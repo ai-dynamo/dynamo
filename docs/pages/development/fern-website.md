@@ -7,12 +7,20 @@ title: Building and Publishing Docs
 This document describes the architecture, workflows, and maintenance procedures for the
 NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com).
 
+> [!NOTE]
+> The documentation website is hosted entirely on
+> [Fern](https://buildwithfern.com). CI publishes to
+> `dynamo.docs.buildwithfern.com`; the production domain
+> `docs.dynamo.nvidia.com` is a custom domain alias that points to the
+> Fern-hosted site. There is no separate server — Fern handles hosting,
+> CDN, and versioned URL routing.
+
 **Live URLs:**
 
 | Environment | URL |
 |---|---|
-| Production | <https://docs.dynamo.nvidia.com/dynamo> |
-| Staging | <https://dynamo.docs.buildwithfern.com/dynamo> |
+| Fern-hosted (primary) | <https://dynamo.docs.buildwithfern.com/dynamo> |
+| Custom domain (alias) | <https://docs.dynamo.nvidia.com/dynamo> |
 
 ---
 
@@ -26,6 +34,7 @@ NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com)
   - [Docs Link Check Workflow](#docs-link-check-workflow-docs-link-checkyml)
 - [Content Authoring](#content-authoring)
 - [Callout Conversion](#callout-conversion)
+- [Running Locally](#running-locally)
 - [Version Management](#version-management)
 - [How Publishing Works](#how-publishing-works)
 - [Common Tasks](#common-tasks)
@@ -311,6 +320,78 @@ workflows. Authors never need to run it manually.
 
 ---
 
+## Running Locally
+
+You can preview the documentation site on your machine using the
+[Fern CLI](https://buildwithfern.com/learn/cli-api/overview). This is useful
+for verifying layout, navigation, and content before opening a PR.
+
+### Prerequisites
+
+Install the Fern CLI globally via npm:
+
+```bash
+npm install -g fern-api
+```
+
+### Create the `fern` symlink
+
+The Fern CLI requires its configuration files to live inside a directory called
+`fern/`. In this repo the docs live in `docs/`, so you need to create a symlink
+that points `fern` back to the same directory:
+
+```bash
+cd docs
+ln -s . fern
+```
+
+This makes the CLI find `fern/fern.config.json`, `fern/docs.yml`, etc. without
+moving any files. The symlink is listed in `.gitignore` and should not be
+committed.
+
+### Validate configuration
+
+Run `fern check` to validate that `docs.yml`, `fern.config.json`, and the
+navigation files are syntactically correct:
+
+```bash
+cd docs
+fern check
+```
+
+### Check for broken links
+
+Use `fern docs broken-links` to scan all pages for internal links that don't
+resolve:
+
+```bash
+cd docs
+fern docs broken-links
+```
+
+This is the same check that runs in CI on every pull request.
+
+### Start a local preview server
+
+Run `fern docs dev` to build the site and serve it locally with hot-reload:
+
+```bash
+cd docs
+fern docs dev
+```
+
+> [!NOTE]
+> `fern docs dev` requires a valid `FERN_TOKEN` environment variable. Ask a
+> maintainer for access, or set it in your shell profile:
+> ```bash
+> export FERN_TOKEN=<your-token>
+> ```
+
+The local server lets you see exactly how pages will look on the live site,
+including navigation, version dropdowns, and custom styling.
+
+---
+
 ## Version Management
 
 ### How versions work
@@ -438,19 +519,6 @@ config, and publishes.
 Go to **Actions → Fern Docs → Run workflow**:
 - Leave **tag** empty to trigger a dev sync.
 - Enter a tag (e.g., `v0.9.0`) to trigger a version release.
-
-### Preview docs locally
-
-Install the Fern CLI and run locally:
-
-```bash
-cd docs
-npm install -g fern-api
-ln -s . fern        # Fern expects a fern/ directory
-fern check          # Validate configuration
-```
-
-Note: Full local preview (`fern docs dev`) requires a `FERN_TOKEN`.
 
 ### Debug a failed publish
 
