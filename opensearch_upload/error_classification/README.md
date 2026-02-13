@@ -1,6 +1,6 @@
 # AI-Powered Error Classification System
 
-Automatically categorizes common errors from CI/CD workflows using Claude API and exports classifications to OpenSearch for trend analysis.
+Automatically categorizes common errors from CI/CD workflows using Claude API.
 
 ## Overview
 
@@ -16,10 +16,10 @@ This system classifies test failures, Docker build errors, Rust tests, and infra
 - **classifier.py** - Core classification orchestration
 - **claude_client.py** - Claude API wrapper with caching and rate limiting
 - **deduplicator.py** - Error normalization and deduplication
-- **error_extractor.py** - Extract errors from JUnit XML, BuildKit logs, annotations
+- **error_extractor.py** - ErrorContext data structure for error information
 - **config.py** - Configuration management
 - **prompts.py** - Claude API prompt templates
-- **opensearch_schema.py** - OpenSearch index schema
+- **github_annotator.py** - GitHub annotations and PR comments
 
 ### Processing Modes
 
@@ -47,41 +47,19 @@ Set environment variables:
 ```bash
 # Required
 export ANTHROPIC_API_KEY="your-api-key"
-export OPENSEARCH_URL="https://your-opensearch-instance"
-export ERROR_CLASSIFICATION_INDEX="error_classifications"
+export GITHUB_TOKEN="your-github-token"
 
 # Optional
-export OPENSEARCH_USERNAME="username"
-export OPENSEARCH_PASSWORD="password"
 export ENABLE_ERROR_CLASSIFICATION="true"
 export ANTHROPIC_MODEL="claude-sonnet-4-5-20250929"
 export MAX_ERROR_LENGTH="10000"
-export BATCH_SIZE="10"
+export ENABLE_PR_COMMENTS="true"
+export MAX_RPM="50"  # Rate limiting (requests per minute)
 ```
 
 ## Usage
 
-### Phase 0: Validate Categories
-
-Analyze recent errors to validate the 10 categories:
-
-```bash
-cd opensearch_upload
-export GITHUB_TOKEN=<token>
-export REPO=ai-dynamo/dynamo
-python3 analyze_recent_errors.py --hours 48 --output error_analysis_report.md
-```
-
-### Batch Processing
-
-Classify all unprocessed errors:
-
-```bash
-cd opensearch_upload
-python3 upload_error_classifications.py --hours 24
-```
-
-### CI Integration
+### Workflow Integration
 
 Add to workflow YAML:
 

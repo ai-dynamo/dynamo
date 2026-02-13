@@ -23,39 +23,13 @@ from datetime import datetime, timezone
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-try:
-    from opensearchpy import OpenSearch
-except ImportError:
-    print("⚠️  opensearch-py not installed, skipping OpenSearch upload")
-    OpenSearch = None
-
 from opensearch_upload.error_classification import (
     Config,
     ErrorClassifier,
-    ErrorExtractor,
     ErrorContext,
-    create_index_if_not_exists,
     GitHubAnnotator,
     AnnotationConfig,
 )
-
-
-def create_opensearch_client(config: Config) -> Optional[OpenSearch]:
-    """Create OpenSearch client."""
-    if not OpenSearch or not config.opensearch_url:
-        return None
-
-    auth = None
-    if config.opensearch_username and config.opensearch_password:
-        auth = (config.opensearch_username, config.opensearch_password)
-
-    return OpenSearch(
-        hosts=[config.opensearch_url],
-        http_auth=auth,
-        use_ssl=True,
-        verify_certs=True,
-        ssl_show_warn=False,
-    )
 
 
 def find_latest_failed_pr_run(github_token: str, repo: str) -> Optional[str]:
@@ -590,20 +564,8 @@ def classify_and_annotate_workflow_errors():
         # Load config
         config = Config.from_env()
 
-        # Create OpenSearch client
-        opensearch_client = create_opensearch_client(config)
-
-        if opensearch_client and config.error_classification_index:
-            print(f"✅ OpenSearch client configured")
-            create_index_if_not_exists(
-                opensearch_client,
-                config.error_classification_index
-            )
-        else:
-            print("ℹ️  OpenSearch not configured, skipping upload")
-
         # Initialize classifier and annotator
-        classifier = ErrorClassifier(config, opensearch_client)
+        classifier = ErrorClassifier(config, opensearch_client=None)
         # Pass Claude client to annotator for intelligent summary generation
         annotator = GitHubAnnotator(
             config=AnnotationConfig.from_env(),
@@ -715,16 +677,6 @@ def classify_and_annotate_workflow_errors():
                 try:
                     job_classifications = future.result()
                     all_classifications.extend(job_classifications)
-
-                    # Upload to OpenSearch
-                    if opensearch_client and config.error_classification_index:
-                        for classification in job_classifications:
-                            doc = classification.to_opensearch_doc()
-                            opensearch_client.index(
-                                index=config.error_classification_index,
-                                id=doc.get("_id"),
-                                body=doc,
-                            )
 
                 except Exception as e:
                     print(f"    ⚠️  Job analysis failed: {e}")
@@ -842,9 +794,6 @@ def classify_and_annotate_workflow_errors():
             print(f"   - Prompt tokens: {total_prompt_tokens:,}")
             print(f"   - Completion tokens: {total_completion_tokens:,}")
             print(f"   - Cached tokens: {total_cached_tokens:,}")
-
-        if opensearch_client:
-            print(f"\n💾 Results uploaded to OpenSearch")
 
         if annotator.is_available():
             print(f"📝 GitHub annotations: {'enabled' if annotator.config.enabled else 'disabled'}")

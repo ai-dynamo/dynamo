@@ -4,14 +4,9 @@ AI-powered error classification system for CI/CD workflows.
 
 from .config import Config, get_config, ERROR_CATEGORIES
 from .classifier import ErrorClassifier, ErrorClassification
-from .error_extractor import ErrorExtractor, ErrorContext
+from .error_extractor import ErrorContext
 from .deduplicator import ErrorDeduplicator
 from .claude_client import ClaudeClient, ClassificationResult
-from .opensearch_schema import (
-    ERROR_CLASSIFICATIONS_INDEX_MAPPING,
-    create_index_if_not_exists,
-    get_index_mapping,
-)
 from .prompts import get_system_prompt, get_category_definitions
 from .github_annotator import (
     GitHubAnnotator,
@@ -28,18 +23,13 @@ __all__ = [
     # Classifier
     "ErrorClassifier",
     "ErrorClassification",
-    # Extractor
-    "ErrorExtractor",
+    # Error context
     "ErrorContext",
     # Deduplicator
     "ErrorDeduplicator",
     # Claude client
     "ClaudeClient",
     "ClassificationResult",
-    # OpenSearch
-    "ERROR_CLASSIFICATIONS_INDEX_MAPPING",
-    "create_index_if_not_exists",
-    "get_index_mapping",
     # Prompts
     "get_system_prompt",
     "get_category_definitions",
