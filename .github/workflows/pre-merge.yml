@@ -68,7 +68,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
       contents: read
     steps:
@@ -124,7 +124,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
       contents: read
     steps:

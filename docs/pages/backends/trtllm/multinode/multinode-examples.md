@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Multinode Examples
 ---
 
 # Example: Multi-node TRTLLM Workers with Dynamo on Slurm
@@ -200,7 +201,6 @@ deployment across 8 nodes:
 2. The OpenAI frontend will listen for and dynamically discover workers as
    they register themselves with Dynamo's distributed runtime:
    ```
-   0: 2025-06-13T02:36:48.160Z  INFO dynamo_run::input::http: Watching for remote model at models
    0: 2025-06-13T02:36:48.161Z  INFO dynamo_llm::http::service::service_v2: Starting HTTP service on: 0.0.0.0:8000 address="0.0.0.0:8000"
    ```
 3. The TRTLLM worker will consist of N (N=16 for TP16) MPI ranks, 1 rank on each

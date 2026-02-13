@@ -12,8 +12,7 @@
 # Start nats and etcd:
 #  - nats-server -js
 #
-# Window 1: `python server_vllm.py`. Wait for log "Starting endpoint".
-# Window 2: `dynamo-run out=dyn
+# `python server_vllm.py`. Wait for log "Starting endpoint".
 
 import argparse
 import asyncio
