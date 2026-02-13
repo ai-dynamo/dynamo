@@ -5,11 +5,11 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Dict
 
+from vllm import SamplingParams
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.inputs.data import OmniTextPrompt, OmniTokensPrompt
 
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
-from vllm import SamplingParams
 
 logger = logging.getLogger(__name__)
 

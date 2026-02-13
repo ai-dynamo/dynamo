@@ -20,6 +20,7 @@ import os
 import sys
 
 import uvloop
+from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
@@ -28,7 +29,6 @@ from vllm.inputs import TokensPrompt
 
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from vllm import SamplingParams
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
