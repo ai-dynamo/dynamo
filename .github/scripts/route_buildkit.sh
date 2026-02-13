@@ -274,16 +274,15 @@ for ARCH in "${ARCHS[@]}"; do
     TARGET_INDICES=($(get_target_indices "$flavor" "$CUDA_VERSION" "${ACTIVE_INDICES[@]}"))
 
     ADDRS=""
-    for idx in "${TARGET_INDICES[@]}"; do
-      POD_NAME="${POD_PREFIX}-${idx}"
-      ADDR="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
-      if [ -z "$ADDRS" ]; then
-        ADDRS="$ADDR"
-      else
-        ADDRS="${ADDRS},${ADDR}"
-      fi
-    done
+    # 2. Get the number of elements in the array
+    TARGET_INDICES_LENGTH=${#TARGET_INDICES[@]}
 
+    # 3. Generate a random index between 0 and length-1
+    # The $RANDOM variable provides a number between 0 and 32767.
+    RANDOM_INDEX=$(($RANDOM % $TARGET_INDICES_LENGTH))
+    RANDOM_VALUE="${TARGET_INDICES[$RANDOM_INDEX]}"
+    POD_NAME="${POD_PREFIX}-${RANDOM_VALUE}"
+    ADDRS="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
     echo "    -> Routing ${flavor}_${ARCH} to pod indices: ${TARGET_INDICES[*]}"
 
     # Write to GitHub Output

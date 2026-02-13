@@ -99,7 +99,7 @@ async def triton_worker(runtime: DistributedRuntime, args: argparse.Namespace):
     )
     logger.info(f"Environment: NATS_SERVER={os.environ.get('NATS_SERVER', 'NOT SET')}")
     logger.info(
-        f"Environment: DYN_STORE_KV={os.environ.get('DYN_STORE_KV', 'NOT SET')}"
+        f"Environment: DYN_DISCOVERY_BACKEND={os.environ.get('DYN_DISCOVERY_BACKEND', 'NOT SET')}"
     )
 
     component = runtime.namespace("triton").component("tritonserver")
