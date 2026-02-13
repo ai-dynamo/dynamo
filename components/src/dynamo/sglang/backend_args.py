@@ -3,7 +3,7 @@
 
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
-from typing import Optional
+from typing import List, Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -101,6 +101,14 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=None,
             help="Key to select from nested disaggregation configuration file (e.g., 'prefill', 'decode').",
         )
+        add_argument(
+            g,
+            flag_name="--output-modalities",
+            env_var="DYN_SGL_OUTPUT_MODALITIES",
+            default=None,
+            help="Output modalities for omni/diffusion mode (e.g., --output-modalities text image audio video). When set, overrides the default ModelType for image diffusion registration.",
+            nargs="*",
+        )
         add_negatable_bool_argument(
             g,
             flag_name="--video-generation-worker",
@@ -131,6 +139,8 @@ class DynamoSGLangConfig(ConfigBase):
 
     disagg_config: Optional[str] = None
     disagg_config_key: Optional[str] = None
+
+    output_modalities: Optional[List[str]] = None
 
     video_generation_worker: bool
     video_generation_fs_url: Optional[str] = None
