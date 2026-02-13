@@ -11,7 +11,6 @@ Key differences from TRT-LLM version:
 """
 
 import base64
-import hashlib
 import logging
 from dataclasses import dataclass
 from io import BytesIO
@@ -20,6 +19,8 @@ from urllib.parse import urlparse
 
 import requests
 from PIL import Image
+
+from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,9 @@ def process_multimodal(
     )
 
     # Compute mm_hashes exactly like vLLM handler's multi_modal_uuids path.
-    mm_hashes = _compute_mm_hashes(pil_images)
+    mm_uuids = compute_mm_uuids_from_images(pil_images)
+    mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
+    
     logger.info(f"mm_hashes={mm_hashes}")
 
     return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)
@@ -336,27 +339,3 @@ def _compute_per_image_ranges(
 
     return result
 
-
-def _compute_mm_hashes(pil_images: list[Image.Image]) -> list[int] | None:
-    """
-    Compute mm_hash for each image using SHA256 of normalized PNG bytes.
-
-    This mirrors the vLLM handler's `multi_modal_uuids` flow:
-    image -> RGB PIL -> PNG bytes -> SHA256 hex -> first 16 hex chars as u64.
-    """
-    if not pil_images:
-        return None
-
-    try:
-        hashes = []
-        for image in pil_images:
-            buf = BytesIO()
-            image.save(buf, format="PNG")
-            hex_str = hashlib.sha256(buf.getvalue()).hexdigest()
-            mm_hash = int(hex_str[:16], 16)
-            hashes.append(mm_hash)
-            logger.debug(f"Image mm_hash: {hex_str[:16]} -> {mm_hash}")
-        return hashes
-    except Exception as e:
-        logger.warning(f"Failed to compute mm_hashes: {e}")
-        return None

@@ -4,7 +4,6 @@
 import asyncio
 import base64
 import binascii
-import hashlib
 import io
 import logging
 import os
@@ -37,6 +36,7 @@ from dynamo.llm import (
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
+from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.image_loader import ImageLoader
 
 # Multimodal data dictionary keys
@@ -47,20 +47,6 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-def _image_to_bytes(img) -> bytes:
-    """Convert a PIL Image to PNG bytes for hashing."""
-    from PIL import Image
-
-    if isinstance(img, Image.Image):
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
-    elif isinstance(img, bytes):
-        return img
-    else:
-        raise TypeError(f"Unsupported image type for hashing: {type(img)}")
 
 
 def _compute_mm_uuids(multi_modal_data: Dict[str, Any] | None) -> Dict[str, list[str]] | None:
@@ -77,14 +63,7 @@ def _compute_mm_uuids(multi_modal_data: Dict[str, Any] | None) -> Dict[str, list
         images = [images]
     if not images:
         return None
-    uuids = []
-    for img in images:
-        try:
-            raw_bytes = _image_to_bytes(img)
-            uuids.append(hashlib.sha256(raw_bytes).hexdigest())
-        except Exception as e:
-            logger.warning(f"Failed to compute mm_uuid for image: {e}")
-            uuids.append("")
+    uuids = compute_mm_uuids_from_images(images)
     return {"image": uuids}
 
 
