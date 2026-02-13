@@ -2,14 +2,11 @@
 AI-powered error classification system for CI/CD workflows.
 """
 
-from .config import Config, get_config, ERROR_CATEGORIES
-from .classifier import ErrorClassifier, ErrorClassification, ErrorContext
+from .classifier import ErrorClassification, ErrorClassifier, ErrorContext
 from .claude_client import ClaudeClient
+from .config import ERROR_CATEGORIES, Config, get_config
+from .pr_commentator import CATEGORY_SEVERITY, PRCommentator
 from .prompts import get_category_definitions
-from .pr_commentator import (
-    PRCommentator,
-    CATEGORY_SEVERITY,
-)
 
 __all__ = [
     # Config

@@ -2,7 +2,6 @@
 Prompt templates for Claude API error classification.
 """
 from typing import Dict
-from .config import ERROR_CATEGORIES
 
 
 def get_category_definitions() -> Dict[str, str]:
@@ -14,7 +13,7 @@ def get_category_definitions() -> Dict[str, str]:
 
 
 # System prompt for full job log analysis
-SYSTEM_PROMPT_FULL_LOG_ANALYSIS = f"""You are an expert CI/CD error analyzer for ML infrastructure projects, specifically focused on LLM inference frameworks like vLLM, SGLang, and TensorRT-LLM.
+SYSTEM_PROMPT_FULL_LOG_ANALYSIS = """You are an expert CI/CD error analyzer for ML infrastructure projects, specifically focused on LLM inference frameworks like vLLM, SGLang, and TensorRT-LLM.
 
 Your task is to analyze COMPLETE GitHub Actions job logs and identify ALL errors/failures.
 
@@ -74,18 +73,18 @@ Examples: "error: use of undeclared identifier", "AssertionError: assert 100 == 
 
 Return ONLY valid JSON (no markdown, no explanations):
 
-{{
+{
   "errors_found": [
-    {{
+    {
       "step": "step name from ##[group] marker or 'unknown'",
       "primary_category": "infrastructure_error" or "code_error",
       "confidence_score": 0.85,
       "root_cause_summary": "Brief 2-3 sentence explanation of the root cause",
       "log_excerpt": "5-10 key lines showing the error"
-    }}
+    }
   ],
   "total_errors": number
-}}
+}
 
-If no errors are found, return: {{"errors_found": [], "total_errors": 0}}
+If no errors are found, return: {"errors_found": [], "total_errors": 0}
 """

@@ -12,23 +12,20 @@ Usage:
     python3 .github/workflows/classify_workflow_errors.py
 """
 
+import concurrent.futures
 import os
 import sys
-import requests
-import concurrent.futures
 from functools import partial
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import requests
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from error_classification import (
-    Config,
-    ErrorClassifier,
-    ErrorContext,
-    PRCommentator,
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
+
+from error_classification import Config, ErrorClassifier, PRCommentator
 
 
 def find_latest_failed_pr_run(github_token: str, repo: str) -> Optional[str]:
@@ -51,7 +48,7 @@ def find_latest_failed_pr_run(github_token: str, repo: str) -> Optional[str]:
     runs_url = f"https://api.github.com/repos/{repo}/actions/runs?event=pull_request&status=failure&per_page=10"
 
     try:
-        print(f"🔍 Searching for latest failed PR workflow run...")
+        print("🔍 Searching for latest failed PR workflow run...")
         response = requests.get(runs_url, headers=headers, timeout=10)
 
         if response.status_code != 200:
@@ -141,7 +138,9 @@ def fetch_workflow_jobs() -> List[Dict[str, Any]]:
         return []
 
 
-def fetch_job_steps(job: Dict[str, Any], github_token: str, repo: str) -> List[Dict[str, Any]]:
+def fetch_job_steps(
+    job: Dict[str, Any], github_token: str, repo: str
+) -> List[Dict[str, Any]]:
     """
     Fetch step details for a specific job.
 
@@ -153,23 +152,17 @@ def fetch_job_steps(job: Dict[str, Any], github_token: str, repo: str) -> List[D
     Returns:
         List of step objects with name, conclusion, number
     """
-    job_id = job.get("id")
-
-    headers = {
-        "Authorization": f"Bearer {github_token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-
     # The job object already contains steps
     steps = job.get("steps", [])
 
     if not steps:
-        print(f"  ⚠️  No steps found in job data")
+        print("  ⚠️  No steps found in job data")
         return []
 
     # Filter for failed steps, excluding classification steps
     failed_steps = [
-        step for step in steps
+        step
+        for step in steps
         if step.get("conclusion") == "failure"
         and "Classify" not in step.get("name", "")  # Skip classification steps
         and "Error Classification" not in step.get("name", "")
@@ -231,7 +224,6 @@ def extract_failed_step_logs(full_log: str, step: Dict[str, Any]) -> str:
         Log content for that step only
     """
     step_name = step.get("name", "")
-    step_number = step.get("number", 0)
 
     # GitHub logs format: ##[group]Step name
     # Try to find the step section
@@ -255,152 +247,6 @@ def extract_failed_step_logs(full_log: str, step: Dict[str, Any]) -> str:
 
     # Last resort: return full log (filtered later)
     return full_log
-
-
-def extract_errors_from_workflow() -> List[ErrorContext]:
-    """
-    Extract errors from all failed jobs in the workflow.
-
-    Returns:
-        List of ErrorContext objects
-    """
-    extractor = ErrorExtractor()
-    errors = []
-
-    # Get GitHub context
-    github_token = os.getenv("GITHUB_TOKEN")
-    repo = os.getenv("GITHUB_REPOSITORY")
-
-    context = {
-        "workflow_id": os.getenv("GITHUB_RUN_ID"),
-        "workflow_name": os.getenv("GITHUB_WORKFLOW"),
-        "repo": repo,
-        "branch": os.getenv("GITHUB_REF_NAME"),
-        "commit_sha": os.getenv("GITHUB_SHA"),
-        "user_alias": os.getenv("GITHUB_ACTOR"),
-    }
-
-    # Fetch all jobs
-    jobs = fetch_workflow_jobs()
-
-    if not jobs:
-        print("⚠️  No jobs found")
-        return errors
-
-    # Filter for failed jobs
-    failed_jobs = [
-        job for job in jobs
-        if job.get("conclusion") == "failure"
-    ]
-
-    if not failed_jobs:
-        print("✅ No failed jobs in workflow")
-        return errors
-
-    print(f"\n🔍 Found {len(failed_jobs)} failed jobs:")
-    for job in failed_jobs:
-        print(f"   - {job.get('name')}")
-
-    print(f"\n📋 Extracting errors from failed jobs...")
-
-    # Extract errors from each failed job
-    for job in failed_jobs:
-        job_name = job.get("name")
-        job_id = job.get("id")
-
-        # Update context with job info
-        job_context = {
-            **context,
-            "job_id": str(job_id),
-            "job_name": job_name,
-        }
-
-        # Get failed steps for this job
-        failed_steps = fetch_job_steps(job, github_token, repo)
-
-        if not failed_steps:
-            print(f"  ℹ️  No failed steps found in {job_name} (or all failures from classification steps)")
-            # Create a generic error for the job since we can't identify specific failed steps
-            generic_error = ErrorContext(
-                error_text=f"Job '{job_name}' failed but no specific failed steps identified.\n\nSee job logs for details.",
-                source_type="github_job_log",
-                workflow_id=job_context.get("workflow_id"),
-                job_id=job_context.get("job_id"),
-                job_name=job_name,
-                repo=job_context.get("repo"),
-                workflow_name=job_context.get("workflow_name"),
-                branch=job_context.get("branch"),
-                commit_sha=job_context.get("commit_sha"),
-                user_alias=job_context.get("user_alias"),
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            )
-            errors.append(generic_error)
-            continue
-
-        print(f"  🔍 Found {len(failed_steps)} failed step(s) in {job_name}:")
-        for step in failed_steps:
-            print(f"     - {step.get('name')}")
-
-        # Fetch full job logs
-        log_content = fetch_job_logs(job, github_token, repo)
-
-        if not log_content:
-            continue
-
-        # Extract errors from each failed step
-        step_error_count = 0
-        for step in failed_steps:
-            step_name = step.get("name")
-            step_number = step.get("number")
-
-            # Extract logs for this specific step
-            step_log = extract_failed_step_logs(log_content, step)
-
-            # Update context with step info
-            step_context = {
-                **job_context,
-                "step_id": str(step_number),
-                "step_name": step_name,
-                "full_step_log": step_log,  # Store full log for potential second pass
-            }
-
-            # Extract errors from this step's logs
-            step_errors = extractor.extract_from_github_job_logs(step_log, step_context)
-
-            # Only take the FIRST error from each failed step to avoid over-classification
-            # Each failed step should produce at most 1 error for classification
-            if step_errors:
-                # Store full log in metadata for potential re-analysis
-                step_errors[0].metadata = step_errors[0].metadata or {}
-                step_errors[0].metadata['full_step_log'] = step_log
-
-                errors.append(step_errors[0])  # Only take first error
-                step_error_count += 1
-                if len(step_errors) > 1:
-                    print(f"     ℹ️  Step '{step_name}' had {len(step_errors)} error patterns, using first one only")
-
-        if step_error_count > 0:
-            print(f"  ✅ Extracted {step_error_count} error(s) from {job_name}")
-        else:
-            # No errors extracted from failed steps - create generic error
-            step_names = ", ".join([s.get("name", "unknown") for s in failed_steps])
-            generic_error = ErrorContext(
-                error_text=f"Job '{job_name}' failed in step(s): {step_names}\n\nNo specific error pattern identified. See job logs for details.",
-                source_type="github_job_log",
-                workflow_id=job_context.get("workflow_id"),
-                job_id=job_context.get("job_id"),
-                job_name=job_name,
-                repo=job_context.get("repo"),
-                workflow_name=job_context.get("workflow_name"),
-                branch=job_context.get("branch"),
-                commit_sha=job_context.get("commit_sha"),
-                user_alias=job_context.get("user_alias"),
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            )
-            errors.append(generic_error)
-            print(f"  ℹ️  Created generic error for {job_name}")
-
-    return errors
 
 
 def classify_and_annotate_workflow_errors():
@@ -431,9 +277,7 @@ def classify_and_annotate_workflow_errors():
         # Initialize classifier and PR commentator
         classifier = ErrorClassifier(config)
         # Pass Claude client to PR commentator for intelligent summary generation
-        commentator = PRCommentator(
-            claude_client=classifier.claude
-        )
+        commentator = PRCommentator(claude_client=classifier.claude)
 
         # Fetch all jobs from workflow
         print("\n" + "=" * 70)
@@ -447,10 +291,7 @@ def classify_and_annotate_workflow_errors():
             return
 
         # Filter to FAILED jobs only (don't analyze passing jobs)
-        failed_jobs = [
-            job for job in jobs
-            if job.get("conclusion") == "failure"
-        ]
+        failed_jobs = [job for job in jobs if job.get("conclusion") == "failure"]
 
         if not failed_jobs:
             print("\n✅ No failed jobs in workflow")
@@ -501,20 +342,23 @@ def classify_and_annotate_workflow_errors():
                     job_name=job_name,
                     job_id=job_id,
                     workflow_context=workflow_context,
-                    use_cache=True
+                    use_cache=True,
                 )
 
                 print(f"    ✅ Found {len(classifications)} error(s) in {job_name}")
 
                 # Print summary
                 for c in classifications:
-                    print(f"       - {c.primary_category} ({c.confidence_score:.0%}): {c.step_name}")
+                    print(
+                        f"       - {c.primary_category} ({c.confidence_score:.0%}): {c.step_name}"
+                    )
 
                 return classifications
 
             except Exception as e:
                 print(f"    ❌ Failed to analyze {job_name}: {e}")
                 import traceback
+
                 traceback.print_exc()
                 return []
 
@@ -523,13 +367,15 @@ def classify_and_annotate_workflow_errors():
         all_classifications = []
         error_contexts = {}
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as executor:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_parallel
+        ) as executor:
             analyze_fn = partial(
                 analyze_single_job,
                 classifier=classifier,
                 github_token=github_token,
                 repo=repo,
-                workflow_context=workflow_context
+                workflow_context=workflow_context,
             )
 
             # Submit all jobs
@@ -545,7 +391,9 @@ def classify_and_annotate_workflow_errors():
                     print(f"    ⚠️  Job analysis failed: {e}")
 
         classifications = all_classifications
-        print(f"\n📊 Total: {len(classifications)} error(s) across {len(failed_jobs)} failed job(s)")
+        print(
+            f"\n📊 Total: {len(classifications)} error(s) across {len(failed_jobs)} failed job(s)"
+        )
         print("=" * 70)
 
         # Validate classifications (skip detailed validation for full log analysis)
@@ -558,13 +406,15 @@ def classify_and_annotate_workflow_errors():
             confidences = [c.confidence_score for c in classifications]
             avg_confidence = sum(confidences) / len(confidences) if confidences else 0
 
-            print(f"  📊 Confidence statistics:")
+            print("  📊 Confidence statistics:")
             print(f"     Average: {avg_confidence:.1%}")
             print(f"     Min: {min(confidences):.1%}, Max: {max(confidences):.1%}")
 
             low_confidence = [c for c in classifications if c.confidence_score < 0.6]
             if low_confidence:
-                print(f"  ⚠️  {len(low_confidence)} classification(s) with low confidence (<60%)")
+                print(
+                    f"  ⚠️  {len(low_confidence)} classification(s) with low confidence (<60%)"
+                )
             else:
                 print("  ✅ All classifications have reasonable confidence")
 
@@ -574,16 +424,16 @@ def classify_and_annotate_workflow_errors():
                 cat = c.primary_category
                 category_counts[cat] = category_counts.get(cat, 0) + 1
 
-            print(f"  📊 Category distribution:")
+            print("  📊 Category distribution:")
             for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
                 print(f"     - {cat}: {count}")
 
-        # Create GitHub annotations for all classifications
-        if classifications:
         # Create PR comment with summary
         if classifications:
             # Check if PR comments are enabled
-            enable_pr_comments = os.getenv("ENABLE_PR_COMMENTS", "true").lower() == "true"
+            enable_pr_comments = (
+                os.getenv("ENABLE_PR_COMMENTS", "true").lower() == "true"
+            )
 
             if enable_pr_comments:
                 print("\n" + "=" * 70)
@@ -592,8 +442,7 @@ def classify_and_annotate_workflow_errors():
 
                 try:
                     success = commentator.create_pr_comment(
-                        classifications,
-                        error_contexts
+                        classifications, error_contexts
                     )
 
                     if success:
@@ -604,6 +453,7 @@ def classify_and_annotate_workflow_errors():
                 except Exception as e:
                     print(f"⚠️  Failed to create PR comment: {e}")
                     import traceback
+
                     traceback.print_exc()
             else:
                 print("\nℹ️  PR comments disabled (ENABLE_PR_COMMENTS=false)")
@@ -622,7 +472,7 @@ def classify_and_annotate_workflow_errors():
                 cat = c.primary_category
                 categories[cat] = categories.get(cat, 0) + 1
 
-            print(f"\n📊 Errors by category:")
+            print("\n📊 Errors by category:")
             for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
                 print(f"   - {cat}: {count}")
 
@@ -631,7 +481,7 @@ def classify_and_annotate_workflow_errors():
             total_completion_tokens = sum(c.completion_tokens for c in classifications)
             total_cached_tokens = sum(c.cached_tokens for c in classifications)
 
-            print(f"\n💰 Token usage:")
+            print("\n💰 Token usage:")
             print(f"   - Prompt tokens: {total_prompt_tokens:,}")
             print(f"   - Completion tokens: {total_completion_tokens:,}")
             print(f"   - Cached tokens: {total_cached_tokens:,}")
@@ -640,13 +490,14 @@ def classify_and_annotate_workflow_errors():
         if commentator.is_available():
             print(f"💬 PR comments: {'enabled' if enable_pr_comments else 'disabled'}")
         else:
-            print(f"💬 PR comments: unavailable (not in GitHub Actions or missing token)")
+            print("💬 PR comments: unavailable (not in GitHub Actions or missing token)")
 
         print("=" * 70)
 
     except Exception as e:
         print(f"\n❌ Error during classification: {e}")
         import traceback
+
         traceback.print_exc()
         # Don't fail the workflow on classification errors
         sys.exit(0)

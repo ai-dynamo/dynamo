@@ -2,12 +2,12 @@
 Core error classification orchestration.
 """
 import uuid
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
-from .config import Config
 from .claude_client import ClaudeClient
+from .config import Config
 
 
 @dataclass
@@ -144,7 +144,7 @@ class ErrorClassifier:
         job_name: str,
         job_id: str,
         workflow_context: Optional[Dict[str, Any]] = None,
-        use_cache: bool = True
+        use_cache: bool = True,
     ) -> List[ErrorClassification]:
         """
         Analyze full job log and classify all errors found.
@@ -161,10 +161,7 @@ class ErrorClassifier:
         """
         # Call Claude to analyze full log
         result = self.claude.analyze_full_job_log(
-            job_log=job_log,
-            job_name=job_name,
-            job_id=job_id,
-            use_cache=use_cache
+            job_log=job_log, job_name=job_name, job_id=job_id, use_cache=use_cache
         )
 
         # Extract workflow context
@@ -192,7 +189,9 @@ class ErrorClassifier:
                 pr_id=workflow_context.get("pr_id"),
                 commit_sha=workflow_context.get("commit_sha"),
                 error_snippet=error_text[:500] if error_text else "",
-                error_full_text=error_text[:self.config.max_error_length] if error_text else "",
+                error_full_text=error_text[: self.config.max_error_length]
+                if error_text
+                else "",
                 primary_category=error_data["primary_category"],
                 confidence_score=error_data["confidence_score"],
                 root_cause_summary=error_data["root_cause_summary"],

@@ -3,17 +3,16 @@ GitHub PR Comment integration for error classifications.
 
 Creates PR comments with markdown summaries of workflow errors.
 """
-import os
 import json
-import requests
-from typing import Dict, Any, Optional, List
+import os
+from typing import Any, Dict, List, Optional
 
+import requests
 
 # Category to severity mapping
 CATEGORY_SEVERITY = {
     # Infrastructure errors - platform/network issues that often block entire jobs
     "infrastructure_error": ("failure", "🔴"),
-
     # Code errors - build/test/runtime issues in the code itself
     "code_error": ("warning", "🟠"),
 }
@@ -41,7 +40,7 @@ class PRCommentator:
         # GitHub API headers
         self.headers = {
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "error-classification-system/1.0"
+            "User-Agent": "error-classification-system/1.0",
         }
 
         if self.github_token:
@@ -49,11 +48,13 @@ class PRCommentator:
 
     def is_available(self) -> bool:
         """Check if GitHub PR comments are available (running in GitHub Actions with token)."""
-        return all([
-            self.github_token,
-            self.repo,
-            self.sha,
-        ])
+        return all(
+            [
+                self.github_token,
+                self.repo,
+                self.sha,
+            ]
+        )
 
     def get_category_icon(self, category: str) -> str:
         """
@@ -71,7 +72,7 @@ class PRCommentator:
     def create_pr_comment(
         self,
         classifications: List[Any],
-        error_contexts: Optional[Dict[str, Any]] = None
+        error_contexts: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         Create a PR comment with markdown summary of all errors.
@@ -114,26 +115,30 @@ class PRCommentator:
                     workflow_name=workflow_name,
                     run_id=run_id,
                     run_url=run_url,
-                    failed_jobs=failed_jobs
+                    failed_jobs=failed_jobs,
                 )
                 markdown += claude_summary
             except Exception as e:
-                print(f"  ⚠️  Claude summary generation failed, falling back to basic format: {e}")
+                print(
+                    f"  ⚠️  Claude summary generation failed, falling back to basic format: {e}"
+                )
                 # Fallback to old format if Claude fails
-                markdown += self._build_summary_markdown_body(classifications, error_contexts or {})
+                markdown += self._build_summary_markdown_body(
+                    classifications, error_contexts or {}
+                )
         else:
             # No Claude client available, use basic format
             print("  ℹ️  No Claude client available, using basic format")
-            markdown += self._build_summary_markdown_body(classifications, error_contexts or {})
+            markdown += self._build_summary_markdown_body(
+                classifications, error_contexts or {}
+            )
 
         # Post comment via GitHub API
         try:
-            url = f"https://api.github.com/repos/{self.repo}/issues/{pr_number}/comments"
-            response = requests.post(
-                url,
-                headers=self.headers,
-                json={"body": markdown}
+            url = (
+                f"https://api.github.com/repos/{self.repo}/issues/{pr_number}/comments"
             )
+            response = requests.post(url, headers=self.headers, json={"body": markdown})
 
             if response.status_code == 201:
                 print(f"✅ Created PR comment on PR #{pr_number}")
@@ -170,7 +175,9 @@ class PRCommentator:
             if len(parts) >= 4 and parts[2] == "pull-request":
                 try:
                     pr_num = int(parts[3])
-                    print(f"  ✅ Found PR #{pr_num} from GITHUB_REF (branch name format)")
+                    print(
+                        f"  ✅ Found PR #{pr_num} from GITHUB_REF (branch name format)"
+                    )
                     return pr_num
                 except (ValueError, IndexError):
                     pass
@@ -195,7 +202,7 @@ class PRCommentator:
                 # workflow_run event - check if triggered by a PR
                 workflow_run = event.get("workflow_run", {})
                 if workflow_run:
-                    print(f"  workflow_run event detected")
+                    print("  workflow_run event detected")
                     print(f"    head_branch: {workflow_run.get('head_branch')}")
                     print(f"    head_sha: {workflow_run.get('head_sha')}")
 
@@ -220,6 +227,7 @@ class PRCommentator:
             except Exception as e:
                 print(f"⚠️  Error reading event file: {e}")
                 import traceback
+
                 traceback.print_exc()
 
         print("  ❌ No PR number found")
@@ -245,14 +253,13 @@ class PRCommentator:
         except Exception as e:
             print(f"⚠️  Error finding PR by commit: {e}")
             import traceback
+
             traceback.print_exc()
 
         return None
 
     def _build_summary_markdown_body(
-        self,
-        classifications: List[Any],
-        error_contexts: Dict[str, Any]
+        self, classifications: List[Any], error_contexts: Dict[str, Any]
     ) -> str:
         """Build markdown summary table (fallback format without Claude)."""
         # Group by category
@@ -299,7 +306,9 @@ class PRCommentator:
         md += f"**Total Errors:** {len(classifications)}\n\n"
 
         # Average confidence
-        avg_confidence = sum(c.confidence_score for c in classifications) / len(classifications)
+        avg_confidence = sum(c.confidence_score for c in classifications) / len(
+            classifications
+        )
         md += f"**Average Confidence:** {avg_confidence:.1%}\n\n"
 
         # Breakdown by type
@@ -322,12 +331,18 @@ class PRCommentator:
 
     def _group_by_severity(self, classifications: List[Any]) -> tuple:
         """Group classifications by category (infrastructure vs code errors)."""
-        infrastructure = [c for c in classifications if c.primary_category == "infrastructure_error"]
+        infrastructure = [
+            c for c in classifications if c.primary_category == "infrastructure_error"
+        ]
         code_errors = [c for c in classifications if c.primary_category == "code_error"]
-        return infrastructure, code_errors, []  # Return 3-tuple for backward compat (third is empty)
+        return (
+            infrastructure,
+            code_errors,
+            [],
+        )  # Return 3-tuple for backward compat (third is empty)
 
     def _truncate(self, text: str, max_length: int) -> str:
         """Truncate text to max length with ellipsis."""
         if len(text) <= max_length:
             return text
-        return text[:max_length - 3] + "..."
+        return text[: max_length - 3] + "..."
