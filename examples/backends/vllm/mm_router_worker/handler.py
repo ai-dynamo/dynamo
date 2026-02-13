@@ -8,7 +8,7 @@ MM Router Handler - Routes requests to best vLLM worker based on KV cache overla
 import logging
 from typing import Any, AsyncGenerator
 
-from dynamo.llm import KvPushRouter
+from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .mm_processor import build_block_mm_infos, extract_image_urls, process_multimodal
@@ -25,7 +25,7 @@ class MMRouterHandler:
 
     def __init__(
         self,
-        kv_push_router: KvPushRouter,
+        kv_router: KvRouter,
         tokenizer: Any,
         processor: Any,
         model: str,
@@ -35,13 +35,13 @@ class MMRouterHandler:
         Initialize the MM Router Handler.
 
         Args:
-            kv_push_router: KvPushRouter for KV-aware worker selection and routing
+            kv_router: KvRouter for KV-aware worker selection and routing
             tokenizer: HuggingFace AutoTokenizer
             processor: HuggingFace AutoProcessor (optional)
             model: Model path/name
             block_size: KV cache block size
         """
-        self.kv_push_router = kv_push_router
+        self.kv_router = kv_router
         self.tokenizer = tokenizer
         self.processor = processor
         self.model = model
@@ -117,7 +117,7 @@ class MMRouterHandler:
             # Text-only routing has no multimodal objects; provide per-block None entries.
             block_mm_infos = [None] * routing_blocks
 
-        # Route and generate through KvPushRouter with explicit fields.
+        # Route and generate through KvRouter with explicit fields.
         # We pass:
         # - execution payload (token_ids + multi_modal_data)
         # - routing payload (mm_routing_info: routing_token_ids + block_mm_infos)
@@ -131,7 +131,7 @@ class MMRouterHandler:
             "block_mm_infos": block_mm_infos,
         }
 
-        stream = await self.kv_push_router.generate(
+        stream = await self.kv_router.generate(
             token_ids=token_ids,
             model=request["model"],
             stop_conditions=request.get("stop_conditions"),

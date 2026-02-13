@@ -492,6 +492,7 @@ impl PrefillRouter {
                         None,
                         token_ids,
                         None,
+                        None,
                         update_states,
                         lora_name,
                         priority_jump,

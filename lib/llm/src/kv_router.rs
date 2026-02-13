@@ -52,7 +52,7 @@ use crate::{
         protocols::{
             BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
             RouterResponse, TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
-            compute_block_hash_for_seq, compute_seq_hash_for_block,
+            compute_block_hash_for_seq,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::{SequenceError, SequenceRequest},

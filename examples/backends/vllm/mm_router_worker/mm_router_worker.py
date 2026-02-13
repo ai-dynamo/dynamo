@@ -27,7 +27,7 @@ import uvloop
 from transformers import AutoProcessor, AutoTokenizer
 
 from dynamo.llm import (
-    KvPushRouter,
+    KvRouter,
     KvRouterConfig,
     ModelInput,
     ModelType,
@@ -109,7 +109,7 @@ async def worker(runtime: DistributedRuntime) -> None:
     """
     Main worker function.
 
-    Sets up connections to downstream vLLM workers, creates KvPushRouter
+    Sets up connections to downstream vLLM workers, creates KvRouter
     for tracking their cache states, and serves the MM router endpoint.
     """
     args = parse_args()
@@ -142,13 +142,13 @@ async def worker(runtime: DistributedRuntime) -> None:
     instance_ids = await downstream_client.wait_for_instances()
     logger.info(f"Found {len(instance_ids)} workers: {list(instance_ids)}")
 
-    # Create KvPushRouter to select workers based on KV overlap
-    kv_push_router = KvPushRouter(
+    # Create KvRouter to select workers based on KV overlap
+    kv_router = KvRouter(
         endpoint=downstream_endpoint,
         block_size=args.block_size,
         kv_router_config=KvRouterConfig(),
     )
-    logger.info("KvPushRouter created successfully")
+    logger.info("KvRouter created successfully")
 
     # Initialize tokenizer and processor for MM processing
     logger.info(f"Loading tokenizer from {args.model}...")
@@ -159,7 +159,7 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     # Create handler
     handler = MMRouterHandler(
-        kv_push_router=kv_push_router,
+        kv_router=kv_router,
         tokenizer=tokenizer,
         processor=processor,
         model=args.model,
