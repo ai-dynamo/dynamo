@@ -26,7 +26,7 @@ default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 
 [dependencies]
-dynamo-llm = { path = "../../llm" }
+dynamo-llm = { path = "../../llm", default-features = false }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-parsers = { path = "../../parsers" }
 
@@ -73,6 +73,9 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "0.17.1", features = ["cuda-12020"], optional = true }
 prometheus = "0.14.0"
 
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dynamo-llm = { path = "../../llm", features = ["block-manager"] }
 
 [dev-dependencies]
 rstest = "0.25"
