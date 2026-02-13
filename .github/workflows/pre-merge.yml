@@ -117,25 +117,6 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
-    - name: Classify Critical Errors on Failure
-      if: failure()
-      env:
-        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        API_FORMAT: "openai"
-        API_BASE_URL: "https://inference-api.nvidia.com/v1"
-        ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
-        ENABLE_ERROR_CLASSIFICATION: "true"
-        ENABLE_GITHUB_ANNOTATIONS: "true"
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
-        OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
-      run: |
-        sudo apt-get update && sudo apt-get install -y python3-venv || true
-        python3 -m venv /tmp/error-classification-venv
-        . /tmp/error-classification-venv/bin/activate
-        pip install -r opensearch_upload/requirements.txt
-        python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
-        deactivate
 
   rust-clippy:
     needs: changed-files
@@ -179,27 +160,8 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
-    - name: Classify Critical Errors on Failure
-      if: failure()
-      env:
-        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        API_FORMAT: "openai"
-        API_BASE_URL: "https://inference-api.nvidia.com/v1"
-        ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
-        ENABLE_ERROR_CLASSIFICATION: "true"
-        ENABLE_GITHUB_ANNOTATIONS: "true"
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
-        OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
-      run: |
-        sudo apt-get update && sudo apt-get install -y python3-venv || true
-        python3 -m venv /tmp/error-classification-venv
-        . /tmp/error-classification-venv/bin/activate
-        pip install -r opensearch_upload/requirements.txt
-        python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
-        deactivate
 
-  classify-workflow-errors:
+  classify-errors:
     if: always() && !cancelled()
     needs: [changed-files, pre-commit, rust-tests, rust-clippy]
     permissions:

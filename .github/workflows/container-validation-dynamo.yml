@@ -130,25 +130,6 @@ jobs:
         if: always()
         run: |
           docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_XML_FILE }} .
-      - name: Classify Critical Errors on Failure
-        if: failure()
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          API_FORMAT: "openai"
-          API_BASE_URL: "https://inference-api.nvidia.com/v1"
-          ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
-          ENABLE_ERROR_CLASSIFICATION: "true"
-          ENABLE_GITHUB_ANNOTATIONS: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
-          OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
-        run: |
-          sudo apt-get update && sudo apt-get install -y python3-venv || true
-          python3 -m venv /tmp/error-classification-venv
-          . /tmp/error-classification-venv/bin/activate
-          pip install -r opensearch_upload/requirements.txt
-          python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
-          deactivate
       - name: Archive test report
         uses: actions/upload-artifact@v4
         if: always()
@@ -158,6 +139,16 @@ jobs:
           path: |
             ${{ env.PYTEST_XML_FILE }}
             ${{ env.PYTEST_PARALLEL_XML_FILE }}
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [build-test]
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    uses: ./.github/workflows/classify-workflow-errors-reusable.yml
+    secrets: inherit
 
   event_file:
     name: "Event File"

@@ -164,25 +164,6 @@ jobs:
           aws_push: 'false'
           azure_push: 'true'
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      - name: Classify Critical Errors on Failure
-        if: failure()
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          API_FORMAT: "openai"
-          API_BASE_URL: "https://inference-api.nvidia.com/v1"
-          ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
-          ENABLE_ERROR_CLASSIFICATION: "true"
-          ENABLE_GITHUB_ANNOTATIONS: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
-          OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
-        run: |
-          sudo apt-get update && sudo apt-get install -y python3-venv || true
-          python3 -m venv /tmp/error-classification-venv
-          . /tmp/error-classification-venv/bin/activate
-          pip install -r opensearch_upload/requirements.txt
-          python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
-          deactivate
 
           echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -276,25 +257,6 @@ jobs:
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
           hf_token: ${{ secrets.HF_TOKEN }}
-      - name: Classify Critical Errors on Failure
-        if: failure()
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          API_FORMAT: "openai"
-          API_BASE_URL: "https://inference-api.nvidia.com/v1"
-          ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
-          ENABLE_ERROR_CLASSIFICATION: "true"
-          ENABLE_GITHUB_ANNOTATIONS: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
-          OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
-        run: |
-          sudo apt-get update && sudo apt-get install -y python3-venv || true
-          python3 -m venv /tmp/error-classification-venv
-          . /tmp/error-classification-venv/bin/activate
-          pip install -r opensearch_upload/requirements.txt
-          python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
-          deactivate
 
   # ============================================================================
   # SGLANG PIPELINE
@@ -608,26 +570,6 @@ jobs:
         else
           echo "⚠️  test-output.log not found"
         fi
-
-    - name: Classify Critical Errors on Failure
-      if: failure()
-      env:
-        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        API_FORMAT: "openai"
-        API_BASE_URL: "https://inference-api.nvidia.com/v1"
-        ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
-        ENABLE_ERROR_CLASSIFICATION: "true"
-        ENABLE_GITHUB_ANNOTATIONS: "true"
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        ERROR_CLASSIFICATION_INDEX: ${{ secrets.ERROR_CLASSIFICATION_INDEX }}
-        OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
-      run: |
-        sudo apt-get update && sudo apt-get install -y python3-venv || true
-        python3 -m venv /tmp/error-classification-venv
-        . /tmp/error-classification-venv/bin/activate
-        pip install -r opensearch_upload/requirements.txt
-        python3 .github/workflows/classify_errors_on_failure.py || echo "⚠️  Error classification failed but continuing workflow"
-        deactivate
 
     - name: Upload Deployment Test Results
       uses: actions/upload-artifact@v4
