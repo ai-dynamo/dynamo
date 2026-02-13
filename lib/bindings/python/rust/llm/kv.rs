@@ -879,13 +879,13 @@ impl KvRouter {
         let mm_routing_info: Option<llm_rs::protocols::common::preprocessor::MmRoutingInfo> =
             if let Some(obj) = mm_routing_info {
                 Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-            } else if let Some(infos) = block_mm_infos {
-                Some(llm_rs::protocols::common::preprocessor::MmRoutingInfo {
-                    routing_token_ids: token_ids.clone(),
-                    block_mm_infos: infos,
-                })
             } else {
-                None
+                block_mm_infos.map(
+                    |infos| llm_rs::protocols::common::preprocessor::MmRoutingInfo {
+                        routing_token_ids: token_ids.clone(),
+                        block_mm_infos: infos,
+                    },
+                )
             };
 
         // Create tracker to capture worker routing info from KvRouter
