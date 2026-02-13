@@ -19,6 +19,7 @@ from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,9 @@ class EtcdCluster:
         self.base_port = base_port
         self.replicas: List[Optional[EtcdReplicaServer]] = []
         self.data_dirs: List[str] = []
-        self.log_base_dir = f"{request.node.name}_etcd_cluster"
+        self.log_base_dir = resolve_test_output_path(
+            f"{request.node.name}_etcd_cluster"
+        )
 
         # Clean up any existing log directory
         try:

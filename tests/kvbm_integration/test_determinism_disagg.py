@@ -29,6 +29,8 @@ import pytest
 import requests
 import yaml
 
+from tests.utils.test_output import resolve_test_output_path
+
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
 from .common import check_module_available
@@ -507,7 +509,7 @@ def llm_server(request, runtime_services):
     port = getattr(request, "param", {}).get("port", None)
 
     # Put logs in the per-test directory set up by tests/conftest.py
-    log_dir = Path(request.node.name)
+    log_dir = Path(resolve_test_output_path(request.node.name))
 
     if check_module_available("vllm"):
         server_type = ServerType.vllm

@@ -8,7 +8,6 @@ import shutil
 import signal
 import socket
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -18,6 +17,7 @@ import requests
 
 from tests.utils.constants import DefaultPort
 from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.test_output import resolve_test_output_path
 
 
 def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):
@@ -182,12 +182,7 @@ class ManagedProcess:
             # Keep test logs out of the git working tree: many tests pass a relative
             # `log_dir` derived from `request.node.name`, which otherwise creates a large
             # number of untracked directories under the repo root during pytest runs.
-            if not os.path.isabs(self.log_dir):
-                log_root = os.environ.get(
-                    "DYN_TEST_OUTPUT_PATH",
-                    os.path.join(tempfile.gettempdir(), "dynamo_tests"),
-                )
-                self.log_dir = os.path.join(log_root, self.log_dir)
+            self.log_dir = resolve_test_output_path(self.log_dir)
 
             os.makedirs(self.log_dir, exist_ok=True)
             log_name = f"{self._command_name}.log.txt"
