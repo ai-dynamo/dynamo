@@ -189,6 +189,16 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
         )
 
+        # ModelExpress P2P
+        add_argument(
+            g,
+            flag_name="--model-express-url",
+            env_var="MODEL_EXPRESS_URL",
+            default=None,
+            help="ModelExpress P2P server URL (e.g., http://mx-server:8080). "
+            "Required when using --load-format=mx-source or --load-format=mx-target.",
+        )
+
 
 # @dataclass()
 class DynamoVllmConfig(ConfigBase):
@@ -220,6 +230,9 @@ class DynamoVllmConfig(ConfigBase):
     # vLLM-Omni
     omni: bool
     stage_configs_path: Optional[str] = None
+
+    # ModelExpress P2P
+    model_express_url: Optional[str] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
