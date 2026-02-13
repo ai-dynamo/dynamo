@@ -103,28 +103,20 @@ impl MockVllmEngine {
             tracing::info!(port = port, "Bootstrap server started for prefill worker");
         }
 
-        let needs_kv_publisher = self.engine_args.needs_kv_publisher();
-        if needs_kv_publisher {
+        let kv_component = if self.engine_args.needs_kv_publisher() {
             tracing::info!(
                 "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
                 self.engine_args.block_size,
                 self.engine_args.enable_local_indexer
             );
-        }
+            Some(&component)
+        } else {
+            None
+        };
 
-        let schedulers = self.start_schedulers(
-            self.engine_args.clone(),
-            self.active_requests.clone(),
-            if needs_kv_publisher {
-                Some(component.clone())
-            } else {
-                None
-            },
-            cancel_token.clone(),
-        );
+        let schedulers = self.start_schedulers(kv_component, cancel_token.clone());
 
-        Self::start_metrics_publishing(&schedulers, Some(component.clone()), cancel_token.clone())
-            .await?;
+        Self::start_metrics_publishing(&schedulers, component, cancel_token.clone()).await?;
 
         Ok(())
     }
@@ -155,41 +147,35 @@ impl MockVllmEngine {
     /// Create schedulers and spawn their background tasks for distributing token notifications
     fn start_schedulers(
         &self,
-        args: MockEngineArgs,
-        active_requests: Arc<DashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>,
-        component: Option<Component>,
+        component: Option<&Component>,
         cancel_token: CancellationToken,
     ) -> Vec<Scheduler> {
+        let args = &self.engine_args;
         let mut schedulers = Vec::<Scheduler>::new();
         let mut senders = Vec::with_capacity(args.dp_size as usize);
 
-        // Create multiple schedulers and their background tasks
         for dp_rank in 0..args.dp_size {
-            // Create a shared output channel that this scheduler will use
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
-            // Create a KvEventPublisher for THIS dp_rank if component is provided
-            let kv_event_sink: Option<Arc<dyn KvCacheEventSink>> =
-                component
-                    .as_ref()
-                    .and_then(|comp| {
-                        match KvEventPublisher::new_with_local_indexer(
-                            comp.clone(),
-                            args.block_size as u32,
-                            None,
-                            args.enable_local_indexer,
-                            dp_rank,
-                        ) {
-                            Ok(publisher) => Some(Arc::new(KvEventSinkAdapter(publisher))
-                                as Arc<dyn KvCacheEventSink>),
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to create KV event publisher for dp_rank {dp_rank}: {e}"
-                                );
-                                None
-                            }
-                        }
-                    });
+            let kv_event_sink: Option<Arc<dyn KvCacheEventSink>> = component.and_then(|comp| {
+                match KvEventPublisher::new_with_local_indexer(
+                    comp.clone(),
+                    args.block_size as u32,
+                    None,
+                    args.enable_local_indexer,
+                    dp_rank,
+                ) {
+                    Ok(publisher) => {
+                        Some(Arc::new(KvEventSinkAdapter(publisher)) as Arc<dyn KvCacheEventSink>)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to create KV event publisher for dp_rank {dp_rank}: {e}"
+                        );
+                        None
+                    }
+                }
+            });
 
             let scheduler = Scheduler::new(
                 args.clone(),
@@ -202,9 +188,7 @@ impl MockVllmEngine {
             senders.push(scheduler.request_sender());
             schedulers.push(scheduler);
 
-            // Spawn a background task for this scheduler to distribute token notifications to active requests
-            // let output_rx = Arc::new(Mutex::new(output_rx));
-            let active_requests_clone = active_requests.clone();
+            let active_requests_clone = self.active_requests.clone();
             let cancel_token_cloned = cancel_token.clone();
 
             tokio::spawn(async move {
@@ -241,30 +225,14 @@ impl MockVllmEngine {
     /// Start background tasks to publish metrics on change
     async fn start_metrics_publishing(
         schedulers: &[Scheduler],
-        component: Option<Component>,
+        component: Component,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        tracing::debug!("Creating metrics publisher");
         let metrics_publisher = Arc::new(WorkerMetricsPublisher::new()?);
-        tracing::debug!("Metrics publisher created");
 
-        if let Some(comp) = component {
-            tracing::debug!("Creating metrics endpoint");
-            tokio::spawn({
-                let publisher = metrics_publisher.clone();
-                async move {
-                    if let Err(e) = publisher.create_endpoint(comp.clone()).await {
-                        tracing::error!("Metrics endpoint failed: {e}");
-                    }
-                }
-            });
-
-            // Give it a moment to start
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            tracing::debug!("Metrics endpoint started (background)");
+        if let Err(e) = metrics_publisher.create_endpoint(component).await {
+            tracing::error!("Metrics endpoint failed: {e}");
         }
-
-        tracing::debug!("Starting metrics background tasks");
         for scheduler in schedulers.iter() {
             let mut metrics_rx = scheduler.metrics_receiver();
             let publisher = metrics_publisher.clone();
@@ -348,7 +316,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             request
                 .stop_conditions
                 .max_tokens
-                .expect("max_output_tokens must be specified for mocker") as usize
+                .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
+                as usize
         };
 
         // Convert PreprocessedRequest to DirectRequest for scheduler
