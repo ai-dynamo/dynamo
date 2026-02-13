@@ -74,22 +74,22 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_vllm_cli):
 
 
 @pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_modelexpress_server_from_cli_arg(mock_vllm_cli, load_format):
-    """Test that --modelexpress-server is stored when load format is mx-source/mx-target."""
+def test_model_express_url_from_cli_arg(mock_vllm_cli, load_format):
+    """Test that --model-express-url is stored when load format is mx-source/mx-target."""
     mock_vllm_cli(
         "--model",
         "Qwen/Qwen3-0.6B",
         "--load-format",
         load_format,
-        "--modelexpress-server",
+        "--model-express-url",
         "http://mx-server:8080",
     )
     config = parse_args()
-    assert config.modelexpress_server == "http://mx-server:8080"
+    assert config.model_express_url == "http://mx-server:8080"
 
 
 @pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_modelexpress_server_from_env_var(monkeypatch, mock_vllm_cli, load_format):
+def test_model_express_url_from_env_var(monkeypatch, mock_vllm_cli, load_format):
     """Test that MODEL_EXPRESS_URL env var is used as fallback."""
     monkeypatch.setenv("MODEL_EXPRESS_URL", "http://env-mx:9090")
     mock_vllm_cli(
@@ -99,27 +99,27 @@ def test_modelexpress_server_from_env_var(monkeypatch, mock_vllm_cli, load_forma
         load_format,
     )
     config = parse_args()
-    assert config.modelexpress_server == "http://env-mx:9090"
+    assert config.model_express_url == "http://env-mx:9090"
 
 
 @pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_modelexpress_server_cli_overrides_env(monkeypatch, mock_vllm_cli, load_format):
-    """Test that --modelexpress-server takes precedence over MODEL_EXPRESS_URL."""
+def test_model_express_url_cli_overrides_env(monkeypatch, mock_vllm_cli, load_format):
+    """Test that --model-express-url takes precedence over MODEL_EXPRESS_URL."""
     monkeypatch.setenv("MODEL_EXPRESS_URL", "http://env-mx:9090")
     mock_vllm_cli(
         "--model",
         "Qwen/Qwen3-0.6B",
         "--load-format",
         load_format,
-        "--modelexpress-server",
+        "--model-express-url",
         "http://cli-mx:8080",
     )
     config = parse_args()
-    assert config.modelexpress_server == "http://cli-mx:8080"
+    assert config.model_express_url == "http://cli-mx:8080"
 
 
 @pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_modelexpress_server_missing_raises(monkeypatch, mock_vllm_cli, load_format):
+def test_model_express_url_missing_raises(monkeypatch, mock_vllm_cli, load_format):
     """Test that missing server URL raises ValueError for mx load formats."""
     monkeypatch.delenv("MODEL_EXPRESS_URL", raising=False)
     mock_vllm_cli(
@@ -135,8 +135,8 @@ def test_modelexpress_server_missing_raises(monkeypatch, mock_vllm_cli, load_for
         parse_args()
 
 
-def test_modelexpress_server_none_for_default_load_format(mock_vllm_cli):
-    """Test that modelexpress_server is None when load format is not mx-*."""
+def test_model_express_url_none_for_default_load_format(mock_vllm_cli):
+    """Test that model_express_url is None when load format is not mx-*."""
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
     config = parse_args()
-    assert config.modelexpress_server is None
+    assert config.model_express_url is None

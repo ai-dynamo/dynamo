@@ -192,7 +192,7 @@ class DynamoVllmArgGroup(ArgGroup):
         # ModelExpress P2P
         add_argument(
             g,
-            flag_name="--modelexpress-server",
+            flag_name="--model-express-url",
             env_var="MODEL_EXPRESS_URL",
             default=None,
             help="ModelExpress P2P server URL (e.g., http://mx-server:8080). "
@@ -232,7 +232,7 @@ class DynamoVllmConfig(ConfigBase):
     stage_configs_path: Optional[str] = None
 
     # ModelExpress P2P
-    modelexpress_server: Optional[str] = None
+    model_express_url: Optional[str] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""

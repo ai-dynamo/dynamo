@@ -219,9 +219,9 @@ def update_dynamo_config_with_engine(
 
     # Validate ModelExpress P2P server URL
     if getattr(engine_config, "load_format", None) in ("mx-source", "mx-target"):
-        if not dynamo_config.modelexpress_server:
+        if not dynamo_config.model_express_url:
             raise ValueError(
-                f"--modelexpress-server or MODEL_EXPRESS_URL env var is required "
+                f"--model-express-url or MODEL_EXPRESS_URL env var is required "
                 f"when using --load-format={engine_config.load_format}"
             )
 
