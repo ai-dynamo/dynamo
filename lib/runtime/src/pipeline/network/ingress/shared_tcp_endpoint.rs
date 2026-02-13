@@ -482,21 +482,20 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
+            let ack_response = TcpResponseMessage::empty();
+            if let Ok(encoded_ack) = ack_response.encode()
+                && response_tx.send(encoded_ack).is_err()
+            {
+                tracing::debug!("Write task closed, ending read loop");
+                // Clean up inflight counter since work was queued but ACK failed
+                handler.inflight.fetch_sub(1, Ordering::SeqCst);
+                handler.notify.notify_one();
+                break;
+            }
+
             // Send to worker pool with backpressure - BEFORE sending ACK
             match work_tx.send(work_item).await {
                 Ok(_) => {
-                    // Send acknowledgment ONLY after successful queuing
-                    let ack_response = TcpResponseMessage::empty();
-                    if let Ok(encoded_ack) = ack_response.encode()
-                        && response_tx.send(encoded_ack).is_err()
-                    {
-                        tracing::debug!("Write task closed, ending read loop");
-                        // Clean up inflight counter since work was queued but ACK failed
-                        handler.inflight.fetch_sub(1, Ordering::SeqCst);
-                        handler.notify.notify_one();
-                        break;
-                    }
-
                     tracing::trace!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
