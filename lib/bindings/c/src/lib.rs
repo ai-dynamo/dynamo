@@ -418,9 +418,10 @@ impl RouterHandles {
         tokens: &[u32],
         update_states: bool,
         lora_name: Option<String>,
+        priority_jump: f64,
     ) -> Result<u64, QueryRouterResult> {
         self.prefill_router
-            .query_prefill_worker(tokens, update_states, lora_name)
+            .query_prefill_worker(tokens, update_states, lora_name, priority_jump)
             .await
             .map(|(worker_id, _dp_rank)| worker_id)
             .map_err(|e| {
@@ -454,7 +455,7 @@ impl RouterHandles {
         };
 
         self.decode_router
-            .find_best_match(None, tokens, config_override.as_ref(), false, None)
+            .find_best_match(None, tokens, config_override.as_ref(), false, None, 0.0)
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");
@@ -786,6 +787,7 @@ pub unsafe extern "C" fn add_request(
                     None,
                     worker,
                     None, // lora_name
+                    None, // router_config_override
                 )
                 .await;
 
@@ -1023,7 +1025,9 @@ pub unsafe extern "C" fn route_request(
     // Query workers
     let result = handles.runtime.secondary().block_on(async {
         let prefill_worker_id = if is_disaggregated {
-            handles.query_prefill_worker(tokens, false, None).await?
+            handles
+                .query_prefill_worker(tokens, false, None, 0.0)
+                .await?
         } else {
             0
         };

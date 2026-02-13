@@ -489,7 +489,14 @@ impl PrefillRouter {
             InnerPrefillRouter::KvRouter(r) => {
                 let (worker, _overlap) = r
                     .chooser
-                    .find_best_match(None, token_ids, None, update_states, lora_name, priority_jump)
+                    .find_best_match(
+                        None,
+                        token_ids,
+                        None,
+                        update_states,
+                        lora_name,
+                        priority_jump,
+                    )
                     .await?;
                 Ok((worker.worker_id, worker.dp_rank))
             }
