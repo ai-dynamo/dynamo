@@ -79,15 +79,11 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
     fi
 
-<<<<<<< anants/remove-test-deps
-# Install runtime dependencies as root
-=======
 # Copy benchmarks after wheel install so benchmarks changes don't invalidate the layer above
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
 # Install common and test dependencies as root
->>>>>>> main
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
