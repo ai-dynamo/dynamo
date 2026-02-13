@@ -1301,7 +1301,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, rate(sglang:hicache_eviction_duration_seconds_bucket[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(sglang:hicache_eviction_duration_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p99",
           "range": true,
           "refId": "A"
@@ -1385,7 +1385,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, rate(sglang:hicache_load_back_duration_seconds_bucket[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(sglang:hicache_load_back_duration_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p99",
           "range": true,
           "refId": "A"
