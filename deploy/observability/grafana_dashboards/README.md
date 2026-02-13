@@ -3,6 +3,7 @@
 This directory contains example Grafana dashboards for Dynamo observability. These are starter files that you can use as references for building your own custom dashboards.
 
 - `dynamo.json` - General Dynamo dashboard showing software and hardware metrics
+- `sglang.json` - SGLang engine metrics (request latency, throughput, cache) and HiCache KV cache metrics (GPU/CPU tier usage, eviction/load-back, PIN count)
 - `dcgm-metrics.json` - GPU metrics dashboard using DCGM exporter data
 - `kvbm.json` - KV Block Manager metrics dashboard
 - `temp-loki.json` - Logging dashboard for Loki integration
