@@ -410,6 +410,11 @@ class TestProfileSLADryRun:
     @pytest.mark.gpu_0
     @pytest.mark.integration
     @pytest.mark.sglang
+    @pytest.mark.skip(
+        reason="Blocked on AI Configurator database format: sglang 0.5.6.post2 database "
+        "is in legacy format missing 'gemm_dtype' field. "
+        "See: KeyError in aiconfigurator/sdk/perf_database.py"
+    )
     @patch("dynamo.profiler.utils.model_info.get_model_info")
     async def test_sglang_profile_with_autogen_search_space_h100(
         self,
@@ -422,6 +427,10 @@ class TestProfileSLADryRun:
         This test demonstrates how search space is auto-generated based on model
         size and available GPU memory for sglang backend. GPU info is provided via
         command-line arguments injected by the Operator into the profiling config (DYN-2135).
+
+        NOTE: Currently skipped due to AI Configurator database format issue.
+        The sglang 0.5.6.post2 database for h100_sxm is in legacy format and missing
+        the required 'gemm_dtype' field, causing KeyError during database loading.
         """
         # Configure the mock to return the appropriate model info
         mock_get_model_info.return_value = mock_model_info
