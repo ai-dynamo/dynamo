@@ -11,7 +11,10 @@
 
 dynamo:
   base_image: nvcr.io/nvidia/cuda-dl-base
-  base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
+  cuda12.9:
+    base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
+  cuda13.0:
+    base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
   epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
   python_version: "3.12"
