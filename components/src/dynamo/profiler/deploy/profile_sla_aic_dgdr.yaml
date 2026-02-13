@@ -12,7 +12,7 @@ spec:
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
-    profilerImage: "nvcr.io/nvidian/dynamo-dev/trtllm-runtime:dyn-2135.0"
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag"
 
     # NOTE: any image built before January 10 and any release prior to 0.8.1
     # will need to use snake_case within profilingConfig.config
@@ -23,14 +23,6 @@ spec:
         osl: 150
         ttft: 500.0
         itl: 30.0
-      # Hardware config is required when GPU discovery is unavailable
-      # (e.g., namespace-scoped operator without node read permissions)
-      # Remove this section if GPU discovery is available in your cluster
-      hardware:
-        numGpusPerNode: 8
-        gpuModel: "H100-SXM5-80GB"
-        gpuVramMib: 81920
-        # system: "h100_sxm"  # optional, auto-derived from gpuModel if omitted
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidian/dynamo-dev/trtllm-runtime:dyn-2135.0"
+    workersImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag"
   autoApply: true
