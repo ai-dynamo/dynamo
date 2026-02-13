@@ -159,7 +159,7 @@ async def launch_workers(args, extra_engine_args_path):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
         # Create a separate DistributedRuntime for this worker (on same event loop)
-        runtime = DistributedRuntime(loop, args.store_kv, args.request_plane)
+        runtime = DistributedRuntime(loop, args.discovery_backend, args.request_plane)
         runtimes.append(runtime)
 
         # Determine which engine args file to use
