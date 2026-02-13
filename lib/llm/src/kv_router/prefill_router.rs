@@ -287,7 +287,6 @@ impl PrefillRouter {
                 .unwrap_or(0.0);
             match self
                 .query_prefill_worker(&req.token_ids, false, lora_name, priority_jump)
-                .instrument(tracing::info_span!("query_prefill_worker"))
                 .await
             {
                 Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
@@ -619,7 +618,6 @@ impl
                 })
             }
         }
-        .instrument(tracing::info_span!("prefill_routing"))
         .await;
 
         // Abort if cancelled during prefill

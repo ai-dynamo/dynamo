@@ -13,6 +13,7 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde_json::json;
+use tracing::Instrument;
 
 use crate::{
     kv_router::{
@@ -239,6 +240,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let block_size = self.chooser.block_size() as usize;
         let selection = self
             .select_worker(&context_id, &request, phase, is_query_only)
+            .instrument(tracing::info_span!("kv_router.select_worker"))
             .await?;
         let WorkerSelection {
             instance_id,
@@ -328,7 +330,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
-        let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
+        let mut response_stream = self
+            .inner
+            .direct(updated_request, instance_id)
+            .instrument(tracing::info_span!(
+                "kv_router.route_request",
+                request_id = %context_id,
+                worker_id = instance_id,
+                dp_rank = dp_rank,
+                overlap_blocks = overlap_amount,
+                phase = ?phase,
+            ))
+            .await?;
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
