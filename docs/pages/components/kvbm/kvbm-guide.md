@@ -100,10 +100,11 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 docker compose -f deploy/docker-compose.yml up -d
 
 # Build a dynamo TRTLLM container (KVBM is built in by default)
-./container/build.sh --framework trtllm
+python container/render.py --framework trtllm --target runtime --output-short-filename
+docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
-./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
+container/run.sh --image dynamo:latest-trtllm-runtime -it --mount-workspace --use-nixl-gds
 ```
 
 ### Aggregated Serving
