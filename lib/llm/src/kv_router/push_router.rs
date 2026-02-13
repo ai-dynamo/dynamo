@@ -124,6 +124,7 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
+        let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
 
@@ -147,6 +148,7 @@ impl KvPushRouter {
                     request.router_config_override.as_ref(),
                     !is_query_only,
                     lora_name,
+                    priority_jump,
                 )
                 .await?;
 
