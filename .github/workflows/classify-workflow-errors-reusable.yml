@@ -49,7 +49,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y python3-venv || true
           python3 -m venv /tmp/error-classification-venv
           . /tmp/error-classification-venv/bin/activate
-          pip install -r opensearch_upload/requirements.txt
+          pip install -r error_classification/requirements.txt
 
       - name: Classify Workflow Errors
         env:

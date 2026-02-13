@@ -3,8 +3,7 @@ AI-powered error classification system for CI/CD workflows.
 """
 
 from .config import Config, get_config, ERROR_CATEGORIES
-from .classifier import ErrorClassifier, ErrorClassification
-from .error_extractor import ErrorContext
+from .classifier import ErrorClassifier, ErrorClassification, ErrorContext
 from .claude_client import ClaudeClient
 from .prompts import get_category_definitions
 from .pr_commentator import (
