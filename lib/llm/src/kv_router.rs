@@ -771,50 +771,22 @@ impl KvPushRouter {
         };
 
         let Some(id) = preselected_id else {
-            let extra_args = request.extra_args.as_ref();
-
-            let routing_token_ids_owned = extra_args
-                .and_then(|args| args.get("routing_token_ids"))
-                .and_then(|raw_tokens| {
-                    serde_json::from_value::<Vec<u32>>(raw_tokens.clone())
-                        .map_err(|e| {
-                            tracing::warn!(
-                                request_id = %context_id,
-                                error = %e,
-                                "Invalid routing_token_ids in request.extra_args; using request.token_ids"
-                            );
-                            e
-                        })
-                        .ok()
-                });
-            let routing_token_ids = routing_token_ids_owned
-                .as_deref()
+            let mm_routing_info = request.mm_routing_info.as_ref();
+            let routing_token_ids = mm_routing_info
+                .map(|info| info.routing_token_ids.as_slice())
+                .filter(|tokens| !tokens.is_empty())
                 .unwrap_or(&request.token_ids);
             let total_blocks = routing_token_ids
                 .len()
                 .div_ceil(self.chooser.block_size() as usize);
-
-            let block_mm_infos = extra_args
-                .and_then(|extra_args| extra_args.get("block_mm_infos"))
-                .and_then(|raw_infos| {
-                    serde_json::from_value::<Vec<Option<BlockExtraInfo>>>(raw_infos.clone())
-                        .map_err(|e| {
-                            tracing::warn!(
-                                request_id = %context_id,
-                                error = %e,
-                                "Invalid block_mm_infos in request.extra_args; ignoring MM block info"
-                            );
-                            e
-                        })
-                        .ok()
-                });
+            let block_mm_infos = mm_routing_info.map(|info| info.block_mm_infos.as_slice());
 
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
                     Some(context_id),
                     routing_token_ids,
-                    block_mm_infos.as_deref(),
+                    block_mm_infos,
                     request.router_config_override.as_ref(),
                     !is_query_only,
                     lora_name,

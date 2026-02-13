@@ -1317,6 +1317,7 @@ class KvPushRouter:
         extra_args: Optional[JsonLike] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         multi_modal_data: Optional[JsonLike] = None,
+        mm_routing_info: Optional[JsonLike] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -1338,11 +1339,13 @@ class KvPushRouter:
             extra_args: Optional extra request arguments to include in the
                        PreprocessedRequest.
             block_mm_infos: Optional block-level multimodal metadata aligned to
-                           request blocks. When provided, this is forwarded via
-                           extra_args and used by the router for MM-aware worker
-                           selection in the non-preselected path.
+                           request blocks. Backward-compatible shortcut; this is
+                           converted to mm_routing_info with routing_token_ids=token_ids.
             multi_modal_data: Optional multimodal payload map to preserve image/video
                              data for downstream model execution.
+            mm_routing_info: Optional structured routing-only multimodal payload
+                            (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
+                            used by router selection without changing execution token_ids.
 
         Returns:
             An async iterator yielding generation responses

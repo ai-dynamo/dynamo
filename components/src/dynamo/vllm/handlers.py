@@ -1067,7 +1067,7 @@ class BaseWorkerHandler(ABC):
         else:
             # Normal path: use token IDs
             mm_uuids = _compute_mm_uuids(multi_modal_data)
-            prompt_kwargs = dict(
+            prompt_kwargs = dict[str, Any](
                 prompt_token_ids=request["token_ids"],
                 multi_modal_data=multi_modal_data,
             )

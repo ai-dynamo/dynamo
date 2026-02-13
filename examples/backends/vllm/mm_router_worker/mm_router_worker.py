@@ -159,9 +159,7 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     # Create handler
     handler = MMRouterHandler(
-        client=downstream_client,
         kv_push_router=kv_push_router,
-        instance_ids=list(instance_ids),
         tokenizer=tokenizer,
         processor=processor,
         model=args.model,

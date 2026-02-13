@@ -294,6 +294,52 @@ def _send_request_get_overlap(
 
 @pytest.mark.timeout(1800)
 @pytest.mark.nightly
+def test_vllm_text_only_overlap_repeated_prompt(
+    start_vllm_mm_services, predownload_models
+):
+    """Text-only routing should increase overlap on repeat and then stabilize."""
+    frontend_port, router_proc = start_vllm_mm_services
+
+    prompt = (
+        "TEXT routing e2e unique case zeta-7f31. "
+        "Repeat this sentence to force multiple KV blocks. "
+    ) * 80
+    payload = _build_payload([], prompt=prompt)
+
+    overlap_1, total_1, _ = _send_request_get_overlap(
+        frontend_port, router_proc, payload, "text_only_req1"
+    )
+    overlap_2, total_2, _ = _send_request_get_overlap(
+        frontend_port, router_proc, payload, "text_only_req2"
+    )
+    overlap_3, total_3, segment_3 = _send_request_get_overlap(
+        frontend_port, router_proc, payload, "text_only_req3"
+    )
+
+    assert total_1 > 0 and total_2 > 0 and total_3 > 0, (
+        f"Expected non-zero total blocks for text-only request, got "
+        f"{total_1}, {total_2}, {total_3}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+    assert abs(total_1 - total_2) <= 2 and abs(total_2 - total_3) <= 2, (
+        f"Expected text-only total blocks to remain stable across repeats, got "
+        f"req1={total_1}, req2={total_2}, req3={total_3}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+    assert overlap_2 > overlap_1, (
+        f"Expected second text-only overlap > first, got "
+        f"req1={overlap_1}/{total_1}, req2={overlap_2}/{total_2}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+    assert overlap_3 == overlap_2, (
+        f"Expected third text-only overlap == second, got "
+        f"req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
+        f"Recent router logs:\n{segment_3[-4000:]}"
+    )
+
+
+@pytest.mark.timeout(1800)
+@pytest.mark.nightly
 def test_vllm_mm_overlap_repeated_three_images(
     start_vllm_mm_services, predownload_models
 ):

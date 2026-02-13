@@ -1039,7 +1039,7 @@ impl KvPushRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -1054,6 +1054,7 @@ impl KvPushRouter {
         extra_args: Option<PyObject>,
         block_mm_infos: Option<PyObject>,
         multi_modal_data: Option<PyObject>,
+        mm_routing_info: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
@@ -1081,7 +1082,7 @@ impl KvPushRouter {
                 None
             };
 
-        let mut extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
+        let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
             Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
         } else {
             None
@@ -1101,23 +1102,17 @@ impl KvPushRouter {
                 None
             };
 
-        if let Some(infos) = block_mm_infos {
-            let infos_json = serde_json::to_value(infos).map_err(to_pyerr)?;
-            match extra_args.as_mut() {
-                Some(value) => {
-                    if let Some(map) = value.as_object_mut() {
-                        map.insert("block_mm_infos".to_string(), infos_json);
-                    } else {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            "extra_args must be a JSON object when block_mm_infos is provided",
-                        ));
-                    }
-                }
-                None => {
-                    extra_args = Some(json!({ "block_mm_infos": infos_json }));
-                }
-            }
-        }
+        let mm_routing_info: Option<llm_rs::protocols::common::preprocessor::MmRoutingInfo> =
+            if let Some(obj) = mm_routing_info {
+                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+            } else if let Some(infos) = block_mm_infos {
+                Some(llm_rs::protocols::common::preprocessor::MmRoutingInfo {
+                    routing_token_ids: token_ids.clone(),
+                    block_mm_infos: infos,
+                })
+            } else {
+                None
+            };
 
         // Create tracker to capture worker routing info from KvRouter
         let tracker = Arc::new(RequestTracker::new());
@@ -1133,6 +1128,7 @@ impl KvPushRouter {
             .output_options(output_options)
             .router_config_override(router_config_override)
             .multi_modal_data(multi_modal_data)
+            .mm_routing_info(mm_routing_info)
             .extra_args(extra_args)
             .tracker(Some(tracker.clone()));
 

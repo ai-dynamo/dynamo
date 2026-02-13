@@ -9,7 +9,6 @@ import logging
 from typing import Any, AsyncGenerator
 
 from dynamo.llm import KvPushRouter
-from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .mm_processor import build_block_mm_infos, extract_image_urls, process_multimodal
@@ -26,9 +25,7 @@ class MMRouterHandler:
 
     def __init__(
         self,
-        client: Client,
         kv_push_router: KvPushRouter,
-        instance_ids: list[int],
         tokenizer: Any,
         processor: Any,
         model: str,
@@ -38,17 +35,13 @@ class MMRouterHandler:
         Initialize the MM Router Handler.
 
         Args:
-            client: Dynamo client for downstream vLLM workers
             kv_push_router: KvPushRouter for KV-aware worker selection and routing
-            instance_ids: List of available worker instance IDs
             tokenizer: HuggingFace AutoTokenizer
             processor: HuggingFace AutoProcessor (optional)
             model: Model path/name
             block_size: KV cache block size
         """
-        self.client = client
         self.kv_push_router = kv_push_router
-        self.instance_ids = instance_ids
         self.tokenizer = tokenizer
         self.processor = processor
         self.model = model
@@ -97,6 +90,10 @@ class MMRouterHandler:
                 mm_hashes=processed.mm_hashes,
                 image_ranges=processed.image_ranges,
             )
+            if block_mm_infos is None:
+                raise ValueError(
+                    "Failed to build block_mm_infos for multimodal request"
+                )
 
             routing_tokens = processed.tokens
             routing_blocks = (len(routing_tokens) + self.block_size - 1) // self.block_size
@@ -117,26 +114,22 @@ class MMRouterHandler:
             logger.debug(
                 f"Text request: {len(routing_tokens)} routing tokens, {routing_blocks} routing blocks"
             )
-            block_mm_infos = None
+            # Text-only routing has no multimodal objects; provide per-block None entries.
+            block_mm_infos = [None] * routing_blocks
 
         # Route and generate through KvPushRouter with explicit fields.
         # We pass:
         # - execution payload (token_ids + multi_modal_data)
-        # - routing payload (routing_token_ids + block_mm_infos)
+        # - routing payload (mm_routing_info: routing_token_ids + block_mm_infos)
         # so generate() can select worker internally while preserving MM correctness.
         token_ids = request.get("token_ids")
         if not token_ids:
             raise ValueError("Missing or empty token_ids in preprocessed request")
 
-        raw_extra_args = request.get("extra_args")
-        if raw_extra_args is not None and not isinstance(raw_extra_args, dict):
-            logger.warning(
-                "request.extra_args is not a dict; replacing with routing-only extra_args"
-            )
-            extra_args: dict[str, Any] = {}
-        else:
-            extra_args = dict(raw_extra_args or {})
-        extra_args["routing_token_ids"] = routing_tokens
+        mm_routing_info: dict[str, Any] = {
+            "routing_token_ids": routing_tokens,
+            "block_mm_infos": block_mm_infos,
+        }
 
         stream = await self.kv_push_router.generate(
             token_ids=token_ids,
@@ -145,15 +138,10 @@ class MMRouterHandler:
             sampling_options=request.get("sampling_options"),
             output_options=request.get("output_options"),
             router_config_override=request.get("router_config_override"),
-            extra_args=extra_args,
-            block_mm_infos=block_mm_infos,
+            extra_args=request.get("extra_args"),
             multi_modal_data=request.get("multi_modal_data"),
+            mm_routing_info=mm_routing_info,
         )
 
         async for response in stream:
             yield response
-
-    def update_instance_ids(self, instance_ids: list[int]) -> None:
-        """Update the list of available worker instance IDs."""
-        self.instance_ids = instance_ids
-        logger.info(f"Updated instance IDs: {instance_ids}")

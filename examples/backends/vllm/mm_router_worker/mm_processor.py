@@ -57,21 +57,6 @@ def extract_image_urls(messages: list[dict]) -> list[str]:
     return urls
 
 
-def build_prompt_from_messages(messages: list[dict]) -> str:
-    """Build a simple prompt string from messages."""
-    parts = []
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            parts.append(f"{role}: {content}")
-        elif isinstance(content, list):
-            texts = [p.get("text", "") for p in content if p.get("type") == "text"]
-            if texts:
-                parts.append(f"{role}: {' '.join(texts)}")
-    return "\n".join(parts)
-
-
 def process_multimodal(
     messages: list[dict],
     image_urls: list[str],
@@ -85,45 +70,29 @@ def process_multimodal(
     Uses PIL for image loading and hashlib for mm_hash computation.
     Unlike TRT-LLM, vLLM keeps original image_token_id (no replacement).
     """
-    try:
-        # The preprocessed request does not carry a rendered template string; it carries
-        # original messages in extra_args, so we must apply chat template again here.
-        #
-        # Use apply_chat_template to build prompt WITH image placeholders.
-        # build_prompt_from_messages() strips images and produces text-only,
-        # which means the processor won't insert <|image_pad|> tokens.
-        prompt = _build_prompt_with_images(messages, tokenizer, processor)
-        logger.info(f"Prompt (first 300 chars): {prompt[:300]}")
+    # The preprocessed request does not carry a rendered template string; it carries
+    # original messages in extra_args, so we must apply chat template again here.
+    prompt = _build_prompt_with_images(messages, tokenizer, processor)
+    logger.info(f"Prompt (first 300 chars): {prompt[:300]}")
 
-        # Load images as PIL
-        pil_images = []
-        for url in image_urls:
-            pil_img = _load_image(url)
-            pil_images.append(pil_img)
+    # Load images as PIL
+    pil_images = []
+    for url in image_urls:
+        pil_img = _load_image(url)
+        pil_images.append(pil_img)
 
-        # Get expanded tokens and image ranges (no token replacement for vLLM)
-        tokens, image_ranges = _get_expanded_tokens(
-            prompt, pil_images, tokenizer, processor
-        )
-        logger.info(
-            f"Expanded: {len(tokens)} tokens, "
-            f"image_ranges={image_ranges}"
-        )
+    # Get expanded tokens and image ranges (no token replacement for vLLM)
+    tokens, image_ranges = _get_expanded_tokens(prompt, pil_images, tokenizer, processor)
+    logger.info(
+        f"Expanded: {len(tokens)} tokens, "
+        f"image_ranges={image_ranges}"
+    )
 
-        # Compute mm_hashes exactly like vLLM handler's multi_modal_uuids path.
-        mm_hashes = _compute_mm_hashes(pil_images)
-        logger.info(f"mm_hashes={mm_hashes}")
+    # Compute mm_hashes exactly like vLLM handler's multi_modal_uuids path.
+    mm_hashes = _compute_mm_hashes(pil_images)
+    logger.info(f"mm_hashes={mm_hashes}")
 
-        return ProcessedInput(
-            tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges
-        )
-
-    except Exception as e:
-        logger.warning(f"MM processing failed: {e}, falling back to text-only")
-        prompt = build_prompt_from_messages(messages)
-        return ProcessedInput(
-            tokens=tokenizer.encode(prompt), mm_hashes=None, image_ranges=None
-        )
+    return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)
 
 
 def build_block_mm_infos(
@@ -176,23 +145,22 @@ def _build_prompt_with_images(
     need <|vision_start|><|image_pad|>...<|vision_end|> in the prompt for
     the processor to expand image tokens correctly.
 
-    Falls back to build_prompt_from_messages() if chat template fails.
+    Raises if chat template cannot be applied. For MM routing correctness, we do
+    not silently fall back to text-only prompts.
     """
-    try:
-        # Try processor first (has the best chat template for multimodal)
-        if processor is not None and hasattr(processor, "apply_chat_template"):
-            return processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        # Fall back to tokenizer
-        if hasattr(tokenizer, "apply_chat_template"):
-            return tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-    except Exception as e:
-        logger.warning(f"apply_chat_template failed: {e}")
+    # Try processor first (has the best chat template for multimodal)
+    if processor is not None and hasattr(processor, "apply_chat_template"):
+        return processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
 
-    return build_prompt_from_messages(messages)
+    # Fall back to tokenizer if available
+    if hasattr(tokenizer, "apply_chat_template"):
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+    raise ValueError("Neither processor nor tokenizer provides apply_chat_template")
 
 
 def _load_image(url: str) -> Image.Image:
@@ -259,7 +227,19 @@ def _get_expanded_tokens(
 def _compute_tokens_per_image(
     processor_output: dict, processor: Any
 ) -> list[int]:
-    """Compute the number of visual tokens for each image from processor output."""
+    """
+    Compute the number of visual tokens for each image from processor output.
+
+    Only Qwen-style processors (Qwen2-VL, Qwen2.5-VL) are supported.
+    Other model families will raise ValueError.
+    """
+    processor_cls = type(processor).__qualname__
+    if "qwen" not in processor_cls.lower():
+        raise NotImplementedError(
+            f"_compute_tokens_per_image only supports Qwen-style processors "
+            f"tuples. Got processor class: {processor_cls}"
+        )
+
     grid_thw = processor_output.get("image_grid_thw")
     if grid_thw is None:
         raise ValueError(
