@@ -260,13 +260,10 @@ async def parse_args(args: list[str]) -> Config:
 
         temp_config_file = _dump_disagg_config_section(section_data)
 
-        try:
-            config_index = unknown.index("--config")
-            unknown[config_index + 1] = temp_config_file
-        except ValueError:
-            # config not found, add it to the end
-            unknown.append("--config")
-            unknown.append(temp_config_file)
+        # Remove any existing --config (both '--config val' and '--config=val' forms)
+        unknown = _remove_cli_flag_and_value(unknown, "--config")
+        unknown.append("--config")
+        unknown.append(temp_config_file)
 
     # Handle SGLang --config file merge if present.
     if "--config" in unknown:

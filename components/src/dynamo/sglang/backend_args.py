@@ -3,7 +3,6 @@
 
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
-import os
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -85,9 +84,7 @@ class DynamoSGLangArgGroup(ArgGroup):
             g,
             flag_name="--image-diffusion-base-url",
             env_var="DYN_SGL_IMAGE_DIFFUSION_BASE_URL",
-            default=os.environ.get(
-                "DYN_IMAGE_DIFFUSION_BASE_URL", "http://localhost:8008/"
-            ),
+            default="http://localhost:8008/",
             help="Base URL for rewriting image URLs in responses (e.g., http://localhost:8008/). When set, generated image URLs will use this base instead of filesystem URLs.",
         )
         add_argument(

@@ -11,9 +11,9 @@ import time
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, DefaultDict
 
+import sglang as sgl
 import uvloop
 
-import sglang as sgl
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.storage import get_fs

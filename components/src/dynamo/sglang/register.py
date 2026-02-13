@@ -6,10 +6,10 @@ import logging
 import socket
 from typing import Any, Optional
 
+import sglang as sgl
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_local_ip_auto
 
-import sglang as sgl
 from dynamo._core import Endpoint
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.sglang.args import DynamoConfig
