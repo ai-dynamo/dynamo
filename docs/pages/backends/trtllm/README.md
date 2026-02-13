@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: TensorRT-LLM
 ---
 
 # LLM Deployment using TensorRT-LLM
@@ -242,17 +243,19 @@ python -m dynamo.trtllm \
 
 ### API Endpoint
 
-Video generation uses the `/v1/videos/generations` endpoint:
+Video generation uses the `/v1/videos` endpoint:
 
 ```bash
-curl -X POST http://localhost:8000/v1/videos/generations \
+curl -X POST http://localhost:8000/v1/videos \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "A cat playing piano",
     "model": "wan_t2v",
-    "size": "832x480",
     "seconds": 4,
-    "fps": 24
+    "size": "832x480",
+    "nvext": {
+      "fps": 24
+    }
   }'
 ```
 

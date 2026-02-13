@@ -7,12 +7,14 @@ import argparse
 import pytest
 
 from dynamo.common.configuration.utils import (
+    add_argument,
     add_negatable_bool_argument,
     env_or_default,
 )
 
 pytestmark = [
     pytest.mark.unit,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
 
@@ -87,6 +89,86 @@ class TestEnvOrDefault:
         assert isinstance(env_or_default("TEST_VAR", 3.14), float)
         # Bool
         assert isinstance(env_or_default("TEST_VAR", True), bool)
+
+    def test_none_default_with_no_value_type_returns_raw_env_value(self, monkeypatch):
+        """Test env value is returned as string when no type info is available."""
+        monkeypatch.setenv("TEST_VAR", "env_value")
+
+        result = env_or_default("TEST_VAR", None, value_type=None)
+        assert result == "env_value"
+        assert isinstance(result, str)
+
+
+class TestAddArgument:
+    """Test add_argument function."""
+
+    def test_callable_type_with_none_default_uses_env_and_validates(self, monkeypatch):
+        """Test callable arg_type works when default is None and env var is set."""
+        monkeypatch.setenv("TEST_MODEL_NAME", "  model-A  ")
+        parser = argparse.ArgumentParser()
+
+        def validate_model_name(value: str) -> str:
+            if len(value.strip()) == 0:
+                raise argparse.ArgumentTypeError("model-name must be non-empty")
+            return value.strip()
+
+        add_argument(
+            parser,
+            flag_name="--model-name",
+            env_var="TEST_MODEL_NAME",
+            default=None,
+            help="Model name",
+            arg_type=validate_model_name,
+        )
+
+        args = parser.parse_args([])
+        assert args.model_name == "model-A"
+
+    def test_callable_type_with_none_default_uses_none_when_env_unset(
+        self, monkeypatch
+    ):
+        """Test callable arg_type keeps None default when env var is not set."""
+        monkeypatch.delenv("TEST_MODEL_NAME", raising=False)
+        parser = argparse.ArgumentParser()
+
+        def validate_model_name(value: str) -> str:
+            if len(value.strip()) == 0:
+                raise argparse.ArgumentTypeError("model-name must be non-empty")
+            return value.strip()
+
+        add_argument(
+            parser,
+            flag_name="--model-name",
+            env_var="TEST_MODEL_NAME",
+            default=None,
+            help="Model name",
+            arg_type=validate_model_name,
+        )
+
+        args = parser.parse_args([])
+        assert args.model_name is None
+
+    def test_callable_type_with_invalid_env_value_fails_parse(self, monkeypatch):
+        """Test invalid env value still fails validation via argparse type callable."""
+        monkeypatch.setenv("TEST_MODEL_NAME", "   ")
+        parser = argparse.ArgumentParser()
+
+        def validate_model_name(value: str) -> str:
+            if len(value.strip()) == 0:
+                raise argparse.ArgumentTypeError("model-name must be non-empty")
+            return value.strip()
+
+        add_argument(
+            parser,
+            flag_name="--model-name",
+            env_var="TEST_MODEL_NAME",
+            default=None,
+            help="Model name",
+            arg_type=validate_model_name,
+        )
+
+        with pytest.raises(SystemExit):
+            parser.parse_args([])
 
 
 class TestAddNegatableBool:

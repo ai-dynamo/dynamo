@@ -21,7 +21,7 @@
 #    - Triggers on pull requests when docs/** files change
 #    - Runs `fern check` and `fern docs broken-links`
 #
-# 2. SYNC vNEXT (push to main): Syncs docs/ from main to docs-website branch
+# 2. SYNC dev (push to main): Syncs docs/ from main to docs-website branch
 #    - Triggers on push to main when docs/** files change
 #    - Preserves versioned documentation snapshots on docs-website branch
 #    - Publishes docs to Fern after syncing
@@ -49,7 +49,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag to release (e.g., v0.9.0). Leave empty to sync vNext.'
+        description: 'Version tag to release (e.g., v0.9.0). Leave empty to sync dev docs.'
         required: false
         type: string
 
@@ -138,11 +138,11 @@ jobs:
         run: fern docs broken-links
 
   #############################################################################
-  # SYNC vNEXT - Run on push to main when docs/** files change
+  # SYNC dev - Run on push to main when docs/** files change
   #############################################################################
 
-  sync-vnext:
-    name: Sync vNext to docs-website
+  sync-dev:
+    name: Sync dev to docs-website
     needs: changed-files
     if: |
       github.ref == 'refs/heads/main' &&
@@ -171,16 +171,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Sync vNext content from main
+      - name: Sync dev content from main
         run: |
-          # Sync pages/ directory (vNext content)
+          # Sync pages/ directory (dev content)
           echo "Syncing pages/ from main to docs-website branch..."
           rm -rf docs-checkout/docs/pages
           cp -r main-checkout/docs/pages docs-checkout/docs/pages
 
-          # Sync versions/next.yml (vNext navigation)
-          echo "Syncing versions/next.yml from main to docs-website branch..."
-          cp main-checkout/docs/versions/next.yml docs-checkout/docs/versions/next.yml
+          # Sync versions/dev.yml (dev navigation)
+          echo "Syncing versions/dev.yml from main to docs-website branch..."
+          cp main-checkout/docs/versions/dev.yml docs-checkout/docs/versions/dev.yml
 
           # Sync assets/ directory
           echo "Syncing assets/ from main to docs-website branch..."
@@ -201,6 +201,19 @@ jobs:
             cp main-checkout/docs/convert_callouts.py docs-checkout/docs/convert_callouts.py
           fi
 
+          # Sync components/ directory (e.g., CustomFooter.tsx)
+          if [ -d main-checkout/docs/components ]; then
+            echo "Syncing components/ from main to docs-website branch..."
+            rm -rf docs-checkout/docs/components
+            cp -r main-checkout/docs/components docs-checkout/docs/components
+          fi
+
+          # Sync main.css
+          if [ -f main-checkout/docs/main.css ]; then
+            echo "Syncing main.css from main to docs-website branch..."
+            cp main-checkout/docs/main.css docs-checkout/docs/main.css
+          fi
+
       - name: Convert GitHub callouts to Fern format
         run: |
           echo "Converting GitHub-style callouts to Fern format in pages/..."
@@ -211,27 +224,17 @@ jobs:
         run: |
           cd docs-checkout/docs
 
-          # Extract the list of versioned entries from current docs.yml (on docs-website branch)
-          # These are entries after "path: ./versions/next.yml"
-          # We need to preserve them while updating the rest from main
+          # Save the full versions array from docs-website
+          yq '.products[0].versions' docs.yml > /tmp/preserved_versions.yml
 
-          # Get version entries (lines containing "display-name: v" and their path lines)
-          VERSION_ENTRIES=$(awk '/- display-name: v/{found=1} found{print; if(/path:/) found=0}' docs.yml)
+          echo "Preserved versions array:"
+          cat /tmp/preserved_versions.yml
 
-          # Copy docs.yml from main as base
+          # Copy docs.yml from main to get config updates
           cp ../../main-checkout/docs/docs.yml docs.yml
 
-          # If we had version entries, append them after the next.yml line
-          if [ -n "$VERSION_ENTRIES" ]; then
-            echo "Preserving version entries:"
-            echo "$VERSION_ENTRIES"
-
-            # Create a temp file with the version entries properly indented
-            echo "$VERSION_ENTRIES" > /tmp/version_entries.txt
-
-            # Insert version entries after the next.yml path line
-            sed -i '/path: \.\/versions\/next\.yml/r /tmp/version_entries.txt' docs.yml
-          fi
+          # Restore the preserved versions array
+          yq -i '.products[0].versions = load("/tmp/preserved_versions.yml")' docs.yml
 
           echo "Updated docs.yml:"
           cat docs.yml
@@ -255,7 +258,7 @@ jobs:
           cd docs-checkout
 
           git add -A
-          git commit -m "docs(fern): sync vNext from main
+          git commit -m "docs(fern): sync dev from main
 
           Automated sync of docs/ directory from main branch.
           Preserves versioned documentation snapshots.
@@ -264,7 +267,7 @@ jobs:
 
           git push origin docs-website
 
-          echo "Successfully synced vNext docs to docs-website branch"
+          echo "Successfully synced dev docs to docs-website branch"
 
       - name: Setup Node.js
         if: steps.changes.outputs.has_changes == 'true'
@@ -402,8 +405,8 @@ jobs:
 
           echo "Creating version config: $VERSION_FILE"
 
-          # Copy next.yml as template
-          cp docs/versions/next.yml "$VERSION_FILE"
+          # Copy dev.yml as template
+          cp docs/versions/dev.yml "$VERSION_FILE"
 
           # Update the comment at the top
           sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
@@ -424,26 +427,32 @@ jobs:
           echo "Updating $DOCS_FILE to include $TAG..."
 
           # Check if version already in docs.yml
-          if grep -q "display-name: $TAG" "$DOCS_FILE"; then
+          if yq ".products[0].versions[] | select(.display-name == \"$TAG\")" "$DOCS_FILE" | grep -q .; then
             echo "Version $TAG already in docs.yml, skipping update"
             exit 0
           fi
 
-          # Insert new version after "Next" entry
-          # The new version should be inserted after the "path: ./versions/next.yml" line
-          # Use a temp file approach for reliable multi-line insertion
-          awk -v tag="$TAG" '
-            /path: \.\/versions\/next\.yml/ {
-              print
-              print "  - display-name: " tag
-              print "    path: ./versions/" tag ".yml"
-              next
-            }
-            { print }
-          ' "$DOCS_FILE" > "${DOCS_FILE}.tmp" && mv "${DOCS_FILE}.tmp" "$DOCS_FILE"
+          # Find the index of the "dev" entry and insert new version right after it
+          DEV_IDX=$(yq '.products[0].versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' "$DOCS_FILE")
+          INSERT_IDX=$((DEV_IDX + 1))
 
-          echo "Updated docs.yml versions section:"
-          grep -A 20 "^versions:" "$DOCS_FILE"
+          yq -i "
+            .products[0].versions |= (
+              .[:$INSERT_IDX] +
+              [{\"display-name\": \"$TAG\", \"path\": \"./versions/$TAG.yml\", \"slug\": \"$TAG\", \"availability\": \"stable\"}] +
+              .[$INSERT_IDX:]
+            )
+          " "$DOCS_FILE"
+
+          # Update the top-level entry to point to the new version
+          yq -i ".products[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+
+          # Update the "Latest" entry to point to the new version
+          yq -i ".products[0].versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+          yq -i ".products[0].versions[0].display-name = \"Latest ($TAG)\"" "$DOCS_FILE"
+
+          echo "Updated docs.yml products/versions section:"
+          yq '.products[0].versions' "$DOCS_FILE"
 
       - name: Commit and push changes
         run: |

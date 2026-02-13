@@ -115,28 +115,27 @@ class EmbeddingsProcessor:
     def create_multimodal_item(
         embeddings: torch.Tensor, request: SglangMultimodalRequest
     ) -> dict:
-        """
-        Create multimodal item for SGLang generation.
+        """Create mm_item dict for SGLang's engine.async_generate(image_data=[...]).
 
-        Uses format="precomputed_embedding" since Dynamo's Encoder has already
-        run the vision encoder. SGLang expects 2D embeddings (num_patches, hidden_dim).
+        Uses format="processor_output" with precomputed_embeddings so SGLang
+        bypasses get_image_feature() entirely (model-agnostic path).
         """
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
 
-        # SGLang expects 2D tensor for precomputed_embedding format
-        # Encoder outputs 3D (1, num_patches, hidden_dim) for internal consistency
-        # Squeeze batch dimension at SGLang boundary
-        if precomputed.dim() == 3 and precomputed.shape[0] == 1:
-            precomputed = precomputed.squeeze(0)
+        # Convert list fields back to tensors (JSON roundtrip loses tensor type)
+        processor_output = request.processor_output or {}
+        for key, value in processor_output.items():
+            if isinstance(value, list):
+                processor_output[key] = torch.tensor(value)
 
-        grid_thw_tensor = torch.tensor(request.image_grid_thw)
-
-        mm_item = {
-            "format": "precomputed_embedding",
-            "feature": precomputed,
-            "image_grid_thw": grid_thw_tensor,
-            "modality": "IMAGE",
-        }
+        mm_item = dict(processor_output)
+        mm_item.update(
+            {
+                "format": "processor_output",
+                "precomputed_embeddings": precomputed,
+                "modality": "IMAGE",
+            }
+        )
 
         return mm_item
 

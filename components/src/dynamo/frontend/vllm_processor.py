@@ -24,8 +24,9 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
+from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import (
-    KvPushRouter,
+    KvRouter,
     ModelCardInstanceId,
     ModelDeploymentCard,
     PythonAsyncEngine,
@@ -76,7 +77,7 @@ class VllmProcessor:
         self,
         tokenizer: TokenizerLike,
         input_processor: InputProcessor,
-        router,  # Client or KvPushRouter
+        router,  # Client or KvRouter
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
@@ -84,7 +85,7 @@ class VllmProcessor:
         self.tokenizer = tokenizer
         self.input_processor = input_processor
         self.router = router
-        self.is_kv_router = isinstance(router, KvPushRouter)
+        self.is_kv_router = isinstance(router, KvRouter)
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
@@ -367,10 +368,12 @@ class EngineFactory:
         self,
         runtime: DistributedRuntime,
         router_config: RouterConfig,
+        config: FrontendConfig,
         flags: Namespace,
     ):
         self.runtime = runtime
         self.router_config = router_config
+        self.config = config
         self.flags = flags
 
     async def chat_engine_factory(
@@ -442,9 +445,9 @@ class EngineFactory:
         )
 
         if self.router_config.router_mode == RouterMode.KV:
-            router = KvPushRouter(
+            router = KvRouter(
                 endpoint=generate_endpoint,
-                block_size=self.flags.kv_cache_block_size or 16,
+                block_size=self.config.kv_cache_block_size or 16,
                 kv_router_config=self.router_config.kv_router_config,
             )
         else:
