@@ -1606,7 +1606,7 @@
               },
               {
                 "$ref": "#/components/schemas/Stop",
-                "description": "Up to 32 sequences where the API will stop generating further tokens."
+                "description": "Up to 4 sequences where the API will stop generating further tokens."
               }
             ]
           },
@@ -1660,7 +1660,7 @@
             "items": {
               "$ref": "#/components/schemas/ChatCompletionTool"
             },
-            "description": "A list of tools the model may call. Currently, only functions are supported as a tool.\nUse this to provide a list of functions the model may generate JSON inputs for. A max of 1536 functions are supported."
+            "description": "A list of tools the model may call. Currently, only functions are supported as a tool.\nUse this to provide a list of functions the model may generate JSON inputs for. A max of 128 functions are supported."
           },
           "top_logprobs": {
             "type": [
@@ -1799,7 +1799,7 @@
               },
               {
                 "$ref": "#/components/schemas/Stop",
-                "description": "Up to 32 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence."
+                "description": "Up to 4 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence."
               }
             ]
           },
