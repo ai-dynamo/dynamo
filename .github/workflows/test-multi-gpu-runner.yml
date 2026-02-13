@@ -24,6 +24,6 @@ jobs:
     steps:
       - name: Check GPUs (inside Docker)
         run: |
-          nvidia-smi
-          # docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+          # nvidia-smi
+          docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
           # echo "GPU count: $(docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi -L | wc -l)"
