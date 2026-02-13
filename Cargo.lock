@@ -2026,6 +2026,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
+ "dynamo-bench",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",

@@ -40,6 +40,108 @@ impl LatencyStats {
 }
 
 // ---------------------------------------------------------------------------
+// Time-bucketed latency statistics
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TimeBucketStats {
+    pub bucket_start_sec: u64,
+    pub bucket_end_sec: u64,
+    pub count: usize,
+    pub latency_min_us: u64,
+    pub latency_p50_us: u64,
+    pub latency_p95_us: u64,
+    pub latency_max_us: u64,
+}
+
+/// Compute per-bucket latency statistics.
+///
+/// Each item is a `(latency, completion_time)` pair where `completion_time`
+/// is relative to the measurement start.
+pub fn compute_time_bucket_stats(
+    items: &[(Duration, Duration)],
+    bucket_size_secs: u64,
+) -> Vec<TimeBucketStats> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let max_completion = items
+        .iter()
+        .map(|&(_, ct)| ct)
+        .max()
+        .unwrap_or(Duration::ZERO);
+
+    let num_buckets = (max_completion.as_secs() / bucket_size_secs) + 1;
+    let mut bucket_latencies: Vec<Vec<Duration>> = vec![Vec::new(); num_buckets as usize];
+
+    for &(latency, completion_time) in items {
+        let bucket_idx = (completion_time.as_secs() / bucket_size_secs) as usize;
+        if bucket_idx < bucket_latencies.len() {
+            bucket_latencies[bucket_idx].push(latency);
+        }
+    }
+
+    bucket_latencies
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, latencies)| {
+            if latencies.is_empty() {
+                return None;
+            }
+
+            let stats = LatencyStats::from_durations(latencies)?;
+            Some(TimeBucketStats {
+                bucket_start_sec: idx as u64 * bucket_size_secs,
+                bucket_end_sec: (idx as u64 + 1) * bucket_size_secs,
+                count: latencies.len(),
+                latency_min_us: stats.min.as_micros() as u64,
+                latency_p50_us: stats.p50.as_micros() as u64,
+                latency_p95_us: stats.p95.as_micros() as u64,
+                latency_max_us: stats.max.as_micros() as u64,
+            })
+        })
+        .collect()
+}
+
+pub fn print_time_bucket_report(buckets: &[TimeBucketStats]) {
+    if buckets.is_empty() {
+        println!("  No time bucket data available");
+        return;
+    }
+
+    println!(
+        "  {:>8} {:>8} {:>12} {:>12} {:>12} {:>12}",
+        "Time(s)", "Count", "Min(ms)", "P50(ms)", "P95(ms)", "Max(ms)"
+    );
+    println!("  {}", "-".repeat(68));
+
+    for bucket in buckets {
+        println!(
+            "  {:>3}-{:<4} {:>8} {:>12.1} {:>12.1} {:>12.1} {:>12.1}",
+            bucket.bucket_start_sec,
+            bucket.bucket_end_sec,
+            bucket.count,
+            bucket.latency_min_us as f64 / 1000.0,
+            bucket.latency_p50_us as f64 / 1000.0,
+            bucket.latency_p95_us as f64 / 1000.0,
+            bucket.latency_max_us as f64 / 1000.0,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Latency sample (for raw JSON export)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LatencySample {
+    pub latency_us: u64,
+    pub completion_time_ms: u64,
+    pub success: bool,
+}
+
+// ---------------------------------------------------------------------------
 // OpenAI-style chat types
 // ---------------------------------------------------------------------------
 
@@ -47,6 +149,14 @@ impl LatencyStats {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatCompletionRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------

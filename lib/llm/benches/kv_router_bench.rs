@@ -12,12 +12,10 @@
 //!
 //! Run with: cargo bench --package dynamo-llm --bench kv_router_bench --features kv-router-stress -- --help
 
-mod common;
-
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
-use common::{
+use dynamo_bench::common::{
     ChatCompletionRequest, ChatMessage, LatencySample, LatencyStats, TimeBucketStats,
     compute_time_bucket_stats, fetch_model_name, print_time_bucket_report,
 };
