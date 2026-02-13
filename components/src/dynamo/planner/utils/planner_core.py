@@ -845,13 +845,13 @@ class BasePlanner:
                         # Throughput-only: apply scaling directly
                         desired_replicas = self.apply_component_budget(desired_replicas)
                         self.update_predicted_replicas_metric(desired_replicas)
+                        # Throughput planner does not needs blocking scaling because it monitors
+                        # and predicts the load, not relying on the current status of the engine.
                         await self._apply_scaling(desired_replicas)
 
             await asyncio.sleep(self.args.adjustment_interval / 10)
 
-    async def _loadbased_loop(
-        self, require_prefill: bool, require_decode: bool
-    ) -> None:
+    async def _load_loop(self, require_prefill: bool, require_decode: bool) -> None:
         """Load-based scaling loop at shorter interval."""
         while True:
             await asyncio.sleep(self.args.loadbased_adjustment_interval)
@@ -892,6 +892,9 @@ class BasePlanner:
                     desired_replicas = max(desired_replicas, lower_bound)
                 desired_replicas = self.apply_component_budget(desired_replicas)
                 self.update_predicted_replicas_metric(desired_replicas)
+                # Load-based planner needs blocking scaling because it only checks
+                # the current status of the engine, not the predicted load.
+                # We need to wait for the deployment to be steady before making another one.
                 await self._apply_scaling_blocking(desired_replicas)
 
     async def run(self):
@@ -947,7 +950,7 @@ class BasePlanner:
         if self.enable_throughput:
             loops.append(self._throughput_loop(require_prefill, require_decode))
         if self.enable_loadbased:
-            loops.append(self._loadbased_loop(require_prefill, require_decode))
+            loops.append(self._load_loop(require_prefill, require_decode))
             loops.append(
                 self.prometheus_engine_client.run_sampling_loop(
                     self.args.loadbased_metric_samples,

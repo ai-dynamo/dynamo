@@ -121,7 +121,7 @@ class AggPlanner:
             self.planner.model_name = model_name.lower()
 
         loops = [
-            self._loadbased_loop(),
+            self._load_loop(),
             self.planner.prometheus_engine_client.run_sampling_loop(
                 self.args.loadbased_metric_samples,
                 self.args.loadbased_adjustment_interval,
@@ -251,6 +251,8 @@ class AggPlanner:
             return "up"
 
         # Scale down: ALL workers below boundary
+        # TODO: should we strictly enforce all workers below boundary?
+        # how about user-configurable percentage?
         if num_workers > 1:
             sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
@@ -261,7 +263,7 @@ class AggPlanner:
 
         return None
 
-    async def _loadbased_loop(self) -> None:
+    async def _load_loop(self) -> None:
         """Load-based scaling loop for aggregated mode."""
         while True:
             await asyncio.sleep(self.args.loadbased_adjustment_interval)

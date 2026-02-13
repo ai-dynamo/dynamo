@@ -291,6 +291,8 @@ def validate_sla_planner_args(args: argparse.Namespace) -> None:
             import logging
 
             logger = logging.getLogger(__name__)
+
+            # TODO: enable correction after we can gather engine forward pass metrics
             logger.warning(
                 "Correction factor is automatically disabled when load-based "
                 "scaling is enabled. Load-based scaling already accounts for "

@@ -107,7 +107,7 @@ class DisaggPlanner:
         if self.enable_throughput:
             loops.append(self._throughput_loop())
         if self.enable_loadbased:
-            loops.append(self._loadbased_loop())
+            loops.append(self._load_loop())
             loops.append(
                 self.prefill_planner.prometheus_engine_client.run_sampling_loop(
                     self.args.loadbased_metric_samples,
@@ -175,7 +175,7 @@ class DisaggPlanner:
 
             await asyncio.sleep(self.args.adjustment_interval / 10)
 
-    async def _loadbased_loop(self) -> None:
+    async def _load_loop(self) -> None:
         """Load-based scaling loop for disagg mode at shorter interval."""
         while True:
             await asyncio.sleep(self.args.loadbased_adjustment_interval)
