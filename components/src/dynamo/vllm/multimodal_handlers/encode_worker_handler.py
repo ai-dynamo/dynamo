@@ -35,19 +35,6 @@ from ..multimodal_utils.model import is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
-try:
-    import cupy as array_module
-
-    if not array_module.cuda.is_available():
-        raise ImportError("CUDA is not available.")
-    DEVICE = "cuda"
-    logger.info("Using cupy for array operations (GPU mode).")
-except ImportError as e:
-    logger.warning(f"Failed to import cupy, falling back to numpy: {e}.")
-    import numpy as array_module
-
-    DEVICE = "cpu"
-
 CACHE_SIZE_MAXIMUM = 8
 
 TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
