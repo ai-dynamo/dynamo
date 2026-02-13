@@ -77,6 +77,13 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
+# Install runtime dependencies. Cache uv downloads; uv handles its own locking for this cache.
+RUN --mount=type=bind,source=./container/deps/requirements.runtime.txt,target=/tmp/requirements.runtime.txt \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install \
+        --requirement /tmp/requirements.runtime.txt
+
 # Install dynamo wheels (runtime packages only, no test dependencies)
 # uv handles its own locking for the cache, no need to add sharing=locked
 ARG ENABLE_KVBM
