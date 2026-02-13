@@ -17,7 +17,8 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter,
+        CacheControlClient, KvRouter,
+        cache_control::spawn_pin_prefix,
         metrics::RouterRequestMetrics,
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
@@ -31,6 +32,7 @@ use crate::{
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    cache_control_client: Option<CacheControlClient>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -178,8 +180,13 @@ impl KvPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
+        cache_control_client: Option<CacheControlClient>,
     ) -> Self {
-        KvPushRouter { inner, chooser }
+        KvPushRouter {
+            inner,
+            chooser,
+            cache_control_client,
+        }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -418,6 +425,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
+        // Extract PIN hint before consuming the request
+        let pin_prefix = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.pin)
+            .unwrap_or(false);
+        let token_ids_for_pin = pin_prefix.then(|| request.token_ids.clone());
+        let cc_client = pin_prefix
+            .then(|| self.cache_control_client.clone())
+            .flatten();
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
@@ -481,6 +499,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
 
             guard.finish().await;
+
+            // After stream completion, if pin hint was set, fire-and-forget pin_prefix
+            // to the worker. This runs after all response tokens have been yielded.
+            // TODO: Track whether the stream ended naturally vs via cancellation
+            // (context_for_monitoring.stopped()). Pinning after cancellation is wrong
+            // because the prefix may be incomplete on the worker. Add a
+            // `generation_completed` bool, set it on natural stream end, and gate
+            // the PIN call on it.
+            if let Some(ref token_ids) = token_ids_for_pin {
+                spawn_pin_prefix(cc_client.as_ref(), token_ids, instance_id, &context_id);
+            }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }

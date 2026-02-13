@@ -718,7 +718,20 @@ impl KvRouter {
             )
             .await?;
 
-            let kv_push_router = RsKvPushRouter::new(push_router, kv_router);
+            // Create cache_control client if agentic cache control is enabled
+            let cc_client = if kv_router_config.inner().router_enable_agentic_cache_control {
+                tracing::info!("Agentic cache control enabled: cache_control client created for PIN/UNPIN operations");
+                let component = kv_router.client().endpoint.component().clone();
+                Some(
+                    llm_rs::kv_router::create_cache_control_client(&component)
+                        .await
+                        .map_err(to_pyerr)?,
+                )
+            } else {
+                None
+            };
+            let kv_push_router =
+                RsKvPushRouter::new(push_router, kv_router, cc_client);
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),

@@ -188,6 +188,14 @@ pub struct AgentHints {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+
+    /// When true, the router will pin the prefix blocks on the selected worker
+    /// after generation completes. This protects the cached prefix from eviction
+    /// for subsequent requests with the same prefix (e.g., system prompt reuse
+    /// in agentic workflows).
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<bool>,
 }
 
 impl Default for NvExt {

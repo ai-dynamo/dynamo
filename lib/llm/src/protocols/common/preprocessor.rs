@@ -54,6 +54,11 @@ pub struct RoutingHints {
     /// Backend engine scheduling priority forwarded to the generate call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+
+    /// When true, the router pins the prefix blocks on the selected worker
+    /// after generation completes, protecting them from eviction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

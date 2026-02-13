@@ -63,6 +63,7 @@ class FrontendConfig(ConfigBase):
     router_track_output_blocks: bool
     router_event_threads: int
     router_queue_threshold: Optional[float]
+    router_enable_agentic_cache_control: bool
     enforce_disagg: bool
 
     migration_limit: int
@@ -360,6 +361,18 @@ class FrontendArgGroup(ArgGroup):
                 "hints. Must be > 0. If not set, queueing is disabled."
             ),
             arg_type=float,
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-agentic-cache-control",
+            env_var="DYN_ENABLE_AGENTIC_CACHE_CONTROL",
+            default=False,
+            dest="router_enable_agentic_cache_control",
+            help=(
+                "KV Router: Enable agentic cache control (PIN). When set, the router creates "
+                "a cache_control service mesh client and fires pin_prefix after generation for "
+                "requests with nvext.agent_hints.pin=true."
+            ),
         )
         add_negatable_bool_argument(
             g,
