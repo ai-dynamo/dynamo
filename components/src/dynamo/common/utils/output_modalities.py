@@ -48,6 +48,7 @@ def get_output_modalities(cli_input: List[str], model_repo: str) -> Optional[Mod
     for name in cli_input:
         modality = OutputModality.from_name(name)
         for flag in modality.value:
-            output_modalities = flag if output_modalities is None else output_modalities | flag
+            output_modalities = (
+                flag if output_modalities is None else output_modalities | flag
+            )
     return output_modalities
-
