@@ -541,12 +541,12 @@ class TestProfileSLADryRun:
     @pytest.mark.pre_merge
     @pytest.mark.unit
     @pytest.mark.gpu_0
-    def test_sglang_moe_args_has_search_strategy(self, sglang_args_moe):
-        """Test that sglang_args_moe fixture has search_strategy attribute."""
-        assert hasattr(sglang_args_moe, "search_strategy")
-        assert sglang_args_moe.search_strategy == SearchStrategy.THOROUGH
-        assert hasattr(sglang_args_moe, "system")
-        assert sglang_args_moe.system == ""
+    def test_sglang_moe_args_has_search_strategy(self, sglang_moe_args):
+        """Test that sglang_moe_args fixture has search_strategy attribute."""
+        assert hasattr(sglang_moe_args, "search_strategy")
+        assert sglang_moe_args.search_strategy == SearchStrategy.THOROUGH
+        assert hasattr(sglang_moe_args, "system")
+        assert sglang_moe_args.system == ""
 
     @pytest.mark.pre_merge
     @pytest.mark.unit
