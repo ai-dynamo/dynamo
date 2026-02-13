@@ -698,7 +698,9 @@ class AnthropicMessagesStreamPayload(BasePayload):
         msg_start = events[0][1]
         assert msg_start.get("type") == "message_start", "message_start missing type"
         message = msg_start.get("message", {})
-        assert message.get("id", "").startswith("msg_"), "message id should start with msg_"
+        assert message.get("id", "").startswith(
+            "msg_"
+        ), "message id should start with msg_"
         assert message.get("role") == "assistant", "message role should be assistant"
 
         # Validate required event types
@@ -709,7 +711,9 @@ class AnthropicMessagesStreamPayload(BasePayload):
 
         # Validate message_delta has stop_reason
         delta_events = [e for e in events if e[0] == "message_delta"]
-        assert len(delta_events) == 1, f"Expected 1 message_delta, got {len(delta_events)}"
+        assert (
+            len(delta_events) == 1
+        ), f"Expected 1 message_delta, got {len(delta_events)}"
         delta_body = delta_events[0][1].get("delta", {})
         assert delta_body.get("stop_reason") in (
             "end_turn",
