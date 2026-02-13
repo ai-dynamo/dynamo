@@ -22,7 +22,7 @@ testing-cuda = ["dep:cudarc", "dynamo-memory/testing-cuda"]
 testing-nixl = ["dep:nixl-sys", "dynamo-memory/testing-nixl"]
 testing-etcd = []
 testing-remote-storage = []  # Requires NIXL OBJ/POSIX backends for remote transfer tests
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec", "dep:dynamo-memory"]
+block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
@@ -71,6 +71,7 @@ humantime = { workspace = true }                           # input/batch
 rand = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }
+once_cell = { version = "1" }
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -200,4 +201,3 @@ tonic-build = { version = "0.13.1" }
 name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
-

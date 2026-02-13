@@ -180,6 +180,13 @@ pub mod kvbm {
     /// Disable disk offload filter
     pub const DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER: &str = "DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER";
 
+    /// Disable CPU cache lookup for cache hits (dev/testing)
+    pub const DYN_KVBM_DISABLE_CPU_CACHE_LOOKUP: &str =
+        "DYN_KVBM_DISABLE_CPU_CACHE_LOOKUP";
+
+    /// Enable KVBM dev mode (allows destructive operations like pool wiping)
+    pub const KVBM_DEV_MODE: &str = "KVBM_DEV_MODE";
+
     /// CPU cache configuration
     pub mod cpu_cache {
         /// CPU cache size in GB
@@ -263,6 +270,14 @@ pub mod kvbm {
 
         /// Timeout in seconds for G4 (remote storage) transfers.
         pub const DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS: &str = "DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS";
+
+        /// Minimum number of candidate blocks required before issuing G4/object lookup.
+        ///
+        /// Smaller candidate sets are skipped to avoid object lookup overhead.
+        /// Set to 0 to disable this gate and always query object storage.
+        /// Default: 8
+        pub const DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS: &str =
+            "DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS";
 
         /// Enable checksum validation for G4 (remote storage) transfers.
         ///
@@ -487,6 +502,8 @@ mod tests {
             kvbm::DYN_KVBM_METRICS_PORT,
             kvbm::DYN_KVBM_ENABLE_RECORD,
             kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
+            kvbm::DYN_KVBM_DISABLE_CPU_CACHE_LOOKUP,
+            kvbm::KVBM_DEV_MODE,
             kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_GB,
             kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
             kvbm::disk_cache::DYN_KVBM_DISK_CACHE_GB,
@@ -498,6 +515,8 @@ mod tests {
             kvbm::remote_storage::DYN_KVBM_REMOTE_STORAGE_TYPE,
             kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_PATH,
             kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_USE_GDS,
+            kvbm::remote_storage::DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS,
+            kvbm::remote_storage::DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_LORA_ENABLED,

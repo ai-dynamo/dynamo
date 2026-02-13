@@ -13,7 +13,6 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use tmq::{Context, Message, Multipart, pull, router};
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -22,6 +21,7 @@ use super::key::RegistryKey;
 use super::metadata::RegistryMetadata;
 use super::storage::Storage;
 use super::value::RegistryValue;
+use super::zmq_transport::REQUEST_ID_SIZE;
 
 /// Configuration for ZMQ hub.
 #[derive(Clone, Debug)]
@@ -103,7 +103,8 @@ where
             "ZMQ hub starting"
         );
 
-        // Spawn query handler
+        // Spawn query handler on the current (main) tokio runtime.
+        // This is the latency-sensitive path — must never be starved.
         let query_cancel = cancel.clone();
         let query_storage = self.storage.clone();
         let query_codec = self.codec.clone();
@@ -113,26 +114,39 @@ where
             Self::run_query_handler(query_storage, query_codec, query_addr, query_cancel).await
         });
 
-        // Spawn registration handler
+        // Spawn registration handler on a DEDICATED tokio runtime.
+        //
+        // Registration floods (thousands of entries during inference) create a
+        // tight loop in the PULL handler that starves the query handler for CPU.
+        // By running PULL on its own runtime with its own OS threads, it can
+        // never block query processing regardless of registration volume.
         let pull_cancel = cancel.clone();
         let pull_storage = self.storage.clone();
         let pull_codec = self.codec.clone();
         let pull_addr = self.config.pull_addr.clone();
 
-        let pull_handle = tokio::spawn(async move {
-            Self::run_pull_handler(pull_storage, pull_codec, pull_addr, pull_cancel).await
+        let pull_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("registry-pull")
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow!("Failed to create PULL runtime: {}", e))?;
+
+        let pull_join = std::thread::spawn(move || {
+            pull_runtime.block_on(async move {
+                if let Err(e) =
+                    Self::run_pull_handler(pull_storage, pull_codec, pull_addr, pull_cancel).await
+                {
+                    error!(error = %e, "Pull handler failed");
+                }
+            });
         });
 
-        // Wait for either to finish or cancellation
+        // Wait for query handler to finish or cancellation
         tokio::select! {
             result = query_handle => {
                 if let Err(e) = result {
                     error!(error = %e, "Query handler panicked");
-                }
-            }
-            result = pull_handle => {
-                if let Err(e) = result {
-                    error!(error = %e, "Pull handler panicked");
                 }
             }
             _ = cancel.cancelled() => {
@@ -140,11 +154,19 @@ where
             }
         }
 
+        // Wait for PULL runtime thread to finish
+        let _ = pull_join.join();
+
         info!(entries = self.storage.len(), "ZMQ hub stopped");
         Ok(())
     }
 
     /// Run the query handler (ROUTER socket).
+    ///
+    /// Uses a single loop: receive query → process → send response → repeat.
+    /// No socket splitting, no channel, no sender task. This avoids tokio task
+    /// scheduling delays that caused 20-30 second response latencies when the
+    /// sender task was starved by concurrent PULL registration processing.
     async fn run_query_handler(
         storage: Arc<S>,
         codec: Arc<C>,
@@ -152,45 +174,19 @@ where
         cancel: CancellationToken,
     ) -> Result<()> {
         let context = Context::new();
-        let router = router::router(&context)
+        let mut router = router::router(&context)
             .bind(&addr)
             .map_err(|e| anyhow!("Failed to bind ROUTER to {}: {}", addr, e))?;
 
-        let (mut send_half, mut recv_half) = router.split();
-
         info!(addr = %addr, "Query handler started (ROUTER)");
 
-        // Response channel for pipelining
-        let (tx, mut rx) = mpsc::channel::<(Vec<u8>, Vec<u8>)>(1024);
-
-        // Sender task
-        let send_cancel = cancel.clone();
-        let sender_handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = send_cancel.cancelled() => break,
-                    Some((identity, response)) = rx.recv() => {
-                        let mut frames = VecDeque::new();
-                        frames.push_back(Message::from(identity));
-                        frames.push_back(Message::from(response));
-
-                        if let Err(e) = send_half.send(Multipart(frames)).await {
-                            error!(error = %e, "Failed to send response");
-                        }
-                    }
-                    else => break,
-                }
-            }
-        });
-
-        // Receive loop
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     debug!("Query handler shutting down");
                     break;
                 }
-                result = recv_half.next() => {
+                result = router.next() => {
                     match result {
                         Some(Ok(msg)) => {
                             let frames: Vec<_> = msg.iter().collect();
@@ -200,20 +196,47 @@ where
                             }
 
                             let identity = frames[0].to_vec();
-                            let data = frames[frames.len() - 1].to_vec();
+                            let raw_data: &[u8] = &frames[frames.len() - 1];
+
+                            // Extract the 4-byte request ID prefix that the client prepended.
+                            // Echo it back in the response so the client can correlate
+                            // responses to requests and discard stale ones.
+                            if raw_data.len() < REQUEST_ID_SIZE {
+                                warn!(
+                                    data_len = raw_data.len(),
+                                    "Query payload too short for request ID"
+                                );
+                                continue;
+                            }
+                            let request_id_bytes = &raw_data[..REQUEST_ID_SIZE];
+                            let query_data = &raw_data[REQUEST_ID_SIZE..];
 
                             debug!(
                                 identity_len = identity.len(),
-                                data_len = data.len(),
+                                data_len = query_data.len(),
+                                request_id = u32::from_le_bytes(
+                                    request_id_bytes.try_into().unwrap_or([0; 4])
+                                ),
                                 frames = frames.len(),
                                 "Query request received"
                             );
 
-                            let response = Self::handle_query(&storage, &codec, &data);
+                            let query_response = Self::handle_query(&storage, &codec, query_data);
 
-                            if tx.send((identity, response)).await.is_err() {
-                                error!("Response channel closed");
-                                break;
+                            // Prepend the request ID to the response.
+                            let mut response = Vec::with_capacity(
+                                REQUEST_ID_SIZE + query_response.len(),
+                            );
+                            response.extend_from_slice(request_id_bytes);
+                            response.extend_from_slice(&query_response);
+
+                            // Send response inline — no channel hop, no task scheduling delay.
+                            let mut resp_frames = VecDeque::new();
+                            resp_frames.push_back(Message::from(identity));
+                            resp_frames.push_back(Message::from(response));
+
+                            if let Err(e) = router.send(Multipart(resp_frames)).await {
+                                error!(error = %e, "Failed to send response");
                             }
                         }
                         Some(Err(e)) => {
@@ -228,8 +251,6 @@ where
             }
         }
 
-        drop(tx);
-        let _ = sender_handle.await;
         Ok(())
     }
 
@@ -404,21 +425,14 @@ where
         let count = entries.len();
         let prev_total = storage.len();
 
-        // Log each entry being registered
-        for (key, value, metadata) in &entries {
-            debug!(
-                key = ?key,
-                value = ?value,
-                metadata = ?metadata,
-                "Registering entry"
-            );
-        }
-
         for (key, value, _metadata) in entries {
             storage.insert(key, value);
         }
         let new_total = storage.len();
 
+        // Only log the batch summary, not individual entries. Per-entry logging
+        // at debug level caused 20-30 second stalls during registration floods
+        // by monopolizing the tokio runtime with I/O.
         debug!(
             entries_count = count,
             prev_total = prev_total,

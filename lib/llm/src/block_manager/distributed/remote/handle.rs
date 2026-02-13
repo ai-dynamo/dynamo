@@ -17,8 +17,7 @@
 //! let matched = handle.match_prefix(keys).await;
 //! ```
 
-use std::future::Future;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -27,54 +26,13 @@ use crate::block_manager::distributed::registry::{
     Registry, RegistryKey, RegistryMetadata, RegistryValue,
 };
 
-/// Fallback runtime for sync operations when not in a Tokio context.
-/// This is used when `_blocking` methods are called from threads without a runtime
-/// (e.g., Python multiprocessing processes via PyO3).
-static FALLBACK_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-fn get_fallback_runtime() -> &'static tokio::runtime::Runtime {
-    FALLBACK_RUNTIME.get_or_init(|| {
-        tracing::info!(
-            "RemoteHandle: creating fallback Tokio runtime (2 worker threads) for sync operations"
-        );
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("remote-handle-fallback")
-            .enable_all()
-            .build()
-            .expect("Failed to create fallback runtime for RemoteHandle")
-    })
-}
-
-/// Execute a future from synchronous code, using the current runtime if available,
-/// or a fallback runtime if not.
-fn block_on_with_fallback<F, R>(future: F) -> R
-where
-    F: Future<Output = R> + Send,
-    R: Send,
-{
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            // We're in a Tokio context - use block_in_place to avoid blocking worker threads
-            tracing::debug!(
-                "RemoteHandle: using current Tokio runtime (thread: {:?})",
-                std::thread::current().name()
-            );
-            tokio::task::block_in_place(|| handle.block_on(future))
-        }
-        Err(_) => {
-            // No runtime on this thread - use the fallback runtime
-            tracing::debug!(
-                "RemoteHandle: using fallback runtime (thread: {:?})",
-                std::thread::current().name()
-            );
-            get_fallback_runtime().block_on(future)
-        }
-    }
-}
-
-/// Default timeout for registry operations.
-const REGISTRY_TIMEOUT: Duration = Duration::from_secs(1);
+/// Timeout for registry operations.
+///
+/// This is the single point of timeout management. The ZMQ transport no longer
+/// has its own timeout — request-ID correlation handles stale responses instead.
+/// When this timeout fires, the transport future is dropped (releasing the socket
+/// lock), and any late response will be discarded by ID on the next request.
+const REGISTRY_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Channel buffer size for registry commands.
 const CHANNEL_BUFFER_SIZE: usize = 256;
@@ -147,6 +105,10 @@ pub enum RemoteOperation<K, V, M> {
 /// Tokio worker threads. Commands are sent via an mpsc channel to a dedicated
 /// task that owns the registry.
 ///
+/// The `runtime_handle` captures the Tokio runtime that was active when
+/// `spawn()` was called, ensuring that `_blocking` methods always use the
+/// Dynamo runtime rather than creating a separate fallback.
+///
 /// Generic over:
 /// - `K`: Key type (implements `RegistryKey`)
 /// - `V`: Value type (implements `RegistryValue`)
@@ -159,6 +121,10 @@ where
     M: RegistryMetadata,
 {
     tx: mpsc::Sender<RemoteOperation<K, V, M>>,
+    /// Handle to the Tokio runtime that owns the background registry task.
+    /// Used by `_blocking` methods when called from non-Tokio threads
+    /// (e.g., Python/vLLM TP worker threads).
+    runtime_handle: tokio::runtime::Handle,
 }
 
 impl<K, V, M> RemoteHandle<K, V, M>
@@ -167,55 +133,95 @@ where
     V: RegistryValue,
     M: RegistryMetadata,
 {
+    /// Clone the Tokio runtime handle captured at spawn time.
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime_handle.clone()
+    }
+
     /// Spawn the registry task and return a handle.
     ///
     /// The spawned task will process registry commands until all handles are dropped.
+    /// The current Tokio runtime handle is captured so that `_blocking` methods can
+    /// always use the Dynamo runtime instead of creating a separate fallback.
     pub fn spawn(registry: Arc<dyn Registry<K, V, M> + Send + Sync>) -> Self {
         let (tx, rx) = mpsc::channel::<RemoteOperation<K, V, M>>(CHANNEL_BUFFER_SIZE);
+        let runtime_handle = tokio::runtime::Handle::current();
 
         tokio::spawn(Self::run_task(registry, rx));
 
-        Self { tx }
+        Self {
+            tx,
+            runtime_handle,
+        }
+    }
+
+    /// Block the current thread on a future using the Dynamo runtime.
+    ///
+    /// If we're already on a Tokio thread (e.g., called from an async context),
+    /// uses `block_in_place` to avoid deadlocking. Otherwise, drives the future
+    /// on the captured runtime handle from a non-Tokio thread (e.g., Python/vLLM
+    /// TP worker threads).
+    pub fn block_on<F, R>(&self, future: F) -> R
+    where
+        F: std::future::Future<Output = R>,
+    {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // Already in a Tokio context — must use block_in_place to avoid
+            // blocking a worker thread and potentially deadlocking.
+            tokio::task::block_in_place(|| self.runtime_handle.block_on(future))
+        } else {
+            // Non-Tokio thread (Python/vLLM worker) — safe to block directly
+            // on the Dynamo runtime.
+            self.runtime_handle.block_on(future)
+        }
     }
 
     /// The main task loop that processes registry commands.
+    ///
+    /// Each command is spawned as an independent task, allowing concurrent
+    /// operations. This prevents fire-and-forget registrations from blocking
+    /// latency-sensitive queries, and allows multiple queries to be in-flight
+    /// simultaneously (e.g., batched TP lookups).
     async fn run_task(
         registry: Arc<dyn Registry<K, V, M> + Send + Sync>,
         mut rx: mpsc::Receiver<RemoteOperation<K, V, M>>,
     ) {
         while let Some(cmd) = rx.recv().await {
-            match cmd {
-                RemoteOperation::MatchPrefix { keys, reply } => {
-                    let result = Self::do_match_prefix(&registry, &keys).await;
-                    let _ = reply.send(result);
-                }
-                RemoteOperation::Register { entries, reply } => {
-                    let result = Self::do_register(&registry, entries).await;
-                    if let Some(reply) = reply {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                match cmd {
+                    RemoteOperation::MatchPrefix { keys, reply } => {
+                        let result = Self::do_match_prefix(&registry, &keys).await;
                         let _ = reply.send(result);
                     }
-                }
-                RemoteOperation::CanOffload { keys, reply } => {
-                    let result = Self::do_can_offload(&registry, &keys).await;
-                    let _ = reply.send(result);
-                }
-                RemoteOperation::Flush { reply } => {
-                    let result = Self::do_flush(&registry).await;
-                    let _ = reply.send(result);
-                }
-                RemoteOperation::Remove { keys, reply } => {
-                    let result = Self::do_remove(&registry, keys).await;
-                    if let Some(reply) = reply {
+                    RemoteOperation::Register { entries, reply } => {
+                        let result = Self::do_register(&registry, entries).await;
+                        if let Some(reply) = reply {
+                            let _ = reply.send(result);
+                        }
+                    }
+                    RemoteOperation::CanOffload { keys, reply } => {
+                        let result = Self::do_can_offload(&registry, &keys).await;
                         let _ = reply.send(result);
                     }
-                }
-                RemoteOperation::Touch { keys, reply } => {
-                    let result = Self::do_touch(&registry, keys).await;
-                    if let Some(reply) = reply {
+                    RemoteOperation::Flush { reply } => {
+                        let result = Self::do_flush(&registry).await;
                         let _ = reply.send(result);
                     }
+                    RemoteOperation::Remove { keys, reply } => {
+                        let result = Self::do_remove(&registry, keys).await;
+                        if let Some(reply) = reply {
+                            let _ = reply.send(result);
+                        }
+                    }
+                    RemoteOperation::Touch { keys, reply } => {
+                        let result = Self::do_touch(&registry, keys).await;
+                        if let Some(reply) = reply {
+                            let _ = reply.send(result);
+                        }
+                    }
                 }
-            }
+            });
         }
         tracing::debug!("RemoteHandle task shutting down");
     }
@@ -268,8 +274,8 @@ where
         registry: &Arc<dyn Registry<K, V, M> + Send + Sync>,
         keys: &[K],
     ) -> CanOffloadResult<K> {
-        match registry.can_offload(keys).await {
-            Ok(result) => {
+        match tokio::time::timeout(REGISTRY_TIMEOUT, registry.can_offload(keys)).await {
+            Ok(Ok(result)) => {
                 tracing::debug!(
                     can_offload = result.can_offload.len(),
                     already_stored = result.already_stored.len(),
@@ -282,8 +288,16 @@ where
                     leased: result.leased,
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, "can_offload query failed");
+                CanOffloadResult {
+                    can_offload: keys.to_vec(),
+                    already_stored: vec![],
+                    leased: vec![],
+                }
+            }
+            Err(_) => {
+                tracing::warn!("can_offload query timed out");
                 CanOffloadResult {
                     can_offload: keys.to_vec(),
                     already_stored: vec![],
@@ -722,7 +736,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
         let keys = hashes_to_positional_keys(hashes, worker_id);
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             handle
                 .match_prefix(keys)
                 .await
@@ -751,7 +765,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
 
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             handle.register(reg_entries).await;
         });
     }
@@ -768,7 +782,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
         let keys = hashes_to_positional_keys(hashes, worker_id);
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             let result = handle.can_offload(keys).await;
             (
                 result.can_offload.iter().map(|k| k.sequence_hash).collect(),
@@ -790,7 +804,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
         let keys = hashes_to_positional_keys(hashes, worker_id);
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             handle.remove(keys).await;
         });
     }
@@ -803,7 +817,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
         let keys = hash_position_pairs_to_keys(pairs, worker_id);
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             handle.remove(keys).await;
         });
     }

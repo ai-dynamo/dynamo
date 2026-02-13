@@ -99,7 +99,10 @@ pub struct BlockTransferHandler {
     host: Option<LocalBlockDataList<PinnedStorage>>,
     disk: Option<LocalBlockDataList<DiskStorage>>,
     context: Arc<TransferContext>,
-    scheduler_client: Option<TransferSchedulerClient>,
+    /// Scheduler client for completion tracking.
+    /// Public so `RemoteTransferDispatch` can propagate connector_req
+    /// through the scheduler's completion system.
+    pub scheduler_client: Option<TransferSchedulerClient>,
     batcher: ConnectorTransferBatcher,
     remote_context: Option<Arc<RemoteTransferContext>>,
     cancel_token: CancellationToken,

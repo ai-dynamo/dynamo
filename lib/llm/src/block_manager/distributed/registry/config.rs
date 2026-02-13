@@ -148,11 +148,6 @@ pub struct RegistryClientConfig {
     /// `batch_size`, it's automatically flushed.
     pub batch_timeout: Duration,
 
-    /// Request timeout for queries.
-    ///
-    /// How long to wait for a response from the hub before timing out.
-    pub request_timeout: Duration,
-
     /// Optional local cache capacity (0 = disabled).
     ///
     /// If > 0, the client maintains a local Moka cache to reduce
@@ -170,7 +165,6 @@ impl Default for RegistryClientConfig {
             namespace: default_namespace(None, None),
             batch_size: 100,
             batch_timeout: Duration::from_millis(10),
-            request_timeout: Duration::from_secs(5),
             local_cache_capacity: 0,
         }
     }
@@ -216,7 +210,6 @@ impl RegistryClientConfig {
     /// - `DYN_REGISTRY_CLIENT_NAMESPACE`: Namespace identifier (default: "worker-{pid}")
     /// - `DYN_REGISTRY_CLIENT_BATCH_SIZE`: Batch size (default: 100)
     /// - `DYN_REGISTRY_CLIENT_BATCH_TIMEOUT_MS`: Batch timeout in ms (default: 10)
-    /// - `DYN_REGISTRY_CLIENT_REQUEST_TIMEOUT_MS`: Request timeout in ms (default: 5000)
     /// - `DYN_REGISTRY_CLIENT_LOCAL_CACHE`: Local cache capacity (default: 0)
     ///
     /// Note: For rank/world_size-based namespaces, use `with_rank_and_world_size()`
@@ -241,12 +234,6 @@ impl RegistryClientConfig {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(10),
             ),
-            request_timeout: Duration::from_millis(
-                std::env::var("DYN_REGISTRY_CLIENT_REQUEST_TIMEOUT_MS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(5000),
-            ),
             local_cache_capacity: std::env::var("DYN_REGISTRY_CLIENT_LOCAL_CACHE")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -263,12 +250,6 @@ impl RegistryClientConfig {
     /// Set batch size.
     pub fn with_batch_size(mut self, size: usize) -> Self {
         self.batch_size = size;
-        self
-    }
-
-    /// Set request timeout.
-    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
-        self.request_timeout = timeout;
         self
     }
 
@@ -293,8 +274,7 @@ impl RegistryClientConfig {
     /// Returns `None` if connection fails.
     pub fn create_transport(&self) -> Option<super::ZmqTransport> {
         let transport_config =
-            super::ZmqTransportConfig::new(&self.hub_query_addr, &self.hub_register_addr)
-                .with_timeout(self.request_timeout);
+            super::ZmqTransportConfig::new(&self.hub_query_addr, &self.hub_register_addr);
 
         match super::ZmqTransport::connect(transport_config) {
             Ok(t) => Some(t),
@@ -345,12 +325,10 @@ mod tests {
     fn test_client_config_builder() {
         let config = RegistryClientConfig::default()
             .with_local_cache(10_000)
-            .with_batch_size(50)
-            .with_request_timeout(Duration::from_secs(10));
+            .with_batch_size(50);
 
         assert_eq!(config.local_cache_capacity, 10_000);
         assert_eq!(config.batch_size, 50);
-        assert_eq!(config.request_timeout, Duration::from_secs(10));
     }
 
     #[test]

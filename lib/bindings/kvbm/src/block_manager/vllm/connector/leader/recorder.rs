@@ -24,7 +24,7 @@ pub struct GetNumNewMatchedTokensInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetNumNewMatchedTokensOutput {
-    num_new_matched_tokens: usize,
+    num_new_matched_tokens: Option<usize>,
     has_matched: bool,
 }
 
@@ -197,6 +197,7 @@ impl KvConnectorLeaderRecorder {
             block_size: page_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
+            finishing_requests: HashSet::new(),
             iteration_counter: 0,
             kvbm_metrics,
         };
@@ -236,7 +237,7 @@ impl Leader for KvConnectorLeaderRecorder {
         request_id: String,
         request_num_tokens: usize,
         num_computed_tokens: usize,
-    ) -> anyhow::Result<(usize, bool)> {
+    ) -> anyhow::Result<(Option<usize>, bool)> {
         let input_copy = GetNumNewMatchedTokensInput {
             request_id: request_id.clone(),
             request_num_tokens,
@@ -349,5 +350,10 @@ impl Leader for KvConnectorLeaderRecorder {
             .unbounded_tx
             .send(Action::CreateSlot(input_copy, CreateSlotOutput {}));
         Ok(())
+    }
+
+    fn clear_pool(&mut self, pool: String) -> anyhow::Result<()> {
+        // Delegate directly to the inner leader; recording this action is not critical.
+        self.connector_leader.clear_pool(pool)
     }
 }

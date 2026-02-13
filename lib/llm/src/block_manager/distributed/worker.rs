@@ -519,17 +519,43 @@ impl Handler for RemoteTransferDispatch {
             operation_id = %request.operation_id,
             direction = if request.is_onboard() { "onboard" } else { "offload" },
             num_blocks = request.num_blocks(),
+            has_connector_req = request.connector_req.is_some(),
             "received remote transfer request"
         );
 
-        // Execute the remote transfer
-        match handler.execute_remote_transfer(request).await {
-            Ok(()) => {
-                tracing::debug!(target: "kvbm-g4", "remote transfer completed successfully");
+        // If the request has a connector_req, we must go through the scheduler's
+        // completion tracking (schedule_transfer → mark_complete) so the worker-side
+        // `is_complete()` counter gets incremented. Without this, G4 onboard
+        // operations appear to hang forever because the worker never sees them
+        // as finished.
+        if let Some(connector_req) = request.connector_req.clone() {
+            let client = handler
+                .scheduler_client
+                .as_ref()
+                .expect("scheduler client is required for tracked remote transfers")
+                .clone();
+
+            let handle = client.schedule_transfer(connector_req).await?;
+
+            match handler.execute_remote_transfer(request).await {
+                Ok(()) => {
+                    handle.mark_complete(Ok(())).await;
+                    tracing::debug!(target: "kvbm-g4", "remote transfer completed successfully");
+                }
+                Err(e) => {
+                    handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await;
+                    tracing::error!(target: "kvbm-g4", "remote transfer failed: {e:#}");
+                }
             }
-            Err(e) => {
-                tracing::error!(target: "kvbm-g4", "remote transfer failed: {e:#}");
-                // Still ACK to avoid blocking leader
+        } else {
+            // No connector_req — fire-and-forget (e.g., offload without tracking)
+            match handler.execute_remote_transfer(request).await {
+                Ok(()) => {
+                    tracing::debug!(target: "kvbm-g4", "remote transfer completed successfully");
+                }
+                Err(e) => {
+                    tracing::error!(target: "kvbm-g4", "remote transfer failed: {e:#}");
+                }
             }
         }
 

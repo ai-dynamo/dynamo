@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Registry (build + run inside container) + Dynamo KVBM with object storage.
+# dynamo-kvbm runs GPT-OSS 120B in TP8 (vLLM, 8 GPUs).
+# Object storage: provide an external S3-compatible endpoint via env vars (see dynamo-kvbm environment).
+#
+# Usage:
+#   export DYNAMO_IMAGE=dynamo:latest-vllm-local-dev
+#   # Provide your object storage endpoint and credentials (e.g. in .env or export):
+#   #   DYN_KVBM_OBJECT_ENDPOINT, DYN_KVBM_OBJECT_BUCKET, DYN_KVBM_OBJECT_ACCESS_KEY, DYN_KVBM_OBJECT_SECRET_KEY
+#   docker compose -f examples/kvbm/distributed/docker-compose.yml up -d
+#
+# Toggleable options (set via env vars or .env file):
+#   ENABLE_PREFIX_CACHING  - "true" (default) or "false" to disable vLLM prefix caching
+#   GPU_MEMORY_UTILIZATION - GPU memory fraction for vLLM (default: 0.9)
+#   VLLM_EXTRA_ARGS        - Additional args passed to dynamo.vllm (default: empty)
+#   DYN_LOG                - Dynamo log level: debug, info, warn, error (default: debug)
+#
+# Example — run with prefix caching disabled (for clean prefill benchmarks):
+#   ENABLE_PREFIX_CACHING=false docker compose -f examples/kvbm/distributed/docker-compose.yml up -d
+#
+# Registry is built on first start (cargo build then exec registry). Use the same
+# dynamo image so Rust and dynamo-llm are available; workspace is mounted so
+# the binary is built and run inside the container.
+#
+# With --connector kvbm the vLLM worker enables NATS (for kv_events), so NATS and etcd
+# are required; they are included below.
+
+networks:
+  kvbm:
+    driver: bridge
+
+services:
+  # NATS (required by dynamo.vllm when connector is kvbm / use_kv_events). Internal only.
+  # Config: ./nats-server.conf (copy of deploy/nats-server.conf). No healthcheck: nats image is scratch-based.
+  nats-server:
+    image: nats:2.11.4
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+    networks:
+      - kvbm
+
+  # etcd (discovery/KV store used with NATS). Internal only.
+  # Health check per examples/basics/multinode/README.md: etcdctl endpoint health.
+  etcd-server:
+    image: bitnamilegacy/etcd:3.6.1
+    environment:
+      ALLOW_NONE_AUTHENTICATION: yes
+    networks:
+      - kvbm
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health", "--endpoints=http://127.0.0.1:2379"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Distributed registry hub: build and run inside the dynamo container
+  registry:
+    image: ${DYNAMO_IMAGE:-dynamo:object-latest}
+    volumes:
+      - ../../..:/workspace
+    working_dir: /workspace
+    command:
+      - bash
+      - -c
+      - |
+        # Build registry from workspace source inside the container so it uses
+        # the same tmq/ZMQ as the rebuilt KVBM wheel (both from the same Cargo.lock).
+        # sample-registry has its own [workspace] so must be built from its directory.
+        cd /workspace/examples/kvbm/distributed/sample-registry && \
+        cargo build --release && \
+        exec /workspace/target/release/registry
+    environment:
+      DYN_REGISTRY_HUB_QUERY_ADDR: tcp://0.0.0.0:5555
+      DYN_REGISTRY_HUB_REGISTER_ADDR: tcp://0.0.0.0:5556
+      DYN_REGISTRY_HUB_CAPACITY: "1000000"
+      # Use info level in production. Debug level causes per-entry registration
+      # logging that starves the ROUTER sender task during registration floods.
+      RUST_LOG: "${REGISTRY_LOG:-dynamo_llm::block_manager::distributed::registry=debug,registry=debug}"
+    ports:
+      - "5555:5555"
+      - "5556:5556"
+    networks:
+      - kvbm
+
+  # Dynamo with KVBM + object storage; runs GPT-OSS 120B in TP8 (vLLM, 8 GPUs).
+  # user: "0" so the process can write to /opt/models (HF cache volume); image default is non-root.
+  # Mount host HugePages so the container can use them (ensure vm.nr_hugepages is set on the host).
+  dynamo-kvbm:
+    image: ${DYNAMO_IMAGE:-dynamo:object-latest}
+    user: "0"
+    volumes:
+      - ../../..:/workspace
+      - ./hf_cache:/opt/models
+      - /dev/hugepages:/dev/hugepages
+      - /dev/infiniband:/dev/infiniband
+      - ./cufile.json:/etc/cufile.json:ro
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    working_dir: /workspace/examples/backends/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${TP_SIZE:-8}
+              capabilities: [gpu]
+    environment:
+      # Dynamo log level (DYN_LOG, not RUST_LOG). Set to debug for verbose output.
+      DYN_LOG: ${DYN_LOG:-debug}
+      # Model (openai/gpt-oss-120b). Set HF_TOKEN in .env or export for gated models.
+      MODEL: ${MODEL:-openai/gpt-oss-120b}
+      # Toggleable vLLM knobs (see file header for docs)
+      ENABLE_PREFIX_CACHING: ${ENABLE_PREFIX_CACHING:-false}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.9}
+      TP_SIZE: ${TP_SIZE:-8}
+      VLLM_EXTRA_ARGS: ${VLLM_EXTRA_ARGS:-}
+      # FP4 MoE kernel support (needed for NVFP4 models like Nemotron Nano)
+      # These env vars are type-sensitive in vLLM — do NOT set them unless you have a real value.
+      # Pass via command line: VLLM_USE_FLASHINFER_MOE_FP4=1 VLLM_FLASHINFER_MOE_BACKEND=throughput docker compose ...
+      HF_HOME: /opt/models
+      HF_TOKEN: ${HF_TOKEN}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN}
+      # Store and request plane (NATS required when --connector kvbm for kv_events)
+      DYN_STORE_KV: etcd
+      DYN_REQUEST_PLANE: tcp
+      ETCD_ENDPOINTS: http://etcd-server:2379
+      NATS_SERVER: nats://nats-server:4222
+      # Registry client (connect to registry service)
+      DYN_REGISTRY_ENABLE: "1"
+      DYN_REGISTRY_CLIENT_QUERY_ADDR: tcp://registry:5555
+      DYN_REGISTRY_CLIENT_REGISTER_ADDR: tcp://registry:5556
+      # KVBM dev mode — enables destructive pool operations (clear/wipe)
+      # and starts the management HTTP server on KVBM_MANAGEMENT_PORT (default: 6881).
+      KVBM_DEV_MODE: ${KVBM_DEV_MODE:-}
+      KVBM_MANAGEMENT_PORT: ${KVBM_MANAGEMENT_PORT:-6881}
+      # KVBM CPU cache (required)
+      DYN_KVBM_CPU_CACHE_GB: "500"
+      # Object storage (external S3-compatible). Used by KVBM Rust: BUCKET, ENDPOINT, REGION.
+      # NIXL OBJ backend uses AWS_* for credentials; set those for auth (e.g. AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY).
+      # Bucket supports {worker_id} template for per-worker buckets.
+      DYN_KVBM_OBJECT_BUCKET: ${DYN_KVBM_OBJECT_BUCKET:-kvbm-cache-{worker_id}}
+      DYN_KVBM_OBJECT_ENDPOINT: ${DYN_KVBM_OBJECT_ENDPOINT}
+      DYN_KVBM_OBJECT_REGION: ${DYN_KVBM_OBJECT_REGION:-us-east-1}
+      # Credentials for NIXL OBJ backend (uses AWS_*). Set these or DYN_KVBM_OBJECT_ACCESS_KEY/SECRET_KEY and map in .env.
+      AWS_ACCESS_KEY_ID: ${DYN_KVBM_OBJECT_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DYN_KVBM_OBJECT_SECRET_KEY}
+    depends_on:
+      nats-server:
+        condition: service_started
+      etcd-server:
+        condition: service_healthy
+      registry:
+        condition: service_started
+    networks:
+      - kvbm
+    ports:
+      - "8000:8000"
+      - "6881:6881"   # KVBM management API (when KVBM_DEV_MODE=TRUE)
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        echo "=== Rebuilding KVBM wheel from workspace source ==="
+        cd /workspace/lib/bindings/kvbm
+        maturin build --profile dev --out /workspace/dist
+        uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/*.whl
+        echo "=== KVBM wheel rebuilt and installed ==="
+        cd /workspace/examples/backends/vllm
+
+        # Build prefix-caching flag from toggle
+        PREFIX_FLAG=""
+        if [ "$${ENABLE_PREFIX_CACHING}" = "false" ] || [ "$${ENABLE_PREFIX_CACHING}" = "0" ]; then
+          PREFIX_FLAG="--no-enable-prefix-caching"
+          echo "=== Prefix caching: DISABLED ==="
+        else
+          PREFIX_FLAG="--enable-prefix-caching"
+          echo "=== Prefix caching: ENABLED ==="
+        fi
+
+        python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
+        exec python3 -m dynamo.vllm \
+          --model "$${MODEL}" \
+          --tensor-parallel-size "$${TP_SIZE}" \
+          --connector kvbm \
+          --gpu-memory-utilization "$${GPU_MEMORY_UTILIZATION}" \
+          $${PREFIX_FLAG} \
+          $${VLLM_EXTRA_ARGS}

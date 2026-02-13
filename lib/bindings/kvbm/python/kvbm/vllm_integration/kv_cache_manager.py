@@ -240,6 +240,23 @@ class KvbmCacheManager(KVConnectorBase_V1):
         """
         return self.cache_manager.reset_prefix_cache()
 
+    def clear_pool(self, pool: str) -> bool:
+        """Clear (wipe) all KV cache entries from a specific pool.
+
+        Requires KVBM_DEV_MODE=TRUE environment variable.
+
+        This is a destructive operation that:
+          1. Drops all in-flight slots (freeing their block references).
+          2. Resets the target pool, returning every block to the empty state.
+
+        Args:
+            pool: One of "gpu"/"device", "cpu"/"host", or "disk".
+
+        Returns:
+            bool: True if the pool was successfully cleared, False otherwise.
+        """
+        return self.cache_manager.clear_pool(pool)
+
     def get_num_common_prefix_blocks(
         self,
         request: Request,

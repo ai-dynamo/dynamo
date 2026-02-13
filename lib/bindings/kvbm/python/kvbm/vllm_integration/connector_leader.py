@@ -29,6 +29,12 @@ if TYPE_CHECKING:
 # from kvbm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 
 from kvbm import KvbmLeader
+from kvbm.management import (
+    register_clear_pool,
+    register_get_cpu_lookup_status,
+    register_set_cpu_lookup_disabled,
+    start_management_server,
+)
 from kvbm.utils import is_dyn_runtime_enabled
 from kvbm.vllm_integration.rust import KvbmRequest
 from kvbm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
@@ -111,13 +117,24 @@ class KvConnectorLeader:
                 consolidator_output_endpoint=None,
             )
 
+        # Register the clear_pool callable and start the management HTTP
+        # server when KVBM_DEV_MODE is enabled.
+        register_clear_pool(self.clear_pool)
+        register_set_cpu_lookup_disabled(self.set_cpu_cache_lookup_disabled)
+        register_get_cpu_lookup_status(self.get_cpu_cache_lookup_status)
+        mgmt_port = start_management_server()
+        if mgmt_port is not None:
+            print(
+                f"[KVBM] Management API available at http://0.0.0.0:{mgmt_port}"
+            )
+
     # KV Connector
 
     def get_num_new_matched_tokens(
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -130,7 +147,9 @@ class KvConnectorLeader:
         Returns:
             A tuple with the following elements:
                 - The number of tokens that can be loaded from the
-                  external KV cache beyond what is already computed.
+                  external KV cache beyond what is already computed,
+                  or `None` when lookup is still in progress and should
+                  be retried on a later scheduler step.
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps).
         """
@@ -244,6 +263,36 @@ class KvConnectorLeader:
         # ahead of time if the request is finished.
         status = self._connector.request_finished(request.request_id, block_ids)
         return status, None
+
+    # Management API
+
+    def clear_pool(self, pool: str) -> None:
+        """Clear (wipe) all KV cache entries from a specific pool.
+
+        Requires KVBM_DEV_MODE=TRUE environment variable.
+
+        This is a destructive operation that:
+          1. Drops all in-flight slots (freeing their block references).
+          2. Resets the target pool, returning every block to the empty state.
+
+        Args:
+            pool: One of "gpu"/"device", "cpu"/"host", or "disk".
+
+        Raises:
+            RuntimeError: If KVBM_DEV_MODE is not enabled or pool is invalid.
+        """
+        self._connector.clear_pool(pool)
+
+    def set_cpu_cache_lookup_disabled(self, disabled: bool) -> None:
+        """Enable/disable CPU cache lookup for cache hits (dev-only)."""
+        self._connector.set_cpu_cache_lookup_disabled(bool(disabled))
+
+    def get_cpu_cache_lookup_status(self) -> dict:
+        """Return CPU cache lookup status for management API."""
+        return {
+            "disabled": self._connector.get_cpu_cache_lookup_disabled(),
+            "dirty": self._connector.cpu_cache_lookup_dirty(),
+        }
 
     # Utility functions
 

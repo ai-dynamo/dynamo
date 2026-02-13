@@ -237,6 +237,38 @@ impl KvbmCacheManager {
             }
         }
     }
+
+    /// Clear (wipe) all KV cache entries from a specific pool.
+    ///
+    /// `pool` must be one of: "gpu" / "device", "cpu" / "host", or "disk".
+    ///
+    /// **Requires** `KVBM_DEV_MODE=TRUE` (or `1` / `true`).
+    /// This is a destructive operation intended only for development and testing.
+    /// It will:
+    ///   1. Drop **all** in-flight slots (freeing their block references).
+    ///   2. Reset the target pool, returning every block to the empty state.
+    ///
+    /// Returns `true` on success, `false` on error or if dev-mode is disabled.
+    pub fn clear_pool(&self, pool: String) -> bool {
+        if !Self::is_dev_mode() {
+            tracing::warn!(
+                "clear_pool called but KVBM_DEV_MODE is not enabled. \
+                 Set KVBM_DEV_MODE=TRUE to allow destructive pool operations."
+            );
+            return false;
+        }
+
+        match self._clear_pool(&pool) {
+            Ok(()) => {
+                tracing::info!("clear_pool({pool}): pool wiped successfully");
+                true
+            }
+            Err(e) => {
+                tracing::error!("clear_pool({pool}): failed: {e:?}");
+                false
+            }
+        }
+    }
 }
 
 impl KvbmCacheManager {
@@ -257,6 +289,69 @@ impl KvbmCacheManager {
         if let Some(device) = manager.device() {
             device.reset_blocking()?;
             tracing::debug!("reset device prefix cache");
+        }
+
+        Ok(())
+    }
+
+    /// Check whether KVBM_DEV_MODE is enabled via environment variable.
+    fn is_dev_mode() -> bool {
+        std::env::var(dynamo_runtime::config::environment_names::kvbm::KVBM_DEV_MODE)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    /// Internal implementation for clearing a specific pool.
+    /// First drops all slots to release block references, then resets the pool.
+    #[tracing::instrument(level = "info", skip(self))]
+    fn _clear_pool(&self, pool: &str) -> Result<(), SlotError> {
+        // First, drop all slots so their block references are released back to the pool.
+        // Without this the pool reset would fail because blocks are still "active".
+        {
+            let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr).map_err(|e| {
+                SlotError::Error(format!("failed to acquire slot manager lock: {e}"))
+            })?;
+            let num_slots = slot_manager.slots.len();
+            if num_slots > 0 {
+                tracing::warn!(
+                    "clear_pool({pool}): dropping {num_slots} active slots to release block references"
+                );
+                slot_manager.slots.clear();
+            }
+        }
+
+        let manager = self.block_manager();
+
+        match pool.to_lowercase().as_str() {
+            "gpu" | "device" => {
+                if let Some(device) = manager.device() {
+                    device.reset_blocking()?;
+                    tracing::info!("clear_pool: device (GPU) pool wiped");
+                } else {
+                    return Err(SlotError::Error("device pool is not configured".into()));
+                }
+            }
+            "cpu" | "host" => {
+                if let Some(host) = manager.host() {
+                    host.reset_blocking()?;
+                    tracing::info!("clear_pool: host (CPU) pool wiped");
+                } else {
+                    return Err(SlotError::Error("host pool is not configured".into()));
+                }
+            }
+            "disk" => {
+                if let Some(disk) = manager.disk() {
+                    disk.reset_blocking()?;
+                    tracing::info!("clear_pool: disk pool wiped");
+                } else {
+                    return Err(SlotError::Error("disk pool is not configured".into()));
+                }
+            }
+            other => {
+                return Err(SlotError::Error(format!(
+                    "unknown pool '{other}': expected one of 'gpu', 'device', 'cpu', 'host', 'disk'"
+                )));
+            }
         }
 
         Ok(())

@@ -60,7 +60,7 @@ pub struct KvConnectorWorker {
     connector: WorkerSchedulerClient,
     transfer_client: TransferSchedulerClient,
 
-    kv_cache_layers: Vec<(String, Arc<VllmTensor>)>,
+    kv_cache_layers: Vec<(String, Arc<dyn TorchTensor>)>,
 
     /// Map of request id to inflight load requests
     maybe_finished_onboarding: HashSet<String>,
@@ -88,9 +88,72 @@ pub struct KvConnectorWorker {
 
     /// Pending failure notifications not yet processed (request_id → failed UUIDs)
     pending_failures: HashMap<String, HashSet<uuid::Uuid>>,
+
+    /// Request IDs for which we already returned `is_finished_offloading`.
+    /// Prevents duplicate signals in TP>1: a previous step may have returned
+    /// the request via the normal slot-completion path, and a later step
+    /// (where the slot is already gone) must not return it again.
+    already_signaled_offloading: HashMap<String, u64>,
+    finished_poll_counter: u64,
+    signaled_offloading_cap: usize,
+    signaled_offloading_ttl_polls: u64,
+    signaled_offloading_gc_interval: u64,
 }
 
 impl KvConnectorWorker {
+    const DEFAULT_SIGNALED_OFFLOAD_CAP: usize = 131_072;
+    const DEFAULT_SIGNALED_OFFLOAD_TTL_POLLS: u64 = 8_192;
+    const DEFAULT_SIGNALED_OFFLOAD_GC_INTERVAL: u64 = 256;
+
+    fn env_usize(name: &str, default: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
+    }
+
+    fn env_u64(name: &str, default: u64) -> u64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
+    }
+
+    fn mark_signaled_offloading(&mut self, request_id: String) {
+        self.already_signaled_offloading
+            .insert(request_id, self.finished_poll_counter);
+    }
+
+    fn maybe_gc_signaled_offloading(&mut self) {
+        if self.signaled_offloading_gc_interval == 0
+            || (self.finished_poll_counter % self.signaled_offloading_gc_interval != 0)
+        {
+            return;
+        }
+
+        let now = self.finished_poll_counter;
+        let ttl = self.signaled_offloading_ttl_polls;
+
+        self.already_signaled_offloading
+            .retain(|_, last_seen| now.saturating_sub(*last_seen) <= ttl);
+
+        let len = self.already_signaled_offloading.len();
+        if len <= self.signaled_offloading_cap {
+            return;
+        }
+
+        let remove_n = len - self.signaled_offloading_cap;
+        let mut oldest: Vec<(String, u64)> = self
+            .already_signaled_offloading
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        oldest.sort_by_key(|(_, seen)| *seen);
+        for (k, _) in oldest.into_iter().take(remove_n) {
+            self.already_signaled_offloading.remove(&k);
+        }
+    }
+
     fn new(drt: Option<Arc<DistributedRuntime>>, vllm_worker_id: String) -> anyhow::Result<Self> {
         let runtime = get_current_tokio_handle();
 
@@ -129,6 +192,20 @@ impl KvConnectorWorker {
             request_to_blocks: HashMap::new(),
             failed_block_ids: HashSet::new(),
             pending_failures: HashMap::new(),
+            already_signaled_offloading: HashMap::new(),
+            finished_poll_counter: 0,
+            signaled_offloading_cap: Self::env_usize(
+                "DYN_KVBM_SIGNALED_OFFLOAD_CAP",
+                Self::DEFAULT_SIGNALED_OFFLOAD_CAP,
+            ),
+            signaled_offloading_ttl_polls: Self::env_u64(
+                "DYN_KVBM_SIGNALED_OFFLOAD_TTL_POLLS",
+                Self::DEFAULT_SIGNALED_OFFLOAD_TTL_POLLS,
+            ),
+            signaled_offloading_gc_interval: Self::env_u64(
+                "DYN_KVBM_SIGNALED_OFFLOAD_GC_INTERVAL",
+                Self::DEFAULT_SIGNALED_OFFLOAD_GC_INTERVAL,
+            ),
         })
     }
 }
@@ -174,7 +251,8 @@ impl Worker for KvConnectorWorker {
             }
 
             // Store for later lookup by name
-            self.kv_cache_layers.push((layer_name, vllm_tensor.clone()));
+            self.kv_cache_layers
+                .push((layer_name, vllm_tensor.clone() as Arc<dyn TorchTensor>));
 
             // Build ordered tensor list for worker config
             vllm_tensors.push(vllm_tensor as Arc<dyn TorchTensor>);
@@ -355,7 +433,12 @@ impl Worker for KvConnectorWorker {
             // block on the the completion of the last layer
             // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
             // or put the event on a stream and use stream waits to keep it all on device.
-            event_sync_blocking(self.layer_events[self.layers_complete - 1]);
+            if self.layers_complete - 1 < self.layer_events.len() {
+                let ev = self.layer_events[self.layers_complete - 1];
+                if ev != 0 {
+                    event_sync_blocking(ev);
+                }
+            }
             for operation in &offloading_operations {
                 tracing::debug!(
                     request_id = %operation.request_id,
@@ -372,6 +455,9 @@ impl Worker for KvConnectorWorker {
         &mut self,
         finished_requests: HashSet<String>,
     ) -> (HashSet<String>, HashSet<String>) {
+        self.finished_poll_counter = self.finished_poll_counter.saturating_add(1);
+        self.maybe_gc_signaled_offloading();
+
         tracing::debug!(
             iteration = self.iteration,
             "Getting finished requests: {finished_requests:?}"
@@ -400,10 +486,27 @@ impl Worker for KvConnectorWorker {
             tracing::debug!(request_id, "marking request as finished");
 
             if !self.connector.has_slot(&request_id) {
-                tracing::warn!(
-                    request_id,
-                    "finished request received for unknown request_id; assuming never started"
-                );
+                if self.already_signaled_offloading.contains_key(&request_id) {
+                    // We already returned this request as finished_offloading in a
+                    // previous step. Don't signal again — duplicates cause vLLM's
+                    // _update_from_kv_xfer_finished to process the same request twice,
+                    // crashing on the second assert req_id in self.requests.
+                    tracing::debug!(
+                        request_id,
+                        "finished request with no slot already signaled; skipping duplicate"
+                    );
+                } else {
+                    tracing::warn!(
+                        request_id,
+                        "finished request received for unknown request_id; \
+                         signaling as finished_offloading so vLLM can clean up"
+                    );
+                    // The leader returned `true` from request_finished, so vLLM is keeping
+                    // the request in self.requests until we signal completion. Since we have
+                    // no slot (no in-flight transfers to wait for), signal immediately.
+                    is_finished_offloading.insert(request_id.clone());
+                    self.mark_signaled_offloading(request_id);
+                }
                 continue;
             }
 
@@ -448,6 +551,9 @@ impl Worker for KvConnectorWorker {
         // note: when storing is finished we also remove the request from the engine state
         for request_id in &is_finished_offloading {
             self.maybe_finished_offloading.remove(request_id);
+            // Track that we signaled this request, so we don't duplicate if
+            // get_finished is called again after the slot is removed.
+            self.mark_signaled_offloading(request_id.clone());
             // Note: Store operations don't track failures or block_ids - no cleanup needed
 
             // currently chomping the error as the engine is closed and we are shutting down

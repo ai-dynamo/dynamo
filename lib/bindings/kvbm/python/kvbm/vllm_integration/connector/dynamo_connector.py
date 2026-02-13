@@ -74,7 +74,7 @@ class DynamoConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         return self._scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
     @nvtx_annotate(category="scheduler")
@@ -158,6 +158,29 @@ class DynamoConnector(KVConnectorBase_V1):
         if self._worker is None:
             return set()
         return self._worker.get_block_ids_with_load_errors()
+
+    # Management API
+
+    def clear_pool(self, pool: str) -> None:
+        """Clear (wipe) all KV cache entries from a specific pool.
+
+        Requires KVBM_DEV_MODE=TRUE environment variable.
+
+        This is a destructive operation that drops all in-flight slots
+        and resets the target pool, returning every block to the empty state.
+
+        Args:
+            pool: One of "gpu"/"device", "cpu"/"host", or "disk".
+
+        Raises:
+            RuntimeError: If not in scheduler role, KVBM_DEV_MODE is not
+                enabled, or the pool name is invalid.
+        """
+        if self._scheduler is None:
+            raise RuntimeError(
+                "clear_pool is only available on the scheduler (leader) side"
+            )
+        self._scheduler.clear_pool(pool)
 
     @override
     def shutdown(self):

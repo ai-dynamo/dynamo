@@ -141,7 +141,7 @@ class PdConnector(MultiConnector):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         """
         Get the number of matched tokens for the request using Dynamo Connector (KVBM).
         """

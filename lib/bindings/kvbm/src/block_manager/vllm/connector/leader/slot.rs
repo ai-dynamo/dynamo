@@ -1,16 +1,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{any::Any, cmp::max, sync::Arc, time::Duration};
+use std::{any::Any, cmp::max, sync::Arc, time::{Duration, Instant}};
 
 use dynamo_runtime::config::environment_names::kvbm::remote_storage as env_g4;
 use once_cell::sync::Lazy;
+use tokio::sync::{Semaphore, oneshot};
 
 /// Default maximum concurrent H2O (host-to-object) transfers.
 const DEFAULT_MAX_CONCURRENT_H2O: usize = 8;
+const DEFAULT_QUEUE_CAP: usize = 256;
+const DEFAULT_DRAIN_QUEUE_CAP: usize = 512;
+const DEFAULT_MAX_REMOTE_INFLIGHT: usize = 64;
+const DEFAULT_REMOTE_HIGH_QUEUE_CAP: usize = 256;
+const DEFAULT_REMOTE_LOW_QUEUE_CAP: usize = 512;
 
 /// Default timeout in seconds for G4 (remote storage) transfers.
 const DEFAULT_G4_TRANSFER_TIMEOUT_SECS: u64 = 30;
+/// Minimum number of G4 candidate blocks required before triggering object lookup.
+///
+/// Smaller candidate sets are intentionally skipped to avoid paying object-storage
+/// lookup overhead for tiny potential gains.
+const DEFAULT_G4_MIN_CANDIDATE_BLOCKS: usize = 8;
 
 /// Maximum concurrent H2O transfers - cached from env var.
 static MAX_CONCURRENT_H2O: Lazy<usize> = Lazy::new(|| {
@@ -29,17 +40,83 @@ static G4_TRANSFER_TIMEOUT: Lazy<Duration> = Lazy::new(|| {
     Duration::from_secs(secs)
 });
 
+/// Minimum number of G4 candidate blocks required to trigger object lookup.
+/// Set to 0 to disable gating.
+static G4_MIN_CANDIDATE_BLOCKS: Lazy<usize> = Lazy::new(|| {
+    std::env::var(env_g4::DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_G4_MIN_CANDIDATE_BLOCKS)
+});
+
+static ONBOARD_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
+    std::env::var("DYN_KVBM_ONBOARD_QUEUE_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_QUEUE_CAP)
+});
+
+static OFFLOAD_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
+    std::env::var("DYN_KVBM_OFFLOAD_QUEUE_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_QUEUE_CAP)
+});
+
+static DRAIN_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
+    std::env::var("DYN_KVBM_DRAIN_QUEUE_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_DRAIN_QUEUE_CAP)
+});
+
+static MAX_REMOTE_INFLIGHT: Lazy<usize> = Lazy::new(|| {
+    std::env::var("DYN_KVBM_MAX_REMOTE_INFLIGHT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MAX_REMOTE_INFLIGHT)
+});
+
+static REMOTE_HIGH_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
+    std::env::var("DYN_KVBM_REMOTE_HIGH_QUEUE_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_REMOTE_HIGH_QUEUE_CAP)
+});
+
+static REMOTE_LOW_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
+    std::env::var("DYN_KVBM_REMOTE_LOW_QUEUE_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_REMOTE_LOW_QUEUE_CAP)
+});
+
+/// Default batch size for flushing remaining blocks on request finish.
+const DEFAULT_FLUSH_BATCH_SIZE: usize = 512;
+
+/// Flush batch size - cached from env var.
+/// Controls how many blocks are offloaded per D2H transfer during the
+/// post-request flush. Smaller batches allow D2H and H2O to pipeline.
+static FLUSH_BATCH_SIZE: Lazy<usize> = Lazy::new(|| {
+    std::env::var("DYN_KVBM_FLUSH_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_FLUSH_BATCH_SIZE)
+});
+
 use dynamo_llm::{
     block_manager::{
         BlockPool, NixlRegisterableStorage, Storage,
-        block::{BlockMetadata, locality::LocalityProvider},
-        config::{RemoteStorageConfig, should_bypass_cpu_cache},
+        block::{BlockMetadata, locality::LocalityProvider, transfer::remote::RemoteKey},
+        config::{RemoteStorageConfig, should_bypass_cpu_cache, should_disable_cpu_cache_lookup},
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{
             BlockTransferPool, BlockTransferRequest, KvbmLeader, RemoteHashOperationsSync,
             vllm as vllm_int,
         },
+        distributed::registry::{NoMetadata, PositionalKey},
         pool::{PinGuard, PinRegistry},
+        transfer_orchestrator::{TransferPriority, priority_channel, run_priority_worker},
     },
     tokens::TokenBlock,
 };
@@ -294,6 +371,63 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
     }
 }
 
+impl<R: RequestKey> ConnectorSlotManager<R> {
+    /// Clear (wipe) all KV cache entries from a specific pool.
+    ///
+    /// This drops **all** tracked slots (releasing block references) and then
+    /// resets the target pool, returning every block to the empty state.
+    ///
+    /// `pool` must be one of: `"gpu"` / `"device"`, `"cpu"` / `"host"`, or `"disk"`.
+    pub fn clear_pool(&self, pool: &str) -> Result<(), SlotError> {
+        // Step 1: Drop all slots so block references are released back to the pool.
+        {
+            let mut slots = self.slots.lock().unwrap();
+            let count = slots.len();
+            if count > 0 {
+                tracing::warn!(
+                    "clear_pool({pool}): dropping {count} active connector slots to release block references"
+                );
+                slots.clear();
+            }
+        }
+
+        // Step 2: Reset the target pool.
+        match pool.to_lowercase().as_str() {
+            "gpu" | "device" => {
+                if let Some(device) = self.block_manager.device() {
+                    device.reset_blocking()?;
+                    tracing::info!("clear_pool: device (GPU) pool wiped");
+                } else {
+                    return Err(SlotError::InvalidOperation("device pool is not configured".into()));
+                }
+            }
+            "cpu" | "host" => {
+                if let Some(host) = self.block_manager.host() {
+                    host.reset_blocking()?;
+                    tracing::info!("clear_pool: host (CPU) pool wiped");
+                } else {
+                    return Err(SlotError::InvalidOperation("host pool is not configured".into()));
+                }
+            }
+            "disk" => {
+                if let Some(disk) = self.block_manager.disk() {
+                    disk.reset_blocking()?;
+                    tracing::info!("clear_pool: disk pool wiped");
+                } else {
+                    return Err(SlotError::InvalidOperation("disk pool is not configured".into()));
+                }
+            }
+            other => {
+                return Err(SlotError::InvalidOperation(format!(
+                    "unknown pool '{other}': expected one of 'gpu', 'device', 'cpu', 'host', 'disk'"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
     type SlotType = dyn ExternallyManagedDeviceSlot;
 
@@ -350,6 +484,18 @@ impl<R: RequestKey> Drop for ConnectorSlotManager<R> {
     }
 }
 
+/// In-flight async G4 lookup state for a request slot.
+///
+/// Host/disk matches are computed synchronously and preserved here while the
+/// remote (G4/object) prefix lookup runs in the background.
+struct PendingG4Lookup {
+    num_computed_tokens: usize,
+    host_blocks: Vec<ImmutableBlock<PinnedStorage, VllmLocality, BasicMetadata>>,
+    disk_blocks: Vec<ImmutableBlock<DiskStorage, VllmLocality, BasicMetadata>>,
+    world_size: usize,
+    receiver: oneshot::Receiver<Vec<(PositionalKey, RemoteKey, NoMetadata)>>,
+}
+
 pub struct VllmConnectorSlot {
     request_id: String,
 
@@ -399,6 +545,13 @@ pub struct VllmConnectorSlot {
 
     pending_operations: Option<Vec<WorkerTransferRequest>>,
 
+    /// Number of operations that have been dispatched to the worker (via `take_pending_operations`)
+    /// but have not yet been confirmed as complete. This tracks in-flight operations that
+    /// `pending_operations` no longer contains because they were consumed by
+    /// `build_connector_metadata`. Used by `mark_as_finished` to correctly transition to
+    /// `Finishing` when there are operations the worker is still processing.
+    dispatched_operations_count: usize,
+
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
 
@@ -434,6 +587,12 @@ pub struct VllmConnectorSlot {
     /// Cache statistics tracker for this KVBM instance
     cache_stats: Arc<CacheStatsTracker>,
 
+    /// Timestamp when the slot entered `Onboarding` state.
+    /// Used to distinguish in-flight G4 transfers (which need S3 round-trips) from
+    /// genuinely failed transfers. Recovery in `apply_scheduler_output` only fires
+    /// after `G4_TRANSFER_TIMEOUT` has elapsed, giving slow transfers time to complete.
+    onboarding_started_at: Option<Instant>,
+
     /// Minimum priority threshold for offload filtering.
     /// All blocks after the first occurance of block priority < threshold are not offloaded.
     offload_min_priority: u32,
@@ -441,6 +600,9 @@ pub struct VllmConnectorSlot {
     /// Block index where offload was terminated due to priority filtering.
     /// When Some, no further blocks will be offloaded to ensure global contiguity.
     offload_terminated_at_block: Option<usize>,
+
+    /// Pending async G4 lookup, if any.
+    pending_g4_lookup: Option<PendingG4Lookup>,
 
     // Reference to the leader for g4 operations
     leader: Arc<KvbmLeader>,
@@ -478,6 +640,7 @@ impl VllmConnectorSlot {
             staging_from_disk: None,
             staging_from_g4: None,
             pending_operations: None,
+            dispatched_operations_count: 0,
             tokens_cached_from_device: 0,
             tokens_cached_from_host: 0,
             tokens_cached_from_disk: 0,
@@ -487,11 +650,246 @@ impl VllmConnectorSlot {
             skip_g4_on_retry: false,
             recovered_from_failed_transfer: false,
             attempted_g4_hashes: None,
+            onboarding_started_at: None,
             cache_stats,
             offload_min_priority,
             offload_terminated_at_block: None,
+            pending_g4_lookup: None,
             leader,
         }
+    }
+
+    pub fn has_pending_g4_lookup(&self) -> bool {
+        self.pending_g4_lookup.is_some()
+    }
+
+    fn start_async_g4_lookup(
+        &mut self,
+        num_computed_tokens: usize,
+        host_blocks: Vec<ImmutableBlock<PinnedStorage, VllmLocality, BasicMetadata>>,
+        disk_blocks: Vec<ImmutableBlock<DiskStorage, VllmLocality, BasicMetadata>>,
+        g4_candidates: Vec<u64>,
+    ) -> Result<(), SlotError> {
+        if self.pending_g4_lookup.is_some() {
+            return Err(SlotError::InvalidOperation(format!(
+                "async G4 lookup already pending for request {}",
+                self.request_id
+            )));
+        }
+
+        if g4_candidates.is_empty() {
+            return self.stage_local_matches(num_computed_tokens, host_blocks, disk_blocks, vec![]);
+        }
+
+        if self.leader.remote_handle().is_none() {
+            return self.stage_local_matches(num_computed_tokens, host_blocks, disk_blocks, vec![]);
+        }
+
+        let world_size = self.leader.world_size();
+        let num_candidates = g4_candidates.len();
+        let all_keys: Vec<_> = (0..world_size)
+            .flat_map(|wid| {
+                g4_candidates
+                    .iter()
+                    .enumerate()
+                    .map(move |(pos, &hash)| PositionalKey {
+                        worker_id: wid as u64,
+                        sequence_hash: hash,
+                        position: pos as u32,
+                    })
+            })
+            .collect();
+
+        let rx = self.leader.schedule_match_prefix(all_keys);
+
+        tracing::debug!(
+            target: "kvbm-g4",
+            request_id = %self.request_id,
+            num_candidates,
+            "started async G4 lookup"
+        );
+
+        self.pending_g4_lookup = Some(PendingG4Lookup {
+            num_computed_tokens,
+            host_blocks,
+            disk_blocks,
+            world_size,
+            receiver: rx,
+        });
+        Ok(())
+    }
+
+    fn poll_pending_g4_lookup(&mut self) -> Result<bool, SlotError> {
+        enum PollStatus {
+            Pending,
+            Ready(Vec<(PositionalKey, RemoteKey, NoMetadata)>),
+            Closed,
+        }
+
+        let Some(pending) = self.pending_g4_lookup.as_mut() else {
+            return Ok(false);
+        };
+
+        let status = match pending.receiver.try_recv() {
+            Ok(matches) => PollStatus::Ready(matches),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => PollStatus::Pending,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => PollStatus::Closed,
+        };
+
+        match status {
+            PollStatus::Pending => Ok(false),
+            PollStatus::Ready(matches) => {
+                let pending = self.pending_g4_lookup.take().ok_or_else(|| {
+                    SlotError::InvalidOperation("pending g4 lookup unexpectedly missing".into())
+                })?;
+                let g4_hashes = Self::compute_tp_consensus_hashes(matches, pending.world_size);
+                self.stage_local_matches(
+                    pending.num_computed_tokens,
+                    pending.host_blocks,
+                    pending.disk_blocks,
+                    g4_hashes,
+                )?;
+                Ok(true)
+            }
+            PollStatus::Closed => {
+                tracing::warn!(
+                    target: "kvbm-g4",
+                    request_id = %self.request_id,
+                    "async G4 lookup channel closed; proceeding without G4 matches"
+                );
+                let pending = self.pending_g4_lookup.take().ok_or_else(|| {
+                    SlotError::InvalidOperation("pending g4 lookup unexpectedly missing".into())
+                })?;
+                self.stage_local_matches(
+                    pending.num_computed_tokens,
+                    pending.host_blocks,
+                    pending.disk_blocks,
+                    vec![],
+                )?;
+                Ok(true)
+            }
+        }
+    }
+
+    fn compute_tp_consensus_hashes(
+        matches: Vec<(PositionalKey, RemoteKey, NoMetadata)>,
+        world_size: usize,
+    ) -> Vec<u64> {
+        if world_size == 0 {
+            return vec![];
+        }
+
+        let mut per_worker: Vec<std::collections::BTreeMap<u32, u64>> =
+            vec![std::collections::BTreeMap::new(); world_size];
+        for (key, _, _) in matches {
+            let wid = key.worker_id as usize;
+            if wid < world_size {
+                // Duplicate positions for a worker are unexpected; keep first to avoid
+                // destabilizing prefix consensus from late/duplicate registry entries.
+                per_worker[wid]
+                    .entry(key.position)
+                    .or_insert(key.sequence_hash);
+            }
+        }
+
+        // Require strict positional prefix consensus across all TP workers:
+        // - positions must start at 0
+        // - positions must be contiguous
+        // - each position must have identical hash on every worker
+        let mut consensus = Vec::new();
+        let mut pos: u32 = 0;
+        loop {
+            let Some(hash0) = per_worker[0].get(&pos).copied() else {
+                break;
+            };
+            if per_worker
+                .iter()
+                .all(|worker| worker.get(&pos).copied() == Some(hash0))
+            {
+                consensus.push(hash0);
+                pos = pos.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+
+        consensus
+    }
+
+    fn stage_local_matches(
+        &mut self,
+        num_computed_tokens: usize,
+        mut host_blocks: Vec<ImmutableBlock<PinnedStorage, VllmLocality, BasicMetadata>>,
+        mut disk_blocks: Vec<ImmutableBlock<DiskStorage, VllmLocality, BasicMetadata>>,
+        mut g4_hashes: Vec<u64>,
+    ) -> Result<(), SlotError> {
+        let block_size = self.block_size;
+        let num_matched_host_blocks = host_blocks.len();
+        let num_matched_disk_blocks = disk_blocks.len();
+        let num_matched_g4_blocks = g4_hashes.len();
+        self.tokens_cached_from_g4 = num_matched_g4_blocks * block_size;
+
+        let num_matched_blocks =
+            num_matched_host_blocks + num_matched_disk_blocks + num_matched_g4_blocks;
+
+        tracing::debug!(
+            "successfully matched {} host, {} disk, {} g4 blocks; {} total blocks",
+            num_matched_host_blocks,
+            num_matched_disk_blocks,
+            num_matched_g4_blocks,
+            num_matched_blocks
+        );
+
+        // early exit if we did not match any blocks
+        if num_matched_blocks == 0 {
+            return Ok(());
+        }
+
+        let mut num_new_matched_tokens = num_matched_blocks * block_size;
+
+        // we are on a block boundary, so we need to throw away the last block
+        if (num_computed_tokens + num_new_matched_tokens) == self.sequence.total_tokens() {
+            tracing::debug!("on a block boundary, throwing away the last block");
+
+            // we should have matched at least one block
+            assert!(!host_blocks.is_empty() || !disk_blocks.is_empty() || !g4_hashes.is_empty());
+
+            // pop from g4 first, then disk, then host
+            if !g4_hashes.is_empty() {
+                g4_hashes.pop();
+            } else if !disk_blocks.is_empty() {
+                disk_blocks.pop();
+            } else {
+                host_blocks.pop();
+            }
+
+            // decrement the number of new matched tokens by the block size
+            num_new_matched_tokens -= block_size;
+        }
+
+        // early exit if we need to onboard 0 blocks (after potentially dropping the last block)
+        if num_new_matched_tokens == 0 {
+            return Ok(());
+        }
+
+        self.staging_from_host = if !host_blocks.is_empty() {
+            Some(host_blocks)
+        } else {
+            None
+        };
+        self.staging_from_disk = if !disk_blocks.is_empty() {
+            Some(disk_blocks)
+        } else {
+            None
+        };
+        self.staging_from_g4 = if !g4_hashes.is_empty() {
+            Some(g4_hashes)
+        } else {
+            None
+        };
+
+        self.state = SlotState::OnboardStaged(num_new_matched_tokens);
+        Ok(())
     }
 
     fn mark_as_skipped_prefill(&mut self) -> Result<(), SlotError> {
@@ -570,13 +968,19 @@ impl Slot for VllmConnectorSlot {
             tracing::warn!(target: "kvbm-g4", request_id = %self.request_id, "preemption while hashes staged");
             self.staging_from_g4.take();
         }
-        if self.pending_operations.is_some() {
+        if self.pending_g4_lookup.is_some() {
+            tracing::warn!(target: "kvbm-g4", request_id = %self.request_id, "preemption while async G4 lookup pending");
+            self.pending_g4_lookup.take();
+        }
+        if self.pending_operations.is_some() || self.dispatched_operations_count > 0 {
             tracing::warn!(
                 request_id = %self.request_id,
                 pending_ops = self.pending_operations.as_ref().map(|o| o.len()).unwrap_or(0),
-                "Preemption while operations pending"
+                dispatched_ops = self.dispatched_operations_count,
+                "Preemption while operations pending/in-flight"
             );
             self.pending_operations.take();
+            self.dispatched_operations_count = 0;
         }
 
         self.state = SlotState::Preempted;
@@ -593,6 +997,7 @@ impl Slot for VllmConnectorSlot {
         self.offload_terminated_at_block = None;
         self.skip_g4_on_retry = false;
         self.attempted_g4_hashes = None;
+        self.onboarding_started_at = None;
     }
 
     fn reset(&mut self) {
@@ -645,32 +1050,22 @@ impl Slot for VllmConnectorSlot {
             );
         }
 
-        // Handle recovery from failed onboard prior to processing the scheduler output.
-        // When a transfer fails and vLLM reschedules the request, apply_scheduler_output
-        // is called BEFORE acquire_local_matches. We need to detect the failed state here
-        // and reset, otherwise our stale current_position will cause capacity errors.
+        // Onboarding state in apply_scheduler_output is NORMAL, not an error.
+        // vLLM schedules the request for prefill immediately after get_num_new_matched_tokens
+        // returns async=true. The async KV loading happens on the worker during the forward
+        // pass. The slot naturally transitions from Onboarding → Prefilling/Decoding via
+        // the state assignment below.
+        //
+        // Genuine onboarding failures are handled by acquire_local_matches, which is called
+        // when vLLM re-evaluates the request for KV matching after a failure/preemption.
         if matches!(self.state, SlotState::Onboarding(_)) {
-            tracing::warn!(
+            tracing::debug!(
                 request_id = %self.request_id,
                 current_position = self.current_position,
-                device_blocks = self.device_blocks.len(),
                 num_computed_tokens = num_computed_tokens,
-                "Detected Onboarding state in apply_scheduler_output - recovering from failed transfer"
+                "Onboarding state in apply_scheduler_output - transitioning to normal execution"
             );
-            // Reset slot state for retry.
-            // Do not clear device_blocks
-            self.current_position = 0;
-            self.evaluated_blocks = 0;
-            self.tokens_cached_from_device = 0;
-            self.tokens_cached_from_host = 0;
-            self.tokens_cached_from_disk = 0;
-            self.tokens_cached_from_g4 = 0;
-            self.performed_cache_lookup = false;
-            self.total_blocks_queried = 0;
-            self.skip_g4_on_retry = true;
-            self.recovered_from_failed_transfer = true;
-            self.pending_operations.take();
-            self.attempted_g4_hashes.take();
+            self.onboarding_started_at = None;
         }
 
         if !tokens.is_empty() {
@@ -925,6 +1320,15 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn mark_as_finished(&mut self, _iteration: u64) -> Result<(), SlotError> {
+        if self.pending_g4_lookup.is_some() {
+            tracing::debug!(
+                target: "kvbm-g4",
+                request_id = %self.request_id,
+                "dropping pending async G4 lookup while finishing request"
+            );
+            self.pending_g4_lookup.take();
+        }
+
         // Report cache statistics if we performed a cache lookup
         if self.performed_cache_lookup {
             let block_size = self.block_size;
@@ -951,30 +1355,37 @@ impl Slot for VllmConnectorSlot {
             );
         }
 
-        // Check if there are any pending operations
-        let has_pending_ops = self
+        // Check if there are any pending operations (not yet dispatched to worker)
+        let pending_count = self
             .pending_operations
             .as_ref()
-            .map(|ops| !ops.is_empty())
-            .unwrap_or(false);
+            .map(|ops| ops.len())
+            .unwrap_or(0);
 
-        if has_pending_ops {
-            // There are pending operations - need to wait for them to complete
+        // Check if there are any dispatched operations (sent to worker, not yet confirmed complete).
+        // `pending_operations` is drained by `build_connector_metadata` via `take_pending_operations()`
+        // well before `request_finished` fires, so without this check the slot would always
+        // transition to `Finished` even when the worker is still processing transfers.
+        let has_inflight_ops = pending_count > 0 || self.dispatched_operations_count > 0;
+
+        if has_inflight_ops {
+            // There are pending or in-flight operations - need to wait for them to complete
             self.state = SlotState::Finishing;
             tracing::debug!(
                 request_id = %self.request_id,
-                pending_operations = self.pending_operations.as_ref().unwrap().len(),
-                "request set to finish (with pending operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
+                pending_operations = pending_count,
+                dispatched_operations = self.dispatched_operations_count,
+                "request set to finish (with in-flight operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
                 self.tokens_cached_from_device,
                 self.tokens_cached_from_host,
                 self.tokens_cached_from_disk
             );
         } else {
-            // No pending operations - can immediately mark as finished
+            // No pending or in-flight operations - can immediately mark as finished
             self.state = SlotState::Finished;
             tracing::debug!(
                 request_id = %self.request_id,
-                "request set to finished (no pending operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
+                "request set to finished (no in-flight operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
                 self.tokens_cached_from_device,
                 self.tokens_cached_from_host,
                 self.tokens_cached_from_disk
@@ -996,7 +1407,11 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn take_pending_operations(&mut self) -> Option<Vec<WorkerTransferRequest>> {
-        self.pending_operations.take()
+        let ops = self.pending_operations.take();
+        if let Some(ref ops) = ops {
+            self.dispatched_operations_count += ops.len();
+        }
+        ops
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -1006,8 +1421,45 @@ impl Slot for VllmConnectorSlot {
             return Ok(());
         }
 
-        // Handle recovery from failed onboard - vLLM rescheduled the request
+        if self.has_pending_g4_lookup() {
+            if self.poll_pending_g4_lookup()? {
+                tracing::debug!(
+                    target: "kvbm-g4",
+                    request_id = %self.request_id,
+                    state = ?self.state,
+                    "async G4 lookup completed"
+                );
+            } else {
+                tracing::debug!(
+                    target: "kvbm-g4",
+                    request_id = %self.request_id,
+                    "async G4 lookup still pending"
+                );
+            }
+            return Ok(());
+        }
+
+        // Handle recovery from failed onboard - vLLM rescheduled the request.
+        // Same timeout logic as apply_scheduler_output: don't kill in-flight G4 transfers.
         if matches!(self.state(), SlotState::Onboarding(_)) {
+            let elapsed = self
+                .onboarding_started_at
+                .map(|t| t.elapsed())
+                .unwrap_or(Duration::ZERO);
+
+            if elapsed < *G4_TRANSFER_TIMEOUT {
+                // Transfer still in progress -- skip the lookup and let it run.
+                tracing::debug!(
+                    target: "kvbm-g4",
+                    request_id = %self.request_id,
+                    elapsed_ms = elapsed.as_millis(),
+                    timeout_secs = G4_TRANSFER_TIMEOUT.as_secs(),
+                    "Onboarding still in progress, skipping acquire_local_matches"
+                );
+                return Ok(());
+            }
+
+            // Transfer exceeded timeout -- genuine failure, recover.
             // Remove stale G4 hashes from registry to prevent other workers from hitting the same error
             if let Some(stale_hash_positions) = self.attempted_g4_hashes.take() {
                 tracing::warn!(
@@ -1015,7 +1467,8 @@ impl Slot for VllmConnectorSlot {
                     request_id = %self.request_id,
                     num_stale_hashes = stale_hash_positions.len(),
                     stale_hash_positions = ?stale_hash_positions,
-                    "onboard failed - removing stale hashes from registry"
+                    elapsed_ms = elapsed.as_millis(),
+                    "onboard timed out - removing stale hashes from registry"
                 );
 
                 // Remove stale entries from the registry (fire-and-forget)
@@ -1035,10 +1488,12 @@ impl Slot for VllmConnectorSlot {
                 target: "kvbm-g4",
                 request_id = %self.request_id,
                 state = ?self.state(),
-                "slot in onboarding state during acquire_local_matches; recovering from failed onboard - will skip lookup on retry"
+                elapsed_ms = elapsed.as_millis(),
+                "onboard timed out in acquire_local_matches; recovering - will skip G4 on retry"
             );
             // Clean up any pending operations from the failed onboard
             let _ = self.pending_operations.take();
+            self.onboarding_started_at = None;
             // Reset slot state to allow retry - staging fields should already be None
             // since trigger_onboarding consumed them with .take()
             self.state = SlotState::Preempted;
@@ -1124,12 +1579,23 @@ impl Slot for VllmConnectorSlot {
         //     disk.touch_blocks_blocking(&sequence_hashes)?;
         // }
 
-        let mut host_blocks = self
-            .block_manager
-            .host()
-            .map(|host| host.match_sequence_hashes_blocking(blocks_to_lookup))
-            .transpose()?
-            .unwrap_or_default();
+        let disable_cpu_lookup = should_disable_cpu_cache_lookup();
+        if disable_cpu_lookup {
+            tracing::info!(
+                request_id = %self.request_id,
+                "cpu cache lookup disabled via dev flag; skipping host pool match"
+            );
+        }
+
+        let mut host_blocks = if disable_cpu_lookup {
+            Vec::new()
+        } else {
+            self.block_manager
+                .host()
+                .map(|host| host.match_sequence_hashes_blocking(blocks_to_lookup))
+                .transpose()?
+                .unwrap_or_default()
+        };
 
         let num_matched_host_blocks = host_blocks.len();
         self.record_cached_host_tokens(num_matched_host_blocks * block_size);
@@ -1150,94 +1616,40 @@ impl Slot for VllmConnectorSlot {
 
         // Remote registry lookup with TP consensus (G4/object storage)
         let search_offset_g4 = search_offset + num_matched_disk_blocks;
-        let mut g4_hashes = if self.skip_g4_on_retry {
-            tracing::info!(target: "kvbm-g4", request_id = %self.request_id, "skipping - previous failure");
-            vec![]
-        } else if let Some(handle) = self.leader.remote_handle() {
-            let remaining = &sequence_hashes[search_offset_g4..];
-            if !remaining.is_empty() {
-                // TP-aware lookup: queries all workers, returns consensus
-                let matched = vllm_int::match_prefix_tp_blocking(
-                    &handle,
-                    remaining,
-                    self.leader.world_size(),
-                );
-                if !matched.is_empty() {
-                    tracing::debug!(target: "kvbm-g4", matched = matched.len(), remaining = remaining.len(), "cache hit");
-                }
-                matched
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
-        };
+        let g4_candidates = sequence_hashes[search_offset_g4..].to_vec();
 
-        let num_matched_g4_blocks = g4_hashes.len();
-        self.tokens_cached_from_g4 = num_matched_g4_blocks * block_size;
+        if self.skip_g4_on_retry {
+            tracing::info!(
+                target: "kvbm-g4",
+                request_id = %self.request_id,
+                "skipping - previous failure"
+            );
+            return self.stage_local_matches(num_computed_tokens, host_blocks, disk_blocks, vec![]);
+        }
 
-        let num_matched_blocks =
-            num_matched_host_blocks + num_matched_disk_blocks + num_matched_g4_blocks;
+        let min_candidates = *G4_MIN_CANDIDATE_BLOCKS;
+        if !g4_candidates.is_empty() && g4_candidates.len() < min_candidates {
+            tracing::debug!(
+                target: "kvbm-g4",
+                request_id = %self.request_id,
+                g4_candidates = g4_candidates.len(),
+                min_candidates,
+                "skipping G4 lookup due to minimum-candidate threshold"
+            );
+            return self.stage_local_matches(num_computed_tokens, host_blocks, disk_blocks, vec![]);
+        }
 
-        tracing::debug!(
-            "successfully matched {} host, {} disk, {} g4 blocks; {} total blocks",
-            num_matched_host_blocks,
-            num_matched_disk_blocks,
-            num_matched_g4_blocks,
-            num_matched_blocks
-        );
-
-        // early exit if we did not match any blocks
-        if num_matched_blocks == 0 {
+        if !g4_candidates.is_empty() && self.leader.remote_handle().is_some() {
+            self.start_async_g4_lookup(
+                num_computed_tokens,
+                host_blocks,
+                disk_blocks,
+                g4_candidates,
+            )?;
             return Ok(());
         }
 
-        let mut num_new_matched_tokens = num_matched_blocks * block_size;
-
-        // we are on a block boundary, so we need to throw away the last block
-        if (num_computed_tokens + num_new_matched_tokens) == self.sequence().total_tokens() {
-            tracing::debug!("on a block boundary, throwing away the last block");
-
-            // we should have matched at least one block
-            assert!(!host_blocks.is_empty() || !disk_blocks.is_empty() || !g4_hashes.is_empty());
-
-            // pop from g4 first, then disk, then host
-            if !g4_hashes.is_empty() {
-                g4_hashes.pop();
-            } else if !disk_blocks.is_empty() {
-                disk_blocks.pop();
-            } else {
-                host_blocks.pop();
-            }
-
-            // decrement the number of new matched tokens by the block size
-            num_new_matched_tokens -= block_size;
-        }
-
-        // early exit if we need to onboard 0 blocks (after potentially dropping the last block)
-        if num_new_matched_tokens == 0 {
-            return Ok(());
-        }
-
-        self.staging_from_host = if !host_blocks.is_empty() {
-            Some(host_blocks)
-        } else {
-            None
-        };
-        self.staging_from_disk = if !disk_blocks.is_empty() {
-            Some(disk_blocks)
-        } else {
-            None
-        };
-        self.staging_from_g4 = if !g4_hashes.is_empty() {
-            Some(g4_hashes)
-        } else {
-            None
-        };
-
-        self.state = SlotState::OnboardStaged(num_new_matched_tokens);
-
-        Ok(())
+        self.stage_local_matches(num_computed_tokens, host_blocks, disk_blocks, vec![])
     }
 
     fn trigger_onboarding(&mut self, num_external_tokens: usize) -> Result<(), SlotError> {
@@ -1336,6 +1748,7 @@ impl Slot for VllmConnectorSlot {
         }
 
         self.state = SlotState::Onboarding(num_external_tokens);
+        self.onboarding_started_at = Some(Instant::now());
         self.advance_computed_position(num_external_tokens)?;
 
         Ok(())
@@ -1432,6 +1845,102 @@ impl VllmConnectorSlot {
         }
 
         self.append_pending_operation(worker_req);
+
+        Ok(())
+    }
+
+    /// Discard all pending operations WITHOUT counting them as dispatched.
+    /// Used when a request is cancelled mid-transfer (e.g., during onboarding) and the
+    /// operations should not prevent the slot from transitioning to `Finished`.
+    /// Unlike `take_pending_operations()` (which increments `dispatched_operations_count`),
+    /// this method simply drops the pending operations.
+    pub fn discard_pending_operations(&mut self) {
+        if let Some(ops) = self.pending_operations.take() {
+            tracing::debug!(
+                request_id = %self.request_id,
+                discarded_ops = ops.len(),
+                "Discarding pending operations (cancelled request)"
+            );
+        }
+    }
+
+    /// Flush blocks that were never offloaded during chunked prefill.
+    ///
+    /// vLLM v1 chunked prefill only calls `apply_scheduler_output` for the first chunk.
+    /// The remaining chunks are processed internally by vLLM without going through the
+    /// connector's scheduler interface. This method is called from `request_finished`
+    /// with ALL block_ids vLLM allocated, and offloads any blocks that were missed.
+    ///
+    /// Blocks are flushed in batches (FLUSH_BATCH_SIZE) to allow D2H and H2O to pipeline.
+    /// GPU blocks are held until all D2H transfers complete (via pending_operations),
+    /// then freed by vLLM. H2O to object storage continues from CPU blocks in the background.
+    pub fn flush_remaining_blocks(
+        &mut self,
+        all_block_ids: &[BlockId],
+    ) -> Result<(), SlotError> {
+        let already_offloaded = self.evaluated_blocks;
+        let total_sequence_blocks = self.sequence.blocks().len();
+
+        // Don't flush past what the sequence covers
+        let flushable = std::cmp::min(all_block_ids.len(), total_sequence_blocks);
+
+        if already_offloaded >= flushable {
+            return Ok(());
+        }
+
+        // Skip the last block if it covers the exact end of the sequence
+        // (same boundary logic as apply_scheduler_output)
+        let flush_end = if flushable == total_sequence_blocks
+            && (total_sequence_blocks * self.block_size) == self.sequence.total_tokens()
+        {
+            flushable.saturating_sub(1)
+        } else {
+            flushable
+        };
+
+        if already_offloaded >= flush_end {
+            return Ok(());
+        }
+
+        let total_remaining = flush_end - already_offloaded;
+        let batch_size = *FLUSH_BATCH_SIZE;
+
+        tracing::info!(
+            request_id = %self.request_id,
+            already_offloaded = already_offloaded,
+            flushing = total_remaining,
+            total_sequence_blocks = total_sequence_blocks,
+            batch_size = batch_size,
+            num_batches = (total_remaining + batch_size - 1) / batch_size,
+            "Flushing remaining blocks on request finish"
+        );
+
+        // Temporarily allow offload_blocks to work even though we're about to
+        // transition to Finishing. We set state to Prefilling so the
+        // Finishing/Finished check in offload_blocks doesn't reject us.
+        let saved_state = self.state;
+        self.state = SlotState::Prefilling;
+
+        // Split into batches for D2H/H2O pipelining
+        let mut offset = already_offloaded;
+        while offset < flush_end {
+            let batch_end = std::cmp::min(offset + batch_size, flush_end);
+            let batch_block_ids = &all_block_ids[offset..batch_end];
+            let batch_token_blocks: Vec<TokenBlock> = self
+                .sequence
+                .blocks()[offset..batch_end]
+                .to_vec();
+
+            // Flushed blocks don't have priority info; use default priority 0
+            let batch_priorities = vec![0u32; batch_block_ids.len()];
+            self.offload_blocks(batch_block_ids, &batch_token_blocks, &batch_priorities)?;
+            offset = batch_end;
+        }
+
+        self.evaluated_blocks = flush_end;
+
+        // Restore state (mark_as_finished will set it to Finishing/Finished)
+        self.state = saved_state;
 
         Ok(())
     }
@@ -1641,6 +2150,18 @@ impl RemoteTransferRequest {
     }
 }
 
+/// Item pushed to the drain queue after D2H completes.
+/// Holds Arc references to host blocks, preventing eviction until H2O finishes.
+struct DrainItem {
+    request_id: String,
+    sequence_hashes: Vec<u64>,
+    host_block_ids: Vec<BlockId>,
+    /// PinGuard that holds Arc references to the immutable host blocks.
+    /// The blocks cannot be evicted while this guard exists.
+    pin_guard: PinGuard,
+    block_size: usize,
+}
+
 struct LocalTransferEngine {
     block_manager: VllmBlockManager,
     leader: Arc<KvbmLeader>,
@@ -1680,15 +2201,23 @@ impl LocalTransferEngine {
         task_token: CancellationToken,
         kvbm_metrics: KvbmMetrics,
     ) -> anyhow::Result<()> {
-        let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel::<LocalOnboardRequest>();
-        let (offload_tx, mut offload_rx) = mpsc::unbounded_channel::<LocalOffloadRequest>();
-        let (remote_tx, mut remote_rx) = mpsc::unbounded_channel::<RemoteTransferRequest>();
+        let (onboard_tx, mut onboard_rx) = mpsc::channel::<LocalOnboardRequest>(*ONBOARD_QUEUE_CAP);
+        let (offload_tx, mut offload_rx) = mpsc::channel::<LocalOffloadRequest>(*OFFLOAD_QUEUE_CAP);
+        let (remote_tx, remote_rx) =
+            priority_channel::<RemoteTransferRequest>(*REMOTE_HIGH_QUEUE_CAP, *REMOTE_LOW_QUEUE_CAP);
+        let (drain_tx, mut drain_rx) = mpsc::channel::<DrainItem>(*DRAIN_QUEUE_CAP);
 
         // Pin registry for preventing host block eviction during H2O transfers.
-        // Shared between offload task (creates pins) and remote task (releases pins).
+        // Shared between drain task (creates pins) and remote task (releases pins).
         let pin_registry = PinRegistry::new();
-        let pin_registry_offload = pin_registry.clone();
+        let pin_registry_drain = pin_registry.clone();
         let pin_registry_remote = pin_registry.clone();
+
+        // Semaphore to cap concurrent H2O transfers. The drain task acquires a permit
+        // before sending each H2O request. Permits are released when the remote task
+        // completes the H2O and drops the pin from the registry.
+        let h2o_semaphore = Arc::new(Semaphore::new(*MAX_CONCURRENT_H2O));
+        let h2o_semaphore_remote = h2o_semaphore.clone();
 
         // Clone resources needed for tasks
         let block_manager_offload = self.block_manager.clone();
@@ -1697,8 +2226,10 @@ impl LocalTransferEngine {
         let leader_onboard = Arc::clone(&self.leader);
         let leader_remote = Arc::clone(&self.leader);
 
-        // Clone remote_tx for the offload task to trigger H2O after D2H
-        let remote_tx_for_offload = remote_tx.clone();
+        // Clone drain_tx for the offload task to push items after D2H
+        let drain_tx_for_offload = drain_tx.clone();
+        // Drain traffic is low-priority background H2O.
+        let remote_tx_for_drain = remote_tx.clone();
 
         let kvbm_metrics_onboard = kvbm_metrics.clone();
         let kvbm_metrics_offload = kvbm_metrics.clone();
@@ -1741,8 +2272,7 @@ impl LocalTransferEngine {
                         &block_manager_offload,
                         &leader_offload,
                         kvbm_metrics_offload.clone(),
-                        &remote_tx_for_offload,
-                        &pin_registry_offload,
+                        &drain_tx_for_offload,
                     )
                     .await
                     {
@@ -1785,27 +2315,164 @@ impl LocalTransferEngine {
 
         let remote_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token_remote| async move {
-                while let Some(req) = remote_rx.recv().await {
-                    if cancellation_token_remote.is_cancelled() {
-                        tracing::debug!("RemoteTransferTask: received cancellation signal");
-                        break;
+                run_priority_worker(
+                    cancellation_token_remote,
+                    remote_rx,
+                    *MAX_REMOTE_INFLIGHT,
+                    move |req| {
+                        let block_manager = block_manager_remote.clone();
+                        let leader = Arc::clone(&leader_remote);
+                        let metrics = kvbm_metrics_remote.clone();
+                        let pin_reg = pin_registry_remote.clone();
+                        let semaphore = h2o_semaphore_remote.clone();
+
+                        async move {
+                            if let Err(e) = process_remote_transfer_request(
+                                req,
+                                &block_manager,
+                                &leader,
+                                metrics,
+                                &pin_reg,
+                                &semaphore,
+                            )
+                            .await
+                            {
+                                tracing::error!(
+                                    "RemoteTransferTask: error processing request: {:?}",
+                                    e
+                                );
+                            }
+                        }
+                    },
+                )
+                .await;
+                Ok(())
+            },
+            task_token.clone(),
+            "RemoteTransferTask",
+            &task_handle,
+        )
+        .unwrap();
+
+        // Drain task: event-driven H2O offload from CPU (G2) to object storage (G4).
+        // Consumes DrainItems pushed by the offload task after each D2H completion.
+        // Uses a semaphore to cap concurrent H2O transfers at MAX_CONCURRENT_H2O.
+        let drain_task = CriticalTaskExecutionHandle::new_with_runtime(
+            |cancellation_token_drain| async move {
+                tracing::info!(
+                    max_concurrent_h2o = *MAX_CONCURRENT_H2O,
+                    "DrainTask started: event-driven G2->G4 offload"
+                );
+
+                loop {
+                    let item = tokio::select! {
+                        _ = cancellation_token_drain.cancelled() => {
+                            tracing::debug!("DrainTask: received cancellation signal");
+                            break;
+                        }
+                        item = drain_rx.recv() => {
+                            match item {
+                                Some(item) => item,
+                                None => {
+                                    tracing::debug!("DrainTask: channel closed");
+                                    break;
+                                }
+                            }
+                        }
+                    };
+
+                    let num_blocks = item.host_block_ids.len();
+                    let request_id = item.request_id.clone();
+
+                    // Validate block integrity before H2O
+                    tracing::debug!(
+                        target: "kvbm-g4",
+                        request_id = %request_id,
+                        num_blocks = num_blocks,
+                        "DrainTask: received item, acquiring H2O permit"
+                    );
+
+                    // Never block this task waiting for permit; drop low-priority H2O on pressure.
+                    let _permit = match h2o_semaphore.clone().try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::warn!(
+                                target: "kvbm-g4",
+                                request_id = %request_id,
+                                num_blocks = num_blocks,
+                                "DrainTask: dropping H2O request due to concurrency pressure"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let h2o_operation_id = uuid::Uuid::new_v4();
+
+                    // Insert pin guard into registry (prevents host block eviction during H2O).
+                    // The pin_guard was created in process_offload_to_storage and transferred
+                    // here via the DrainItem. The remote task will release it on H2O completion.
+                    pin_registry_drain.insert(h2o_operation_id, item.pin_guard);
+
+                    tracing::debug!(
+                        target: "kvbm-g4",
+                        request_id = %request_id,
+                        pin_id = %h2o_operation_id,
+                        num_blocks = num_blocks,
+                        "DrainTask: pinned host blocks for h2o transfer"
+                    );
+
+                    let h2o_req = RemoteTransferRequest::new_h2o(
+                        request_id.clone(),
+                        item.sequence_hashes,
+                        item.host_block_ids,
+                        h2o_operation_id,
+                        item.block_size,
+                        h2o_operation_id,
+                    );
+
+                    match remote_tx_for_drain.try_send(TransferPriority::Low, h2o_req) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            tracing::warn!(
+                                target: "kvbm-g4",
+                                request_id = %request_id,
+                                "DrainTask: dropping H2O request due to remote queue pressure"
+                            );
+                            pin_registry_drain.remove(&h2o_operation_id);
+                            continue;
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            tracing::error!(
+                                target: "kvbm-g4",
+                                request_id = %request_id,
+                                "DrainTask: remote queue closed, dropping H2O request"
+                            );
+                            pin_registry_drain.remove(&h2o_operation_id);
+                            continue;
+                        }
                     }
-                    if let Err(e) = process_remote_transfer_request(
-                        req,
-                        &block_manager_remote,
-                        &leader_remote,
-                        kvbm_metrics_remote.clone(),
-                        &pin_registry_remote,
-                    )
-                    .await
-                    {
-                        tracing::error!("RemoteTransferTask: error processing request: {:?}", e);
-                    }
+
+                    tracing::debug!(
+                        target: "kvbm-g4",
+                        request_id = %request_id,
+                        operation_id = %h2o_operation_id,
+                        num_blocks = num_blocks,
+                        "DrainTask: H2O request sent"
+                    );
+
+                    // Transfer ownership of the semaphore permit to the H2O lifecycle.
+                    // We forget the permit here to prevent it from being released when
+                    // this scope exits. The remote task's release_pin calls
+                    // semaphore.add_permits(1) when the H2O completes, restoring the
+                    // permit. This ensures the semaphore correctly limits concurrent H2O.
+                    std::mem::forget(_permit);
                 }
+
+                tracing::info!("DrainTask: shutting down");
                 Ok(())
             },
             task_token,
-            "RemoteTransferTask",
+            "DrainTask",
             &task_handle,
         )
         .unwrap();
@@ -1821,18 +2488,44 @@ impl LocalTransferEngine {
                         Some(req) => {
                             match req {
                                 LocalTransferRequest::Offload(offload_req) => {
-                                    if let Err(e) = offload_tx.send(offload_req) {
-                                        tracing::error!("LocalTransferEngine: error sending offload request: {:?}", e);
+                                    match offload_tx.try_send(offload_req) {
+                                        Ok(()) => {}
+                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                            tracing::warn!("LocalTransferEngine: dropping offload request due to queue pressure");
+                                        }
+                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                            tracing::error!("LocalTransferEngine: offload queue closed");
+                                        }
                                     }
                                 }
                                 LocalTransferRequest::Onboard(onboard_req) => {
-                                    if let Err(e) = onboard_tx.send(onboard_req) {
-                                        tracing::error!("LocalTransferEngine: error sending onboard request: {:?}", e);
+                                    match onboard_tx.try_send(onboard_req) {
+                                        Ok(()) => {}
+                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                            tracing::warn!("LocalTransferEngine: dropping onboard request due to queue pressure");
+                                        }
+                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                            tracing::error!("LocalTransferEngine: onboard queue closed");
+                                        }
                                     }
                                 }
                                 LocalTransferRequest::Remote(remote_req) => {
-                                    if let Err(e) = remote_tx.send(remote_req) {
-                                        tracing::error!("LocalTransferEngine: error sending remote transfer request: {:?}", e);
+                                    // Read-path remote operations (onboard) are high priority.
+                                    // Background write-path operations (offload/H2O) are low priority.
+                                    let priority = if remote_req.is_onboard {
+                                        TransferPriority::High
+                                    } else {
+                                        TransferPriority::Low
+                                    };
+
+                                    match remote_tx.try_send(priority, remote_req) {
+                                        Ok(()) => {}
+                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                            tracing::warn!("LocalTransferEngine: dropping remote transfer request due to queue pressure");
+                                        }
+                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                            tracing::error!("LocalTransferEngine: remote queue closed");
+                                        }
                                     }
                                 }
                             }
@@ -1856,6 +2549,7 @@ impl LocalTransferEngine {
         onboard_task.cancel();
         offload_task.cancel();
         remote_task.cancel();
+        drain_task.cancel();
 
         if let Err(e) = onboard_task.join().await {
             tracing::error!("LocalOnboardTask failed: {:?}", e);
@@ -1865,6 +2559,9 @@ impl LocalTransferEngine {
         }
         if let Err(e) = remote_task.join().await {
             tracing::error!("RemoteTransferTask failed: {:?}", e);
+        }
+        if let Err(e) = drain_task.join().await {
+            tracing::error!("DrainTask failed: {:?}", e);
         }
 
         tracing::debug!("LocalTransferEngine: shutdown complete");
@@ -1877,8 +2574,7 @@ async fn process_offload_request(
     block_manager: &VllmBlockManager,
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
-    remote_tx: &mpsc::UnboundedSender<RemoteTransferRequest>,
-    pin_registry: &PinRegistry,
+    drain_tx: &mpsc::Sender<DrainItem>,
 ) -> anyhow::Result<()> {
     let request_id = offload_req.request_id.clone();
     let operation_id = offload_req.operation_id;
@@ -1911,8 +2607,7 @@ async fn process_offload_request(
             &request_id,
             &operation_id,
             "disk",
-            None, // No H2O for disk path
-            pin_registry,
+            None, // No drain for disk path
         )
         .await?;
     } else {
@@ -1928,8 +2623,7 @@ async fn process_offload_request(
             &request_id,
             &operation_id,
             "host",
-            Some(remote_tx), // Enable H2O after D2H
-            pin_registry,
+            Some(drain_tx), // Push to drain queue after D2H
         )
         .await?;
     }
@@ -1946,8 +2640,7 @@ async fn process_offload_to_storage<S, L, M>(
     request_id: &str,
     operation_id: &uuid::Uuid,
     storage_name: &str,
-    remote_tx: Option<&mpsc::UnboundedSender<RemoteTransferRequest>>,
-    pin_registry: &PinRegistry,
+    drain_tx: Option<&mpsc::Sender<DrainItem>>,
 ) -> anyhow::Result<()>
 where
     S: Storage + NixlRegisterableStorage + 'static,
@@ -2046,76 +2739,49 @@ where
         storage_name
     );
 
-    // Decide if H2O should be triggered (uses lib/llm decision logic)
+    // Push to drain queue for async H2O (G2 -> G4) if host transfer and G4 is enabled
     let is_host_transfer = transfer_pool == BlockTransferPool::Host;
-    let should_h2o = vllm_int::should_trigger_h2o(
-        is_host_transfer,
-        leader.remote_registry_enabled(),
-        pin_registry.len(),
-        *MAX_CONCURRENT_H2O,
-    );
+    if is_host_transfer && leader.remote_registry_enabled() {
+        if let Some(drain_tx) = drain_tx {
+            let host_block_ids: Vec<BlockId> =
+                immutable_blocks.iter().map(|b| b.block_id()).collect();
+            let num_blocks = host_block_ids.len();
 
-    if is_host_transfer && leader.remote_registry_enabled() && !should_h2o {
-        tracing::warn!(
-            request_id = request_id,
-            current_h2o = pin_registry.len(),
-            max_h2o = *MAX_CONCURRENT_H2O,
-            num_blocks = offload_req.sequence_hashes.len(),
-            "Skipping H2O transfer due to backpressure"
-        );
-    }
+            // Create PinGuard to prevent host block eviction while in drain queue and during H2O.
+            // The guard holds Arc references to the immutable blocks, keeping their refcount > 0.
+            let pin_guard = PinGuard::new(immutable_blocks);
 
-    if let Some(remote_tx) = remote_tx.filter(|_| should_h2o) {
-        let host_block_ids: Vec<BlockId> = immutable_blocks.iter().map(|b| b.block_id()).collect();
-        let h2o_operation_id = uuid::Uuid::new_v4();
+            let item = DrainItem {
+                request_id: offload_req.request_id.clone(),
+                sequence_hashes: offload_req.sequence_hashes.clone(),
+                host_block_ids,
+                pin_guard,
+                block_size: offload_req.block_size,
+            };
 
-        // Pin the host blocks to prevent eviction during H2O transfer.
-        // The PinGuard holds references to the immutable blocks, keeping
-        // their Arc reference count > 0, which prevents them from being
-        // returned to the inactive pool and evicted.
-        let pin_guard = PinGuard::new(immutable_blocks);
-        pin_registry.insert(h2o_operation_id, pin_guard);
+            match drain_tx.try_send(item) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        request_id = request_id,
+                        num_blocks = num_blocks,
+                        "Dropping drain item due to queue pressure; blocks remain on G2"
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::error!(
+                        request_id = request_id,
+                        num_blocks = num_blocks,
+                        "Drain queue closed; blocks remain on G2"
+                    );
+                }
+            }
 
-        tracing::debug!(
-            target: "kvbm-g4",
-            request_id = request_id,
-            pin_id = %h2o_operation_id,
-            num_blocks = host_block_ids.len(),
-            "pinned host blocks for h2o transfer"
-        );
-
-        let h2o_req = RemoteTransferRequest::new_h2o(
-            offload_req.request_id.clone(),
-            offload_req.sequence_hashes.clone(),
-            host_block_ids,
-            h2o_operation_id,
-            offload_req.block_size,
-            h2o_operation_id,
-        );
-
-        tracing::debug!(
-            request_id = request_id,
-            operation_id = %h2o_operation_id,
-            num_blocks = offload_req.sequence_hashes.len(),
-            "Triggering H2O transfer after D2H offload"
-        );
-
-        if let Err(e) = remote_tx.send(h2o_req) {
-            tracing::error!(
-                request_id = request_id,
-                "Failed to send H2O request: {:?}",
-                e
-            );
-            // Remove the pin since H2O won't happen
-            pin_registry.remove(&h2o_operation_id);
+            return Ok(());
         }
-
-        // Note: immutable_blocks ownership moved to pin_guard, which is now in the registry.
-        // The guard will be released by process_remote_transfer_request after H2O completes.
-        return Ok(());
     }
 
-    // If we didn't trigger H2O, the immutable_blocks are dropped here,
+    // If we didn't push to drain queue, the immutable_blocks are dropped here,
     // allowing them to be returned to the inactive pool normally.
     drop(immutable_blocks);
 
@@ -2185,19 +2851,26 @@ async fn process_remote_transfer_request(
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
     pin_registry: &PinRegistry,
+    h2o_semaphore: &Arc<Semaphore>,
 ) -> anyhow::Result<()> {
     let request_id = &req.request_id;
     let operation_id = &req.operation_id;
     let pin_id = req.pin_id;
+    let is_h2o = req.is_h2o();
 
-    // Helper to release pin guard (called on all exit paths)
-    let release_pin = |pin_registry: &PinRegistry, pin_id: Option<uuid::Uuid>| {
+    // Helper to release pin guard and H2O semaphore permit (called on all exit paths)
+    let release_pin = |pin_registry: &PinRegistry, pin_id: Option<uuid::Uuid>, is_h2o: bool, semaphore: &Arc<Semaphore>| {
         if let Some(guard) = pin_id.and_then(|id| pin_registry.remove(&id)) {
             tracing::debug!(
                 pin_id = ?pin_id,
                 num_blocks = guard.count(),
                 "Released pin guard after H2O transfer"
             );
+            // Release the semaphore permit that was forgotten by the drain task.
+            // This allows the drain task to send the next H2O request.
+            if is_h2o {
+                semaphore.add_permits(1);
+            }
         }
     };
 
@@ -2215,7 +2888,7 @@ async fn process_remote_transfer_request(
         {
             Some(filtered) => filtered,
             None => {
-                release_pin(pin_registry, pin_id);
+                release_pin(pin_registry, pin_id, is_h2o, h2o_semaphore);
                 return Ok(());
             }
         }
@@ -2390,7 +3063,8 @@ async fn process_remote_transfer_request(
 
     // Release pin guard after transfer completes (success or failure).
     // This allows the host blocks to be returned to the inactive pool.
-    release_pin(pin_registry, pin_id);
+    // For H2O transfers from the drain task, this also releases the semaphore permit.
+    release_pin(pin_registry, pin_id, is_h2o, h2o_semaphore);
 
     result
 }

@@ -67,11 +67,48 @@ impl RegistryKey for CompositeKey {
 }
 
 /// Key with worker id, sequence hash, and position in sequence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// **Identity**: Only `worker_id` and `sequence_hash` determine equality and
+/// hashing. The `sequence_hash` is a Merkle chain hash that uniquely encodes
+/// the entire prefix, so position is redundant for identification. It is kept
+/// as metadata (for ordering and wire-format compat) but excluded from
+/// `Hash`/`Eq` so that registry lookups match regardless of how the caller
+/// enumerates positions within different array slices.
+#[derive(Clone, Copy, Debug)]
 pub struct PositionalKey {
     pub worker_id: u64,
     pub sequence_hash: u64,
     pub position: u32,
+}
+
+impl PartialEq for PositionalKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.worker_id == other.worker_id && self.sequence_hash == other.sequence_hash
+    }
+}
+
+impl Eq for PositionalKey {}
+
+impl std::hash::Hash for PositionalKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.worker_id.hash(state);
+        self.sequence_hash.hash(state);
+    }
+}
+
+impl PartialOrd for PositionalKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PositionalKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.worker_id
+            .cmp(&other.worker_id)
+            .then(self.sequence_hash.cmp(&other.sequence_hash))
+            .then(self.position.cmp(&other.position))
+    }
 }
 
 impl RegistryKey for PositionalKey {

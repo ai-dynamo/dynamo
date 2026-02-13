@@ -8,8 +8,12 @@ use crate::block_manager::distributed::notifications::{
     NixlNotificationSender, NixlStatusChecker, RegisterTransferNotification, RegistrationError,
     TransferCompleteNotification, spawn_notification_handler,
 };
+use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
 use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
 use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
+use dynamo_runtime::config::parse_bool;
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use prometheus::Registry;
 
 #[derive(Debug, Clone)]
@@ -307,6 +311,59 @@ pub fn should_bypass_cpu_cache() -> bool {
     let disk_cache_set = disk_cache_gb_set || disk_cache_override_set;
 
     disk_cache_set && !cpu_cache_set
+}
+
+// CPU cache lookup toggle state:
+// 0 = uninitialized (read default from env on first use)
+// 1 = enabled
+// 2 = disabled
+static CPU_CACHE_LOOKUP_STATE: Lazy<AtomicU8> = Lazy::new(|| AtomicU8::new(0));
+static CPU_CACHE_LOOKUP_DIRTY: AtomicBool = AtomicBool::new(false);
+
+fn cpu_cache_lookup_state() -> u8 {
+    let state = CPU_CACHE_LOOKUP_STATE.load(Ordering::Relaxed);
+    if state != 0 {
+        return state;
+    }
+
+    let disabled = std::env::var(env_kvbm::DYN_KVBM_DISABLE_CPU_CACHE_LOOKUP)
+        .ok()
+        .and_then(|v| parse_bool(&v).ok())
+        .unwrap_or(false);
+    let state = if disabled { 2 } else { 1 };
+    CPU_CACHE_LOOKUP_STATE.store(state, Ordering::Relaxed);
+    state
+}
+
+/// Returns true if CPU cache lookup is disabled for this process.
+pub fn cpu_cache_lookup_disabled() -> bool {
+    cpu_cache_lookup_state() == 2
+}
+
+/// Set CPU cache lookup disabled flag for this process.
+pub fn set_cpu_cache_lookup_disabled(disabled: bool) {
+    let state = if disabled { 2 } else { 1 };
+    CPU_CACHE_LOOKUP_STATE.store(state, Ordering::Relaxed);
+    CPU_CACHE_LOOKUP_DIRTY.store(true, Ordering::Relaxed);
+}
+
+/// Returns true if the CPU cache lookup flag has been overridden at runtime.
+pub fn cpu_cache_lookup_dirty() -> bool {
+    CPU_CACHE_LOOKUP_DIRTY.load(Ordering::Relaxed)
+}
+
+/// Determines if CPU cache lookup for cache hits should be disabled.
+/// This is a dev-only toggle and is ignored unless `KVBM_DEV_MODE` is enabled.
+pub fn should_disable_cpu_cache_lookup() -> bool {
+    let dev_mode = std::env::var(env_kvbm::KVBM_DEV_MODE)
+        .ok()
+        .and_then(|v| parse_bool(&v).ok())
+        .unwrap_or(false);
+    if !dev_mode {
+        return false;
+    }
+
+    cpu_cache_lookup_disabled()
 }
 
 #[derive(Clone, Debug)]

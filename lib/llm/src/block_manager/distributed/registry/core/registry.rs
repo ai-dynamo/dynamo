@@ -249,7 +249,7 @@ where
                 }
                 Ok(result)
             }
-            _ => Err(anyhow::anyhow!("unexpected response type")),
+            _ => Err(anyhow::anyhow!("unexpected response type for can_offload")),
         }
     }
 
@@ -270,7 +270,9 @@ where
 
         match decoded {
             ResponseType::Match(entries) => Ok(entries),
-            _ => Err(anyhow::anyhow!("unexpected response type")),
+            _ => Err(anyhow::anyhow!(
+                "unexpected response type for match_prefix"
+            )),
         }
     }
 

@@ -21,6 +21,7 @@ pub mod numa_allocator;
 pub mod offload;
 pub mod pool;
 pub mod storage;
+pub mod transfer_orchestrator;
 pub mod v2;
 
 // dynamo rt integration

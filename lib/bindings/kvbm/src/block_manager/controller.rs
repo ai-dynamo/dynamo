@@ -49,6 +49,47 @@ impl BlockManagerClient {
             .block_on(self.inner.reset_all_pools())
             .map_err(to_pyerr)
     }
+
+    /// Clear (wipe) all KV cache entries from a specific pool.
+    ///
+    /// `pool` must be one of: "gpu" / "device" (G1), "cpu" / "host" (G2), or "disk" (G3).
+    ///
+    /// Requires KVBM_DEV_MODE=TRUE. Raises an exception if dev-mode is not enabled
+    /// or if the pool name is invalid.
+    fn clear_pool(&self, pool: String) -> PyResult<()> {
+        let is_dev = std::env::var(
+            dynamo_runtime::config::environment_names::kvbm::KVBM_DEV_MODE,
+        )
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+        if !is_dev {
+            return Err(to_pyerr(
+                "clear_pool called but KVBM_DEV_MODE is not enabled. \
+                 Set KVBM_DEV_MODE=TRUE to allow destructive pool operations.",
+            ));
+        }
+
+        let cache_level = match pool.to_lowercase().as_str() {
+            "gpu" | "device" => CacheLevel::G1,
+            "cpu" | "host" => CacheLevel::G2,
+            "disk" => CacheLevel::G3,
+            other => {
+                return Err(to_pyerr(format!(
+                    "unknown pool '{other}': expected one of 'gpu', 'device', 'cpu', 'host', 'disk'"
+                )));
+            }
+        };
+
+        tracing::warn!("clear_pool({pool}): wiping pool via controller (dev-mode)");
+
+        pyo3_async_runtimes::tokio::get_runtime()
+            .block_on(self.inner.reset_pool(cache_level))
+            .map_err(to_pyerr)?;
+
+        tracing::info!("clear_pool({pool}): pool wiped successfully via controller");
+        Ok(())
+    }
 }
 
 impl BlockManagerClient {

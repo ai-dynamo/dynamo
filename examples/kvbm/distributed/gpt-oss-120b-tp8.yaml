@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GPT-OSS 120B aggregated engine config for tensor parallel size 8.
+# Used with dynamo.trtllm + KVBM (e.g. docker-compose dynamo-kvbm service).
+#
+# Requires 8 GPUs. Model: openai/gpt-oss-120b
+
+tensor_parallel_size: 8
+moe_expert_parallel_size: 8
+
+enable_attention_dp: true
+trust_remote_code: true
+
+cuda_graph_config:
+  max_batch_size: 800
+  enable_padding: true
+
+kv_cache_config:
+  enable_block_reuse: false
+  dtype: fp8
+  free_gpu_memory_fraction: 0.9
+
+stream_interval: 20
+
+moe_config:
+  backend: CUTLASS
+
+print_iter_log: true
