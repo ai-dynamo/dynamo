@@ -86,6 +86,9 @@ def process_multimodal(
     Unlike TRT-LLM, vLLM keeps original image_token_id (no replacement).
     """
     try:
+        # The preprocessed request does not carry a rendered template string; it carries
+        # original messages in extra_args, so we must apply chat template again here.
+        #
         # Use apply_chat_template to build prompt WITH image placeholders.
         # build_prompt_from_messages() strips images and produces text-only,
         # which means the processor won't insert <|image_pad|> tokens.

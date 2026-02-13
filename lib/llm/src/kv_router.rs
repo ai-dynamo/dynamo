@@ -49,8 +49,8 @@ use crate::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
-            DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
-            TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+            BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
+            RouterResponse, TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
@@ -473,6 +473,7 @@ impl KvRouter {
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -486,7 +487,7 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos);
         #[cfg(feature = "bench")]
         let hash_elapsed = start.elapsed();
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
@@ -698,7 +699,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let response = match request {
             RouterRequest::New { tokens } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(Some(&context_id), &tokens, None, true, None)
+                    .find_best_match(Some(&context_id), &tokens, None, None, true, None)
                     .await?;
 
                 RouterResponse::New {
@@ -775,6 +776,7 @@ impl KvPushRouter {
                 .find_best_match(
                     Some(context_id),
                     &request.token_ids,
+                    None,
                     request.router_config_override.as_ref(),
                     !is_query_only,
                     lora_name,

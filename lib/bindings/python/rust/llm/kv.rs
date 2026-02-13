@@ -1140,18 +1140,26 @@ impl KvPushRouter {
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
         router_config_override: Option<PyObject>,
         request_id: Option<String>,
+        block_mm_infos: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: llm_rs::kv_router::RouterConfigOverride =
                 depythonize(obj.bind(py)).map_err(to_pyerr)?;
             Some(override_config)
+        } else {
+            None
+        };
+
+        let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> = if let Some(obj) = block_mm_infos
+        {
+            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
         } else {
             None
         };
@@ -1164,6 +1172,7 @@ impl KvPushRouter {
                 .find_best_match(
                     request_id.as_deref(),
                     &token_ids,
+                    block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
                     None, // lora_name not exposed in Python API yet

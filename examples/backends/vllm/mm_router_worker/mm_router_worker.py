@@ -26,8 +26,13 @@ import signal
 import uvloop
 from transformers import AutoProcessor, AutoTokenizer
 
-from dynamo._core import KvIndexer
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import (
+    KvPushRouter,
+    KvRouterConfig,
+    ModelInput,
+    ModelType,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 from .handler import MMRouterHandler
@@ -104,7 +109,7 @@ async def worker(runtime: DistributedRuntime) -> None:
     """
     Main worker function.
 
-    Sets up connections to downstream vLLM workers, creates KvIndexer
+    Sets up connections to downstream vLLM workers, creates KvPushRouter
     for tracking their cache states, and serves the MM router endpoint.
     """
     args = parse_args()
@@ -137,34 +142,25 @@ async def worker(runtime: DistributedRuntime) -> None:
     instance_ids = await downstream_client.wait_for_instances()
     logger.info(f"Found {len(instance_ids)} workers: {list(instance_ids)}")
 
-    # Create KvIndexer to track workers' cache states via NATS
-    downstream_component = runtime.namespace(args.namespace).component(
-        args.downstream_component
+    # Create KvPushRouter to select workers based on KV overlap
+    kv_push_router = KvPushRouter(
+        endpoint=downstream_endpoint,
+        block_size=args.block_size,
+        kv_router_config=KvRouterConfig(),
     )
-    try:
-        indexer = KvIndexer(downstream_component, args.block_size)
-        logger.info("KvIndexer created successfully")
-    except Exception as e:
-        logger.warning(f"Failed to create KvIndexer: {e}")
-        logger.warning("Routing will fall back to first available worker")
-        indexer = None
+    logger.info("KvPushRouter created successfully")
 
     # Initialize tokenizer and processor for MM processing
     logger.info(f"Loading tokenizer from {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
-    processor = None
-    try:
-        logger.info(f"Loading HuggingFace processor from {args.model}...")
-        processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
-    except Exception as e:
-        logger.warning(f"Failed to load HF processor: {e}")
-        logger.warning("Visual token expansion will not be available")
+    logger.info(f"Loading HuggingFace processor from {args.model}...")
+    processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
 
     # Create handler
     handler = MMRouterHandler(
         client=downstream_client,
-        indexer=indexer,
+        kv_push_router=kv_push_router,
         instance_ids=list(instance_ids),
         tokenizer=tokenizer,
         processor=processor,

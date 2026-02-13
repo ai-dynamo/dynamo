@@ -1350,6 +1350,7 @@ class KvPushRouter:
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -1360,6 +1361,9 @@ class KvPushRouter:
             request_id: Optional request ID. If provided, router states will be updated
                        to track this request (active blocks, lifecycle events). If not
                        provided, this is a query-only operation that doesn't affect state.
+            block_mm_infos: Optional block-level multimodal metadata aligned to request
+                           blocks. When provided, this is used in block hash computation
+                           to enable MM-aware worker selection.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:

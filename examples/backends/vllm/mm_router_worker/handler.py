@@ -6,9 +6,11 @@ MM Router Handler - Routes requests to best vLLM worker based on KV cache overla
 """
 
 import logging
+from copy import deepcopy
 from typing import Any, AsyncGenerator
 
-from dynamo._core import KvIndexer, compute_block_hash_for_seq_py
+from dynamo._core import compute_block_hash_for_seq_py
+from dynamo.llm import KvPushRouter
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -27,7 +29,7 @@ class MMRouterHandler:
     def __init__(
         self,
         client: Client,
-        indexer: KvIndexer,
+        kv_push_router: KvPushRouter | None,
         instance_ids: list[int],
         tokenizer: Any,
         processor: Any,
@@ -39,7 +41,7 @@ class MMRouterHandler:
 
         Args:
             client: Dynamo client for downstream vLLM workers
-            indexer: KvIndexer for querying worker cache states
+            kv_push_router: KvPushRouter for KV-aware worker selection and routing
             instance_ids: List of available worker instance IDs
             tokenizer: HuggingFace AutoTokenizer
             processor: HuggingFace AutoProcessor (optional)
@@ -47,7 +49,7 @@ class MMRouterHandler:
             block_size: KV cache block size
         """
         self.client = client
-        self.indexer = indexer
+        self.kv_push_router = kv_push_router
         self.instance_ids = instance_ids
         self.tokenizer = tokenizer
         self.processor = processor
@@ -78,6 +80,10 @@ class MMRouterHandler:
 
         if image_urls:
             # Process multimodal: download images, compute mm_hash
+            # Do not reuse request["token_ids"] for MM routing: those are placeholder-level
+            # tokens from frontend. We need processor-expanded tokens to build block_mm_infos.
+            # Request payload does not include a rendered template string; extra_args carries
+            # original messages, so mm_processor reapplies chat template locally.
             processed = process_multimodal(
                 messages=messages,
                 image_urls=image_urls,
@@ -103,109 +109,96 @@ class MMRouterHandler:
                 f"MM request: {len(processed.tokens)} tokens, "
                 f"{len(image_urls)} images, {len(local_hashes)} blocks"
             )
+            expanded_tokens = processed.tokens
         else:
-            # Text-only: tokenize messages for routing
-            tokens = request.get("token_ids", [])
+            # Text-only: rely on frontend-preprocessed token_ids (ModelInput.Tokens contract)
+            tokens = request.get("token_ids")
             if not tokens:
-                # Tokenize from messages if token_ids not provided
-                prompt = self._apply_chat_template(messages)
-                tokens = self.tokenizer.encode(prompt)
-                logger.debug(f"Tokenized text-only prompt: {len(tokens)} tokens")
+                raise ValueError(
+                    "Missing or empty token_ids in preprocessed request for text-only routing"
+                )
 
             local_hashes = compute_block_hash_for_seq_py(tokens, self.block_size, None)
 
             logger.debug(
                 f"Text request: {len(tokens)} tokens, {len(local_hashes)} blocks"
             )
+            expanded_tokens = tokens
+            block_mm_infos = None
+
+        total_blocks = len(local_hashes)
 
         # Find best worker based on KV cache overlap
-        best_worker_id = await self._find_best_worker(local_hashes)
-
-        logger.info(
-            f"Routing to worker {best_worker_id} "
-            f"(mm={'yes' if image_urls else 'no'})"
+        best_worker_id, dp_rank = await self._find_best_worker(
+            expanded_tokens,
+            block_mm_infos,
+            total_blocks=total_blocks,
         )
 
-        # Forward ORIGINAL request to the selected worker
-        # vLLM worker will process images itself
-        async for response in await self.client.direct(request, best_worker_id):
-            yield response.data()
-            
-    async def _find_best_worker(self, local_hashes: list[int]) -> int:
+        logger.info(
+            f"Routing to worker {best_worker_id} (dp_rank={dp_rank}, "
+            f"mm={'yes' if image_urls else 'no'})"
+        )
+
+        # If router is unavailable, fallback to direct forwarding.
+        if self.kv_push_router is None:
+            async for response in await self.client.direct(request, best_worker_id):
+                yield response.data()
+            return
+
+        # Route and generate through KvPushRouter while preserving the full
+        # PreprocessedRequest payload (especially multi_modal_data for Qwen mRoPE).
+        routed_request = deepcopy(request)
+        routing = routed_request.get("routing") or {}
+        routing["backend_instance_id"] = best_worker_id
+        routing["dp_rank"] = dp_rank
+        routed_request["routing"] = routing
+
+        stream = await self.kv_push_router.generate_from_request(routed_request)
+
+        async for response in stream:
+            yield response
+
+    async def _find_best_worker(
+        self,
+        routing_tokens: list[int],
+        block_mm_infos: list[dict | None] | None = None,
+        total_blocks: int = 0,
+    ) -> tuple[int, int]:
         """
         Find the worker with the highest KV cache overlap.
 
         Args:
-            local_hashes: Block hashes for the current request
+            routing_tokens: Token IDs used for routing
+            block_mm_infos: Optional block-level MM metadata aligned with routing_tokens
 
         Returns:
-            Instance ID of the best worker
+            Tuple of (worker_id, dp_rank)
         """
         if not self.instance_ids:
             raise ValueError("No workers available")
 
-        if self.indexer is None:
-            logger.warning("No indexer available, using first worker")
-            return self.instance_ids[0]
+        if self.kv_push_router is None:
+            logger.warning("No KvPushRouter available, using first worker")
+            return self.instance_ids[0], 0
 
         try:
-            # Query indexer for overlap scores
-            logger.info(f"Querying indexer with {len(local_hashes)} block hashes")
-            logger.info(f"First 5 hashes: {local_hashes[:5]}")
-            overlap_scores = await self.indexer.find_matches(local_hashes)
-            scores_dict = overlap_scores.scores
-            # Check tree_sizes to see if indexer has any blocks stored
-            tree_sizes = getattr(overlap_scores, "tree_sizes", {})
-            logger.info(f"Indexer returned scores_dict: {scores_dict}")
-            logger.info(f"Indexer tree_sizes (total blocks per worker): {tree_sizes}")
-
-            # Find worker with highest overlap
-            best_worker_id = self.instance_ids[0]
-            best_score = 0
-
-            # Build a map from worker_id to score
-            # scores_dict keys are (worker_id, dp_rank) tuples, not just worker_id
-            worker_id_to_score = {}
-            for key, score in scores_dict.items():
-                if isinstance(key, tuple):
-                    wid = key[0]  # Extract worker_id from (worker_id, dp_rank)
-                else:
-                    wid = key  # Backwards compatibility with int keys
-                # Sum scores across dp_ranks for same worker
-                worker_id_to_score[wid] = worker_id_to_score.get(wid, 0) + score
-
-            # Log all worker scores for debugging
-            worker_scores = []
-            for worker_id in self.instance_ids:
-                score = worker_id_to_score.get(worker_id, 0)
-                worker_scores.append(f"worker_{worker_id}={score}")
-                if score > best_score:
-                    best_score = score
-                    best_worker_id = worker_id
-
-            # Always log routing decision at INFO level for visibility
-            logger.info(
-                f"[ROUTING] Scores: [{', '.join(worker_scores)}] | "
-                f"Best: worker_{best_worker_id} with {best_score}/{len(local_hashes)} blocks overlap"
+            best_worker_id, dp_rank, overlap_blocks = await self.kv_push_router.best_worker(
+                token_ids=routing_tokens,
+                block_mm_infos=block_mm_infos,
             )
 
-            return best_worker_id
+            logger.info(
+                "[ROUTING] "
+                f"Best: worker_{best_worker_id} dp_rank={dp_rank} "
+                f"with {overlap_blocks}/{total_blocks} blocks overlap"
+            )
+
+            return best_worker_id, dp_rank
 
         except Exception as e:
-            logger.warning(f"Indexer query failed: {e}, using first worker")
-            return self.instance_ids[0]
-
-    def _apply_chat_template(self, messages: list[dict]) -> str:
-        """Apply chat template to messages for tokenization."""
-        try:
-            # Try using tokenizer's chat template if available
-            if hasattr(self.tokenizer, "apply_chat_template"):
-                return self.tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-        except Exception as e:
-            logger.debug(f"Chat template failed: {e}")
-            return None
+            logger.warning(f"KvPushRouter query failed: {e}, using first worker")
+            return self.instance_ids[0], 0
 
     def update_instance_ids(self, instance_ids: list[int]) -> None:
         """Update the list of available worker instance IDs."""
