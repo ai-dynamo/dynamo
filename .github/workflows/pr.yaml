@@ -774,7 +774,7 @@ jobs:
 
   classify-workflow-errors:
     if: always() && !cancelled()
-    needs: [changed-files, backend-status-check, operator, vllm, sglang, trtllm, deploy-operator, deploy-test-vllm, deploy-test-vllm-disagg-router, deploy-test-sglang, deploy-test-trtllm, cleanup]
+    needs: [backend-status-check, cleanup, clean-k8s-builder]
     permissions:
       contents: read
       checks: write
