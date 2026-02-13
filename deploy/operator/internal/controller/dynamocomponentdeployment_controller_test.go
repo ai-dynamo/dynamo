@@ -187,14 +187,6 @@ func TestIsDeploymentReady(t *testing.T) {
 	}
 }
 
-type mockEtcdStorage struct {
-	deleteKeysFunc func(ctx context.Context, prefix string) error
-}
-
-func (m *mockEtcdStorage) DeleteKeys(ctx context.Context, prefix string) error {
-	return m.deleteKeysFunc(ctx, prefix)
-}
-
 func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 	type fields struct {
 	}
