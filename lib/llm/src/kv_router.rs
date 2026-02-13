@@ -394,8 +394,11 @@ impl KvRouter {
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
-            self.kv_router_config
-                .compute_seq_hashes_for_tracking(tokens, self.block_size, router_config_override)
+            self.kv_router_config.compute_seq_hashes_for_tracking(
+                tokens,
+                self.block_size,
+                router_config_override,
+            )
         });
         let seq_hash_elapsed = start.elapsed();
 
