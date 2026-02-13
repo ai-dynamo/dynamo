@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use futures::StreamExt;
-use rand::Rng;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -301,7 +300,7 @@ impl PrefillRouter {
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
-        let bootstrap_room: u64 = rand::rng().random();
+        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX as u64);
 
         tracing::info!(
             worker_id = worker_id,
