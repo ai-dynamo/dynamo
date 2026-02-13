@@ -540,20 +540,20 @@ impl WorkerSelector for DefaultWorkerSelector {
         let candidates = softmax_sample(&worker_logits, temperature);
 
         // If multiple candidates (tied), use tree size as tie-breaker
-        // If tree sizes are also equal, min_by_key uses HashMap iteration order (pseudo-random)
+        // If tree sizes are also equal, use random selection to avoid bias
         let best_worker = if candidates.len() > 1 {
             tracing::info!("Multiple workers tied with same logit, using tree size as tie-breaker");
-            *candidates
+            let tree_sizes: Vec<(usize, &WorkerWithDpRank)> = candidates
                 .iter()
-                .min_by_key(|worker| {
-                    request
-                        .overlaps
-                        .tree_sizes
-                        .get(worker)
-                        .copied()
-                        .unwrap_or(0)
-                })
-                .expect("candidates should not be empty")
+                .map(|w| (request.overlaps.tree_sizes.get(w).copied().unwrap_or(0), w))
+                .collect();
+
+            if tree_sizes.iter().all(|(s, _)| *s == tree_sizes[0].0) {
+                let idx = rand::rng().random_range(0..candidates.len());
+                candidates[idx]
+            } else {
+                *tree_sizes.iter().min_by_key(|(s, _)| *s).unwrap().1
+            }
         } else {
             candidates[0]
         };

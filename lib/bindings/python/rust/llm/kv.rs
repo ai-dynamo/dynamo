@@ -1051,7 +1051,7 @@ impl KvPushRouter {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
-                .get_potential_loads(&token_ids)
+                .get_potential_loads(&token_ids, None)
                 .await
                 .map_err(to_pyerr)?;
 
