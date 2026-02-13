@@ -55,6 +55,14 @@ func (m *MockRBACManager) EnsureServiceAccountWithRBAC(ctx context.Context, targ
 
 // Helper function to create JSON config for tests
 func createTestConfig(config map[string]interface{}) *apiextensionsv1.JSON {
+	// Add default hardware config if not present to satisfy validation
+	if _, hasHardware := config["hardware"]; !hasHardware {
+		config["hardware"] = map[string]interface{}{
+			"numGpusPerNode": 8,
+			"gpuModel":       "H100-SXM5-80GB",
+			"gpuVramMib":     81920,
+		}
+	}
 	jsonBytes, err := json.Marshal(config)
 	if err != nil {
 		panic(err)
@@ -1509,6 +1517,291 @@ spec:
 			Expect(additionalResources).To(HaveLen(2))
 			Expect(additionalResources[0].GetName()).Should(Equal("config1"))
 			Expect(additionalResources[1].GetName()).Should(Equal("config2"))
+		})
+	})
+
+	Context("GPU Discovery Integration Tests", func() {
+		It("Should use GPU discovery when nodes have GPU labels", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-gpu-discovery"
+			namespace := defaultNamespace
+
+			// Create a node with GPU labels (simulating GFD labels)
+			gpuNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "gpu-worker-1",
+					Labels: map[string]string{
+						"nvidia.com/gpu.count":   "8",
+						"nvidia.com/gpu.product": "H100-SXM5-80GB",
+						"nvidia.com/gpu.memory":  "81920",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, gpuNode)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, gpuNode) }()
+
+			// Create DGDR WITHOUT hardware config (should use GPU discovery)
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(`{
+								"sla": {"ttft": 100.0, "itl": 1500.0},
+								"engine": {"minNumGpusPerEngine": 1, "maxNumGpusPerEngine": 8}
+							}`),
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Reconcile - should succeed with GPU discovery
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Should transition to Pending (validation passed)
+			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+			Expect(updated.Status.State).Should(Equal(DGDRStatePending))
+		})
+
+		It("Should respect manual hardware config over GPU discovery", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-manual-override"
+			namespace := defaultNamespace
+
+			// Create a node with H100 GPUs
+			gpuNode := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "gpu-worker-h100",
+					Labels: map[string]string{
+						"nvidia.com/gpu.count":   "8",
+						"nvidia.com/gpu.product": "H100-SXM5-80GB",
+						"nvidia.com/gpu.memory":  "81920",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, gpuNode)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, gpuNode) }()
+
+			// Create DGDR WITH manual hardware config (A100, not H100)
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(`{
+								"sla": {"ttft": 100.0, "itl": 1500.0},
+								"hardware": {
+									"numGpusPerNode": 4,
+									"gpuModel": "A100-SXM4-40GB",
+									"gpuVramMib": 40960,
+									"system": "a100_sxm"
+								}
+							}`),
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Reconcile - should succeed and use manual config
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Should transition to Pending (validation passed with manual config)
+			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+			Expect(updated.Status.State).Should(Equal(DGDRStatePending))
+		})
+
+		It("Should fail validation when GPU discovery unavailable and no manual config", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-no-hardware"
+			namespace := defaultNamespace
+
+			// Don't create any GPU nodes - GPU discovery will fail
+
+			// Create DGDR WITHOUT hardware config and WITHOUT explicit GPU ranges
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(`{
+								"sla": {"ttft": 100.0, "itl": 1500.0}
+							}`),
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Reconcile - should fail validation
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).Should(ContainSubstring("GPU hardware info required"))
+		})
+
+		It("Should pass validation with explicit GPU ranges (no hardware config needed)", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-explicit-ranges"
+			namespace := defaultNamespace
+
+			// Don't create GPU nodes - but provide explicit ranges
+
+			// Create DGDR with explicit minNumGpusPerEngine/maxNumGpusPerEngine
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(`{
+								"sla": {"ttft": 100.0, "itl": 1500.0},
+								"engine": {
+									"minNumGpusPerEngine": 2,
+									"maxNumGpusPerEngine": 4
+								}
+							}`),
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Reconcile - should succeed (explicit ranges bypass hardware requirement)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Should transition to Pending
+			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+			Expect(updated.Status.State).Should(Equal(DGDRStatePending))
+		})
+
+		It("Should use GPU discovery with heterogeneous nodes (picks best)", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-heterogeneous"
+			namespace := defaultNamespace
+
+			// Create nodes with different GPU configs
+			nodeA100 := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "gpu-worker-a100",
+					Labels: map[string]string{
+						"nvidia.com/gpu.count":   "4",
+						"nvidia.com/gpu.product": "A100-SXM4-40GB",
+						"nvidia.com/gpu.memory":  "40960",
+					},
+				},
+			}
+			nodeH100 := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "gpu-worker-h100",
+					Labels: map[string]string{
+						"nvidia.com/gpu.count":   "8",
+						"nvidia.com/gpu.product": "H100-SXM5-80GB",
+						"nvidia.com/gpu.memory":  "81920",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, nodeA100)).Should(Succeed())
+			Expect(k8sClient.Create(ctx, nodeH100)).Should(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, nodeA100)
+				_ = k8sClient.Delete(ctx, nodeH100)
+			}()
+
+			// Create DGDR without hardware config
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(`{
+								"sla": {"ttft": 100.0, "itl": 1500.0},
+								"engine": {"minNumGpusPerEngine": 1, "maxNumGpusPerEngine": 8}
+							}`),
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Reconcile - should pick H100 (8 GPUs > 4 GPUs)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Should transition to Pending (using H100 config)
+			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+			Expect(updated.Status.State).Should(Equal(DGDRStatePending))
 		})
 	})
 })
