@@ -11,12 +11,15 @@ use std::time::Duration;
 // Latency statistics
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone)]
 pub struct LatencyStats {
     pub min: Duration,
     pub max: Duration,
+    pub avg: Duration,
     pub p50: Duration,
     pub p95: Duration,
     pub p99: Duration,
+    pub throughput_ops_sec: f64,
 }
 
 impl LatencyStats {
@@ -28,14 +31,34 @@ impl LatencyStats {
         let mut sorted = durations.to_vec();
         sorted.sort();
         let n = sorted.len();
+        let total: Duration = sorted.iter().sum();
+        let avg = total / n as u32;
 
         Some(Self {
             min: sorted[0],
             max: sorted[n - 1],
+            avg,
             p50: sorted[n / 2],
             p95: sorted[n * 95 / 100],
             p99: sorted[n * 99 / 100],
+            throughput_ops_sec: n as f64 / total.as_secs_f64(),
         })
+    }
+
+    /// Print formatted latency statistics to stdout.
+    pub fn print(&self, operation: &str, blocks_per_op: usize) {
+        println!("\n{} Latency Statistics:", operation);
+        println!("  min:  {:>12?}", self.min);
+        println!("  avg:  {:>12?}", self.avg);
+        println!("  p50:  {:>12?}", self.p50);
+        println!("  p95:  {:>12?}", self.p95);
+        println!("  p99:  {:>12?}", self.p99);
+        println!("  max:  {:>12?}", self.max);
+        println!("  throughput: {:.2} ops/sec", self.throughput_ops_sec);
+        println!(
+            "  throughput: {:.2} blocks/sec",
+            self.throughput_ops_sec * blocks_per_op as f64
+        );
     }
 }
 
