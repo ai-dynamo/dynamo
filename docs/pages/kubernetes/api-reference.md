@@ -606,7 +606,7 @@ _Appears in:_
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
-| `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of a rolling update. |  | Optional: \{\} <br /> |
+| `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
 
 
 #### DynamoModel

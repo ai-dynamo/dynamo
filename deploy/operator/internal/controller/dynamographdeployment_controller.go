@@ -213,7 +213,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments")
 
 			// Update the hash to prevent repeated warnings
-			hash := dynamo.ComputeWorkerSpecHash(dynamoDeployment)
+			hash := dynamo.ComputeDGDWorkersSpecHash(dynamoDeployment)
 			r.setCurrentWorkerHash(dynamoDeployment, hash)
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to update worker hash for unsupported pathway")
@@ -1093,9 +1093,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]string, error) {
 	logger := log.FromContext(ctx)
 
+	computedHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
+
 	restartAnnotations := make(map[string]string)
 	for serviceName := range dgd.Spec.Services {
-		dcdName := dynamo.GetDCDResourceName(dgd, serviceName, dynamo.ComputeWorkerSpecHash(dgd))
+		dcdName := dynamo.GetDCDResourceName(dgd, serviceName, computedHash)
 		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace}, existingDCD)
 

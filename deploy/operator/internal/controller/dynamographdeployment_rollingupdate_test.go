@@ -134,7 +134,7 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 			dgd := createTestDGD("test-dgd", tt.services)
 
 			if tt.existingHash == "compute" {
-				hash := dynamo.ComputeWorkerSpecHash(dgd)
+				hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
 			} else if tt.existingHash != "" {
 				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: tt.existingHash}
@@ -173,7 +173,7 @@ func TestInitializeWorkerHashIfNeeded_FirstDeploy(t *testing.T) {
 	assert.NotEmpty(t, hash, "Hash should be set after initialization")
 
 	// Verify the hash is correct
-	expectedHash := dynamo.ComputeWorkerSpecHash(dgd)
+	expectedHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	assert.Equal(t, expectedHash, hash, "Hash should match computed value")
 }
 
@@ -252,7 +252,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 		"frontend": {ComponentType: consts.ComponentTypeFrontend, Envs: frontendEnvs},
 	})
 
-	hash1 := dynamo.ComputeWorkerSpecHash(dgd1)
+	hash1 := dynamo.ComputeDGDWorkersSpecHash(dgd1)
 
 	// Change only frontend envs
 	dgd2 := createTestDGD("test", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -260,7 +260,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 		"frontend": {ComponentType: consts.ComponentTypeFrontend, Envs: []corev1.EnvVar{{Name: "FRONTEND_VAR", Value: "changed"}}},
 	})
 
-	hash2 := dynamo.ComputeWorkerSpecHash(dgd2)
+	hash2 := dynamo.ComputeDGDWorkersSpecHash(dgd2)
 	assert.Equal(t, hash1, hash2, "Hash should not change when only frontend changes")
 
 	// Change worker envs
@@ -269,7 +269,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 		"frontend": {ComponentType: consts.ComponentTypeFrontend, Envs: frontendEnvs},
 	})
 
-	hash3 := dynamo.ComputeWorkerSpecHash(dgd3)
+	hash3 := dynamo.ComputeDGDWorkersSpecHash(dgd3)
 	assert.NotEqual(t, hash1, hash3, "Hash should change when worker specs change")
 }
 
@@ -280,7 +280,7 @@ func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 		"decode":  {ComponentType: consts.ComponentTypeDecode, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v1"}}},
 	})
 
-	hash1 := dynamo.ComputeWorkerSpecHash(dgd1)
+	hash1 := dynamo.ComputeDGDWorkersSpecHash(dgd1)
 	assert.NotEmpty(t, hash1, "Hash should be computed for prefill/decode")
 
 	// Change prefill spec
@@ -289,7 +289,7 @@ func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 		"decode":  {ComponentType: consts.ComponentTypeDecode, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v1"}}},
 	})
 
-	hash2 := dynamo.ComputeWorkerSpecHash(dgd2)
+	hash2 := dynamo.ComputeDGDWorkersSpecHash(dgd2)
 	assert.NotEqual(t, hash1, hash2, "Hash should change when prefill specs change")
 
 	// Change decode spec
@@ -298,7 +298,7 @@ func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 		"decode":  {ComponentType: consts.ComponentTypeDecode, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v2"}}},
 	})
 
-	hash3 := dynamo.ComputeWorkerSpecHash(dgd3)
+	hash3 := dynamo.ComputeDGDWorkersSpecHash(dgd3)
 	assert.NotEqual(t, hash1, hash3, "Hash should change when decode specs change")
 }
 
@@ -1204,7 +1204,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 			},
 		})
 		// Annotation hash can differ from computed hash — function uses computed hash
-		computedHash := dynamo.ComputeWorkerSpecHash(dgd)
+		computedHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 		dgd.Annotations = map[string]string{
 			consts.AnnotationCurrentWorkerHash: "oldhash",
 		}
@@ -2561,7 +2561,7 @@ func TestReconcileRollingUpdate_NoChange(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
-	hash := dynamo.ComputeWorkerSpecHash(dgd)
+	hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
 	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
 		Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
@@ -2610,7 +2610,7 @@ func TestReconcileRollingUpdate_StuckDetection(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
-	hash := dynamo.ComputeWorkerSpecHash(dgd)
+	hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	// Hash matches current but phase is InProgress — stuck
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
 	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
@@ -2670,7 +2670,7 @@ func TestReconcileRollingUpdate_FailedPhaseNoOp(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
-	hash := dynamo.ComputeWorkerSpecHash(dgd)
+	hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
 	dgd.Status.RollingUpdate = &nvidiacomv1alpha1.RollingUpdateStatus{
 		Phase: nvidiacomv1alpha1.RollingUpdatePhaseFailed,

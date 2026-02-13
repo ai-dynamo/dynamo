@@ -40,7 +40,7 @@ import (
 func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) bool {
-	computedHash := dynamo.ComputeWorkerSpecHash(dgd)
+	computedHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 
 	currentHash := r.getCurrentWorkerHash(dgd)
 
@@ -102,7 +102,7 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 	}
 
 	// Normal first deploy — set the actual computed hash
-	hash := dynamo.ComputeWorkerSpecHash(dgd)
+	hash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	r.setCurrentWorkerHash(dgd, hash)
 
 	if err := r.Update(ctx, dgd); err != nil {
@@ -214,7 +214,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 
 	// Compute hash information
-	newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)
+	newWorkerHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	prevWorkerHash := r.getCurrentWorkerHash(dgd)
 
 	logger.Info("Reconciling rolling update",
@@ -788,7 +788,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	logger := log.FromContext(ctx)
 
 	// Compute hashes
-	newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)
+	newWorkerHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	prevWorkerHash := r.getCurrentWorkerHash(dgd)
 
 	if prevWorkerHash == newWorkerHash {

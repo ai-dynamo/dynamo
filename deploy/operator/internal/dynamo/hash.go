@@ -26,7 +26,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 )
 
-// ComputeWorkerSpecHash computes a deterministic hash of all worker service specs.
+// ComputeDGDWorkersSpecHash computes a deterministic hash of all worker service specs.
 //
 // The hash uses an exclusion-based approach: the entire DynamoComponentDeploymentSharedSpec
 // is hashed after zeroing out fields that do NOT affect the pod template. This ensures
@@ -46,7 +46,7 @@ import (
 //     (pod-level metadata is in ExtraPodMetadata which IS included)
 //
 // Only worker components (prefill, decode, worker) are included in the hash.
-func ComputeWorkerSpecHash(dgd *v1alpha1.DynamoGraphDeployment) string {
+func ComputeDGDWorkersSpecHash(dgd *v1alpha1.DynamoGraphDeployment) string {
 	// Collect worker specs in sorted order for deterministic hashing
 	var workerNames []string
 	for name, spec := range dgd.Spec.Services {

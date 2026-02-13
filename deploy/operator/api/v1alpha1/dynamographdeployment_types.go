@@ -116,7 +116,8 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Checkpoints map[string]ServiceCheckpointStatus `json:"checkpoints,omitempty"`
-	// RollingUpdate tracks the progress of a rolling update.
+	// RollingUpdate tracks the progress of operator manged rolling updates.
+	// Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
 }
@@ -197,6 +198,7 @@ type ServiceReplicaStatus struct {
 	// ComponentName is the name of the primary underlying resource.
 	// DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.
 	// During rolling updates, this reflects the new (target) component name.
+	// +kubebuilder:deprecatedversion:warning="ComponentName is deprecated, view ComponentNames instead"
 	ComponentName string `json:"componentName"`
 
 	// ComponentNames is the list of underlying resource names for this service.
