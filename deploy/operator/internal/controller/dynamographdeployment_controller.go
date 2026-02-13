@@ -68,10 +68,6 @@ const (
 	DGDStatePending State = "pending"
 )
 
-type etcdStorage interface {
-	DeleteKeys(ctx context.Context, prefix string) error
-}
-
 // rbacManager interface for managing RBAC resources
 type rbacManager interface {
 	EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error

@@ -40,7 +40,7 @@ async def init_video_diffusion_worker(
         namespace=config.namespace,
         component=config.component,
         endpoint=config.endpoint,
-        store_kv=config.store_kv,
+        discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
         model_path=config.model,
