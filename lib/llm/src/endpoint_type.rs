@@ -14,7 +14,9 @@ pub enum EndpointType {
     Embedding,
     /// Images API (Diffusion/DALL-E)
     Images,
-    /// Videos API (Video Generation)
+    /// Audios API (speech/audio generation)
+    Audios,
+    /// Videos API (video generation)
     Videos,
     /// Responses API
     Responses,
@@ -29,6 +31,7 @@ impl EndpointType {
             Self::Completion => "completion",
             Self::Embedding => "embedding",
             Self::Images => "images",
+            Self::Audios => "audios",
             Self::Videos => "videos",
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
@@ -41,6 +44,7 @@ impl EndpointType {
             Self::Completion,
             Self::Embedding,
             Self::Images,
+            Self::Audios,
             Self::Videos,
             Self::Responses,
             Self::AnthropicMessages,
