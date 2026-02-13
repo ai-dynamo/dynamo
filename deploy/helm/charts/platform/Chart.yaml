@@ -23,7 +23,7 @@ version: 0.9.0.post1
 home: https://nvidia.com
 dependencies:
   - name: dynamo-operator
-    version: 0.9.0.post1
+    version: 0.9.0
     repository: file://components/operator
     condition: dynamo-operator.enabled
   - name: nats
