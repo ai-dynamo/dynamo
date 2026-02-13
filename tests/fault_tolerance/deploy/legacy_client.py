@@ -31,6 +31,7 @@ from typing import Any, Dict
 import requests
 
 from tests.utils.managed_deployment import ManagedDeployment
+from tests.utils.test_output import resolve_test_output_path
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
@@ -220,6 +221,7 @@ def client(
     logger = logging.getLogger(f"CLIENT: {index}")
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
+    log_dir = resolve_test_output_path(log_dir)
     managed_deployment = ManagedDeployment(log_dir, deployment_spec, namespace)
     pod_ports: Dict[str, Any] = {}
 
