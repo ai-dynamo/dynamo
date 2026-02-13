@@ -160,6 +160,15 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Required
 	ProfilingConfig ProfilingConfigSpec `json:"profilingConfig"`
 
+	// EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.
+	// DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always
+	// attempted automatically. Setting this field has no effect - the operator will always try to discover
+	// GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped
+	// operator without permissions), manual hardware configuration is required regardless of this setting.
+	// +optional
+	// +kubebuilder:default=true
+	EnableGPUDiscovery *bool `json:"enableGpuDiscovery,omitempty"`
+
 	// AutoApply indicates whether to automatically create a DynamoGraphDeployment
 	// after profiling completes. If false, only the spec is generated and stored in status.
 	// Users can then manually create a DGD using the generated spec.

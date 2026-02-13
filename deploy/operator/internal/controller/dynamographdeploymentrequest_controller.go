@@ -130,7 +130,24 @@ const (
 	DefaultModelCacheMountPath = "/opt/model-cache"
 
 	// Command line arguments
-	ArgModel   = "--model"
+	ArgModel = "--model"
+
+	// Profiling config field names; note: will be removed in v1beta1
+	ConfigKeyHardware          = "hardware"
+	ConfigKeyEngine            = "engine"
+	ConfigKeyDeployment        = "deployment"
+	ConfigKeyOutputDir         = "output_dir"
+	ConfigKeyNumGpusPerNode    = "numGpusPerNode"
+	ConfigKeyGPUModel          = "gpuModel"
+	ConfigKeyGPUVramMib        = "gpuVramMib"
+	ConfigKeySystem            = "system"
+	ConfigKeyMinNumGpusPerEng  = "minNumGpusPerEngine"
+	ConfigKeyMaxNumGpusPerEng  = "maxNumGpusPerEngine"
+	ConfigKeyBackend           = "backend"
+	ConfigKeyConfig            = "config"
+	ConfigKeyNamespace         = "namespace"
+	ConfigKeyModel             = "model"
+	ConfigKeyDGDImage          = "dgd_image"
 	ArgBackend = "--backend"
 	ArgTTFT    = "--ttft"
 	ArgITL     = "--itl"
@@ -971,22 +988,22 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		config = make(map[string]interface{})
 	}
 
-	hardwareVal, hasHardware := config["hardware"]
+	hardwareVal, hasHardware := config[ConfigKeyHardware]
 	var hasManualHardwareConfig bool
 	if hasHardware && hardwareVal != nil {
 		if hardwareConfig, ok := hardwareVal.(map[string]interface{}); ok {
-			_, hasGPUModel := hardwareConfig["gpuModel"]
-			_, hasGPUVram := hardwareConfig["gpuVramMib"]
-			_, hasNumGPUs := hardwareConfig["numGpusPerNode"]
+			_, hasGPUModel := hardwareConfig[ConfigKeyGPUModel]
+			_, hasGPUVram := hardwareConfig[ConfigKeyGPUVramMib]
+			_, hasNumGPUs := hardwareConfig[ConfigKeyNumGpusPerNode]
 			hasManualHardwareConfig = hasGPUModel || hasGPUVram || hasNumGPUs
 		}
 	}
 
 	var hasExplicitGPURanges bool
-	if engineVal, hasEngine := config["engine"]; hasEngine && engineVal != nil {
+	if engineVal, hasEngine := config[ConfigKeyEngine]; hasEngine && engineVal != nil {
 		if engineConfig, ok := engineVal.(map[string]interface{}); ok {
-			minGPUs, hasMin := engineConfig["minNumGpusPerEngine"]
-			maxGPUs, hasMax := engineConfig["maxNumGpusPerEngine"]
+			minGPUs, hasMin := engineConfig[ConfigKeyMinNumGpusPerEng]
+			maxGPUs, hasMax := engineConfig[ConfigKeyMaxNumGpusPerEng]
 			if hasMin && hasMax {
 				minVal, _ := minGPUs.(float64)
 				maxVal, _ := maxGPUs.(float64)
@@ -1012,14 +1029,18 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 	if isNamespaceScoped {
 		return fmt.Errorf(`GPU hardware info required but cannot be auto-discovered (namespace-scoped operator lacks node read permissions).
 
-Add hardware config to profilingConfig.config.hardware (numGpusPerNode, gpuModel, gpuVramMib) or specify engine.minNumGpusPerEngine and engine.maxNumGpusPerEngine.
+Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s.
 
-See: https://github.com/ai-dynamo/dynamo/issues/6257`)
+See: https://github.com/ai-dynamo/dynamo/issues/6257`,
+			ConfigKeyHardware, ConfigKeyNumGpusPerNode, ConfigKeyGPUModel, ConfigKeyGPUVramMib,
+			ConfigKeyEngine, ConfigKeyMinNumGpusPerEng, ConfigKeyEngine, ConfigKeyMaxNumGpusPerEng)
 	}
 
-	return fmt.Errorf(`GPU hardware info required but auto-discovery failed. Add hardware config to profilingConfig.config.hardware (numGpusPerNode, gpuModel, gpuVramMib) or specify engine.minNumGpusPerEngine and engine.maxNumGpusPerEngine.
+	return fmt.Errorf(`GPU hardware info required but auto-discovery failed. Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s.
 
-See profiling documentation for configuration details.`)
+See profiling documentation for configuration details.`,
+		ConfigKeyHardware, ConfigKeyNumGpusPerNode, ConfigKeyGPUModel, ConfigKeyGPUVramMib,
+		ConfigKeyEngine, ConfigKeyMinNumGpusPerEng, ConfigKeyEngine, ConfigKeyMaxNumGpusPerEng)
 }
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource

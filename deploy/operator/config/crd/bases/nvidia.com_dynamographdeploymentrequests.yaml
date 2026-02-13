@@ -139,6 +139,15 @@ spec:
                         Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
                       type: string
                   type: object
+                enableGpuDiscovery:
+                  default: true
+                  description: |-
+                    EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.
+                    DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always
+                    attempted automatically. Setting this field has no effect - the operator will always try to discover
+                    GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped
+                    operator without permissions), manual hardware configuration is required regardless of this setting.
+                  type: boolean
                 model:
                   description: |-
                     Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").

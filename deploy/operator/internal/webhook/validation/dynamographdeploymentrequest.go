@@ -48,6 +48,16 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 	var warnings admission.Warnings
 	var err error
 
+	// Warn about deprecated enableGpuDiscovery field
+	if v.request.Spec.EnableGPUDiscovery != nil {
+		warnings = append(warnings, "spec.enableGpuDiscovery is deprecated and will be removed in v1beta1. GPU discovery is now always attempted automatically. This field has no effect.")
+	}
+
+	// Validate GPU hardware information is available
+	if err := v.validateGPUHardwareInfo(); err != nil {
+		return warnings, err
+	}
+
 	// Validate profiler image is specified
 	if v.request.Spec.ProfilingConfig.ProfilerImage == "" {
 		err = errors.Join(err, errors.New("spec.profilingConfig.profilerImage is required"))
@@ -82,6 +92,86 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 	}
 
 	return warnings, err
+}
+
+// validateGPUHardwareInfo ensures GPU hardware information will be available for profiling.
+// This validation happens at admission time to fail fast before the DGDR is persisted to etcd.
+func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error {
+	// Parse profiling config
+	var config map[string]interface{}
+	if v.request.Spec.ProfilingConfig.Config != nil {
+		if err := yaml.Unmarshal(v.request.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+			// Config parse errors will be caught by other validators
+			return nil
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+
+	// Check if manual hardware config is provided
+	hardwareVal, hasHardware := config["hardware"]
+	var hasManualHardwareConfig bool
+	if hasHardware && hardwareVal != nil {
+		if hardwareConfig, ok := hardwareVal.(map[string]interface{}); ok {
+			// Check if essential hardware fields are provided
+			_, hasGPUModel := hardwareConfig["gpuModel"]
+			_, hasGPUVram := hardwareConfig["gpuVramMib"]
+			_, hasNumGPUs := hardwareConfig["numGpusPerNode"]
+			hasManualHardwareConfig = hasGPUModel || hasGPUVram || hasNumGPUs
+		}
+	}
+
+	// Check if explicit GPU ranges are provided
+	var hasExplicitGPURanges bool
+	if engineVal, hasEngine := config["engine"]; hasEngine && engineVal != nil {
+		if engineConfig, ok := engineVal.(map[string]interface{}); ok {
+			minGPUs, hasMin := engineConfig["minNumGpusPerEngine"]
+			maxGPUs, hasMax := engineConfig["maxNumGpusPerEngine"]
+			// Consider ranges explicit only if both are provided and non-zero
+			if hasMin && hasMax {
+				minVal, _ := minGPUs.(float64)
+				maxVal, _ := maxGPUs.(float64)
+				hasExplicitGPURanges = minVal > 0 && maxVal > 0
+			}
+		}
+	}
+
+	// If manual config or explicit ranges provided, validation passes
+	if hasManualHardwareConfig || hasExplicitGPURanges {
+		return nil
+	}
+
+	// Neither manual config nor explicit ranges provided
+	// GPU discovery will be attempted at reconcile time, but if it's unavailable
+	// (e.g., namespace-scoped operator), the DGDR will fail
+	//
+	// Fail at admission time to give users immediate feedback
+	if v.isClusterWideOperator {
+		// Cluster-wide operator should have GPU discovery available
+		// Allow DGDR to be created - GPU discovery will provide hardware info
+		return nil
+	}
+
+	// Namespace-scoped operator likely doesn't have node read permissions
+	// Require manual hardware config or explicit GPU ranges
+	return errors.New(`GPU hardware configuration required for namespace-scoped operators.
+
+Namespace-scoped operators typically lack node read permissions for GPU auto-discovery.
+
+Provide hardware configuration in one of these ways:
+
+1. Add hardware config in spec.profilingConfig.config:
+   hardware:
+     numGpusPerNode: 8
+     gpuModel: "H100-SXM5-80GB"
+     gpuVramMib: 81920
+
+2. Or specify explicit GPU search ranges:
+   engine:
+     minNumGpusPerEngine: 2
+     maxNumGpusPerEngine: 8
+
+See: https://github.com/ai-dynamo/dynamo/issues/6257`)
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeploymentRequest.
