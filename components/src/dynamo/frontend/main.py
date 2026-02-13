@@ -7,7 +7,7 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_llm`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv).
+# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv, direct).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -19,19 +19,18 @@ import argparse
 import asyncio
 import logging
 import os
-import pathlib
 import signal
+import sys
+from argparse import Namespace
+from typing import Optional
 
 import uvloop
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.config_dump.config_dumper import add_config_dump_args
 from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
-    ModelDeploymentCard,
-    PythonAsyncEngine,
     RouterConfig,
     RouterMode,
     make_engine,
@@ -40,287 +39,77 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from . import __version__
-
-DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+from .frontend_args import FrontendArgGroup, FrontendConfig
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-async def _dummy_generator(request):
-    """Minimal generator that yields nothing. Work in progress."""
-    return
-    yield  # Makes this an async generator
-
-
-async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+def setup_engine_factory(
+    runtime: DistributedRuntime,
+    router_config: RouterConfig,
+    config: FrontendConfig,
+    vllm_flags: Namespace,
+):
     """
-    Called by Rust when a model is discovered.
+    When using vllm pre and post processor, create the EngineFactory that
+    creates the engines that run requests.
     """
-    loop = asyncio.get_running_loop()
-    logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
-    return PythonAsyncEngine(_dummy_generator, loop)
+    from .vllm_processor import EngineFactory
+
+    return EngineFactory(runtime, router_config, config, vllm_flags)
 
 
-def validate_model_name(value):
-    """Validate that model-name is a non-empty string."""
-    if not value or not isinstance(value, str) or len(value.strip()) == 0:
-        raise argparse.ArgumentTypeError(
-            f"model-name must be a non-empty string, got: {value}"
-        )
-    return value.strip()
-
-
-def validate_model_path(value):
-    """Validate that model-path is a valid directory on disk."""
-    if not os.path.isdir(value):
-        raise argparse.ArgumentTypeError(
-            f"model-path must be a valid directory on disk, got: {value}"
-        )
-    return value
-
-
-def parse_args():
+def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
     Returns:
-        argparse.Namespace: Parsed command-line arguments.
+        FrontendConfig: Parsed configuration object.
     """
+
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
     )
-    parser.add_argument(
-        "--version", action="version", version=f"Dynamo Frontend {__version__}"
-    )
-    parser.add_argument(
-        "-i", "--interactive", action="store_true", help="Interactive text chat"
-    )
-    parser.add_argument(
-        "--kv-cache-block-size",
-        type=int,
-        default=os.environ.get("DYN_KV_CACHE_BLOCK_SIZE"),
-        help="KV cache block size (u32). Can be set via DYN_KV_CACHE_BLOCK_SIZE env var.",
-    )
-    parser.add_argument(
-        "--http-host",
-        type=str,
-        default=os.environ.get("DYN_HTTP_HOST", "0.0.0.0"),
-        help="HTTP host for the engine (str). Can be set via DYN_HTTP_HOST env var.",
-    )
-    parser.add_argument(
-        "--http-port",
-        type=int,
-        default=int(os.environ.get("DYN_HTTP_PORT", "8000")),
-        help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var.",
-    )
-    parser.add_argument(
-        "--tls-cert-path",
-        type=pathlib.Path,
-        default=None,
-        help="TLS certificate path, PEM format.",
-    )
-    parser.add_argument(
-        "--tls-key-path",
-        type=pathlib.Path,
-        default=None,
-        help="TLS certificate key path, PEM format.",
-    )
-    parser.add_argument(
-        "--router-mode",
-        type=str,
-        choices=["round-robin", "random", "kv"],
-        default=os.environ.get("DYN_ROUTER_MODE", "round-robin"),
-        help="How to route the request. Can be set via DYN_ROUTER_MODE env var.",
-    )
-    parser.add_argument(
-        "--kv-overlap-score-weight",
-        type=float,
-        default=float(os.environ.get("DYN_KV_OVERLAP_SCORE_WEIGHT", "1.0")),
-        help="KV Router: Weight for overlap score in worker selection. Higher values prioritize KV cache reuse.",
-    )
-    parser.add_argument(
-        "--router-temperature",
-        type=float,
-        default=float(os.environ.get("DYN_ROUTER_TEMPERATURE", "0.0")),
-        help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
-    )
-    parser.add_argument(
-        "--kv-events",
-        action=argparse.BooleanOptionalAction,
-        dest="use_kv_events",
-        default=(
-            os.environ.get("DYN_KV_EVENTS", "true").lower() == "true"
-        ),  # default is true
-        help="KV Router: Enable/disable KV events. Use --kv-events to enable (default, router receives cache state events from workers) or --no-kv-events to disable (router predicts cache state based on routing decisions).",
-    )
-    parser.add_argument(
-        "--router-ttl",
-        type=float,
-        default=float(os.environ.get("DYN_ROUTER_TTL", "120.0")),
-        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
-    )
-    parser.add_argument(
-        "--router-max-tree-size",
-        type=int,
-        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**20))),
-        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1048576, which is 2^20).",
-    )
-    parser.add_argument(
-        "--router-prune-target-ratio",
-        type=float,
-        default=float(os.environ.get("DYN_ROUTER_PRUNE_TARGET_RATIO", "0.8")),
-        help="KV Router: Target size ratio after pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
-    )
-    parser.add_argument(
-        "--namespace",
-        type=str,
-        default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
-        help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
-    )
-    parser.add_argument(
-        "--router-replica-sync",
-        action="store_true",
-        default=False,
-        help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state.",
-    )
-    parser.add_argument(
-        "--router-snapshot-threshold",
-        type=int,
-        default=1000000,
-        help="KV Router: Number of messages in stream before triggering a snapshot. Defaults to 1000000.",
-    )
-    parser.add_argument(
-        "--router-reset-states",
-        action="store_true",
-        dest="router_reset_states",
-        default=False,
-        help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas.",
-    )
-    parser.add_argument(
-        "--durable-kv-events",
-        action="store_true",
-        dest="durable_kv_events",
-        default=False,
-        help="KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. By default, the router uses the generic event plane (NATS Core or ZMQ) with local_indexer mode. Use this flag when you need durability and multi-replica consistency. Requires NATS with JetStream enabled.",
-    )
-    parser.add_argument(
-        "--no-track-active-blocks",
-        action="store_false",
-        dest="router_track_active_blocks",
-        default=True,
-        help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
-    )
-    parser.add_argument(
-        "--no-assume-kv-reuse",
-        action="store_false",
-        dest="router_assume_kv_reuse",
-        default=True,
-        help="KV Router: When tracking active blocks, do not assume KV cache reuse (generate random hashes instead of computing actual block hashes). Useful when KV cache reuse is not expected. By default, KV cache reuse is assumed.",
-    )
-    parser.add_argument(
-        "--track-output-blocks",
-        action="store_true",
-        dest="router_track_output_blocks",
-        default=False,
-        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens. By default, output blocks are not tracked.",
-    )
-    parser.add_argument(
-        "--enforce-disagg",
-        action="store_true",
-        default=False,
-        help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
-    )
-    parser.add_argument(
-        "--migration-limit",
-        type=int,
-        default=0,
-        help="Maximum number of times a request may be migrated to a different engine worker. When > 0, enables request migration on worker disconnect (default: 0).",
-    )
-    parser.add_argument(
-        "--active-decode-blocks-threshold",
-        type=float,
-        default=None,
-        help="Threshold percentage (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. If not set, blocks-based busy detection is disabled.",
-    )
-    parser.add_argument(
-        "--active-prefill-tokens-threshold",
-        type=int,
-        default=None,
-        help="Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.",
-    )
-    parser.add_argument(
-        "--active-prefill-tokens-threshold-frac",
-        type=float,
-        default=None,
-        help="Fraction of max_num_batched_tokens for busy detection. Worker is busy when active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). Uses OR logic with --active-prefill-tokens-threshold.",
-    )
-    parser.add_argument(
-        "--model-name",
-        type=validate_model_name,
-        help="Model name as a string (e.g., 'Llama-3.2-1B-Instruct')",
-    )
-    parser.add_argument(
-        "--model-path",
-        type=validate_model_path,
-        help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
-    )
-    parser.add_argument(
-        "--metrics-prefix",
-        type=str,
-        default=None,
-        help="Prefix for Dynamo frontend metrics. If unset, uses DYN_METRICS_PREFIX env var or 'dynamo_frontend'.",
-    )
-    parser.add_argument(
-        "--kserve-grpc-server",
-        action="store_true",
-        default=False,
-        help="Start KServe gRPC server.",
-    )
-    parser.add_argument(
-        "--grpc-metrics-port",
-        type=int,
-        default=8788,
-        help="HTTP metrics port for gRPC service (u16). Only used with --kserve-grpc-server. Defaults to 8788.",
-    )
-    add_config_dump_args(parser)
-    parser.add_argument(
-        "--store-kv",
-        type=str,
-        choices=["etcd", "file", "mem"],
-        default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
-    )
-    parser.add_argument(
-        "--request-plane",
-        type=str,
-        choices=["nats", "http", "tcp"],
-        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
-        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
-    )
-    parser.add_argument(
-        "--event-plane",
-        type=str,
-        choices=["nats", "zmq"],
-        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
-        help="Determines how events are published [nats|zmq]",
-    )
-    parser.add_argument(
-        "--exp-python-factory",
-        action="store_true",
-        default=False,
-        help="[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be created via a Python callback instead of the default Rust pipeline.",
-    )
 
-    flags = parser.parse_args()
+    FrontendArgGroup().add_arguments(parser)
 
-    if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
-        parser.error("--tls-cert-path and --tls-key-path must be provided together")
-    if flags.migration_limit < 0 or flags.migration_limit > 4294967295:
-        parser.error("--migration-limit must be between 0 and 4294967295 (0=disabled)")
+    args, unknown = parser.parse_known_args()
 
-    return flags
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    vllm_flags = None
+
+    # parse extra vllm flags using vllm native parser.
+    if config.chat_processor == "vllm":
+        try:
+            from vllm.utils import FlexibleArgumentParser
+        except ImportError:
+            try:
+                from vllm.utils.argparse_utils import FlexibleArgumentParser
+            except ModuleNotFoundError:
+                logger.exception(
+                    "Flag '--chat-processor vllm' requires vllm be installed."
+                )
+                sys.exit(1)
+        try:
+            from vllm.engine.arg_utils import AsyncEngineArgs
+            from vllm.entrypoints.openai.cli_args import FrontendArgs
+        except ModuleNotFoundError:
+            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
+            sys.exit(1)
+
+        vllm_parser = FlexibleArgumentParser(add_help=False)
+        vllm_parser = FrontendArgs.add_cli_args(vllm_parser)
+        vllm_parser = AsyncEngineArgs.add_cli_args(vllm_parser)
+        # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
+        vllm_flags = vllm_parser.parse_args(unknown)
+    else:
+        if unknown:
+            logger.error(f"Unknown arguments specified: {unknown}")
+            sys.exit(1)
+    return config, vllm_flags
 
 
 async def async_main():
@@ -336,12 +125,12 @@ async def async_main():
     # bind that port before the worker, causing port conflicts and/or scraping the
     # wrong metrics endpoint.
     os.environ.pop("DYN_SYSTEM_PORT", None)
-    flags = parse_args()
-    dump_config(flags.dump_config_to, flags)
-    os.environ["DYN_EVENT_PLANE"] = flags.event_plane
+    config, vllm_flags = parse_args()
+    dump_config(config.dump_config_to, config)
+    os.environ["DYN_EVENT_PLANE"] = config.event_plane
     logger.info(
-        f"Request migration {'enabled' if flags.migration_limit > 0 else 'disabled'} "
-        f"(limit: {flags.migration_limit})"
+        f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
+        f"(limit: {config.migration_limit})"
     )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
@@ -354,29 +143,31 @@ async def async_main():
         )
 
     # Configure Dynamo frontend HTTP service metrics prefix
-    if flags.metrics_prefix is not None:
-        prefix = flags.metrics_prefix.strip()
+    if config.metrics_prefix is not None:
+        prefix = config.metrics_prefix.strip()
         if prefix:
-            os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
+            os.environ["DYN_METRICS_PREFIX"] = config.metrics_prefix
 
     # NATS is needed when:
     # 1. Request plane is NATS, OR
     # 2. Durable KV events (JetStream) is explicitly requested, OR
     # 3. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
     # Note: NATS Core (without JetStream) is the default for KV events when durable_kv_events=False
-    enable_nats = flags.request_plane == "nats" or (
-        flags.router_mode == "kv"
+    enable_nats = config.request_plane == "nats" or (
+        config.router_mode == "kv"
         and (
-            flags.durable_kv_events
+            config.durable_kv_events
             or (
-                flags.event_plane == "nats"
-                and (flags.use_kv_events or flags.router_replica_sync)
+                config.event_plane == "nats"
+                and (config.use_kv_events or config.router_replica_sync)
             )
         )
     )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
+    runtime = DistributedRuntime(
+        loop, config.store_kv, config.request_plane, enable_nats
+    )
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -384,68 +175,80 @@ async def async_main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    if flags.router_mode == "kv":
+    if config.router_mode == "kv":
         router_mode = RouterMode.KV
         kv_router_config = KvRouterConfig(
-            overlap_score_weight=flags.kv_overlap_score_weight,
-            router_temperature=flags.router_temperature,
-            use_kv_events=flags.use_kv_events,
-            durable_kv_events=flags.durable_kv_events,
-            router_replica_sync=flags.router_replica_sync,
-            router_track_active_blocks=flags.router_track_active_blocks,
-            router_track_output_blocks=flags.router_track_output_blocks,
-            router_assume_kv_reuse=flags.router_assume_kv_reuse,
-            router_snapshot_threshold=flags.router_snapshot_threshold,
-            router_reset_states=flags.router_reset_states,
-            router_ttl_secs=flags.router_ttl,
-            router_max_tree_size=flags.router_max_tree_size,
-            router_prune_target_ratio=flags.router_prune_target_ratio,
+            overlap_score_weight=config.kv_overlap_score_weight,
+            router_temperature=config.router_temperature,
+            use_kv_events=config.use_kv_events,
+            durable_kv_events=config.durable_kv_events,
+            router_replica_sync=config.router_replica_sync,
+            router_track_active_blocks=config.router_track_active_blocks,
+            router_track_output_blocks=config.router_track_output_blocks,
+            router_assume_kv_reuse=config.router_assume_kv_reuse,
+            router_snapshot_threshold=config.router_snapshot_threshold,
+            router_reset_states=config.router_reset_states,
+            router_ttl_secs=config.router_ttl,
+            router_max_tree_size=config.router_max_tree_size,
+            router_prune_target_ratio=config.router_prune_target_ratio,
+            router_queue_threshold=config.router_queue_threshold,
+            router_event_threads=config.router_event_threads,
         )
-    elif flags.router_mode == "random":
+    elif config.router_mode == "random":
         router_mode = RouterMode.Random
+        kv_router_config = None
+    elif config.router_mode == "direct":
+        router_mode = RouterMode.Direct
         kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
+    router_config = RouterConfig(
+        router_mode,
+        kv_router_config,
+        active_decode_blocks_threshold=config.active_decode_blocks_threshold,
+        active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
+        active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
+        enforce_disagg=config.enforce_disagg,
+    )
     kwargs = {
-        "http_host": flags.http_host,
-        "http_port": flags.http_port,
-        "kv_cache_block_size": flags.kv_cache_block_size,
-        "router_config": RouterConfig(
-            router_mode,
-            kv_router_config,
-            active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
-            active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
-            active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
-            enforce_disagg=flags.enforce_disagg,
-        ),
-        "migration_limit": flags.migration_limit,
+        "http_host": config.http_host,
+        "http_port": config.http_port,
+        "kv_cache_block_size": config.kv_cache_block_size,
+        "router_config": router_config,
+        "migration_limit": config.migration_limit,
     }
 
-    if flags.model_name:
-        kwargs["model_name"] = flags.model_name
-    if flags.model_path:
-        kwargs["model_path"] = flags.model_path
-    if flags.tls_cert_path:
-        kwargs["tls_cert_path"] = flags.tls_cert_path
-    if flags.tls_key_path:
-        kwargs["tls_key_path"] = flags.tls_key_path
-    if flags.namespace:
-        kwargs["namespace"] = flags.namespace
-    if flags.kserve_grpc_server and flags.grpc_metrics_port:
-        kwargs["http_metrics_port"] = flags.grpc_metrics_port
+    if config.model_name:
+        kwargs["model_name"] = config.model_name
+    if config.model_path:
+        kwargs["model_path"] = config.model_path
+    if config.tls_cert_path:
+        kwargs["tls_cert_path"] = config.tls_cert_path
+    if config.tls_key_path:
+        kwargs["tls_key_path"] = config.tls_key_path
+    if config.namespace:
+        kwargs["namespace"] = config.namespace
+    if config.kserve_grpc_server and config.grpc_metrics_port:
+        kwargs["http_metrics_port"] = config.grpc_metrics_port
 
-    if flags.exp_python_factory:
-        kwargs["engine_factory"] = engine_factory
+    if config.chat_processor == "vllm":
+        assert (
+            vllm_flags is not None
+        ), "vllm_flags is required when chat_processor is vllm"
+        chat_engine_factory = setup_engine_factory(
+            runtime, router_config, config, vllm_flags
+        ).chat_engine_factory
+        kwargs["chat_engine_factory"] = chat_engine_factory
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
 
     try:
-        if flags.interactive:
+        if config.interactive:
             await run_input(runtime, "text", engine)
-        elif flags.kserve_grpc_server:
+        elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
         else:
             await run_input(runtime, "http", engine)

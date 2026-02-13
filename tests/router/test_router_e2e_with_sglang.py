@@ -29,6 +29,7 @@ MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 pytestmark = [
     pytest.mark.e2e,
+    pytest.mark.router,
     pytest.mark.sglang,
     pytest.mark.model(MODEL_NAME),
 ]
@@ -116,6 +117,14 @@ class SGLangProcess:
         self.worker_processes = []
         self.store_backend = store_backend
 
+        # Dynamically allocate unique system and KV event ports (one per worker)
+        # to avoid conflicts in parallel test runs.
+        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        request.addfinalizer(
+            lambda: deallocate_ports(self._system_ports + self._kv_event_ports)
+        )
+
         if sglang_args is None:
             sglang_args = {}
 
@@ -180,8 +189,8 @@ class SGLangProcess:
                 )
 
             # Add per-worker KV events config for ZMQ publishing
-            # Each worker needs a unique port to avoid conflicts
-            kv_events_port = 20080 + worker_idx
+            # Ports are dynamically allocated for xdist-safe parallel execution.
+            kv_events_port = self._kv_event_ports[worker_idx]
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
 
@@ -189,11 +198,16 @@ class SGLangProcess:
             if durable_kv_events:
                 command.append("--durable-kv-events")
 
+            # Each SGLang worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
+            # Ports are dynamically allocated for xdist-safe parallel execution.
+            system_port = self._system_ports[worker_idx]
+
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
                 "CUDA_VISIBLE_DEVICES": gpu_device,
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
+                "DYN_SYSTEM_PORT": str(system_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
 
@@ -218,13 +232,13 @@ class SGLangProcess:
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, kv_port={kv_events_port}) "
+                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created SGLang worker {worker_idx} on GPU {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, kv_port={kv_events_port}) "
+                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
@@ -342,18 +356,16 @@ def test_sglang_kv_router_basic(
         f"Starting SGLang KV router test with {N_SGLANG_WORKERS} workers using request_plane={request_plane}"
     )
 
-    try:
+    with SGLangProcess(
+        request,
+        sglang_args=SGLANG_ARGS,
+        num_workers=N_SGLANG_WORKERS,
+        single_gpu=True,  # fit workers into one GPU
+        request_plane=request_plane,
+    ) as sglang_workers:
         # Start SGLang workers
         logger.info(f"Starting {N_SGLANG_WORKERS} SGLang workers")
-        sglang_workers = SGLangProcess(
-            request,
-            sglang_args=SGLANG_ARGS,
-            num_workers=N_SGLANG_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-            request_plane=request_plane,
-        )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
-        sglang_workers.__enter__()
 
         # Run basic router test (starts router internally and waits for workers to be ready)
         frontend_port = allocate_frontend_ports(request, 1)[0]
@@ -369,56 +381,51 @@ def test_sglang_kv_router_basic(
             request_plane=request_plane,
         )
 
-    finally:
-        if "sglang_workers" in locals():
-            sglang_workers.__exit__(None, None, None)
-
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.skip(reason="Broken by sglang changes")
-# TODO: Re-enable this test once https://github.com/sgl-project/sglang/pull/14934 is merged
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "router_event_threads",
+    [1, 2],
+    ids=["single_thread", "multi_thread"],
+)
 def test_router_decisions_sglang_multiple_workers(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
+    router_event_threads,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting SGLang router prefix reuse test with two workers")
     N_WORKERS = 2
 
-    try:
+    with SGLangProcess(
+        request,
+        sglang_args=SGLANG_ARGS,
+        num_workers=N_WORKERS,
+        single_gpu=True,  # Worker uses GPU 0
+        request_plane=request_plane,
+    ) as sglang_workers:
         # Start 2 worker processes on the same GPU
         logger.info("Starting 2 SGLang worker processes on single GPU (mem_frac=0.4)")
-        sglang_workers = SGLangProcess(
-            request,
-            sglang_args=SGLANG_ARGS,
-            num_workers=N_WORKERS,
-            single_gpu=True,  # Worker uses GPU 0
-            request_plane=request_plane,
-        )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
 
-        # Initialize SGLang workers
-        sglang_workers.__enter__()
-
-        # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         namespace = runtime.namespace(sglang_workers.namespace)
         component = namespace.component("backend")
         endpoint = component.endpoint("generate")
 
         _test_router_decisions(
-            sglang_workers, endpoint, MODEL_NAME, request, test_dp_rank=False
+            sglang_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=False,
+            router_event_threads=router_event_threads,
         )
-
-    finally:
-        # Clean up SGLang workers
-        if "sglang_workers" in locals():
-            sglang_workers.__exit__(None, None, None)
 
 
 @pytest.mark.gpu_2
@@ -442,18 +449,16 @@ def test_router_decisions_sglang_dp(
     N_WORKERS = 1
     DP_SIZE = 2
 
-    try:
+    with SGLangProcess(
+        request,
+        sglang_args=SGLANG_ARGS,
+        num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
+        single_gpu=False,
+        data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
+        request_plane=request_plane,
+    ) as sglang_workers:
         logger.info("Starting 2 SGLang DP ranks (dp_size=2) (mem_frac=0.4)")
-        sglang_workers = SGLangProcess(
-            request,
-            sglang_args=SGLANG_ARGS,
-            num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
-            single_gpu=False,
-            data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
-            request_plane=request_plane,
-        )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
-        sglang_workers.__enter__()
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
@@ -465,11 +470,6 @@ def test_router_decisions_sglang_dp(
         _test_router_decisions(
             sglang_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
         )
-
-    finally:
-        # Clean up SGLang workers
-        if "sglang_workers" in locals():
-            sglang_workers.__exit__(None, None, None)
 
 
 @pytest.mark.pre_merge
@@ -511,20 +511,18 @@ def test_sglang_indexers_sync(
 
     N_SGLANG_WORKERS = 2
 
-    try:
+    with SGLangProcess(
+        request,
+        sglang_args=SGLANG_ARGS,
+        num_workers=N_SGLANG_WORKERS,
+        single_gpu=True,  # fit workers into one GPU
+        request_plane=request_plane,
+        store_backend=store_backend,
+        durable_kv_events=durable_kv_events,
+    ) as sglang_workers:
         # Start SGLang workers
         logger.info(f"Starting {N_SGLANG_WORKERS} SGLang workers")
-        sglang_workers = SGLangProcess(
-            request,
-            sglang_args=SGLANG_ARGS,
-            num_workers=N_SGLANG_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-            request_plane=request_plane,
-            store_backend=store_backend,
-            durable_kv_events=durable_kv_events,
-        )
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
-        sglang_workers.__enter__()
 
         # Use the common test implementation (creates its own runtimes for each router)
         # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
@@ -542,7 +540,3 @@ def test_sglang_indexers_sync(
         )
 
         logger.info("SGLang indexers sync test completed successfully")
-
-    finally:
-        if "sglang_workers" in locals():
-            sglang_workers.__exit__(None, None, None)

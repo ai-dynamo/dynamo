@@ -22,7 +22,13 @@ dynamo/
 ├── components/
 │   ├── src/dynamo/
 │   |   └── planner/
+│   |   |   └── zoo.py
+│   |   |   └── foo/
+│   |   |   |   └── bar.py
 │   │   │   └── tests/              # Python unit/integration tests for planner
+│   │   │   |   └── test_zoo.py
+│   │   │   |   └── foo/            # Mirror the source code file hierarchy
+│   │   │   |   |   └── test_bar.py
 │   |   └── router/
 │   │   │   └── tests/
 │   |   └── ...
@@ -129,7 +135,7 @@ then this test will be included in the nightly run as well.
   ```
 - Run in container:
   ```bash
-  python container/render.py --framework=${FRAMEWORK} --target=runtime --short-output
+  python container/render.py --framework=${FRAMEWORK} --target=runtime --output-short-filename
   docker build -t dynamo:${FRAMEWORK}-latest -f container/rendered.Dockerfile .
   ./container/run.sh --mount-workspace -it -- pytest
   ./container/run.sh --mount-workspace -it -- pytest -m [optional markers]

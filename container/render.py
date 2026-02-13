@@ -4,7 +4,6 @@
 
 import argparse
 import re
-import sys
 from pathlib import Path
 
 import yaml
@@ -41,9 +40,9 @@ def parse_args():
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
-        "--short-output",
+        "--output-short-filename",
         action="store_true",
-        help="Output filename is just rendered.Dockerfile",
+        help="Output filename is rendered.Dockerfile instead of <framework>-<target>-cuda<cuda_version>-<arch>-rendered.Dockerfile",
     )
     parser.add_argument(
         "--show-result",
@@ -55,7 +54,23 @@ def parse_args():
 
 
 def validate_args(args):
-    # TODO: Add validation logic
+    valid_inputs = {
+        "vllm": {"runtime", "dev", "local-dev", "framework", "wheel_builder", "base"},
+        "trtllm": {"runtime", "dev", "local-dev", "framework", "wheel_builder", "base"},
+        "sglang": {"runtime", "dev", "local-dev", "wheel_builder", "base"},
+        "dynamo": {"runtime", "dev", "local-dev", "frontend", "wheel_builder", "base"},
+    }
+
+    if args.framework in valid_inputs:
+        if args.target in valid_inputs[args.framework]:
+            return
+        raise ValueError(
+            f"Invalid input combination: [framework={args.framework},target={args.target}]"
+        )
+
+    raise ValueError(
+        f"Invalid input combination: [framework={args.framework},target={args.target}]"
+    )
     return
 
 
@@ -75,7 +90,7 @@ def render(args, context, script_dir):
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
 
-    if args.short_output:
+    if args.output_short_filename:
         filename = "rendered.Dockerfile"
     else:
         filename = f"{args.framework}-{args.target}-cuda{args.cuda_version}-{args.platform}-rendered.Dockerfile"
@@ -98,7 +113,7 @@ def render(args, context, script_dir):
 def main():
     args = parse_args()
     validate_args(args)
-    script_dir = Path(sys.argv[0]).parent
+    script_dir = Path(__file__).parent
     with open(f"{script_dir}/context.yaml", "r") as f:
         context = yaml.safe_load(f)
 

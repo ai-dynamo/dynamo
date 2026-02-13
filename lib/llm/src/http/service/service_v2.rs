@@ -16,8 +16,9 @@ use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
 use super::metrics::register_worker_timing_metrics;
-use crate::discovery::{ModelManager, register_worker_load_metrics};
+use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
+use crate::kv_router::metrics::{register_routing_overhead_metrics, register_worker_load_metrics};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -47,6 +48,7 @@ struct StateFlags {
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
+    videos_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
 }
 
@@ -57,6 +59,7 @@ impl StateFlags {
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
@@ -74,6 +77,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Images => self
                 .images_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Videos => self
+                .videos_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
@@ -106,6 +112,7 @@ impl State {
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
+                videos_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
@@ -391,6 +398,12 @@ impl HttpServiceConfigBuilder {
             tracing::warn!("Failed to register worker timing metrics: {}", e);
         }
 
+        // Register routing overhead metrics (block hashing, find matches, scheduling latencies)
+        // These are updated by KvRouter::find_best_match on every routing decision
+        if let Err(e) = register_routing_overhead_metrics(&registry) {
+            tracing::warn!("Failed to register routing overhead metrics: {}", e);
+        }
+
         let mut router = axum::Router::new();
 
         let mut all_docs = Vec::new();
@@ -484,6 +497,7 @@ impl HttpServiceConfigBuilder {
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
+        let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
@@ -495,6 +509,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
+        endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
         for endpoint_type in EndpointType::all() {
