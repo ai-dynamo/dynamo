@@ -139,12 +139,12 @@ class TrtllmConfigModifier(BaseConfigModifier):
             ):
                 override_dict["kv_cache_config"] = {}
             override_dict["kv_cache_config"]["enable_block_reuse"] = False
-            override_dict["disable_overlap_scheduler"] = (
-                False  # Enable overlap scheduler for agg
-            )
-            override_dict["cache_transceiver_config"] = (
-                None  # Remove cache transceiver for agg
-            )
+            override_dict[
+                "disable_overlap_scheduler"
+            ] = False  # Enable overlap scheduler for agg
+            override_dict[
+                "cache_transceiver_config"
+            ] = None  # Remove cache transceiver for agg
 
             override_str = json.dumps(override_dict)
             args = append_argument(args, ["--override-engine-args", override_str])
@@ -192,9 +192,9 @@ class TrtllmConfigModifier(BaseConfigModifier):
             ):
                 override_dict["kv_cache_config"] = {}
             override_dict["kv_cache_config"]["enable_block_reuse"] = True
-            override_dict["cache_transceiver_config"] = (
-                None  # Remove cache transceiver for agg
-            )
+            override_dict[
+                "cache_transceiver_config"
+            ] = None  # Remove cache transceiver for agg
 
             override_str = json.dumps(override_dict)
             args = append_argument(args, ["--override-engine-args", override_str])

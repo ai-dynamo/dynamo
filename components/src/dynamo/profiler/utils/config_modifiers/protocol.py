@@ -49,7 +49,8 @@ class ConfigModifierProtocol(Protocol):
         config: dict,
         target: EngineType,
         is_moe_model: bool = False,
-    ) -> dict: ...
+    ) -> dict:
+        ...
 
     @classmethod
     def set_config_tp_size(
@@ -57,7 +58,8 @@ class ConfigModifierProtocol(Protocol):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ) -> dict: ...
+    ) -> dict:
+        ...
 
     @classmethod
     def set_config_tep_size(
@@ -66,7 +68,8 @@ class ConfigModifierProtocol(Protocol):
         tep_size: int,
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ) -> dict: ...
+    ) -> dict:
+        ...
 
     @classmethod
     def set_config_dep_size(
@@ -75,10 +78,12 @@ class ConfigModifierProtocol(Protocol):
         dep_size: int,
         num_gpus_per_node: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ) -> dict: ...
+    ) -> dict:
+        ...
 
     @classmethod
-    def get_model_name(cls, config: dict) -> Tuple[str, str]: ...
+    def get_model_name(cls, config: dict) -> Tuple[str, str]:
+        ...
 
     @classmethod
     def set_prefill_config(
@@ -87,33 +92,40 @@ class ConfigModifierProtocol(Protocol):
         max_batch_size: int,
         max_num_tokens: int,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ) -> dict: ...
+    ) -> dict:
+        ...
 
     @classmethod
     def set_decode_config(
         cls,
         config: dict,
         component_type: SubComponentType = SubComponentType.DECODE,
-    ) -> dict: ...
+    ) -> dict:
+        ...
 
     @classmethod
-    def get_port(cls, config: dict) -> int: ...
+    def get_port(cls, config: dict) -> int:
+        ...
 
     @classmethod
     def get_kv_cache_size_from_dynamo_log(
         cls, dynamo_log_fn: str, attention_dp_size: int = 1
-    ) -> int: ...
+    ) -> int:
+        ...
 
     @classmethod
-    def load_default_config(cls, mode: str = "disagg") -> dict: ...
+    def load_default_config(cls, mode: str = "disagg") -> dict:
+        ...
 
     @classmethod
     def update_model(
         cls, config: dict, model_name: str, model_path: str | None = None
-    ) -> dict: ...
+    ) -> dict:
+        ...
 
     @classmethod
-    def update_image(cls, config: dict, image: str) -> dict: ...
+    def update_image(cls, config: dict, image: str) -> dict:
+        ...
 
     @classmethod
     def update_model_from_pvc(
@@ -123,7 +135,8 @@ class ConfigModifierProtocol(Protocol):
         pvc_name: str,
         pvc_mount_path: str,
         pvc_path: str,
-    ) -> dict: ...
+    ) -> dict:
+        ...
 
 
 class BaseConfigModifier:
