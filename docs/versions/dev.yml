@@ -253,8 +253,6 @@ navigation:
       - page: Model Caching with Fluid
         path: ../pages/kubernetes/model-caching-with-fluid.md
       # -- Reference --
-      - page: CLI Reference
-        path: ../pages/reference/cli.md
       - page: Glossary
         path: ../pages/reference/glossary.md
       - page: Tuning Disaggregated Performance

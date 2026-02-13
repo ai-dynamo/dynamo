@@ -1,6 +1,8 @@
-# KV Router Index Data Structures
+# ⚡ FlashIndexer — KV Router Index Data Structures
 
-This document explains the KV cache index implementations: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` (NestedMap).
+This document explains the KV cache index implementations: `RadixTree` (and its concurrent variant `ConcurrentRadixTree`) and `PositionalIndexer` (NestedMap).
+
+The concurrent indexers achieve a combined throughput of over **10 million events + requests per second** with **p99 latency under 10 microseconds**.
 
 ## Motivation: The Four Block Identifiers
 
@@ -27,8 +29,8 @@ LocalBlockHash = hash(tokens) = 0xABCD1234
 Sequence A: [block0, block1, block2]
 Sequence B: [block0', block1', block2]  // block2 has same content but different prefix
 
-block2 in A: seq_hash = hash(hash(hash(block0) + block1) + block2) = 0x1111
-block2 in B: seq_hash = hash(hash(hash(block0') + block1') + block2) = 0x2222
+block2 in A: seq_hash = hash(hash(hash(block0) || block1) || block2) = 0x1111
+block2 in B: seq_hash = hash(hash(hash(block0') || block1') || block2) = 0x2222
 ```
 
 **Computation**: `seq_hash[i] = hash(seq_hash[i-1] || local_hash[i])` where `seq_hash[0] = local_hash[0]`
@@ -53,7 +55,7 @@ block2 in B: seq_hash = hash(hash(hash(block0') + block1') + block2) = 0x2222
 
 **Why**: The router needs to know which workers can serve a request based on their cached blocks.
 
-### 4. Position (`u64`)
+### 4. Position (`usize`)
 
 **What**: The block's index in the sequence (0, 1, 2, ...).
 
@@ -65,13 +67,13 @@ block2 in B: seq_hash = hash(hash(hash(block0') + block1') + block2) = 0x2222
 
 Both data structures support three operations:
 
-| Operation | Description | Hot Path? |
-|-----------|-------------|-----------|
-| `store_blocks` | Add blocks for a worker | No (background) |
-| `remove_blocks` | Remove blocks for a worker | No (background) |
-| `find_matches` | Find workers with matching prefix | **Yes** (per-request) |
+| Operation | Description |
+|-----------|-------------|
+| `store_blocks` | Add blocks for a worker (background) |
+| `remove_blocks` | Remove blocks for a worker (background) |
+| `find_matches` | Find workers with matching prefix (per-request) |
 
-The key insight: **reads (find_matches) are far more frequent than writes (store/remove)**. This motivates different structural tradeoffs.
+**Read vs write cost and frequency**: When the radix tree has little or no shared prefix for a request, `find_matches` can exit after a single root-level lookup (first block miss)—reads then do less work than writes (which traverse and update multiple nodes). Vice versa, with large prefix overlap, reads traverse deeper and can be invoked more often than writes. We consider both extremes; the proposed data structures are designed to handle them.
 
 ---
 
@@ -145,6 +147,36 @@ RadixBlock
 | find_matches (depth D) | O(D × W) | O(W) |
 
 Where W = number of workers.
+
+---
+
+## ConcurrentRadixTree: Thread-Safe Variant
+
+`ConcurrentRadixTree` adapts the `RadixTree` for concurrent access. The key change is replacing `Rc<RefCell<>>` with `Arc<RwLock<>>` per node, and using a `DashMap` for the per-worker lookup table:
+
+```
+ConcurrentRadixTree
+├── root: SharedBlock (Arc<RwLock<Block>>)
+└── lookup: DashMap<Worker, RwLock<HashMap<SeqHash, SharedBlock>>>
+```
+
+The `DashMap` distributes lock contention across shards, while each worker's block map is behind its own `RwLock`. This means `find_matches` only takes read locks — on the tree nodes and on the lookup — so multiple reads can proceed in parallel without blocking each other.
+
+Writes (`store_blocks`, `remove_blocks`) take write locks on the affected nodes using hand-over-hand locking (parent before child). To avoid write–write contention, `ConcurrentRadixTree` is designed to be wrapped in a `ThreadPoolIndexer`, which uses per-worker sticky routing: each `WorkerId` is assigned to a dedicated OS thread via a `DashMap<WorkerId, usize>` mapping, and events are dispatched through per-thread `flume` channels. Since KV events for a given worker always land on the same thread, writes to that worker's subtree are serialized without cross-thread locking.
+
+```
+                   ┌──────────────────────────────────┐
+find_matches() ──→ │   Arc<ConcurrentRadixTree>       │ ← reads go inline
+                   │                                  │
+ KV events ──→ flume[0] ──→ thread 0 (W0, W3) ──→     │
+           ──→ flume[1] ──→ thread 1 (W1, W4) ──→     │ ← writes via sticky
+           ──→ flume[2] ──→ thread 2 (W2, W5) ──→     │   worker assignment
+                   └──────────────────────────────────┘
+```
+
+This same pattern — inline reads on the caller thread, sticky-routed writes through a thread pool — is shared with `PositionalIndexer` (see below). Both implement the `SyncIndexer` trait and are wrapped in `ThreadPoolIndexer`.
+
+One trade-off: `ConcurrentRadixTree` drops the `recent_uses` frequency tracking from `RadixTree`, keeping `find_matches` fully read-only (no mutable state updates on the read path).
 
 ---
 
@@ -250,9 +282,9 @@ Query: [b0, b1, b2, ..., b63, b64, ..., b127, ...]
 |-----------|------|-------|
 | store_blocks (N blocks) | O(N) | O(N) entries |
 | remove_blocks (N blocks) | O(N) | - |
-| find_matches (depth D) | O(D/J + J×W) | O(W) |
+| find_matches (depth D) | O(D/J) | O(W) |
 
-Where J = jump_size, W = number of workers. The jump optimization reduces D iterations to D/J jumps plus occasional scans.
+Where J = jump_size, W = number of workers. The jump optimization reduces D sequential lookups to D/J jumps, with occasional linear scans over skipped positions when workers drop out at a jump point.
 
 ---
 
@@ -268,17 +300,6 @@ Where J = jump_size, W = number of workers. The jump optimization reduces D iter
 | **dump_events** | BFS traversal of tree | Sort by position per worker |
 | **Memory** | Higher (Rc/Arc overhead per node) | Lower (flat entries) |
 | **Cache locality** | Poor (pointer chasing) | Better (position-first) |
-
-### Benchmark Results (1M blocks, depth 1024, 128 workers)
-
-| Operation | RadixTree | NestedMap | Winner |
-|-----------|-----------|-----------|--------|
-| STORE_BLOCK | 90µs | 98µs | RadixTree (1.1x) |
-| REMOVE_BLOCK | 91µs | 233µs | RadixTree (2.5x) |
-| FIND_MATCHES (HIT) | 227µs | **44µs** | **NestedMap (5.2x)** |
-| FIND_MATCHES (PARTIAL) | 216µs | **44µs** | **NestedMap (4.9x)** |
-
-**Recommendation**: Use NestedMap for read-heavy workloads (typical router usage).
 
 ---
 
@@ -297,36 +318,3 @@ let workers_at_64 = index.get(&(64, local_hashes[64]));  // O(1) lookup
 let workers_at_128 = index.get(&(128, local_hashes[128]));  // O(1) lookup
 // Skip positions 1-63, 65-127 entirely!
 ```
-
----
-
-## SeqEntry Optimization
-
-The innermost level uses an enum to avoid HashMap allocation in the common case:
-
-```rust
-enum SeqEntry {
-    // Common: one prefix leads to this (position, local_hash)
-    Single(SeqHash, HashSet<Worker>),
-
-    // Rare: different prefixes converge on same (position, local_hash)
-    Multi(HashMap<SeqHash, HashSet<Worker>>),
-}
-```
-
-**When does Multi occur?**
-
-Only when two different sequences have:
-1. Same local block content at position P
-2. Different prefix histories (different seq_hash)
-
-Example:
-```
-Sequence A: [tok1, tok2, tok3] → positions 0,1,2
-Sequence B: [tok4, tok5, tok3] → positions 0,1,2
-                       ^^^^
-                 Same local content at pos=2
-                 but different seq_hash!
-```
-
-This is rare in practice, so `Single` saves ~48 bytes per entry.
