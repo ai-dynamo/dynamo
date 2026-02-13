@@ -20,6 +20,7 @@ use dynamo_runtime::{
 };
 use futures::stream;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 use validator::Validate;
 
 // Re-export from dynamo-kv-router crate
@@ -383,18 +384,25 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
+            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, None));
         let hash_elapsed = start.elapsed();
 
-        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+        let overlap_scores = self
+            .indexer
+            .find_matches(block_hashes)
+            .instrument(tracing::info_span!("kv_router.find_matches"))
+            .await?;
         let find_matches_elapsed = start.elapsed();
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
-        let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
-            tokens,
-            self.block_size,
-            router_config_override,
-        );
+        let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
+            self.kv_router_config.compute_seq_hashes_for_tracking(
+                tokens,
+                self.block_size,
+                router_config_override,
+            )
+        });
         let seq_hash_elapsed = start.elapsed();
 
         let best_worker = self
@@ -409,6 +417,7 @@ impl KvRouter {
                 lora_name,
                 priority_jump,
             )
+            .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
         let total_elapsed = start.elapsed();
 
