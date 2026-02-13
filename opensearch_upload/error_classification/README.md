@@ -15,11 +15,10 @@ This system classifies test failures, Docker build errors, Rust tests, and infra
 
 - **classifier.py** - Core classification orchestration
 - **claude_client.py** - Claude API wrapper with caching and rate limiting
-- **deduplicator.py** - Error normalization and deduplication
 - **error_extractor.py** - ErrorContext data structure for error information
 - **config.py** - Configuration management
 - **prompts.py** - Claude API prompt templates
-- **github_annotator.py** - GitHub annotations and PR comments
+- **pr_commentator.py** - GitHub PR comment generation with Claude-powered summaries
 
 ### Processing Modes
 

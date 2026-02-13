@@ -7,10 +7,8 @@ from .classifier import ErrorClassifier, ErrorClassification
 from .error_extractor import ErrorContext
 from .claude_client import ClaudeClient
 from .prompts import get_category_definitions
-from .github_annotator import (
-    GitHubAnnotator,
-    AnnotationConfig,
-    create_annotations_for_classifications,
+from .pr_commentator import (
+    PRCommentator,
     CATEGORY_SEVERITY,
 )
 
@@ -28,10 +26,8 @@ __all__ = [
     "ClaudeClient",
     # Prompts
     "get_category_definitions",
-    # GitHub annotations
-    "GitHubAnnotator",
-    "AnnotationConfig",
-    "create_annotations_for_classifications",
+    # PR comments
+    "PRCommentator",
     "CATEGORY_SEVERITY",
 ]
 

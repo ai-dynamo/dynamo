@@ -27,8 +27,7 @@ from opensearch_upload.error_classification import (
     Config,
     ErrorClassifier,
     ErrorContext,
-    GitHubAnnotator,
-    AnnotationConfig,
+    PRCommentator,
 )
 
 
@@ -564,11 +563,10 @@ def classify_and_annotate_workflow_errors():
         # Load config
         config = Config.from_env()
 
-        # Initialize classifier and annotator
+        # Initialize classifier and PR commentator
         classifier = ErrorClassifier(config)
-        # Pass Claude client to annotator for intelligent summary generation
-        annotator = GitHubAnnotator(
-            config=AnnotationConfig.from_env(),
+        # Pass Claude client to PR commentator for intelligent summary generation
+        commentator = PRCommentator(
             claude_client=classifier.claude
         )
 
@@ -717,28 +715,6 @@ def classify_and_annotate_workflow_errors():
 
         # Create GitHub annotations for all classifications
         if classifications:
-            print("\n" + "=" * 70)
-            print("📝 Creating GitHub annotations...")
-            print("=" * 70)
-
-            try:
-                success = annotator.create_check_run_with_annotations(
-                    classifications,
-                    error_contexts
-                )
-
-                if success:
-                    print("✅ GitHub annotations created successfully")
-                    print(f"   {len(classifications)} errors annotated")
-                else:
-                    print("⚠️  GitHub annotations not created")
-                    print("   (May be disabled or unavailable)")
-
-            except Exception as e:
-                print(f"⚠️  Failed to create GitHub annotations: {e}")
-                import traceback
-                traceback.print_exc()
-
         # Create PR comment with summary
         if classifications:
             # Check if PR comments are enabled
@@ -750,7 +726,7 @@ def classify_and_annotate_workflow_errors():
                 print("=" * 70)
 
                 try:
-                    success = annotator.create_pr_comment(
+                    success = commentator.create_pr_comment(
                         classifications,
                         error_contexts
                     )
@@ -795,11 +771,11 @@ def classify_and_annotate_workflow_errors():
             print(f"   - Completion tokens: {total_completion_tokens:,}")
             print(f"   - Cached tokens: {total_cached_tokens:,}")
 
-        if annotator.is_available():
-            print(f"📝 GitHub annotations: {'enabled' if annotator.config.enabled else 'disabled'}")
-
         enable_pr_comments = os.getenv("ENABLE_PR_COMMENTS", "true").lower() == "true"
-        print(f"💬 PR comments: {'enabled' if enable_pr_comments else 'disabled'}")
+        if commentator.is_available():
+            print(f"💬 PR comments: {'enabled' if enable_pr_comments else 'disabled'}")
+        else:
+            print(f"💬 PR comments: unavailable (not in GitHub Actions or missing token)")
 
         print("=" * 70)
 
