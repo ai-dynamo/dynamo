@@ -236,14 +236,13 @@ jobs:
     runs-on: prod-default-small-v2
     # Run when any deploy test will run: if core, any framework, or deploy files changed
     if: |
-      always() &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
-      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
-    needs: [changed-files, operator]
+      needs.backend-status-check.result == 'success'
+    needs: [changed-files, operator, backend-status-check]
     outputs:
       NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
     steps:
