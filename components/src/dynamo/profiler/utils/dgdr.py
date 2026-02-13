@@ -13,7 +13,7 @@ class Backend(str, Enum):
     VLLM = "vllm"
     SGLANG = "sglang"
     TRTLLM = "trtllm"
-    ANY = "any"
+    AUTO = "auto"
 
 
 class SweepMode(str, Enum):
@@ -42,9 +42,8 @@ class BackendSpec(BaseModel):
         description="Inference backend to use.",
     )
     dynamo_image: str = Field(
-        description="Full K8s container image reference (e.g. "
+        description="Full K8s dynamo image reference (e.g. "
         "'nvcr.io/nvidia/dynamo-runtime:latest'). "
-        "If only a tag is supplied the operator may resolve the full image path.",
     )
 
 
@@ -55,6 +54,7 @@ class HardwareSpec(BaseModel):
     )
     vram_mb: float = Field(
         ...,
+        gt=0,
         description="VRAM per GPU in MiB.",
     )
     total_gpus: int = Field(
@@ -82,48 +82,48 @@ class WorkloadSpec(BaseModel):
         default=None,
         gt=0,
         description="Target concurrency level. "
-        "Required (or request_rate) when the planner is disabled."
+        "Required (or request_rate) when the planner is disabled. "
         "Will be ignored if the planner is enabled.",
     )
     request_rate: Optional[float] = Field(
         default=None,
         gt=0,
         description="Target request rate (req/s). "
-        "Required (or concurrency) when the planner is disabled."
+        "Required (or concurrency) when the planner is disabled. "
         "Will be ignored if the planner is enabled.",
     )
 
 
 class SLASpec(BaseModel):
-    ttft_ms: Optional[float] = Field(
+    ttft: Optional[float] = Field(
         default=None,
         description="Target Time-To-First-Token in milliseconds.",
     )
-    itl_ms: Optional[float] = Field(
+    itl: Optional[float] = Field(
         default=None,
         description="Target Inter-Token Latency in milliseconds.",
     )
-    e2e_latency_ms: Optional[float] = Field(
+    e2e_latency: Optional[float] = Field(
         default=None,
         description="Target end-to-end request latency in milliseconds. "
-        "Alternative to specifying ttft_ms + itl_ms.",
+        "Alternative to specifying ttft + itl.",
     )
 
     @model_validator(mode="after")
     def _validate_sla_option(self) -> "SLASpec":
-        has_ttft_itl = self.ttft_ms is not None and self.itl_ms is not None
-        has_e2e = self.e2e_latency_ms is not None
+        has_ttft_itl = self.ttft is not None and self.itl is not None
+        has_e2e = self.e2e_latency is not None
 
         if not has_ttft_itl and not has_e2e:
             raise ValueError(
-                "SLA must specify either (ttft_ms and itl_ms) or e2e_latency_ms."
+                "SLA must specify either (ttft and itl) or e2e_latency."
             )
         if has_ttft_itl and has_e2e:
             raise ValueError(
-                "SLA must specify either (ttft_ms and itl_ms) or e2e_latency_ms, not both."
+                "SLA must specify either (ttft and itl) or e2e_latency, not both."
             )
-        if (self.ttft_ms is not None) != (self.itl_ms is not None):
-            raise ValueError("ttft_ms and itl_ms must both be provided together.")
+        if (self.ttft is not None) != (self.itl is not None):
+            raise ValueError("ttft and itl must both be provided together.")
         return self
 
 
@@ -161,6 +161,33 @@ class PlannerSpec(BaseModel):
     )
 
 
+class FeaturesSpec(BaseModel):
+    """Feature toggles (planner, mocker)."""
+
+    planner: PlannerSpec = Field(
+        default_factory=PlannerSpec,
+        description="Planner configuration. Disabled by default.",
+    )
+    mocker: MockerSpec = Field(
+        default_factory=MockerSpec,
+        description="Mocker configuration. Disabled by default.",
+    )
+
+    @model_validator(mode="after")
+    def _mocker_requires_planner_pre_deployment_sweeping(self) -> "FeaturesSpec":
+        if self.mocker.enabled and (
+            self.planner.planner_pre_deployment_sweeping is None
+            or self.planner.planner_pre_deployment_sweeping
+            == PlannerPreDeploymentSweepMode.NONE
+        ):
+            raise ValueError(
+                "Mocker requires planner pre-deployment sweeping to be enabled "
+                "(set to 'rapid' or 'thorough') because it relies on in-depth "
+                "profiling data produced during the sweep."
+            )
+        return self
+
+
 class AugmentedDGDR(BaseModel):
     """User input DGDR + operator-augmented fields.
 
@@ -193,13 +220,9 @@ class AugmentedDGDR(BaseModel):
         default=SweepMode.RAPID,
         description="Overall sweep thoroughness: rapid or thorough.",
     )
-    planner: PlannerSpec = Field(
-        default_factory=PlannerSpec,
-        description="Planner configuration. Disabled by default.",
-    )
-    mocker: MockerSpec = Field(
-        default_factory=MockerSpec,
-        description="Mocker configuration. Disabled by default.",
+    features: FeaturesSpec = Field(
+        default_factory=FeaturesSpec,
+        description="Feature toggles (planner, mocker, etc.).",
     )
 
     @model_validator(mode="after")
@@ -208,24 +231,10 @@ class AugmentedDGDR(BaseModel):
             self.workload.concurrency is not None
             or self.workload.request_rate is not None
         )
-        if not self.planner.enabled and not has_load:
+        if not self.features.planner.enabled and not has_load:
             raise ValueError(
                 "When the planner is disabled, either 'workload.concurrency' or "
                 "'workload.request_rate' must be provided."
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _mocker_requires_planner_pre_deployment_sweeping(self) -> "AugmentedDGDR":
-        if self.mocker.enabled and (
-            self.planner.planner_pre_deployment_sweeping is None
-            or self.planner.planner_pre_deployment_sweeping
-            == PlannerPreDeploymentSweepMode.NONE
-        ):
-            raise ValueError(
-                "Mocker requires planner pre-deployment sweeping to be enabled "
-                "(set to 'rapid' or 'thorough') because it relies on in-depth "
-                "profiling data produced during the sweep."
             )
         return self
 
