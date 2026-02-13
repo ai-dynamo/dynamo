@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Tracing
 ---
 
 # Distributed Tracing with Tempo
@@ -144,7 +145,7 @@ http://localhost:8000/v1/chat/completions
 
 Below is an example of what a trace looks like in Grafana Tempo:
 
-![Trace Example](/assets/img/trace.png)
+![Trace Example](../../assets/img/trace.png)
 
 ### 6. Stop Services
 

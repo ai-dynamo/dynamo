@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Planner Design
 ---
 
 # Planner Design
@@ -13,7 +14,7 @@ The Planner is Dynamo's autoscaling controller. It observes system metrics, pred
 
 ## Architecture
 
-![Planner architecture showing Metric Collector, Load Predictor, and Performance Interpolator feeding into the Scaling Algorithm and Connector Layer](/assets/img/planner-architecture.svg)
+![Planner architecture showing Metric Collector, Load Predictor, and Performance Interpolator feeding into the Scaling Algorithm and Connector Layer](../../assets/img/planner-architecture.svg)
 
 ## Scaling Algorithm
 

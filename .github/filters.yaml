@@ -44,7 +44,6 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
-  - 'launch/**'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
@@ -110,6 +109,7 @@ deploy:
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
+  - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
 
 vllm:
