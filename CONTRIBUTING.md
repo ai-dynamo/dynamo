@@ -205,7 +205,7 @@ For larger contributions, follow these steps:
 
 6. **Address Code Rabbit Review** – Respond to automated Code Rabbit suggestions, including nitpicks.
 
-7. **Trigger CI Tests** – A Dynamo maintainer must comment `/ok to test <commit-id>` to run the full CI suite, where `<commit-id>` is the short SHA of your latest commit. **Important**: This must be re-issued after every new push — the approval is per-commit, not per-PR. Fix any failing tests before requesting human review. If you're unsure what's failing, comment `/lgtm-bot diagnose` on your PR for a detailed analysis.
+7. **Trigger CI Tests** – A Dynamo maintainer must comment `/ok to test <commit-id>` to run the full CI suite, where `<commit-id>` is the short SHA of your latest commit. **Important**: This must be re-issued after every new push — the approval is per-commit, not per-PR. Fix any failing tests before requesting human review. If you're unsure what's failing, comment `/diagnose` on your PR for a detailed analysis.
 
 8. **Request Review** – CODEOWNERS team reviews are automatically requested when your PR is opened. The bot also posts a comment listing which teams are required and why. You can add additional reviewers manually — check [CODEOWNERS](CODEOWNERS) for the full list of required approvers based on files modified.
 
@@ -227,7 +227,7 @@ The LGTM Bot automates merge readiness tracking for all PRs. Here's what it does
 
 ### On-Demand Diagnostics
 
-Comment `/lgtm-bot diagnose` on any PR to get a detailed analysis of what's blocking merge:
+Comment `/diagnose` on any PR to get a detailed analysis of what's blocking merge:
 
 - **CI failures** – Lists failing checks with links to logs and (when available) AI-powered fix suggestions
 - **Missing reviews** – Shows which CODEOWNERS teams still need to review
@@ -235,6 +235,14 @@ Comment `/lgtm-bot diagnose` on any PR to get a detailed analysis of what's bloc
 - **Merge conflicts** – Detects conflicts and suggests rebasing
 - **DCO / PR title** – Checks for DCO sign-off and conventional commit format
 - **CI trigger status** – Shows whether full CI has been triggered and provides the exact `/ok to test <sha>` command for maintainers
+
+### Error Classification
+
+CI workflows automatically classify failures when jobs complete with errors. You can also trigger classification on demand:
+
+- **Automatic** – The error classifier runs as the final step in CI pipelines (`pre-merge`, `pr`, `ci-test-suite`, `container-validation-dynamo`, `copyright-checks`, `build-frontend-image`). When failures are detected, it posts a PR comment categorizing each as **infrastructure error** (network/runner issues) or **code error** (build/test/compilation failures).
+- **On-demand** – Comment `/diagnose` on any PR to run classification along with the full merge-readiness diagnostic.
+- **Via diagnose** – The `/diagnose` command automatically runs the error classifier when CI failures are present.
 
 ### For External Contributors
 
@@ -282,6 +290,15 @@ act -j pre-merge-rust
 ```
 
 Or use the [GitHub Local Actions](https://marketplace.visualstudio.com/items?itemName=SanjulaGanepola.github-local-actions) VS Code extension.
+
+### CI Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/diagnose` | Run full merge-readiness diagnostic with LLM-powered CI failure analysis |
+| `/ok to test <sha>` | Trigger full CI suite (maintainers only) |
+
+For maintainer reference, see [`.github/LGTM_BOT.md`](.github/LGTM_BOT.md) for configuration details and required secrets.
 
 ---
 

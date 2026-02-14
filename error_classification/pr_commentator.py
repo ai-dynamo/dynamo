@@ -8,9 +8,13 @@ Creates PR comments with markdown summaries of workflow errors.
 """
 import json
 import os
+import traceback
 from typing import Any, Dict, List, Optional
 
 import requests
+
+# Marker for find-and-update: only one CI-errors comment per PR
+CI_ERRORS_MARKER = "<!-- lgtm-bot-ci-errors -->"
 
 # Category to severity mapping
 CATEGORY_SEVERITY = {
@@ -72,6 +76,50 @@ class PRCommentator:
         _, icon = CATEGORY_SEVERITY.get(category, ("warning", "⚠️"))
         return icon
 
+    def build_comment_markdown(
+        self,
+        classifications: List[Any],
+        workflow_name: str = "Unknown Workflow",
+        run_id: str = "unknown",
+        run_url: str = "",
+        failed_jobs: int = 0,
+        error_contexts: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Build markdown body for a PR comment (no API post).
+        Used by diagnose to embed classifier output in the diagnosis comment.
+        """
+        if not classifications:
+            return ""
+        if not run_url and self.repo and run_id != "unknown":
+            run_url = f"https://github.com/{self.repo}/actions/runs/{run_id}"
+        if failed_jobs <= 0:
+            failed_jobs = len(set(c.job_name for c in classifications if c.job_name))
+
+        markdown = f"## 🔴 Workflow Failed: {workflow_name}\n\n"
+        markdown += f"**Workflow Run**: [#{run_id}]({run_url}) | "
+        markdown += f"**Failed Jobs**: {failed_jobs}\n\n"
+
+        if self.claude_client:
+            try:
+                claude_summary = self.claude_client.generate_formatted_summary(
+                    classifications=classifications,
+                    workflow_name=workflow_name,
+                    run_id=run_id,
+                    run_url=run_url,
+                    failed_jobs=failed_jobs,
+                )
+                markdown += claude_summary
+            except Exception:
+                markdown += self._build_summary_markdown_body(
+                    classifications, error_contexts or {}
+                )
+        else:
+            markdown += self._build_summary_markdown_body(
+                classifications, error_contexts or {}
+            )
+        return markdown
+
     def create_pr_comment(
         self,
         classifications: List[Any],
@@ -104,56 +152,90 @@ class PRCommentator:
         run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
         failed_jobs = len(set(c.job_name for c in classifications if c.job_name))
 
-        # Build header manually
-        markdown = f"## 🔴 Workflow Failed: {workflow_name}\n\n"
-        markdown += f"**Workflow Run**: [#{run_id}]({run_url}) | "
-        markdown += f"**Failed Jobs**: {failed_jobs}\n\n"
+        markdown = self.build_comment_markdown(
+            classifications,
+            workflow_name=workflow_name,
+            run_id=run_id,
+            run_url=run_url,
+            failed_jobs=failed_jobs,
+            error_contexts=error_contexts,
+        )
 
-        # Use Claude to generate the rest (grouping + summary) if available
-        if self.claude_client:
-            try:
-                print("  🤖 Generating formatted summary with Claude...")
-                claude_summary = self.claude_client.generate_formatted_summary(
-                    classifications=classifications,
-                    workflow_name=workflow_name,
-                    run_id=run_id,
-                    run_url=run_url,
-                    failed_jobs=failed_jobs,
-                )
-                markdown += claude_summary
-            except Exception as e:
-                print(
-                    f"  ⚠️  Claude summary generation failed, falling back to basic format: {e}"
-                )
-                # Fallback to old format if Claude fails
-                markdown += self._build_summary_markdown_body(
-                    classifications, error_contexts or {}
-                )
-        else:
-            # No Claude client available, use basic format
-            print("  ℹ️  No Claude client available, using basic format")
-            markdown += self._build_summary_markdown_body(
-                classifications, error_contexts or {}
-            )
+        # Prepend marker so we can find this comment later
+        markdown = f"{CI_ERRORS_MARKER}\n{markdown}"
 
-        # Post comment via GitHub API
+        # Find existing CI-errors comment (search newest first)
+        existing_comment_id = self._find_existing_comment(pr_number)
+
+        # Post or update comment via GitHub API
         try:
-            url = (
-                f"https://api.github.com/repos/{self.repo}/issues/{pr_number}/comments"
-            )
-            response = requests.post(url, headers=self.headers, json={"body": markdown})
+            if existing_comment_id:
+                # Update existing comment
+                url = f"https://api.github.com/repos/{self.repo}/issues/comments/{existing_comment_id}"
+                response = requests.patch(
+                    url, headers=self.headers, json={"body": markdown}
+                )
 
-            if response.status_code == 201:
-                print(f"✅ Created PR comment on PR #{pr_number}")
-                return True
+                if response.status_code == 200:
+                    print(
+                        f"✅ Updated existing CI-errors comment {existing_comment_id} on PR #{pr_number}"
+                    )
+                    return True
+                else:
+                    print(f"⚠️  Failed to update comment: HTTP {response.status_code}")
+                    print(f"    Response: {response.text[:200]}")
+                    return False
             else:
-                print(f"⚠️  Failed to create PR comment: HTTP {response.status_code}")
-                print(f"    Response: {response.text[:200]}")
-                return False
+                # Create new comment
+                url = f"https://api.github.com/repos/{self.repo}/issues/{pr_number}/comments"
+                response = requests.post(
+                    url, headers=self.headers, json={"body": markdown}
+                )
+
+                if response.status_code == 201:
+                    print(f"✅ Created PR comment on PR #{pr_number}")
+                    return True
+                else:
+                    print(
+                        f"⚠️  Failed to create PR comment: HTTP {response.status_code}"
+                    )
+                    print(f"    Response: {response.text[:200]}")
+                    return False
 
         except Exception as e:
             print(f"⚠️  Error creating PR comment: {e}")
             return False
+
+    def _find_existing_comment(self, pr_number: int) -> Optional[int]:
+        """Search PR comments for an existing CI-errors comment by marker.
+
+        Returns the comment ID if found, None otherwise.
+        """
+        try:
+            page = 1
+            while True:
+                url = (
+                    f"https://api.github.com/repos/{self.repo}/issues/{pr_number}/comments"
+                    f"?per_page=100&page={page}&direction=desc"
+                )
+                response = requests.get(url, headers=self.headers)
+                if response.status_code != 200:
+                    break
+
+                comments = response.json()
+                if not comments:
+                    break
+
+                for comment in comments:
+                    if CI_ERRORS_MARKER in (comment.get("body") or ""):
+                        print(f"🔍 Found existing CI-errors comment {comment['id']}")
+                        return comment["id"]
+
+                page += 1
+        except Exception as e:
+            print(f"⚠️  Error searching for existing comment: {e}")
+
+        return None
 
     def _get_pr_number(self) -> Optional[int]:
         """Extract PR number from environment."""
@@ -229,8 +311,6 @@ class PRCommentator:
                             print(f"  ❌ No PR found via API for commit {head_sha[:8]}")
             except Exception as e:
                 print(f"⚠️  Error reading event file: {e}")
-                import traceback
-
                 traceback.print_exc()
 
         print("  ❌ No PR number found")
@@ -255,8 +335,6 @@ class PRCommentator:
                 print(f"    API error: {response.text[:200]}")
         except Exception as e:
             print(f"⚠️  Error finding PR by commit: {e}")
-            import traceback
-
             traceback.print_exc()
 
         return None
@@ -266,7 +344,7 @@ class PRCommentator:
     ) -> str:
         """Build markdown summary table (fallback format without Claude)."""
         # Group by category
-        infrastructure, code_errors, _ = self._group_by_severity(classifications)
+        infrastructure, code_errors = self._group_by_severity(classifications)
 
         # Count unique jobs
         unique_jobs = len(set(c.job_name for c in classifications if c.job_name))
@@ -328,21 +406,26 @@ class PRCommentator:
 
         md += "\n</details>\n\n"
         md += "---\n"
-        md += "*Generated by [AI Error Classification System](https://github.com/)*\n"
+        md += "*Generated by [AI Error Classification System](https://github.com/ai-dynamo/dynamo)*\n"
 
         return md
 
     def _group_by_severity(self, classifications: List[Any]) -> tuple:
         """Group classifications by category (infrastructure vs code errors)."""
-        infrastructure = [
-            c for c in classifications if c.primary_category == "infrastructure_error"
-        ]
-        code_errors = [c for c in classifications if c.primary_category == "code_error"]
-        return (
-            infrastructure,
-            code_errors,
-            [],
-        )  # Return 3-tuple for backward compat (third is empty)
+        infrastructure = []
+        code_errors = []
+        for c in classifications:
+            if c.primary_category == "infrastructure_error":
+                infrastructure.append(c)
+            elif c.primary_category == "code_error":
+                code_errors.append(c)
+            else:
+                # Unexpected category — treat as code error so it still appears in output
+                print(
+                    f"⚠️  Unknown category '{c.primary_category}' for {getattr(c, 'job_name', 'unknown')}, treating as code_error"
+                )
+                code_errors.append(c)
+        return (infrastructure, code_errors)
 
     def _truncate(self, text: str, max_length: int) -> str:
         """Truncate text to max length with ellipsis."""

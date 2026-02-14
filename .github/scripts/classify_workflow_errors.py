@@ -6,14 +6,15 @@ Runs at the end of a workflow to classify all failures from completed jobs.
 Creates comprehensive GitHub annotations for all errors in the workflow.
 
 Usage:
-    export ANTHROPIC_API_KEY=<key>
+    export NVIDIA_INFERENCE_API_KEY=<key>   # or ANTHROPIC_API_KEY
     export GITHUB_TOKEN=<token>
     export ENABLE_ERROR_CLASSIFICATION=true
-    python3 .github/workflows/classify_workflow_errors.py
+    python3 .github/scripts/classify_workflow_errors.py
 """
 
 import concurrent.futures
 import os
+import re
 import sys
 from functools import partial
 from typing import Any, Dict, List, Optional
@@ -227,8 +228,6 @@ def extract_failed_step_logs(full_log: str, step: Dict[str, Any]) -> str:
 
     # GitHub logs format: ##[group]Step name
     # Try to find the step section
-    import re
-
     # Look for the step by name
     step_pattern = rf"##\[group\]{re.escape(step_name)}.*?##\[endgroup\]"
     match = re.search(step_pattern, full_log, re.DOTALL | re.MULTILINE)
@@ -255,19 +254,36 @@ def classify_and_annotate_workflow_errors():
     run_id = os.getenv("WORKFLOW_RUN_ID") or os.getenv("GITHUB_RUN_ID")
     event_name = os.getenv("GITHUB_EVENT_NAME")
 
-    print("=" * 70)
-    print("WORKFLOW ERROR CLASSIFICATION")
-    print("=" * 70)
-    print(f"Trigger: {event_name}")
-    print(f"Workflow: {os.getenv('GITHUB_WORKFLOW')}")
-    print(f"Run ID: {run_id}")
-    print(f"Repository: {os.getenv('GITHUB_REPOSITORY')}")
-    print("=" * 70)
+    # When OUTPUT_ONLY mode is active, redirect all progress/stats to stderr
+    # so stdout contains only the final markdown for the caller to capture.
+    _output_only = os.getenv("OUTPUT_ONLY", "").lower() == "true"
+
+    # In OUTPUT_ONLY mode, redirect all stdout to stderr so that only
+    # the final markdown print goes to real stdout.
+    _real_stdout = sys.stdout
+    if _output_only:
+        sys.stdout = sys.stderr
+
+    def log(msg: str) -> None:
+        if _output_only:
+            sys.stderr.write(msg + "\n")
+            sys.stderr.flush()
+        else:
+            print(msg)
+
+    log("=" * 70)
+    log("WORKFLOW ERROR CLASSIFICATION")
+    log("=" * 70)
+    log(f"Trigger: {event_name}")
+    log(f"Workflow: {os.getenv('GITHUB_WORKFLOW')}")
+    log(f"Run ID: {run_id}")
+    log(f"Repository: {os.getenv('GITHUB_REPOSITORY')}")
+    log("=" * 70)
 
     # Check if enabled
     if not os.getenv("ENABLE_ERROR_CLASSIFICATION", "").lower() == "true":
-        print("⚠️  Error classification not enabled")
-        print("   Set ENABLE_ERROR_CLASSIFICATION=true to enable")
+        log("⚠️  Error classification not enabled")
+        log("   Set ENABLE_ERROR_CLASSIFICATION=true to enable")
         return
 
     try:
@@ -280,36 +296,33 @@ def classify_and_annotate_workflow_errors():
         commentator = PRCommentator(claude_client=classifier.claude)
 
         # Fetch all jobs from workflow
-        print("\n" + "=" * 70)
-        print("📡 Fetching workflow jobs...")
-        print("=" * 70)
+        log("\n" + "=" * 70)
+        log("📡 Fetching workflow jobs...")
+        log("=" * 70)
 
         jobs = fetch_workflow_jobs()
 
         if not jobs:
-            print("\n⚠️  No jobs found in workflow")
+            log("\n⚠️  No jobs found in workflow")
             return
 
         # Filter to FAILED jobs only (don't analyze passing jobs)
         failed_jobs = [job for job in jobs if job.get("conclusion") == "failure"]
 
         if not failed_jobs:
-            print("\n✅ No failed jobs in workflow")
+            log("\n✅ No failed jobs in workflow")
             return
 
-        print(f"\n🔍 Found {len(failed_jobs)} failed job(s) to analyze:")
+        log(f"\n🔍 Found {len(failed_jobs)} failed job(s) to analyze:")
         for job in failed_jobs:
-            print(f"   - {job.get('name')}")
+            log(f"   - {job.get('name')}")
 
         # Get GitHub context for workflow
         github_token = os.getenv("GITHUB_TOKEN")
         repo = os.getenv("GITHUB_REPOSITORY")
 
-        # Use WORKFLOW_RUN_ID if set (workflow_dispatch), otherwise GITHUB_RUN_ID
-        target_run_id = os.getenv("WORKFLOW_RUN_ID") or os.getenv("GITHUB_RUN_ID")
-
         workflow_context = {
-            "workflow_id": target_run_id,
+            "workflow_id": run_id,
             "workflow_name": os.getenv("GITHUB_WORKFLOW"),
             "repo": repo,
             "branch": os.getenv("GITHUB_REF_NAME"),
@@ -318,22 +331,22 @@ def classify_and_annotate_workflow_errors():
         }
 
         # Process failed jobs in parallel
-        print("\n" + "=" * 70)
-        print("🤖 Analyzing full logs with Claude (parallel processing)...")
-        print("=" * 70)
+        log("\n" + "=" * 70)
+        log("🤖 Analyzing full logs with Claude (parallel processing)...")
+        log("=" * 70)
 
         def analyze_single_job(job, classifier, github_token, repo, workflow_context):
             """Analyze one job's full log."""
             job_id = str(job["id"])
             job_name = job["name"]
 
-            print(f"\n  🤖 Analyzing: {job_name}")
+            log(f"\n  🤖 Analyzing: {job_name}")
 
             try:
                 # Fetch complete job log
                 log_content = fetch_job_logs(job, github_token, repo)
                 if not log_content:
-                    print(f"    ⚠️  Could not fetch logs for {job_name}")
+                    log(f"    ⚠️  Could not fetch logs for {job_name}")
                     return []
 
                 # Analyze full log and get all errors
@@ -345,27 +358,26 @@ def classify_and_annotate_workflow_errors():
                     use_cache=True,
                 )
 
-                print(f"    ✅ Found {len(classifications)} error(s) in {job_name}")
+                log(f"    ✅ Found {len(classifications)} error(s) in {job_name}")
 
                 # Print summary
                 for c in classifications:
-                    print(
+                    log(
                         f"       - {c.primary_category} ({c.confidence_score:.0%}): {c.step_name}"
                     )
 
                 return classifications
 
             except Exception as e:
-                print(f"    ❌ Failed to analyze {job_name}: {e}")
+                log(f"    ❌ Failed to analyze {job_name}: {e}")
                 import traceback
 
-                traceback.print_exc()
+                traceback.print_exc(file=sys.stderr)
                 return []
 
         # Process up to 5 jobs in parallel
         max_parallel = int(os.getenv("MAX_PARALLEL_JOBS", "5"))
         all_classifications = []
-        error_contexts = {}
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=max_parallel
@@ -388,35 +400,35 @@ def classify_and_annotate_workflow_errors():
                     all_classifications.extend(job_classifications)
 
                 except Exception as e:
-                    print(f"    ⚠️  Job analysis failed: {e}")
+                    log(f"    ⚠️  Job analysis failed: {e}")
 
         classifications = all_classifications
-        print(
+        log(
             f"\n📊 Total: {len(classifications)} error(s) across {len(failed_jobs)} failed job(s)"
         )
-        print("=" * 70)
+        log("=" * 70)
 
         # Validate classifications (skip detailed validation for full log analysis)
         if classifications:
-            print("\n" + "=" * 70)
-            print("🔍 Validating classifications...")
-            print("=" * 70)
+            log("\n" + "=" * 70)
+            log("🔍 Validating classifications...")
+            log("=" * 70)
 
             # Basic validation
             confidences = [c.confidence_score for c in classifications]
             avg_confidence = sum(confidences) / len(confidences) if confidences else 0
 
-            print("  📊 Confidence statistics:")
-            print(f"     Average: {avg_confidence:.1%}")
-            print(f"     Min: {min(confidences):.1%}, Max: {max(confidences):.1%}")
+            log("  📊 Confidence statistics:")
+            log(f"     Average: {avg_confidence:.1%}")
+            log(f"     Min: {min(confidences):.1%}, Max: {max(confidences):.1%}")
 
             low_confidence = [c for c in classifications if c.confidence_score < 0.6]
             if low_confidence:
-                print(
+                log(
                     f"  ⚠️  {len(low_confidence)} classification(s) with low confidence (<60%)"
                 )
             else:
-                print("  ✅ All classifications have reasonable confidence")
+                log("  ✅ All classifications have reasonable confidence")
 
             # Category distribution
             category_counts = {}
@@ -424,46 +436,60 @@ def classify_and_annotate_workflow_errors():
                 cat = c.primary_category
                 category_counts[cat] = category_counts.get(cat, 0) + 1
 
-            print("  📊 Category distribution:")
+            log("  📊 Category distribution:")
             for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
-                print(f"     - {cat}: {count}")
+                log(f"     - {cat}: {count}")
 
-        # Create PR comment with summary
+        # Create PR comment with summary, or output markdown only (for diagnose)
         if classifications:
-            # Check if PR comments are enabled
-            enable_pr_comments = (
-                os.getenv("ENABLE_PR_COMMENTS", "true").lower() == "true"
-            )
-
-            if enable_pr_comments:
-                print("\n" + "=" * 70)
-                print("💬 Creating PR comment summary...")
-                print("=" * 70)
-
-                try:
-                    success = commentator.create_pr_comment(
-                        classifications, error_contexts
-                    )
-
-                    if success:
-                        print("✅ PR comment created successfully")
-                    else:
-                        print("ℹ️  PR comment not created (not a PR context or failed)")
-
-                except Exception as e:
-                    print(f"⚠️  Failed to create PR comment: {e}")
-                    import traceback
-
-                    traceback.print_exc()
+            if _output_only:
+                workflow_name = os.getenv("GITHUB_WORKFLOW", "Pre-merge CI")
+                run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+                markdown = commentator.build_comment_markdown(
+                    classifications,
+                    workflow_name=workflow_name,
+                    run_id=run_id,
+                    run_url=run_url,
+                    failed_jobs=len(failed_jobs),
+                )
+                # This is the ONLY thing that goes to real stdout in OUTPUT_ONLY mode
+                _real_stdout.write(markdown + "\n")
+                _real_stdout.flush()
             else:
-                print("\nℹ️  PR comments disabled (ENABLE_PR_COMMENTS=false)")
+                # Check if PR comments are enabled
+                enable_pr_comments = (
+                    os.getenv("ENABLE_PR_COMMENTS", "true").lower() == "true"
+                )
+
+                if enable_pr_comments:
+                    log("\n" + "=" * 70)
+                    log("💬 Creating PR comment summary...")
+                    log("=" * 70)
+
+                    try:
+                        success = commentator.create_pr_comment(classifications)
+
+                        if success:
+                            log("✅ PR comment created successfully")
+                        else:
+                            log(
+                                "ℹ️  PR comment not created (not a PR context or failed)"
+                            )
+
+                    except Exception as e:
+                        log(f"⚠️  Failed to create PR comment: {e}")
+                        import traceback
+
+                        traceback.print_exc(file=sys.stderr)
+                else:
+                    log("\nℹ️  PR comments disabled (ENABLE_PR_COMMENTS=false)")
 
         # Summary
-        print("\n" + "=" * 70)
-        print("SUMMARY")
-        print("=" * 70)
-        print(f"✅ Analyzed {len(failed_jobs)} failed job(s)")
-        print(f"✅ Found {len(classifications)} total error(s)")
+        log("\n" + "=" * 70)
+        log("SUMMARY")
+        log("=" * 70)
+        log(f"✅ Analyzed {len(failed_jobs)} failed job(s)")
+        log(f"✅ Found {len(classifications)} total error(s)")
 
         if classifications:
             # Count by category
@@ -472,35 +498,39 @@ def classify_and_annotate_workflow_errors():
                 cat = c.primary_category
                 categories[cat] = categories.get(cat, 0) + 1
 
-            print("\n📊 Errors by category:")
+            log("\n📊 Errors by category:")
             for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
-                print(f"   - {cat}: {count}")
+                log(f"   - {cat}: {count}")
 
             # Token usage summary
             total_prompt_tokens = sum(c.prompt_tokens for c in classifications)
             total_completion_tokens = sum(c.completion_tokens for c in classifications)
             total_cached_tokens = sum(c.cached_tokens for c in classifications)
 
-            print("\n💰 Token usage:")
-            print(f"   - Prompt tokens: {total_prompt_tokens:,}")
-            print(f"   - Completion tokens: {total_completion_tokens:,}")
-            print(f"   - Cached tokens: {total_cached_tokens:,}")
+            log("\n💰 Token usage:")
+            log(f"   - Prompt tokens: {total_prompt_tokens:,}")
+            log(f"   - Completion tokens: {total_completion_tokens:,}")
+            log(f"   - Cached tokens: {total_cached_tokens:,}")
 
         enable_pr_comments = os.getenv("ENABLE_PR_COMMENTS", "true").lower() == "true"
         if commentator.is_available():
-            print(f"💬 PR comments: {'enabled' if enable_pr_comments else 'disabled'}")
+            log(f"💬 PR comments: {'enabled' if enable_pr_comments else 'disabled'}")
         else:
-            print("💬 PR comments: unavailable (not in GitHub Actions or missing token)")
+            log("💬 PR comments: unavailable (not in GitHub Actions or missing token)")
 
-        print("=" * 70)
+        log("=" * 70)
 
     except Exception as e:
-        print(f"\n❌ Error during classification: {e}")
+        log(f"\n❌ Error during classification: {e}")
         import traceback
 
-        traceback.print_exc()
-        # Don't fail the workflow on classification errors
-        sys.exit(0)
+        traceback.print_exc(file=sys.stderr)
+        # Exit with failure so workflow steps can detect real failures
+        sys.exit(1)
+    finally:
+        # Restore stdout so subsequent code (if any) is not affected
+        if _output_only:
+            sys.stdout = _real_stdout
 
 
 if __name__ == "__main__":

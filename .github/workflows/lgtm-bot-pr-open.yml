@@ -15,8 +15,8 @@
 
 # LGTM Bot PR Open - Runs when a PR is opened or updated.
 # Features:
-#   3. Auto-request reviews from CODEOWNERS teams
-#   4. Post a comment listing required CODEOWNERS teams
+#   1. Auto-request reviews from CODEOWNERS teams + individual reviewer assignment
+#   2. Post a comment listing required CODEOWNERS teams
 #   Plus: Fork CI detection for external contributors
 #
 # Note: PR size labels are managed by an existing integration.
@@ -35,9 +35,13 @@ jobs:
   pr-onboard:
     name: PR Onboarding
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Onboard PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          REVIEWERS_YAML: ${{ secrets.LGTM_BOT_REVIEWERS_YAML }}
+          REVIEWERS_PER_TEAM: ${{ vars.LGTM_BOT_REVIEWERS_PER_TEAM || '1' }}
         with:
           script: |
             const pr = context.payload.pull_request;
@@ -176,30 +180,122 @@ jobs:
             console.log(`Required CODEOWNERS teams: ${requiredTeams.join(', ') || 'none'}`);
 
             // ============================================================
-            // Feature 3: Auto-request CODEOWNERS reviews (on open only)
+            // Feature 3: Auto-request reviews (on open only)
+            //   - Request team reviews from CODEOWNERS teams
+            //   - Assign individual reviewers via team member resolution
+            //     and/or YAML roster from LGTM_BOT_REVIEWERS_YAML secret
             // ============================================================
 
             if (isOpened && requiredTeams.length > 0) {
+              // Helper: pick N random items from an array
+              function pickRandom(arr, n) {
+                const shuffled = [...arr].sort(() => Math.random() - 0.5);
+                return shuffled.slice(0, n);
+              }
+
+              const prAuthor = pr.user.login;
+              const reviewersPerTeam = parseInt(process.env.REVIEWERS_PER_TEAM || '1', 10);
+
               // Extract team slugs from @org/team format
               const teamSlugs = requiredTeams
                 .map(t => {
-                  const match = t.match(/@[^/]+\/(.+)/);
-                  return match ? match[1] : null;
+                  const match = t.match(/@([^/]+)\/(.+)/);
+                  return match ? { org: match[1], slug: match[2], full: `${match[1]}/${match[2]}` } : null;
                 })
                 .filter(Boolean);
 
-              if (teamSlugs.length > 0) {
+              // Request team-level reviews
+              const slugNames = teamSlugs.map(t => t.slug);
+              if (slugNames.length > 0) {
                 try {
                   await github.rest.pulls.requestReviewers({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     pull_number: prNumber,
-                    team_reviewers: teamSlugs,
+                    team_reviewers: slugNames,
                   });
-                  console.log(`Requested reviews from: ${teamSlugs.join(', ')}`);
+                  console.log(`Requested team reviews from: ${slugNames.join(', ')}`);
                 } catch (e) {
-                  // May fail if team doesn't have access or author is a member
                   console.log(`Could not request some team reviews: ${e.message}`);
+                }
+              }
+
+              // --- Individual reviewer assignment ---
+              const individualReviewers = new Set();
+
+              // Option 1: Resolve CODEOWNERS teams to individual members
+              for (const team of teamSlugs) {
+                try {
+                  const { data: members } = await github.rest.teams.listMembersInOrg({
+                    org: team.org,
+                    team_slug: team.slug,
+                    per_page: 100,
+                  });
+                  const eligible = members.map(m => m.login).filter(l => l !== prAuthor);
+                  const picks = pickRandom(eligible, reviewersPerTeam);
+                  for (const p of picks) individualReviewers.add(p);
+                  console.log(`Team ${team.full}: ${eligible.length} eligible → picked ${picks.join(', ') || 'none'}`);
+                } catch (e) {
+                  console.log(`Could not resolve team ${team.full}: ${e.message}`);
+                }
+              }
+
+              // Option 2: Roster from LGTM_BOT_REVIEWERS_YAML secret
+              // Expected YAML format:
+              //   default: [user1, user2]
+              //   rust: [user3, user4]
+              //   python: [user5]
+              const rosterYaml = process.env.REVIEWERS_YAML || '';
+              if (rosterYaml.trim()) {
+                try {
+                  // Lightweight YAML-subset parser for key: [val, val] format
+                  const roster = {};
+                  for (const line of rosterYaml.split('\n')) {
+                    const trimmed = line.trim();
+                    if (!trimmed || trimmed.startsWith('#')) continue;
+                    const colonIdx = trimmed.indexOf(':');
+                    if (colonIdx === -1) continue;
+                    const key = trimmed.slice(0, colonIdx).trim();
+                    let valStr = trimmed.slice(colonIdx + 1).trim().replace(/^\[|\]$/g, '');
+                    const vals = valStr.split(',').map(v => v.trim()).filter(Boolean);
+                    if (vals.length) roster[key] = vals;
+                  }
+
+                  const matchedKeys = new Set();
+                  for (const filepath of changedFiles) {
+                    for (const key of Object.keys(roster)) {
+                      if (key === 'default') continue;
+                      if (filepath.includes(key) || filepath.endsWith(`.${key}`)) {
+                        matchedKeys.add(key);
+                      }
+                    }
+                  }
+                  if (roster['default']) matchedKeys.add('default');
+
+                  for (const key of matchedKeys) {
+                    const candidates = (roster[key] || []).filter(u => u !== prAuthor);
+                    const picks = pickRandom(candidates, reviewersPerTeam);
+                    for (const p of picks) individualReviewers.add(p);
+                    console.log(`Roster "${key}": ${candidates.length} eligible → picked ${picks.join(', ') || 'none'}`);
+                  }
+                } catch (e) {
+                  console.log(`Roster assignment error: ${e.message}`);
+                }
+              }
+
+              // Request individual reviews
+              const reviewersList = [...individualReviewers];
+              if (reviewersList.length > 0) {
+                try {
+                  await github.rest.pulls.requestReviewers({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: prNumber,
+                    reviewers: reviewersList,
+                  });
+                  console.log(`Requested individual reviews from: ${reviewersList.join(', ')}`);
+                } catch (e) {
+                  console.log(`Could not request some individual reviews: ${e.message}`);
                 }
               }
             }
@@ -240,13 +336,17 @@ jobs:
               commentLines.push('Reviews have been automatically requested.');
             }
 
-            // CI trigger guidance (applies to all PRs — /ok to test is needed
-            // for both fork PRs and internal branches without GPG signing)
+            // CI trigger guidance
             commentLines.push('');
-            commentLines.push('> **Triggering CI**: A maintainer must comment');
-            commentLines.push(`> \`/ok to test ${headSha.slice(0, 7)}\` to trigger the full CI suite.`);
-            commentLines.push('> This must be re-issued after every new push (per-commit, not per-PR).');
-            commentLines.push('> Org members with GPG-signed commits trigger CI automatically.');
+            commentLines.push('> **Triggering CI**:');
+            commentLines.push('> - **First-time contributors**: A maintainer must comment');
+            commentLines.push(`>   \`/ok to test ${headSha.slice(0, 7)}\` to trigger CI. This must be re-issued after every new push.`);
+            commentLines.push('> - **L1 contributors**: A maintainer must run `/ok to test` once; subsequent pushes trigger CI automatically.');
+            commentLines.push('> - **L2+ external contributors and org members**: CI triggers automatically with GPG-signed commits.');
+
+            commentLines.push('');
+            commentLines.push('---');
+            commentLines.push('_This comment updates automatically when new commits are pushed._');
 
             const commentBody = commentLines.join('\n');
 

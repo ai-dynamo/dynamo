@@ -6,7 +6,7 @@ Configuration management for error classification system.
 """
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 # Core error categories for classification
 # Simplified to 2 categories for more consistent classification
@@ -20,79 +20,58 @@ ERROR_CATEGORIES = [
 class Config:
     """Configuration for error classification system."""
 
-    # Anthropic API settings
-    anthropic_api_key: str
-    anthropic_model: str = "claude-sonnet-4-5-20250929"
-
-    # API format settings
-    api_format: str = "anthropic"  # "anthropic" or "openai"
-    api_base_url: str = (
-        None  # Custom base URL (e.g., NVIDIA: https://inference-api.nvidia.com/v1)
+    # API key: prefer NVIDIA_INFERENCE_API_KEY (inference.nvidia.com), fallback ANTHROPIC_API_KEY
+    api_key: str  # LLM API key (NVIDIA_INFERENCE_API_KEY or ANTHROPIC_API_KEY)
+    # Model: prefer NVIDIA_INFERENCE_MODEL, fallback ANTHROPIC_MODEL
+    model: str = (
+        "aws/anthropic/bedrock-claude-opus-4-6"  # NVIDIA Inference API model id
     )
 
-    # Processing limits
-    max_error_length: int = 10000  # Max chars to send to API
-    batch_size: int = 10
+    # API format settings
+    api_format: str = "openai"  # "anthropic" or "openai" (default openai for NVIDIA)
+    api_base_url: Optional[
+        str
+    ] = None  # Custom base URL (e.g., NVIDIA: https://inference-api.nvidia.com/v1)
 
     # Rate limiting
-    max_rpm: int = 50  # Max requests per minute to Claude API
-
-    # Cache settings
-    classification_cache_ttl_hours: int = 168  # 1 week
-    min_confidence_for_reuse: float = 0.8
-
-    # Real-time classification settings
-    enable_realtime_classification: bool = False
-    classify_realtime_threshold: str = "infrastructure"  # infrastructure|all
+    max_rpm: int = 50  # Max requests per minute to LLM API
+    max_error_length: int = 10000  # Max chars per error to send to API
 
     @classmethod
     def from_env(cls) -> "Config":
-        """Load configuration from environment variables."""
-
-        anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not anthropic_api_key:
-            raise ValueError("ANTHROPIC_API_KEY environment variable is required")
+        """Load configuration from environment variables.
+        Prefers NVIDIA_INFERENCE_API_KEY and NVIDIA_INFERENCE_MODEL for inference.nvidia.com.
+        """
+        api_key = os.getenv("NVIDIA_INFERENCE_API_KEY") or os.getenv(
+            "ANTHROPIC_API_KEY"
+        )
+        if not api_key:
+            raise ValueError(
+                "NVIDIA_INFERENCE_API_KEY or ANTHROPIC_API_KEY environment variable is required"
+            )
+        # Treat empty string as unset (GitHub Actions vars.X yields "" when not configured)
+        model = (
+            os.getenv("NVIDIA_INFERENCE_MODEL", "").strip()
+            or os.getenv("ANTHROPIC_MODEL", "").strip()
+            or "aws/anthropic/bedrock-claude-opus-4-6"  # default NVIDIA Inference API model
+        )
 
         return cls(
-            anthropic_api_key=anthropic_api_key,
-            anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
-            api_format=os.getenv("API_FORMAT", "anthropic"),  # anthropic or openai
+            api_key=api_key,
+            model=model,
+            api_format=os.getenv("API_FORMAT", "openai"),  # default openai for NVIDIA
             api_base_url=os.getenv(
-                "API_BASE_URL"
-            ),  # e.g., https://inference-api.nvidia.com/v1
-            max_error_length=int(os.getenv("MAX_ERROR_LENGTH", "10000")),
-            batch_size=int(os.getenv("BATCH_SIZE", "10")),
+                "API_BASE_URL", "https://inference-api.nvidia.com/v1"
+            ),  # default NVIDIA
             max_rpm=int(os.getenv("MAX_RPM", "50")),
-            classification_cache_ttl_hours=int(
-                os.getenv("CLASSIFICATION_CACHE_TTL_HOURS", "168")
-            ),
-            min_confidence_for_reuse=float(
-                os.getenv("MIN_CONFIDENCE_FOR_REUSE", "0.8")
-            ),
-            enable_realtime_classification=os.getenv(
-                "ENABLE_ERROR_CLASSIFICATION", ""
-            ).lower()
-            == "true",
-            classify_realtime_threshold=os.getenv(
-                "CLASSIFY_REALTIME_THRESHOLD", "infrastructure"
-            ),
         )
 
     def validate(self) -> List[str]:
         """Validate configuration and return list of errors."""
         errors = []
 
-        if not self.anthropic_api_key:
-            errors.append("anthropic_api_key is required")
-
-        if self.max_error_length <= 0:
-            errors.append("max_error_length must be positive")
-
-        if self.batch_size <= 0:
-            errors.append("batch_size must be positive")
-
-        if not (0.0 <= self.min_confidence_for_reuse <= 1.0):
-            errors.append("min_confidence_for_reuse must be between 0 and 1")
+        if not self.api_key:
+            errors.append("api_key is required")
 
         return errors
 

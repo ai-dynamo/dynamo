@@ -16,8 +16,8 @@
 """LGTM Bot diagnostic script.
 
 Analyzes a PR's merge readiness and posts a detailed diagnostic comment.
-Uses the GitHub API for PR data and optionally the NVIDIA Inference API
-for LLM-powered CI failure diagnosis.
+Uses the GitHub API for PR data and delegates CI failure analysis to
+classify_workflow_errors.py as a subprocess.
 
 Environment variables:
     GITHUB_TOKEN: GitHub API token (required)
@@ -30,6 +30,7 @@ import base64
 import fnmatch
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -44,8 +45,6 @@ NVIDIA_API_KEY = os.environ.get("NVIDIA_INFERENCE_API_KEY", "")
 
 OWNER, REPO = GITHUB_REPOSITORY.split("/")
 GITHUB_API = "https://api.github.com"
-NVIDIA_API_URL = "https://inference-api.nvidia.com/v1/chat/completions"
-NVIDIA_MODEL = "us/aws/anthropic/bedrock-claude-opus-4-6"
 
 DIAGNOSIS_MARKER = "<!-- lgtm-bot-diagnosis -->"
 
@@ -107,8 +106,13 @@ def github_graphql(query: str, variables: dict | None = None) -> Any:
     }
     body = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"GraphQL error: {e.code} {body[:200]}", file=sys.stderr)
+        raise
 
 
 # --- CODEOWNERS parsing ---
@@ -271,6 +275,56 @@ def diagnose_ci(head_sha: str) -> tuple[dict, list[str]]:
     return results, failing
 
 
+def get_workflow_run_id_for_commit(head_sha: str) -> str | None:
+    """Return the most recent workflow run id for the given commit SHA."""
+    try:
+        data = github_request(
+            f"/repos/{OWNER}/{REPO}/actions/runs"
+            f"?head_sha={head_sha}&per_page=5&exclude_pull_requests=false"
+        )
+        runs = data.get("workflow_runs", [])
+        if not runs:
+            return None
+        return str(runs[0]["id"])
+    except Exception as e:
+        print(f"Failed to get workflow run for {head_sha[:7]}: {e}", file=sys.stderr)
+        return None
+
+
+def run_error_classifier(run_id: str, repo_root: str) -> str | None:
+    """Run the error classifier for the given workflow run; return markdown or None."""
+    env = {
+        **os.environ,
+        "WORKFLOW_RUN_ID": run_id,
+        "OUTPUT_ONLY": "true",
+        "ENABLE_ERROR_CLASSIFICATION": "true",
+        "GITHUB_REPOSITORY": GITHUB_REPOSITORY,
+    }
+    try:
+        result = subprocess.run(
+            ["python3", ".github/scripts/classify_workflow_errors.py"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=repo_root,
+            env=env,
+        )
+        if result.returncode != 0:
+            print(
+                f"Classifier exited {result.returncode}: {result.stderr[:500]}",
+                file=sys.stderr,
+            )
+            return None
+        out = (result.stdout or "").strip()
+        return out if out else None
+    except subprocess.TimeoutExpired:
+        print("Classifier timed out", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"Classifier failed: {e}", file=sys.stderr)
+        return None
+
+
 def fetch_failed_logs(check_run_id: int) -> str:
     """Fetch annotations for a failed check run."""
     try:
@@ -289,56 +343,10 @@ def fetch_failed_logs(check_run_id: int) -> str:
             return "\n".join(log_lines)[:8000]
         return ""
     except Exception as e:
-        print(f"Failed to fetch logs for check run {check_run_id}: {e}")
-        return ""
-
-
-def call_llm(failing_checks: list[str], logs: str) -> str | None:
-    """Call NVIDIA Inference API for CI failure diagnosis."""
-    if not NVIDIA_API_KEY:
-        return None
-
-    prompt = (
-        "You are a CI debugging assistant for the ai-dynamo/dynamo project "
-        "(a distributed LLM inference platform written in Rust and Python).\n\n"
-        "A pull request has the following CI failures. Analyze the logs and "
-        "provide concise, actionable fix suggestions.\n\n"
-        f"Failing checks: {', '.join(failing_checks)}\n\n"
-        f"Log excerpts:\n{logs}\n\n"
-        "Provide a brief diagnosis and suggested fix for each failure. "
-        "Be specific and actionable. Format as markdown."
-    )
-
-    data = {
-        "model": NVIDIA_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful CI debugging assistant. Be concise "
-                    "and actionable. Focus on the most likely root cause."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "max_tokens": 2048,
-    }
-
-    try:
-        headers = {
-            "Authorization": f"Bearer {NVIDIA_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        body = json.dumps(data).encode()
-        req = urllib.request.Request(
-            NVIDIA_API_URL, data=body, headers=headers, method="POST"
+        print(
+            f"Failed to fetch logs for check run {check_run_id}: {e}", file=sys.stderr
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode())
-            return result["choices"][0]["message"]["content"]
-    except Exception as e:
-        print(f"LLM call failed: {e}", file=sys.stderr)
-        return None
+        return ""
 
 
 def diagnose_reviews(pr_number: int, pr_author: str) -> tuple[list[str], list[str]]:
@@ -435,7 +443,8 @@ def diagnose_codeowners(pr_number: int, base_ref: str) -> dict[str, list[str]]:
         )
         content = base64.b64decode(codeowners_data["content"]).decode()
         rules = parse_codeowners(content)
-    except Exception:
+    except Exception as e:
+        print(f"CODEOWNERS analysis failed: {e}", file=sys.stderr)
         return {}
 
     # Fetch changed files
@@ -474,9 +483,8 @@ def build_diagnostic_comment(
     changes_requested: list[str],
     unresolved: list[dict],
     team_files: dict[str, list[str]],
-    is_fork: bool,
     head_sha: str,
-    llm_response: str | None,
+    classifier_markdown: str | None = None,
 ) -> str:
     """Build the diagnostic markdown comment."""
     lines = [DIAGNOSIS_MARKER, "## 🤖 LGTM Bot — Diagnosis", ""]
@@ -509,12 +517,20 @@ def build_diagnostic_comment(
         count = len(blockers)
         word = "blocker" if count == 1 else "blockers"
         lines.append(f"**Status**: Not ready to merge ({count} {word})")
+        lines.append("")
+        lines.append(
+            "> **Tip**: Run `/diagnose` after pushing fixes "
+            "to re-check merge readiness."
+        )
     else:
-        lines.append("**Status**: Ready to merge :white_check_mark:")
+        lines.append(
+            "**Status**: Ready to merge :white_check_mark: " "— no diagnosis needed."
+        )
     lines.append("")
 
-    # --- CI section ---
-    lines.append("### CI Checks")
+    # --- CI section (collapsible, open by default) ---
+    lines.append("<details open>")
+    lines.append("<summary><h3>CI Checks</h3></summary>")
     lines.append("")
     lines.append("| Check | Status | Link |")
     lines.append("|-------|--------|------|")
@@ -529,13 +545,20 @@ def build_diagnostic_comment(
         link = f"[View]({result['url']})" if result.get("url") else "—"
         lines.append(f"| {display} | {status_text} | {link} |")
     lines.append("")
+    lines.append("</details>")
+    lines.append("")
 
-    # LLM diagnosis for failures
+    # CI failure analysis (collapsible, closed by default)
     if failing_checks:
-        if llm_response:
-            lines.append("#### Suggested Fixes")
+        if classifier_markdown:
+            lines.append("<details>")
+            lines.append(
+                "<summary><h4>CI Failure Analysis (from error classifier)</h4></summary>"
+            )
             lines.append("")
-            lines.append(llm_response)
+            lines.append(classifier_markdown)
+            lines.append("")
+            lines.append("</details>")
             lines.append("")
         else:
             lines.append("> **Tip**: Check the CI logs linked above for error details.")
@@ -557,8 +580,9 @@ def build_diagnostic_comment(
         )
         lines.append("")
 
-    # --- Reviews section ---
-    lines.append("### Reviews")
+    # --- Reviews section (collapsible, closed by default) ---
+    lines.append("<details>")
+    lines.append("<summary><h3>Reviews</h3></summary>")
     lines.append("")
     if approvals:
         names = ", ".join(f"@{u}" for u in approvals)
@@ -573,11 +597,14 @@ def build_diagnostic_comment(
     if changes_requested:
         names = ", ".join(f"@{u}" for u in changes_requested)
         lines.append(f"- **Changes requested** by: {names}")
+    lines.append("")
+    lines.append("</details>")
+    lines.append("")
 
-    # CODEOWNERS
+    # CODEOWNERS (collapsible, closed by default)
     if team_files:
-        lines.append("")
-        lines.append("**Required CODEOWNERS teams:**")
+        lines.append("<details>")
+        lines.append("<summary><h3>Required CODEOWNERS Teams</h3></summary>")
         lines.append("")
         lines.append("| Team | Files |")
         lines.append("|------|-------|")
@@ -586,11 +613,16 @@ def build_diagnostic_comment(
             if len(files) > 3:
                 file_list += f" (+{len(files) - 3} more)"
             lines.append(f"| {team} | {file_list} |")
+        lines.append("")
+        lines.append("</details>")
     lines.append("")
 
-    # --- Unresolved conversations ---
+    # --- Unresolved conversations (collapsible, closed by default) ---
     if unresolved:
-        lines.append(f"### Unresolved Conversations ({len(unresolved)})")
+        lines.append("<details>")
+        lines.append(
+            f"<summary><h3>Unresolved Conversations ({len(unresolved)})</h3></summary>"
+        )
         lines.append("")
         for thread in unresolved[:10]:
             path_info = f"`{thread['path']}"
@@ -601,9 +633,12 @@ def build_diagnostic_comment(
         if len(unresolved) > 10:
             lines.append(f"- ...and {len(unresolved) - 10} more")
         lines.append("")
+        lines.append("</details>")
+        lines.append("")
 
-    # --- Other checks ---
-    lines.append("### Other")
+    # --- Other checks (collapsible, closed by default) ---
+    lines.append("<details>")
+    lines.append("<summary><h3>Other</h3></summary>")
     lines.append("")
 
     # DCO
@@ -645,8 +680,10 @@ def build_diagnostic_comment(
         lines.append("- **Merge conflicts**: none")
 
     lines.append("")
+    lines.append("</details>")
+    lines.append("")
     lines.append("---")
-    lines.append("*Run `/lgtm-bot diagnose` again to refresh*")
+    lines.append("*Run `/diagnose` again to refresh*")
 
     return "\n".join(lines)
 
@@ -697,28 +734,30 @@ def main() -> None:
     head_sha = pr["head"]["sha"]
     base_ref = pr["base"]["ref"]
     pr_author = pr["user"]["login"]
-    head_repo = pr["head"].get("repo")
-    is_fork = (not head_repo) or head_repo["full_name"] != f"{OWNER}/{REPO}"
-
     # Run all diagnostics
     ci_results, failing_checks = diagnose_ci(head_sha)
     approvals, changes_requested = diagnose_reviews(PR_NUMBER, pr_author)
     unresolved = diagnose_unresolved_conversations(PR_NUMBER)
     team_files = diagnose_codeowners(PR_NUMBER, base_ref)
 
-    # LLM diagnosis for CI failures
-    llm_response = None
-    if failing_checks:
-        all_logs = []
-        for name in failing_checks:
-            check = ci_results[name]
-            if "id" in check:
-                logs = fetch_failed_logs(check["id"])
-                if logs:
-                    all_logs.append(f"### {name}\n{logs}")
-        if all_logs:
-            combined_logs = "\n\n".join(all_logs)[:8000]
-            llm_response = call_llm(failing_checks, combined_logs)
+    # Short-circuit: if the PR is already mergeable, skip expensive classifier
+    classifier_markdown = None
+    is_mergeable = (
+        not failing_checks
+        and len(approvals) >= 1
+        and not changes_requested
+        and not unresolved
+        and pr.get("mergeable_state") != "dirty"
+    )
+
+    if is_mergeable:
+        print("PR is mergeable, skipping CI failure analysis.")
+    elif failing_checks and NVIDIA_API_KEY:
+        # CI failure analysis: run error classifier (if API key and run_id available)
+        run_id = get_workflow_run_id_for_commit(head_sha)
+        if run_id:
+            repo_root = os.getcwd()
+            classifier_markdown = run_error_classifier(run_id, repo_root)
 
     # Build and post comment
     comment_body = build_diagnostic_comment(
@@ -729,9 +768,8 @@ def main() -> None:
         changes_requested,
         unresolved,
         team_files,
-        is_fork,
         head_sha,
-        llm_response,
+        classifier_markdown=classifier_markdown,
     )
     post_diagnostic_comment(PR_NUMBER, comment_body)
     print("Diagnosis complete!")

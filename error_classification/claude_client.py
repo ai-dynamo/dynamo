@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Claude API client with prompt caching and rate limiting.
+LLM inference client with prompt caching and rate limiting.
 Supports both Anthropic native API and OpenAI-compatible APIs (e.g., NVIDIA).
 """
 import json
+import threading
 import time
-from dataclasses import dataclass
 from typing import Any, Dict, List
 
 import anthropic
@@ -17,19 +17,8 @@ from anthropic import Anthropic
 from .config import Config
 from .prompts import SYSTEM_PROMPT_FULL_LOG_ANALYSIS
 
-
-@dataclass
-class ClassificationResult:
-    """Result from Claude API classification."""
-
-    primary_category: str
-    confidence_score: float
-    root_cause_summary: str
-    prompt_tokens: int
-    completion_tokens: int
-    cached_tokens: int
-    model_version: str
-    classified_at: str
+# Maximum characters to send to the LLM (approx ~100K tokens, leaves room for system prompt)
+MAX_LOG_LENGTH = 400_000
 
 
 class RateLimiter:
@@ -44,23 +33,27 @@ class RateLimiter:
         """
         self.max_rpm = max_rpm
         self.requests = []
+        self._lock = threading.Lock()
 
     def wait_if_needed(self):
         """Wait if rate limit would be exceeded."""
-        now = time.time()
+        with self._lock:
+            now = time.time()
 
-        # Remove requests older than 1 minute
-        self.requests = [req_time for req_time in self.requests if now - req_time < 60]
+            # Remove requests older than 1 minute
+            self.requests = [
+                req_time for req_time in self.requests if now - req_time < 60
+            ]
 
-        # If at limit, wait
-        if len(self.requests) >= self.max_rpm:
-            oldest_request = self.requests[0]
-            wait_time = 60 - (now - oldest_request)
-            if wait_time > 0:
-                print(f"⏳ Rate limit reached, waiting {wait_time:.1f}s")
-                time.sleep(wait_time)
+            # If at limit, wait
+            if len(self.requests) >= self.max_rpm:
+                oldest_request = self.requests[0]
+                wait_time = 60 - (now - oldest_request)
+                if wait_time > 0:
+                    print(f"⏳ Rate limit reached, waiting {wait_time:.1f}s")
+                    time.sleep(wait_time)
 
-        self.requests.append(now)
+            self.requests.append(now)
 
 
 class ClaudeClient:
@@ -83,7 +76,7 @@ class ClaudeClient:
             self.api_base_url = config.api_base_url or "https://api.openai.com/v1"
         else:
             # For native Anthropic API
-            self.client = Anthropic(api_key=config.anthropic_api_key)
+            self.client = Anthropic(api_key=config.api_key)
             self.api_base_url = None
 
     def analyze_full_job_log(
@@ -121,13 +114,12 @@ class ClaudeClient:
         self.rate_limiter.wait_if_needed()
 
         # Truncate log if too large (keep last portion - most relevant for failures)
-        max_log_length = 400000  # ~100K tokens, leave room for system prompt
-        if len(job_log) > max_log_length:
+        if len(job_log) > MAX_LOG_LENGTH:
             # Keep last portion of log (failures typically at end)
-            truncated_length = len(job_log) - max_log_length
+            truncated_length = len(job_log) - MAX_LOG_LENGTH
             job_log = (
                 f"[... truncated first {truncated_length} chars ...]\n\n"
-                + job_log[-max_log_length:]
+                + job_log[-MAX_LOG_LENGTH:]
             )
 
         # Build prompt with full log
@@ -137,7 +129,7 @@ class ClaudeClient:
         try:
             if use_cache:
                 response = self.client.messages.create(
-                    model=self.config.anthropic_model,
+                    model=self.config.model,
                     max_tokens=4096,  # Allow longer response for multiple errors
                     system=[
                         {
@@ -150,7 +142,7 @@ class ClaudeClient:
                 )
             else:
                 response = self.client.messages.create(
-                    model=self.config.anthropic_model,
+                    model=self.config.model,
                     max_tokens=4096,
                     system=SYSTEM_PROMPT_FULL_LOG_ANALYSIS,
                     messages=[{"role": "user", "content": user_prompt}],
@@ -172,7 +164,7 @@ class ClaudeClient:
             result["prompt_tokens"] = prompt_tokens
             result["completion_tokens"] = completion_tokens
             result["cached_tokens"] = cached_tokens
-            result["model_version"] = self.config.anthropic_model
+            result["model_version"] = self.config.model
 
             return result
 
@@ -201,7 +193,7 @@ Full Log:
 Please:
 1. Identify all errors/failures in this log
 2. For each error, determine which step it occurred in
-3. Classify each error into one of the 10 categories
+3. Classify each error into one of the 2 categories
 4. Provide a root cause summary for each
 5. Include a relevant log excerpt showing the error
 
@@ -261,6 +253,94 @@ Return JSON format as specified in the system prompt."""
         except Exception as e:
             raise ValueError(f"Error parsing response: {e}")
 
+    def _openai_request_with_retry(self, payload: dict) -> requests.Response:
+        """
+        Make an OpenAI-compatible API request with retry logic.
+
+        Handles 429 rate-limit errors and timeouts with exponential backoff
+        (up to 3 attempts).
+
+        Args:
+            payload: JSON payload for the chat completions endpoint
+
+        Returns:
+            The successful requests.Response object
+
+        Raises:
+            requests.exceptions.HTTPError: If all retries exhausted on 429
+            requests.exceptions.Timeout: If all retries exhausted on timeout
+            Exception: Any other non-retryable exception
+        """
+        url = f"{self.api_base_url}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.config.api_key}",
+        }
+
+        max_retries = 3
+        retry_delay = 2.0
+        response = None
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    url, headers=headers, json=payload, timeout=120
+                )
+
+                # Handle rate limit errors (429)
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        # Check for Retry-After header
+                        retry_after = response.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                wait_time = float(retry_after)
+                                print(
+                                    f"⏳ Rate limit hit (429), Retry-After: {wait_time}s"
+                                )
+                            except ValueError:
+                                wait_time = retry_delay * (2**attempt)
+                        else:
+                            wait_time = retry_delay * (2**attempt)
+
+                        print(
+                            f"⏳ Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}"
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"❌ Rate limit exceeded after {max_retries} retries")
+                        response.raise_for_status()
+
+                # Retry on 5xx server errors (transient infrastructure issues)
+                if response.status_code >= 500:
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (2**attempt)
+                        print(
+                            f"⏳ Server error {response.status_code}, retrying in {wait_time:.1f}s ({attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(
+                            f"❌ Server error {response.status_code} after {max_retries} retries"
+                        )
+
+                response.raise_for_status()
+                return response
+
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    print(f"⏳ Timeout, retrying {attempt + 1}/{max_retries}")
+                    time.sleep(retry_delay)
+                    continue
+                raise
+
+        # Should not normally reach here, but guard against it
+        if response is not None:
+            return response
+        raise RuntimeError("All retry attempts failed without a response")
+
     def _analyze_full_log_openai_format(
         self, job_log: str, job_name: str, job_id: str
     ) -> Dict[str, Any]:
@@ -279,26 +359,19 @@ Return JSON format as specified in the system prompt."""
         self.rate_limiter.wait_if_needed()
 
         # Truncate log if too large
-        max_log_length = 400000
-        if len(job_log) > max_log_length:
-            truncated_length = len(job_log) - max_log_length
+        if len(job_log) > MAX_LOG_LENGTH:
+            truncated_length = len(job_log) - MAX_LOG_LENGTH
             job_log = (
                 f"[... truncated first {truncated_length} chars ...]\n\n"
-                + job_log[-max_log_length:]
+                + job_log[-MAX_LOG_LENGTH:]
             )
 
         # Build prompt
         user_prompt = self._build_full_log_prompt(job_log, job_name, job_id)
 
         # Make API call with OpenAI format (with retry logic for rate limits)
-        url = f"{self.api_base_url}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.config.anthropic_api_key}",
-        }
-
         payload = {
-            "model": self.config.anthropic_model,
+            "model": self.config.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT_FULL_LOG_ANALYSIS},
                 {"role": "user", "content": user_prompt},
@@ -307,55 +380,7 @@ Return JSON format as specified in the system prompt."""
             "max_tokens": 4096,
         }
 
-        # Retry with exponential backoff for rate limit errors
-        max_retries = 3
-        retry_delay = 2.0
-
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(
-                    url, headers=headers, json=payload, timeout=120
-                )
-
-                # Handle rate limit errors (429)
-                if response.status_code == 429:
-                    if attempt < max_retries - 1:
-                        # Check for Retry-After header
-                        retry_after = response.headers.get("Retry-After")
-                        if retry_after:
-                            try:
-                                wait_time = float(retry_after)
-                                print(
-                                    f"⏳ Rate limit hit (429) for job {job_name}, Retry-After: {wait_time}s"
-                                )
-                            except ValueError:
-                                wait_time = retry_delay * (2**attempt)
-                        else:
-                            wait_time = retry_delay * (2**attempt)
-
-                        print(
-                            f"⏳ Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}"
-                        )
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        print(
-                            f"❌ Rate limit exceeded for job {job_name} after {max_retries} retries"
-                        )
-                        response.raise_for_status()
-
-                response.raise_for_status()
-                break  # Success, exit retry loop
-
-            except requests.exceptions.Timeout:
-                if attempt < max_retries - 1:
-                    print(
-                        f"⏳ Timeout for job {job_name}, retrying {attempt + 1}/{max_retries}"
-                    )
-                    time.sleep(retry_delay)
-                    continue
-                raise
-
+        response = self._openai_request_with_retry(payload)
         data = response.json()
 
         # Parse OpenAI format response
@@ -369,9 +394,100 @@ Return JSON format as specified in the system prompt."""
         result["prompt_tokens"] = usage.get("prompt_tokens", 0)
         result["completion_tokens"] = usage.get("completion_tokens", 0)
         result["cached_tokens"] = usage.get("cached_tokens", 0)
-        result["model_version"] = data.get("model", self.config.anthropic_model)
+        result["model_version"] = data.get("model", self.config.model)
 
         return result
+
+    def _build_summary_prompt(
+        self,
+        classifications: List[Any],
+        workflow_name: str,
+        run_id: str,
+        run_url: str,
+        failed_jobs: int,
+    ) -> str:
+        """
+        Build the summary prompt shared by both Anthropic and OpenAI paths.
+
+        Args:
+            classifications: List of ErrorClassification objects
+            workflow_name: Name of the workflow that failed
+            run_id: GitHub workflow run ID
+            run_url: URL to the workflow run
+            failed_jobs: Number of failed jobs
+
+        Returns:
+            Prompt string for the summary generation request
+        """
+        # Build list of all errors with context
+        error_list = []
+        for c in classifications:
+            error_list.append(
+                {
+                    "job_name": c.job_name,
+                    "step_name": c.step_name,
+                    "category": c.primary_category,
+                    "confidence": round(
+                        c.confidence_score * 100
+                    ),  # Convert to percentage
+                    "root_cause": c.root_cause_summary,
+                }
+            )
+
+        return f"""You are analyzing a failed GitHub Actions workflow. Below are all the error classifications from the failed jobs.
+
+**Workflow**: {workflow_name}
+**Run ID**: {run_id}
+**Failed Jobs**: {failed_jobs}
+
+**All Errors**:
+{json.dumps(error_list, indent=2)}
+
+Your task is to generate a concise, actionable markdown summary for contributors:
+
+1. **Overall Summary** (1-2 sentences): Primary reason(s) the workflow failed.
+
+2. **For each failure or group**: Include exactly:
+   - **What failed**: One line describing what broke.
+   - **Next step**: One concrete action the contributor can take (e.g., "Fix the import in tests/foo.py", "Re-run the job", "Check Docker login").
+
+3. Keep Infrastructure (🔴) vs Code (🟠) clear. Be short and scannable.
+
+Use this **exact format**:
+
+### 🤖 Overall Failure Summary
+
+[1-2 sentence summary. Mention main pattern if many jobs failed for same reason.]
+
+### ❌ Common Failures (affecting multiple jobs)
+
+**🔴 [Short failure description]** (X jobs affected)
+
+- **What failed**: [One line.]
+- **Next step**: [One concrete action.]
+- **Jobs**: `job1`, `job2`
+- **Root Cause**: [1 sentence.]
+
+[Repeat for each group.]
+
+### 🔍 Unique Job Failures
+
+**🟠 job-name** (step: `step-name`)
+
+- **What failed**: [One line.]
+- **Next step**: [One concrete action.]
+- **Root Cause**: [1 sentence.]
+
+[Repeat for each unique failure.]
+
+---
+
+**Guidelines**:
+- Use 🔴 for infrastructure_error, 🟠 for code_error.
+- Every failure or group must have exactly one "What failed" and one "Next step" line; keep them one line each and actionable.
+- Group similar failures; only show Common Failures if 2+ jobs share a root cause.
+- Keep the whole summary short so external contributors can act quickly.
+"""
 
     def generate_formatted_summary(
         self,
@@ -409,88 +525,15 @@ Return JSON format as specified in the system prompt."""
         # Rate limit
         self.rate_limiter.wait_if_needed()
 
-        # Build list of all errors with context
-        error_list = []
-        for c in classifications:
-            error_list.append(
-                {
-                    "job_name": c.job_name,
-                    "step_name": c.step_name,
-                    "category": c.primary_category,
-                    "confidence": round(
-                        c.confidence_score * 100
-                    ),  # Convert to percentage
-                    "root_cause": c.root_cause_summary,
-                }
-            )
-
-        # Build the prompt
-        prompt = f"""You are analyzing a failed GitHub Actions workflow. Below are all the error classifications from the failed jobs.
-
-**Workflow**: {workflow_name}
-**Run ID**: {run_id}
-**Failed Jobs**: {failed_jobs}
-
-**All Errors**:
-{json.dumps(error_list, indent=2)}
-
-Your task is to generate a concise, well-formatted markdown summary with:
-
-1. **Overall Summary** (2-3 sentences): Explain the primary reason(s) the workflow failed. If multiple jobs failed for the same or similar reason, emphasize that pattern.
-
-2. **Grouped Failures**: Identify similar failures across multiple jobs and group them together. For each group:
-   - Short description of the failure
-   - Number of jobs affected
-   - List of affected job names
-   - Highest confidence score in the group
-   - Root cause explanation
-
-3. **Unique Failures**: List any job-specific failures that don't fit into groups (only 1 job affected). For each:
-   - Job name
-   - Confidence score
-   - Root cause
-
-Use this **exact format**:
-
-### 🤖 Overall Failure Summary
-
-[Your 2-3 sentence summary here]
-
-### ❌ Common Failures (affecting multiple jobs)
-
-**🔴 [Short failure description]** (X jobs affected)
-
-- **Jobs**: `job1`, `job2`, `job3`
-- **Confidence**: XX%
-- **Root Cause**: [explanation]
-
-[Repeat for each group of similar failures]
-
-### 🔍 Unique Job Failures
-
-**🟠 job-name** (step: `step-name`)
-
-- **Confidence**: XX%
-- **Root Cause**: [explanation]
-
-[Repeat for each unique failure]
-
----
-
-**Guidelines**:
-- Use 🔴 for infrastructure_error, 🟠 for code_error
-- Group by similarity of root cause (not just exact matches) - if errors are conceptually similar (e.g., all Docker-related, all import errors), group them even if wording differs slightly
-- If 5+ jobs fail for essentially the same reason, definitely group them
-- Only show "Common Failures" section if 2+ jobs share a root cause
-- Only show "Unique Failures" section if there are job-specific issues
-- Keep root causes concise but informative (1-2 sentences max)
-- In the overall summary, mention the most impactful patterns (e.g., "6 jobs failed due to Docker auth")
-"""
+        # Build the prompt (shared with OpenAI path)
+        prompt = self._build_summary_prompt(
+            classifications, workflow_name, run_id, run_url, failed_jobs
+        )
 
         try:
             # Call Claude with the native API
             response = self.client.messages.create(
-                model=self.config.anthropic_model,
+                model=self.config.model,
                 max_tokens=2000,
                 temperature=0.3,
                 messages=[{"role": "user", "content": prompt}],
@@ -519,144 +562,20 @@ Use this **exact format**:
         # Apply rate limiting BEFORE making the request
         self.rate_limiter.wait_if_needed()
 
-        # Build list of all errors with context
-        error_list = []
-        for c in classifications:
-            error_list.append(
-                {
-                    "job_name": c.job_name,
-                    "step_name": c.step_name,
-                    "category": c.primary_category,
-                    "confidence": round(c.confidence_score * 100),
-                    "root_cause": c.root_cause_summary,
-                }
-            )
-
-        prompt = f"""You are analyzing a failed GitHub Actions workflow. Below are all the error classifications from the failed jobs.
-
-**Workflow**: {workflow_name}
-**Run ID**: {run_id}
-**Failed Jobs**: {failed_jobs}
-
-**All Errors**:
-{json.dumps(error_list, indent=2)}
-
-Your task is to generate a concise, well-formatted markdown summary with:
-
-1. **Overall Summary** (2-3 sentences): Explain the primary reason(s) the workflow failed. If multiple jobs failed for the same or similar reason, emphasize that pattern.
-
-2. **Grouped Failures**: Identify similar failures across multiple jobs and group them together. For each group:
-   - Short description of the failure
-   - Number of jobs affected
-   - List of affected job names
-   - Highest confidence score in the group
-   - Root cause explanation
-
-3. **Unique Failures**: List any job-specific failures that don't fit into groups (only 1 job affected). For each:
-   - Job name
-   - Confidence score
-   - Root cause
-
-Use this **exact format**:
-
-### 🤖 Overall Failure Summary
-
-[Your 2-3 sentence summary here]
-
-### ❌ Common Failures (affecting multiple jobs)
-
-**🔴 [Short failure description]** (X jobs affected)
-
-- **Jobs**: `job1`, `job2`, `job3`
-- **Confidence**: XX%
-- **Root Cause**: [explanation]
-
-[Repeat for each group of similar failures]
-
-### 🔍 Unique Job Failures
-
-**🟠 job-name** (step: `step-name`)
-
-- **Confidence**: XX%
-- **Root Cause**: [explanation]
-
-[Repeat for each unique failure]
-
----
-
-**Guidelines**:
-- Use 🔴 for infrastructure_error, 🟠 for code_error
-- Group by similarity of root cause (not just exact matches) - if errors are conceptually similar (e.g., all Docker-related, all import errors), group them even if wording differs slightly
-- If 5+ jobs fail for essentially the same reason, definitely group them
-- Only show "Common Failures" section if 2+ jobs share a root cause
-- Only show "Unique Failures" section if there are job-specific issues
-- Keep root causes concise but informative (1-2 sentences max)
-- In the overall summary, mention the most impactful patterns (e.g., "6 jobs failed due to Docker auth")
-"""
+        # Build the prompt (shared with Anthropic path)
+        prompt = self._build_summary_prompt(
+            classifications, workflow_name, run_id, run_url, failed_jobs
+        )
 
         try:
-            url = f"{self.api_base_url}/chat/completions"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.config.anthropic_api_key}",
-            }
-
             payload = {
-                "model": self.config.anthropic_model,
+                "model": self.config.model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
                 "max_tokens": 2000,
             }
 
-            # Retry with exponential backoff for rate limit errors
-            max_retries = 3
-            retry_delay = 2.0
-
-            for attempt in range(max_retries):
-                try:
-                    response = requests.post(
-                        url, headers=headers, json=payload, timeout=60
-                    )
-
-                    # Handle rate limit errors (429)
-                    if response.status_code == 429:
-                        if attempt < max_retries - 1:
-                            # Check for Retry-After header
-                            retry_after = response.headers.get("Retry-After")
-                            if retry_after:
-                                try:
-                                    wait_time = float(retry_after)
-                                    print(
-                                        f"⏳ Rate limit hit (429) for summary, Retry-After: {wait_time}s"
-                                    )
-                                except ValueError:
-                                    wait_time = retry_delay * (2**attempt)
-                            else:
-                                wait_time = retry_delay * (2**attempt)
-
-                            print(
-                                f"⏳ Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}"
-                            )
-                            time.sleep(wait_time)
-                            continue
-                        else:
-                            print(
-                                f"❌ Rate limit exceeded for summary after {max_retries} retries"
-                            )
-                            response.raise_for_status()
-
-                    response.raise_for_status()
-                    break  # Success, exit retry loop
-
-                except requests.exceptions.Timeout:
-                    if attempt < max_retries - 1:
-                        print(
-                            f"⏳ Timeout for summary, retrying {attempt + 1}/{max_retries}"
-                        )
-                        time.sleep(retry_delay)
-                        continue
-                    raise
-
+            response = self._openai_request_with_retry(payload)
             data = response.json()
             content = data["choices"][0]["message"]["content"]
 
