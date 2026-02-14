@@ -3,7 +3,7 @@
 
 # Router benchmark only — for quick feedback while developing.
 # Runs the same e2e router benchmark test as nightly, without the full pipeline.
-# Uses a pre-built image (default: main-vllm-amd64) so no build step.
+# Always pulls the latest main branch image (main-vllm-amd64) from ACR.
 #
 # Trigger from a branch:
 #   - Push to any branch that has this file (runs on push when workflow or test changes).
@@ -13,12 +13,6 @@ name: Router Benchmark CI
 
 on:
   workflow_dispatch:
-    inputs:
-      image_tag:
-        description: 'Runtime image tag (e.g. main-vllm-amd64, nightly-vllm-amd64)'
-        required: true
-        default: 'main-vllm-amd64'
-        type: string
   push:
     paths:
       - '.github/workflows/router-benchmark-ci.yml'
@@ -30,6 +24,7 @@ permissions:
 
 env:
   REGISTRY_IMAGE: ai-dynamo/dynamo
+  IMAGE_TAG: main-vllm-amd64
 
 jobs:
   router-benchmark:
@@ -45,14 +40,18 @@ jobs:
         shell: bash
         env:
           ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
-          docker pull ${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
-          docker tag ${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+          ACR_HOSTNAME="${ACR_HOSTNAME%%[[:space:]]*}"
+          if [ -z "$ACR_HOSTNAME" ]; then
+            echo "ERROR: ACR_HOSTNAME must be set"
+            exit 1
+          fi
+          docker pull "${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_TAG }}"
+          docker tag "${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_TAG }}" "${{ env.IMAGE_TAG }}"
       - name: Run E2E Router Benchmark Tests (gpu_4)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ inputs.image_tag }}
+          image_tag: ${{ env.IMAGE_TAG }}
           pytest_marks: "vllm and e2e and router_benchmark and nightly and gpu_4"
           framework: vllm
           test_type: e2e-router-benchmark
