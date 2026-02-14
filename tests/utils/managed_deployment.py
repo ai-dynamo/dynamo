@@ -670,8 +670,7 @@ class DeploymentSpec:
         self._log_collection_storage_class = storage_class
         self._log_collection_container_dir = container_log_dir
 
-        # Debug: Log the generated PVC name for consistency verification
-        print(f"[DEBUG] Generated PVC name: {pvc_name}")
+        self._logger.debug(f"Generated PVC name: {pvc_name}")
 
         # Add PVC at deployment level (following recipe pattern)
         if "pvcs" not in self._deployment_spec["spec"]:
@@ -1760,7 +1759,7 @@ fi
                 # Extract the archive locally
                 import tarfile
 
-                print(local_archive)
+                self._logger.debug(f"Extracting archive: {local_archive}")
 
                 with tarfile.open(local_archive, "r:gz") as tar:
                     tar.extractall(path=local_output_dir, filter="data")
@@ -1800,7 +1799,6 @@ fi
             }
 
         except Exception as e:
-            print(e)
             self._logger.error(
                 f"Failed to extract logs from download job {job_name}: {e}"
             )
