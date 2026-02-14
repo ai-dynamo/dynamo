@@ -556,7 +556,6 @@ async def parse_args(args: list[str]) -> Config:
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
 
-
     if parsed_args.use_sglang_tokenizer:
         logging.info(
             "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
