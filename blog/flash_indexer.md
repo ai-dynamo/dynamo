@@ -31,7 +31,7 @@ Every block in the system carries a few pieces of identity:
 
 There is a deliberate asymmetry here. Local hashes are *chunk hashes*---they depend only on the tokens inside a single block, with no rolling context from the prefix. This is a conscious design choice driven by the read path.
 
-When a `find_matches` request arrives, the router frontend needs to hash the query's tokens to produce the local hashes it will probe the index with. There are *many* frontends serving a high volume of requests, and each request may span hundreds or thousands of blocks. If local hashes required rolling context (knowing the full prefix to compute each block's hash), the frontend would need to compute a sequential rolling hash for every position---serialized, expensive, and hard to parallelize. With chunk hashes, each block's hash is independent: the frontend can hash them cheaply and in parallel.
+When a `find_matches` request arrives, the router frontend needs to hash the query's tokens to produce the local hashes it will probe the index with. There are *many* frontends serving a high volume of requests, and each request may span hundreds or thousands of blocks. If local hashes required rolling context (knowing the full prefix to compute each block's hash), the frontend would need to compute a sequential rolling hash for every position. With chunk hashes, each block's hash is independent: the frontend can hash them cheaply and in parallel.
 
 The engine-side publisher, by contrast, only needs to compute the rolling sequence hash for its own KV events, and there's one publisher per engine processing events sequentially. The asymmetry in workload---many frontends doing reads vs. one publisher per engine doing writes---is what makes chunk hashes the right default for local hashes.
 
@@ -43,10 +43,14 @@ But this comes at a cost. Chunk hashes do not uniquely identify a block's positi
 
 The indexer handles two kinds of traffic: **events** (writes) and **requests** (reads).
 
-**KV Events** are produced by the **publisher**---a wrapper around each inference engine that acts as the bridge between the engine's internal world and the indexer's. In the Dynamo design, the publisher subscribes to raw KV events from the engine (containing the engine's external sequence hashes and the token IDs of each block), computes the local block hash from the token content (using the same hashing algorithm as the frontend router, so the two sides always agree), and tags each event with metadata: the `worker_id` (extracted from Dynamo's discovery mechanism), a monotonically increasing `event_id` (for gap detection and ordering), and the `dp_rank`. It then publishes these enriched events over pub/sub (via NATS or ZMQ) to every KV indexer instance. There are two event types that matter:
+**KV Events** are produced by the **publisher**---a wrapper around each inference engine that acts as the bridge between the engine's internal world and the indexer's. In the Dynamo design, the publisher subscribes to raw KV events from the engine (containing the engine's external sequence hashes and the token IDs of each block), computes the local block hash from the token content (using the same hashing algorithm as the frontend router, so the two sides always agree), and tags each event with metadata: the `worker_id` (extracted from Dynamo's discovery mechanism), a monotonically increasing `event_id` (for gap detection and ordering), and extra identifiers we can extract from the engine like `dp_rank`. It then publishes these enriched events over pub/sub to every KV indexer instance. There are two event types that matter:
 
 - **Store**: A worker has computed and cached a new block. The event carries `(worker_id, local_hash, seq_hash)`. This happens when a request triggers a prefill or decode that extends the KV cache with new blocks. The indexer must record that this worker now holds this block.
-- **Remove**: A worker has evicted a block from its cache (to make room for new ones, or because a sequence finished). The event carries `(worker_id, seq_hash)`. The indexer must delete the corresponding entry.
+- **Remove**: A worker has evicted a block from its cache (to make room for new ones). The event carries `(worker_id, seq_hash)`. The indexer must delete the corresponding entry.
+
+Why can't we just infer the cache state from the request-response cycle? Because engines cache KV blocks beyond the lifetime of a single request, and we have no way of knowing when a block gets evicted unless we can perfectly simulate the engine's eviction policy. The engine's internal cache management---LRU sweeps, memory pressure, preemption---is opaque to the outside world. KV events are the engine's way of telling us what actually happened, and the pub/sub pattern naturally fits horizontal scaling: adding more indexer instances just means more subscribers, no protocol changes.
+
+That said, there are strategies to reduce or eliminate reliance on KV events. We can use a TTL-based heuristic that expires blocks after a period of inactivity, approximating eviction without explicit remove events. Or we can run a mock engine that mirrors the real engine's scheduling and eviction logic to predict cache state. But both are approximations with different tradeoff profiles, and are out of scope for this post.
 
 In practice, the event stream is bursty: a single prefill can produce dozens of store events at once (one per new block), and eviction sweeps can produce a burst of removes. The indexer must absorb these at the rate the engines produce them---falling behind means the index goes stale and routing decisions degrade.
 
@@ -64,7 +68,7 @@ flowchart LR
 
 **Requests** are prefix match queries issued by the router frontend on every incoming inference request. The frontend tokenizes the prompt, chunks the tokens into blocks, computes the chunk hashes, and hands the indexer a sequence of local hashes: `[local_hash_0, local_hash_1, ..., local_hash_D]`. The indexer's job: walk the sequence and, for each worker, determine how deep the prefix overlap goes. The result is a set of `(worker_id, match_depth)` scores that the router uses to pick the best worker---the one with the deepest cached prefix, minimizing redundant computation.
 
-Requests are the hot path. Every millisecond of user-facing latency counts, and the indexer sits directly in the critical path between "request arrives" and "request gets routed." The design goal: make requests as fast as possible, even if it means events do a bit more bookkeeping.
+Both events and requests are on the hot path, and the design goal is to make them fast *without contending with each other*. If events are slow, the index goes stale and routing decisions are based on outdated cache state. If requests are slow, user-facing latency suffers. And if the two compete for the same locks or threads, improving one degrades the other. The challenge is to keep both fast and non-interfering---quick routing decisions on up-to-date data.
 
 #### Serving at planetary scale
 
@@ -74,28 +78,27 @@ So far, the indexer has been a core component of our KV router, battle-tested by
 
 ## 1. Your Leetcode DSA
 
-The simplest possible index is a nested dictionary. For each worker, store a mapping from local block hash to external sequence hash. To find matches, iterate every worker and walk through the query sequence, checking for hits.
+The simplest possible index is a nested dictionary. For each worker, store a mapping from local block hash to the set of external sequence hashes that share that chunk hash. Since local hashes are chunk hashes---the same tokens can appear at different positions in different sequences---a single local hash can map to multiple sequence hashes on the same worker. To find matches, iterate every worker and walk through the query sequence, checking for hits.
 
 ```python
 class KvIndex:
-    # worker_id -> { local_hash -> external_seq_hash }
-    index: dict[int, dict[int, int]] = {}
+    # worker_id -> { local_hash -> set of seq_hashes }
+    index: dict[int, dict[int, set[int]]] = {}
 
     def store(self, worker_id: int, blocks: list[tuple[int, int]]):
         if worker_id not in self.index:
             self.index[worker_id] = {}
         for local_hash, seq_hash in blocks:
-            self.index[worker_id][local_hash] = seq_hash
+            if local_hash not in self.index[worker_id]:
+                self.index[worker_id][local_hash] = set()
+            self.index[worker_id][local_hash].add(seq_hash)
 
     def remove(self, worker_id: int, seq_hashes: list[int]):
         if worker_id not in self.index:
             return
         for seq_hash in seq_hashes:
-            # linear scan to find by value... not great
-            self.index[worker_id] = {
-                k: v for k, v in self.index[worker_id].items()
-                if v != seq_hash
-            }
+            for local_hash, hashes in self.index[worker_id].items():
+                hashes.discard(seq_hash)
 
     def find_matches(self, query: list[int]) -> dict[int, int]:
         """Returns { worker_id: match_depth }"""
@@ -103,7 +106,7 @@ class KvIndex:
         for worker_id, blocks in self.index.items():
             depth = 0
             for local_hash in query:
-                if local_hash in blocks:
+                if local_hash in blocks and blocks[local_hash]:
                     depth += 1
                 else:
                     break
@@ -114,7 +117,9 @@ class KvIndex:
 
 This works. It's also `O(W × D)` for every `find_matches` call, where `W` is the number of workers and `D` is the query depth. With hundreds of workers and sequences thousands of blocks long, this is a non-starter for a hot-path that runs on every incoming request.
 
-But it's a good starting point. Let's bring it to a language that takes performance seriously.
+There's also a correctness issue already present. The `find_matches` check `local_hash in blocks` tells us the worker has *some* block with those tokens, but it can't tell us *which* one---different sequences with the same chunk at the same position are conflated. If there's an overlap, we'd need some secondary resolution (potentially an RPC call back to the engine to verify), which is expensive and defeats the purpose of a fast local index. We'll accept this for now and deal with it properly soon.
+
+But first, let's bring this to a language that takes performance seriously.
 
 ---
 
@@ -126,8 +131,8 @@ The Python dict translates directly to Rust's `HashMap`:
 
 ```rust
 struct KvIndex {
-    // worker -> (local_hash -> seq_hash)
-    index: HashMap<WorkerId, HashMap<LocalHash, ExternalHash>>,
+    // worker -> (local_hash -> set of seq_hashes)
+    index: HashMap<WorkerId, HashMap<LocalHash, HashSet<ExternalHash>>>,
 }
 ```
 
@@ -176,33 +181,34 @@ This is clean, correct, and simple. But it has an inherent throughput ceiling: e
 
 The nested dictionary `worker -> { hash -> ... }` forces `find_matches` to iterate over every worker. If you have 100 workers, you're doing 100 traversals of the query sequence. But think about what we're actually asking: "which workers have this block?" That's a question about a *block*, not a worker.
 
-Invert the index. Instead of iterating workers and checking blocks, we build a forward index keyed by `LocalHash` that maps directly to the set of workers holding that block. We also keep the per-worker `lookup` table as the authoritative record for event processing---adds and removes go through `lookup`, and the forward `index` is updated alongside it.
+Invert the index. Instead of iterating workers and checking blocks, build a forward index keyed by `LocalHash` that maps to the sequence hashes and their worker sets. Since multiple sequence hashes can share the same chunk hash, we nest them: `local_hash -> { seq_hash -> set of workers }`.
 
 ```rust
 struct KvIndex {
-    // Forward index: local_hash -> set of workers (fast reads)
-    index: HashMap<LocalHash, HashSet<WorkerId>>,
-    // Reverse lookup: worker -> (seq_hash -> local_hash) (authoritative for writes)
-    lookup: HashMap<WorkerId, HashMap<ExternalHash, LocalHash>>,
+    // Forward index: local_hash -> (seq_hash -> set of workers)
+    index: HashMap<LocalHash, HashMap<ExternalHash, HashSet<WorkerId>>>,
 }
 ```
 
-On a KV event, we update both structures: insert into `lookup[worker][seq_hash]` and add the worker to `index[local_hash]`. On removal, reverse the process.
+On a store event, insert the worker into `index[local_hash][seq_hash]`. On removal, we need to find and remove the worker's entry---but without a reverse lookup, we'd have to scan the entire index to find which `(local_hash, seq_hash)` pair corresponds to the removed block. Not great, but let's set that aside for now.
 
-Now `find_matches` traverses the query sequence once, looking up the worker set at each position via the forward `index`. Workers can only *drop out* as you go deeper (if a worker doesn't have a block at position `i`, it certainly doesn't have the continuation at position `i+1`). The total set-intersection work across all levels is bounded by `W`---each worker is "drained" from the active set at most once---giving us `O(D + W)` instead of `O(W × D)`.
+Now `find_matches` traverses the query sequence once. At each position, we look up `index[local_hash]`---which returns all seq hashes (and their worker sets) that share this chunk hash. For the purpose of traversal, we take the **union** of all worker sets across seq hashes at that position. Workers can only *drop out* as you go deeper (if a worker doesn't have a block at position `i`, it certainly doesn't have the continuation at position `i+1`). The total set-intersection work across all levels is bounded by `W`---each worker is "drained" from the active set at most once---giving us `O(D + W)` instead of `O(W × D)`.
 
 ```rust
 fn find_matches(&self, query: &[LocalHash]) -> HashMap<WorkerId, u32> {
     let mut scores = HashMap::new();
-    let Some(active) = self.index.get(&query[0]) else {
+    let Some(entry) = self.index.get(&query[0]) else {
         return scores;
     };
-    let mut active = active.clone();
+    // Union all workers across seq hashes at this local hash
+    let mut active: HashSet<WorkerId> = entry.values().flatten().copied().collect();
 
     for (depth, local_hash) in query.iter().enumerate() {
-        let Some(workers_here) = self.index.get(local_hash) else {
-            break; // no workers have this block -- everyone drains
-        };
+        let workers_here: HashSet<WorkerId> = self.index
+            .get(local_hash)
+            .map(|e| e.values().flatten().copied().collect())
+            .unwrap_or_default();
+
         let drained: Vec<_> = active.iter()
             .filter(|w| !workers_here.contains(w))
             .copied()
@@ -211,6 +217,7 @@ fn find_matches(&self, query: &[LocalHash]) -> HashMap<WorkerId, u32> {
             active.remove(&w);
             scores.insert(w, depth as u32);
         }
+        if active.is_empty() { break; }
     }
     for w in active {
         scores.insert(w, query.len() as u32);
@@ -219,21 +226,21 @@ fn find_matches(&self, query: &[LocalHash]) -> HashMap<WorkerId, u32> {
 }
 ```
 
-This is a big win. But there's a collision problem hiding in the forward index---the chunk hash problem we introduced in the Background.
+This is a big win for read performance. But two problems remain.
 
-Because local hashes are chunk hashes (content-only, no positional context), the forward `index` keyed on `LocalHash` conflates blocks that share the same tokens regardless of where they appear. A worker that cached a common system prompt as block 0 in one conversation will appear as a match for *every* conversation that starts with the same tokens, even if the continuations diverge entirely.
+First, the collision issue from Section 1 is still here---just in a different shape. When we union worker sets across all seq hashes at a given local hash, we're conflating workers that cached *different sequences* that happen to share the same chunk. A worker whose block 0 came from "Summarize this document" will appear as a match for any query starting with those same tokens, even if the full sequences diverge. The seq hash data is *in* the index, but `find_matches` can't use it without knowing the query's own seq hashes---which brings us back to rolling hash computation on the read path, exactly what chunk hashes were meant to avoid.
 
-The `lookup` table, keyed by `ExternalHash` (rolling hash of the entire prefix), doesn't have this problem---it's collision-free by construction. But the `lookup` is per-worker, so we can't query it without iterating workers, which is exactly what we're trying to avoid. The fast path (`index`) is imprecise; the precise path (`lookup`) is slow.
+Second, removes are expensive. Without a per-worker reverse lookup, removing a block by seq hash requires scanning the entire index. We could add a reverse lookup table, but that's more bookkeeping on the write path.
 
-We're stuck. The forward index gives us speed but risks false matches. We need a data structure that can give us both: fast traversal *and* collision safety. That's where the tree comes in.
+We need a data structure that resolves both: collision safety during traversal *and* efficient per-worker event processing. That's where the tree comes in.
 
 ---
 
 ## 4. Branching Out
 
-Section 3 left us with a tension: the forward index gives fast traversal but suffers from chunk hash collisions, while the per-worker lookup is precise but per-worker. We also have a scaling problem---the flat `HashMap` grows into a massive table where every `find_matches` call does `D` independent lookups. At millions of entries, these are not the theoretical O(1) we learned in school: cache line misses dominate, and probe sequences get longer as the load factor climbs.
+Section 3 left us with two frustrations: chunk hash collisions produce false positives during traversal, and removes require scanning the entire index without a reverse lookup. We also have a scaling problem---the flat `HashMap` grows into a massive table where every `find_matches` call does `D` independent lookups into one giant map. At millions of entries, these are not the theoretical O(1) we learned in school: cache line misses dominate, and probe sequences get longer as the load factor climbs.
 
-What if we could solve both problems at once---collision safety *and* cache-friendly traversal---by walking a path through a tree?
+What if we could solve all three problems at once---collision safety, efficient event processing, *and* cache-friendly traversal---by walking a path through a tree?
 
 ### The Radix Tree
 
