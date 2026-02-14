@@ -1,8 +1,7 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-title: Profiler Guide
----
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 # Profiler Guide
 
@@ -51,7 +50,7 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 
 ### Kubernetes Deployment (DGDR)
 
-The recommended deployment method is through DGDRs. Sample configurations are provided in `components/src/dynamo/profiler/deploy/`:
+The recommended deployment method is through DGDRs. Sample configurations are provided in `benchmarks/profiler/deploy/`:
 
 | Sample | Description |
 |--------|-------------|
@@ -149,7 +148,7 @@ curl http://localhost:8000/v1/models
 For advanced use cases or local development:
 
 ```bash
-python -m dynamo.profiler.profile_sla \
+python -m benchmarks.profiler.profile_sla \
   --backend vllm \
   --config path/to/disagg.yaml \
   --model meta-llama/Llama-3-8B \
@@ -171,12 +170,12 @@ The profiler follows a 5-step process:
    - **Prefill**:
      - TP/TEP: Measure TTFT with batch size = 1 (assuming ISL is long enough to saturate compute) without KV reuse.
      - DEP: Attention uses data parallelism. Send a single burst with total concurrency `attention_dp_size × attn_dp_num_req_ratio` (defaults to 4) and compute the reported TTFT as `time_to_first_token.max / attn_dp_num_req_ratio` from the AIPerf summary of that burst.
-   ![Prefill Performance](../../../assets/img/h100-prefill-performance.png)
+   ![Prefill Performance](../../images/h100_prefill_performance.png)
    - **Decode**: Measure the ITL under different numbers of in-flight requests, from 1 to the maximum the KV cache can hold. To measure ITL without being affected by piggy-backed prefill requests, the script enables KV-reuse and warms up the engine by issuing the same prompts before measuring.
-   ![Decode Performance](../../../assets/img/h100-decode-performance.png)
+   ![Decode Performance](../../images/h100_decode_performance.png)
 4. **Recommendation**: Select optimal parallelization mapping for prefill and decode that achieves the highest per-GPU throughput while adhering to the SLA on TTFT and ITL.
 5. **In-Depth Profiling on the Recommended P/D Engine**: Interpolate TTFT with ISL and ITL with active KV cache and decode context length for more accurate performance estimation.
-![ITL Interpolation](../../../assets/img/pd-interpolation.png)
+![ITL Interpolation](../../images/pd_interpolation.png)
    - **Prefill**: Measures TTFT and throughput per GPU across different input lengths with batch size=1.
    - **Decode**: Measures ITL and throughput per GPU under various KV cache loads and decode context lengths.
 
@@ -338,7 +337,7 @@ planner:
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
+> Planner arguments use `planner_` prefix. See the AI Configurator documentation for full list.
 
 ### Model Cache PVC (Advanced)
 
@@ -596,7 +595,7 @@ AssertionError: num_heads <N> should be divisible by tp_size <M> and the divisio
 **Affected Models:**
 - **Qwen3-0.6B** (16 heads): Max TP = 4
 - **GPT-2** (12 heads): Max TP = 3
-- Most models **\<1B parameters**: May hit this constraint
+- Most models **<1B parameters**: May hit this constraint
 
 **Solution**: Limit `maxNumGpusPerEngine`:
 ```yaml
@@ -642,8 +641,6 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 
 ## See Also
 
-- [Profiler Examples](profiler-examples.md) - Complete DGDR YAML examples
-- [SLA Planner Guide](../planner/planner-guide.md) - End-to-end deployment workflow
-- [SLA Planner Architecture](../planner/planner-guide.md) - How the Planner uses profiling data
-- [DGDR API Reference](../../kubernetes/api-reference.md) - DGDR specification
+- [DGDR Examples](../../../components/src/dynamo/profiler/deploy/) - Complete DGDR YAML examples
+- [DGDR API Reference](/docs/kubernetes/api_reference.md) - DGDR specification
 - [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/utils/profiler_argparse.py) - Full CLI reference
