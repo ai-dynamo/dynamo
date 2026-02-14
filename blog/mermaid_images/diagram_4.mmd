@@ -1,0 +1,16 @@
+flowchart LR
+    subgraph query ["Query sequence — 256 blocks"]
+        P0["pos 0"] ~~~ P32["pos 32"] ~~~ P64["pos 64"] ~~~ P96["pos 96"] ~~~ P128["pos 128"]
+    end
+
+    P0 -->|"jump: all 5 match"| P32
+    P32 -->|"jump: all 5 match"| P64
+    P64 -->|"jump: only 3 match!"| P96
+
+    subgraph scan ["Linear scan 65..96"]
+        S65["pos 65"] ~~~ S66["..."] ~~~ S78["pos 78: W2 drains"] ~~~ S79["..."] ~~~ S91["pos 91: W4 drains"]
+    end
+
+    P64 -->|"scan back"| scan
+    scan -->|"continue jumping"| P96
+    P96 -->|"jump: all 3 match"| P128

@@ -1,0 +1,9 @@
+flowchart LR
+    E1[Engine 1] -->|KV events| P1[Publisher 1]
+    E2[Engine 2] -->|KV events| P2[Publisher 2]
+    E3[Engine N] -->|KV events| PN[Publisher N]
+    P1 -->|"(worker_id, local_hash, seq_hash)"| IDX[Flash Indexer]
+    P2 -->|"(worker_id, local_hash, seq_hash)"| IDX
+    PN -->|"(worker_id, local_hash, seq_hash)"| IDX
+    IDX -->|overlap scores| R[Router]
+    R -->|routed request| E1
