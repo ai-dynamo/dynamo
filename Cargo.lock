@@ -1970,6 +1970,7 @@ dependencies = [
  "async-trait",
  "clap 4.5.53",
  "dashmap 6.1.0",
+ "dynamo-bench",
  "dynamo-mocker",
  "dynamo-runtime",
  "dynamo-tokens",
