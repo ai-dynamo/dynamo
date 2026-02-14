@@ -7,8 +7,60 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <mutex>
 #include <type_traits>
 #include <vector>
+
+// cudaMemcpyBatchAsync requires a non-NULL runtime-API stream.  It returns
+// cudaErrorInvalidValue when given the NULL (default) stream or a driver-API
+// CUstream that the runtime doesn't recognise.
+//
+// We work around this by maintaining a persistent internal non-blocking stream
+// and using lightweight events to preserve ordering with the caller's stream:
+//   1. Record an event on the caller's stream (captures prior work)
+//   2. Make our internal stream wait on that event
+//   3. Enqueue cudaMemcpyBatchAsync on the internal stream
+//   4. Record an event on the internal stream (captures batch completion)
+//   5. Make the caller's stream wait on that event
+//
+// Cost: two event records + two stream-waits per call (sub-microsecond).
+
+static cudaStream_t
+get_batch_stream()
+{
+  static cudaStream_t s = nullptr;
+  static std::once_flag flag;
+  std::call_once(flag, []() { cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking); });
+  return s;
+}
+
+/// Wrap a cudaMemcpyBatchAsync call so it runs on an internal runtime-API
+/// stream while preserving ordering with `caller_stream`.
+/// The `batch_fn` callback receives the internal stream and should call
+/// cudaMemcpyBatchAsync on it.
+template <typename F>
+static cudaError_t
+run_on_batch_stream(cudaStream_t caller_stream, F&& batch_fn)
+{
+  cudaStream_t bs = get_batch_stream();
+
+  // Ordering: make batch stream wait for prior work on caller's stream
+  cudaEvent_t ev;
+  cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
+  cudaEventRecord(ev, caller_stream);
+  cudaStreamWaitEvent(bs, ev);
+
+  // Run the batch copy
+  cudaError_t err = batch_fn(bs);
+
+  // Ordering: make caller's stream wait for batch completion
+  cudaEventRecord(ev, bs);
+  cudaStreamWaitEvent(caller_stream, ev);
+  cudaEventDestroy(ev);
+
+  return err;
+}
 
 // Compile-time CUDA version detection and diagnostics
 #if defined(CUDART_VERSION)
@@ -623,61 +675,33 @@ kvbm_kernels_launch_operational_copy(
   };
 
   auto launch_memcpy_batch = [&]() -> cudaError_t {
-  // cudaMemcpyBatchAsync API changed between CUDA 12.9 and 13.0:
-  // - CUDA 12.9: Has failIdx parameter (9 params total)
-  // - CUDA 13.0: Removed failIdx, uses rich error reporting (8 params)
-  // - Earlier versions (< 12.9): Function doesn't exist
-#if defined(CUDART_VERSION)
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 12090
+    std::vector<void*> src_ptrs_mut(total_chunks);
+    for (size_t idx = 0; idx < total_chunks; ++idx) {
+      src_ptrs_mut[idx] = const_cast<void*>(src_ptrs[idx]);
+    }
+
+    // attrIdxList must have one entry per copy, mapping each to an attribute.
+    std::vector<size_t> attr_indices(total_chunks, 0);
+    cudaMemcpyAttributes attr = {};
+    attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+
+    return run_on_batch_stream(stream, [&](cudaStream_t bs) -> cudaError_t {
 #if CUDART_VERSION >= 13000
-    // CUDA 13.0+: Use 8-parameter API (no failIdx)
-    // Signature: cudaError_t cudaMemcpyBatchAsync(void *const *dsts, const void *const *srcs,
-    //     const size_t *sizes, size_t count, cudaMemcpyAttributes *attrs,
-    //     size_t *attrsIdxs, size_t numAttrs, cudaStream_t stream)
-    std::vector<void*> src_mut(total_chunks);
-    for (size_t i = 0; i < total_chunks; ++i) {
-      src_mut[i] = const_cast<void*>(src_ptrs[i]);
-    }
-
-    cudaError_t result = cudaMemcpyBatchAsync(
-        const_cast<void**>(dst_ptrs.data()), const_cast<const void**>(src_mut.data()),
-        const_cast<size_t*>(sizes.data()), total_chunks,
-        nullptr,  // attrs - no attributes needed
-        nullptr,  // attrsIdxs - no attribute indices
-        0,        // numAttrs - zero attributes
-        stream);  // No failIdx parameter in CUDA 13.0
-
-    return result;
-
-#elif CUDART_VERSION >= 12090
-    // CUDA 12.9: Use 9-parameter API (with failIdx)
-    // Signature: cudaError_t cudaMemcpyBatchAsync(void *const *dsts, const void *const *srcs,
-    //     const size_t *sizes, size_t count, cudaMemcpyAttributes *attrs,
-    //     size_t *attrsIdxs, size_t numAttrs, size_t *failIdx, cudaStream_t stream)
-    std::vector<void*> src_mut(total_chunks);
-    for (size_t i = 0; i < total_chunks; ++i) {
-      src_mut[i] = const_cast<void*>(src_ptrs[i]);
-    }
-    size_t fail_idx = 0;
-
-    cudaError_t result = cudaMemcpyBatchAsync(
-        const_cast<void**>(dst_ptrs.data()), const_cast<const void**>(src_mut.data()),
-        const_cast<size_t*>(sizes.data()), total_chunks,
-        nullptr,    // attrs
-        nullptr,    // attrsIdxs
-        0,          // numAttrs
-        &fail_idx,  // failIdx - included in CUDA 12.9
-        stream);
-
-    // Note: In CUDA 12.9, fail_idx will contain the index of the first failed operation
-    // if result != cudaSuccess
-    return result;
-
+      // CUDA 13.0+: 8-parameter API (no failIdx)
+      return cudaMemcpyBatchAsync(
+          dst_ptrs.data(), src_ptrs_mut.data(), sizes.data(), total_chunks, &attr, attr_indices.data(), 1, bs);
 #else
-    // CUDA version < 12.9 - cudaMemcpyBatchAsync not available
-    return cudaErrorNotSupported;
+      // CUDA 12.9: 9-parameter API (with failIdx)
+      size_t fail_idx = 0;
+      return cudaMemcpyBatchAsync(
+          dst_ptrs.data(), src_ptrs_mut.data(),
+          sizes.data(), total_chunks,
+          &attr, attr_indices.data(), 1,
+          &fail_idx, bs);
 #endif
+    });
 #else
-    // CUDART_VERSION not defined
     return cudaErrorNotSupported;
 #endif
   };
@@ -708,6 +732,9 @@ kvbm_kernels_launch_operational_copy(
       break;
     case OperationalCopyBackend::MemcpyBatch:
       status = launch_memcpy_batch();
+      if (status == cudaErrorNotSupported || status == cudaErrorInvalidValue) {
+        status = launch_memcpy_async();
+      }
       break;
     case OperationalCopyBackend::Auto:
     default:
@@ -719,7 +746,7 @@ kvbm_kernels_launch_operational_copy(
         }
       }
       status = launch_memcpy_batch();
-      if (status == cudaErrorNotSupported) {
+      if (status == cudaErrorNotSupported || status == cudaErrorInvalidValue) {
         status = launch_memcpy_async();
       }
       break;
@@ -740,7 +767,14 @@ kvbm_kernels_has_memcpy_batch_async()
 #endif
 }
 
-/// Batched memcpy using cudaMemcpyBatchAsync (CUDA 12.9+) or fallback to individual cudaMemcpyAsync.
+/// Controls how kvbm_kernels_memcpy_batch dispatches copies.
+enum class MemcpyBatchMode : int {
+  BatchedWithFallback = 0,   // Try cudaMemcpyBatchAsync, fall back to individual cudaMemcpyAsync on failure
+  FallbackOnly = 1,          // Only use individual cudaMemcpyAsync loop (never attempt batch API)
+  BatchWithoutFallback = 2,  // Try cudaMemcpyBatchAsync, return error on failure (no fallback)
+};
+
+/// Batched memcpy using cudaMemcpyBatchAsync (CUDA 12.9+) and/or individual cudaMemcpyAsync.
 ///
 /// Takes HOST arrays of src/dst pointers - no device allocation needed.
 /// Direction is auto-determined by CUDA from pointer types using cudaMemcpyDefault.
@@ -749,13 +783,16 @@ kvbm_kernels_has_memcpy_batch_async()
 /// @param dst_ptrs_host Host array of destination pointers
 /// @param size_per_copy Size in bytes for each copy
 /// @param num_copies Number of copies to perform
+/// @param mode_value Controls dispatch: 0 = BatchedWithFallback, 1 = FallbackOnly, 2 = BatchWithoutFallback
 /// @param stream CUDA stream for async execution
-/// @return cudaSuccess on success, cudaErrorNotSupported if CUDA < 12.9 and batch API unavailable
+/// @return cudaSuccess on success, cudaErrorNotSupported if batch API unavailable and mode disallows fallback
 extern "C" cudaError_t
 kvbm_kernels_memcpy_batch(
     const void* const* src_ptrs_host, void* const* dst_ptrs_host, size_t size_per_copy, size_t num_copies,
-    cudaStream_t stream)
+    int mode_value, cudaStream_t stream)
 {
+  auto mode = static_cast<MemcpyBatchMode>(mode_value);
+
   if (num_copies == 0 || size_per_copy == 0) {
     return cudaSuccess;
   }
@@ -764,55 +801,176 @@ kvbm_kernels_memcpy_batch(
     return cudaErrorInvalidValue;
   }
 
+  auto launch_memcpy_async_fallback = [&]() -> cudaError_t {
+    for (size_t i = 0; i < num_copies; ++i) {
+      cudaError_t copy_err =
+          cudaMemcpyAsync(dst_ptrs_host[i], src_ptrs_host[i], size_per_copy, cudaMemcpyDefault, stream);
+      if (copy_err != cudaSuccess) {
+        return copy_err;
+      }
+    }
+    return cudaSuccess;
+  };
+
+  // FallbackOnly: skip batch entirely, always use individual cudaMemcpyAsync
+  if (mode == MemcpyBatchMode::FallbackOnly) {
+    return launch_memcpy_async_fallback();
+  }
+
 #if defined(CUDART_VERSION)
-#if CUDART_VERSION >= 13000
-  // CUDA 13.0+: Use 8-parameter API (no failIdx)
+#if CUDART_VERSION >= 12090
   std::vector<size_t> sizes(num_copies, size_per_copy);
-
-  return cudaMemcpyBatchAsync(
-      const_cast<void**>(dst_ptrs_host), const_cast<const void**>(src_ptrs_host), sizes.data(), num_copies,
-      nullptr,  // attrs - nullptr = auto-detect direction
-      nullptr,  // attrsIdxs
-      0,        // numAttrs
-      stream);
-
-#elif CUDART_VERSION >= 12090
-  // CUDA 12.9: Use 9-parameter API (with failIdx)
-  std::vector<size_t> sizes(num_copies, size_per_copy);
-  size_t fail_idx = 0;
-  size_t attrs_idx = 0;  // Attribute 0 applies starting from copy index 0
-
-  // CUDA 12.9 requires valid srcAccessOrder for each copy
+  std::vector<void*> src_ptrs_mut(num_copies);
+  for (size_t i = 0; i < num_copies; ++i) {
+    src_ptrs_mut[i] = const_cast<void*>(src_ptrs_host[i]);
+  }
+  // attrIdxList must have one entry per copy, mapping each to an attribute.
+  // We use a single attribute (index 0) for all copies.
+  std::vector<size_t> attr_indices(num_copies, 0);
   cudaMemcpyAttributes attr = {};
   attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
 
-  return cudaMemcpyBatchAsync(
-      const_cast<void**>(dst_ptrs_host), const_cast<const void**>(src_ptrs_host), sizes.data(), num_copies,
-      &attr,       // Single attribute applied to all copies
-      &attrs_idx,  // Required: points to {0} per CUDA 12.9 docs
-      1,           // numAttrs = 1
-      &fail_idx,   // failIdx - included in CUDA 12.9
-      stream);
+  cudaError_t err = run_on_batch_stream(stream, [&](cudaStream_t bs) -> cudaError_t {
+#if CUDART_VERSION >= 13000
+    // CUDA 13.0+: 8-parameter API (no failIdx)
+    return cudaMemcpyBatchAsync(
+        const_cast<void**>(dst_ptrs_host), src_ptrs_mut.data(), sizes.data(), num_copies, &attr, attr_indices.data(), 1,
+        bs);
+#else
+    // CUDA 12.9: 9-parameter API (with failIdx)
+    size_t fail_idx = 0;
+    return cudaMemcpyBatchAsync(
+        const_cast<void**>(dst_ptrs_host), src_ptrs_mut.data(),
+        sizes.data(), num_copies,
+        &attr, attr_indices.data(), 1,
+        &fail_idx, bs);
+#endif
+  });
+
+  if (err == cudaErrorNotSupported || err == cudaErrorInvalidValue) {
+    if (mode == MemcpyBatchMode::BatchWithoutFallback) {
+      return err;
+    }
+    fprintf(
+        stderr, "cudaMemcpyBatchAsync failed with error %d (%s), falling back to individual cudaMemcpyAsync\n",
+        (int)err, cudaGetErrorString(err));
+    return launch_memcpy_async_fallback();
+  }
+  return err;
 
 #else
-  // CUDA < 12.9: Fallback to individual cudaMemcpyAsync with cudaMemcpyDefault
-  for (size_t i = 0; i < num_copies; ++i) {
-    cudaError_t err = cudaMemcpyAsync(dst_ptrs_host[i], src_ptrs_host[i], size_per_copy, cudaMemcpyDefault, stream);
-    if (err != cudaSuccess) {
-      return err;
-    }
+  // CUDA < 12.9: batch API not available at compile time
+  if (mode == MemcpyBatchMode::BatchWithoutFallback) {
+    return cudaErrorNotSupported;
   }
-  return cudaSuccess;
+#pragma message("CUDA < 12.9: Fallback to individual cudaMemcpyAsync with cudaMemcpyDefault")
+  return launch_memcpy_async_fallback();
 #endif
 #else
-  // CUDART_VERSION not defined - fallback to individual copies
-  for (size_t i = 0; i < num_copies; ++i) {
-    cudaError_t err = cudaMemcpyAsync(dst_ptrs_host[i], src_ptrs_host[i], size_per_copy, cudaMemcpyDefault, stream);
-    if (err != cudaSuccess) {
-      return err;
-    }
+  // CUDART_VERSION not defined
+  if (mode == MemcpyBatchMode::BatchWithoutFallback) {
+    return cudaErrorNotSupported;
   }
-  return cudaSuccess;
+  return launch_memcpy_async_fallback();
+#endif
+}
+
+/// Diagnostic: tests cudaMemcpyBatchAsync with multiple stream/memory combos
+/// to isolate whether the issue is the stream type or the memory allocator.
+///
+/// Tests (all using runtime-API cudaMalloc/cudaMallocHost for memory):
+///   A) own runtime-API stream  + own memory  (known working — benchmark pattern)
+///   B) caller's stream         + own memory  (tests stream hypothesis)
+///
+/// Also tests with caller-provided device pointers:
+///   C) own runtime-API stream  + caller's device memory  (tests memory hypothesis)
+///   D) caller's stream         + caller's device memory  (both caller)
+///
+/// dev_ptrs_from_caller: if non-NULL, array of N device pointers allocated by the
+///   caller (e.g. via cudarc/driver API).  If NULL, tests C & D are skipped.
+///
+/// Writes per-test results to stderr.  Returns the result of test A (always).
+extern "C" cudaError_t
+kvbm_kernels_memcpy_batch_diagnostic(
+    cudaStream_t caller_stream, int* out_err_code, void** dev_ptrs_from_caller, size_t caller_dev_count)
+{
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 12090
+  constexpr int N = 4;
+  constexpr size_t COPY_SIZE = 256;
+
+  fprintf(stderr, "DIAGNOSTIC: CUDART_VERSION=%d, caller_stream=%p\n", CUDART_VERSION, (void*)caller_stream);
+
+  // Create our own runtime-API stream
+  cudaStream_t own_stream;
+  cudaStreamCreateWithFlags(&own_stream, cudaStreamNonBlocking);
+
+  // Allocate our own pinned host + device memory (runtime API)
+  char* host_bufs[N];
+  char* own_dev[N];
+  size_t sizes[N];
+  for (int i = 0; i < N; ++i) {
+    sizes[i] = COPY_SIZE;
+    cudaMallocHost(&host_bufs[i], COPY_SIZE);
+    cudaMalloc(&own_dev[i], COPY_SIZE);
+    for (size_t j = 0; j < COPY_SIZE; ++j) host_bufs[i][j] = (char)((i * 31 + j * 7) & 0xFF);
+  }
+
+  size_t attrs_idxs[1] = {0};
+  cudaMemcpyAttributes attr{};
+  attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+
+  // Helper lambda
+  auto try_batch = [&](const char* label, char** dst, char** src, cudaStream_t s) -> cudaError_t {
+    cudaError_t e;
+#if CUDART_VERSION >= 13000
+    e = cudaMemcpyBatchAsync(dst, src, sizes, N, &attr, attrs_idxs, 1, s);
+#else
+    size_t fail_idx = (size_t)-1;
+    e = cudaMemcpyBatchAsync(dst, src, sizes, N, &attr, attrs_idxs, 1, &fail_idx, s);
+    if (e != cudaSuccess)
+      fprintf(stderr, "  fail_idx=%zu\n", fail_idx);
+#endif
+    fprintf(stderr, "DIAGNOSTIC [%s]: %s (%d)\n", label, e == cudaSuccess ? "OK" : cudaGetErrorString(e), (int)e);
+    if (e == cudaSuccess)
+      cudaStreamSynchronize(s);
+    return e;
+  };
+
+  // Test A: own stream + own memory (benchmark pattern)
+  cudaError_t result_a = try_batch("A: own_stream+own_mem", own_dev, host_bufs, own_stream);
+
+  // Test B: caller stream + own memory
+  try_batch("B: caller_stream+own_mem", own_dev, host_bufs, caller_stream);
+
+  // Tests C & D: with caller-provided device memory
+  if (dev_ptrs_from_caller && caller_dev_count >= (size_t)N) {
+    char** caller_dev = reinterpret_cast<char**>(dev_ptrs_from_caller);
+
+    // Test C: own stream + caller's device memory
+    try_batch("C: own_stream+caller_dev", caller_dev, host_bufs, own_stream);
+
+    // Test D: caller stream + caller's device memory
+    try_batch("D: caller_stream+caller_dev", caller_dev, host_bufs, caller_stream);
+  } else {
+    fprintf(stderr, "DIAGNOSTIC [C,D]: skipped (no caller dev ptrs)\n");
+  }
+
+  *out_err_code = (int)result_a;
+
+  // Cleanup own resources
+  for (int i = 0; i < N; ++i) {
+    cudaFreeHost(host_bufs[i]);
+    cudaFree(own_dev[i]);
+  }
+  cudaStreamDestroy(own_stream);
+
+  return result_a;
+#else
+  (void)caller_stream;
+  (void)dev_ptrs_from_caller;
+  (void)caller_dev_count;
+  *out_err_code = (int)cudaErrorNotSupported;
+  return cudaErrorNotSupported;
 #endif
 }
 

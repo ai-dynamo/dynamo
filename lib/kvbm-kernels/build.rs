@@ -25,6 +25,8 @@ fn main() {
     );
     println!("cargo:rerun-if-env-changed=CUDA_ARCHS");
     println!("cargo:rerun-if-env-changed=KVBM_REQUIRE_CUDA");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=CUDA_HOME");
 
     // Check if CUDA is required (set by Python bindings build)
     let require_cuda = env::var("KVBM_REQUIRE_CUDA").is_ok();

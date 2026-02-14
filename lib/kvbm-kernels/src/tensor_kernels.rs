@@ -112,6 +112,18 @@ unsafe extern "C" {
     ) -> cudaError_t;
 }
 
+/// Controls how `memcpy_batch` dispatches copies.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemcpyBatchMode {
+    /// Try cudaMemcpyBatchAsync, fall back to individual cudaMemcpyAsync on failure.
+    BatchedWithFallback = 0,
+    /// Only use individual cudaMemcpyAsync loop (never attempt batch API).
+    FallbackOnly = 1,
+    /// Try cudaMemcpyBatchAsync, return error on failure (no fallback).
+    BatchWithoutFallback = 2,
+}
+
 unsafe extern "C" {
     fn kvbm_kernels_launch_vectorized_copy(
         src_ptrs_device: *mut *mut c_void,
@@ -126,11 +138,18 @@ unsafe extern "C" {
         dst_ptrs_host: *const *mut c_void,
         size_per_copy: usize,
         num_copies: usize,
+        mode: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
 
     fn kvbm_kernels_has_memcpy_batch_async() -> bool;
     fn kvbm_kernels_is_stub_build() -> bool;
+    fn kvbm_kernels_memcpy_batch_diagnostic(
+        stream: cudaStream_t,
+        out_err_code: *mut i32,
+        dev_ptrs_from_caller: *const *mut c_void,
+        caller_dev_count: usize,
+    ) -> cudaError_t;
 }
 
 /// Check if cudaMemcpyBatchAsync is available.
@@ -161,12 +180,15 @@ pub fn is_using_stubs() -> bool {
     unsafe { kvbm_kernels_is_stub_build() }
 }
 
-/// Batched memcpy using cudaMemcpyBatchAsync (CUDA 12.9+) or fallback to individual cudaMemcpyAsync.
+/// Batched memcpy using cudaMemcpyBatchAsync (CUDA 12.9+) and/or individual cudaMemcpyAsync.
 ///
 /// Takes HOST arrays of src/dst pointers - no device allocation needed.
 /// Direction is auto-determined by CUDA from pointer types using cudaMemcpyDefault.
 ///
-/// Returns cudaErrorNotSupported if CUDA < 12.9 and no fallback is available.
+/// The `mode` parameter controls dispatch:
+/// - [`MemcpyBatchMode::BatchedWithFallback`]: try batch API, fall back to individual copies on error
+/// - [`MemcpyBatchMode::FallbackOnly`]: always use individual cudaMemcpyAsync loop
+/// - [`MemcpyBatchMode::BatchWithoutFallback`]: try batch API, return error if unavailable
 ///
 /// # Safety
 /// - `src_ptrs_host` must point to a valid array of `num_copies` source pointers
@@ -178,6 +200,7 @@ pub unsafe fn memcpy_batch(
     dst_ptrs_host: *const *mut c_void,
     size_per_copy: usize,
     num_copies: usize,
+    mode: MemcpyBatchMode,
     stream: cudaStream_t,
 ) -> cudaError_t {
     unsafe {
@@ -186,7 +209,35 @@ pub unsafe fn memcpy_batch(
             dst_ptrs_host,
             size_per_copy,
             num_copies,
+            mode as i32,
             stream,
+        )
+    }
+}
+
+/// Diagnostic: tests cudaMemcpyBatchAsync with multiple stream/memory combos
+/// to isolate whether issues are caused by the stream type or memory allocator.
+///
+/// If `dev_ptrs_from_caller` is non-null, also tests with caller-provided device memory.
+///
+/// # Safety
+/// - `stream` must be a valid CUDA stream handle.
+/// - If provided, `dev_ptrs_from_caller` must point to at least 4 valid device buffers of 256+ bytes.
+pub unsafe fn memcpy_batch_diagnostic(
+    stream: cudaStream_t,
+    out_err_code: &mut i32,
+    dev_ptrs_from_caller: Option<&[*mut c_void]>,
+) -> cudaError_t {
+    let (ptr, count) = match dev_ptrs_from_caller {
+        Some(ptrs) => (ptrs.as_ptr(), ptrs.len()),
+        None => (std::ptr::null(), 0),
+    };
+    unsafe {
+        kvbm_kernels_memcpy_batch_diagnostic(
+            stream,
+            out_err_code as *mut i32,
+            ptr as *const *mut c_void,
+            count,
         )
     }
 }
@@ -358,6 +409,7 @@ pub unsafe fn operational_copy(
 ))]
 mod tests {
     use super::*;
+    use cudarc::driver::result::memset_d8_async;
     use cudarc::driver::{CudaContext, CudaSlice, DevicePtr, DevicePtrMut, DriverError};
     use cudarc::runtime::sys as cuda_runtime;
 
@@ -425,6 +477,14 @@ mod tests {
             {
                 let (ptr_raw, _guard) = slice.device_ptr_mut(&stream);
                 universal_ptr_values.push(ptr_raw as usize);
+                unsafe {
+                    memset_d8_async(
+                        ptr_raw,
+                        0xDE,
+                        block_volume * std::mem::size_of::<f32>(),
+                        stream.cu_stream(),
+                    )?;
+                }
             }
             universal_slices.push(slice);
         }
@@ -439,6 +499,14 @@ mod tests {
                 let (ptr_raw, _guard) = slice.device_ptr_mut(&stream);
                 operational_ptrs_host.push(ptr_raw as usize as *mut c_void);
                 operational_ptr_values.push(ptr_raw as usize);
+                unsafe {
+                    memset_d8_async(
+                        ptr_raw,
+                        0xDE,
+                        operational_volume * std::mem::size_of::<f32>(),
+                        stream.cu_stream(),
+                    )?;
+                }
             }
             operational_slices.push(slice);
         }
@@ -512,10 +580,18 @@ mod tests {
             }
         }
 
-        // Universal -> Block
+        // Universal -> Block (poison-fill destination before reverse pass)
         for block in &mut block_slices {
             for slice in block {
-                stream.memset_zeros(slice)?;
+                let (dptr, _guard) = slice.device_ptr_mut(&stream);
+                unsafe {
+                    memset_d8_async(
+                        dptr,
+                        0xDE,
+                        inner * std::mem::size_of::<f32>(),
+                        stream.cu_stream(),
+                    )?;
+                }
             }
         }
         stream.synchronize()?;
@@ -612,10 +688,18 @@ mod tests {
             }
         }
 
-        // Operational -> Block
+        // Operational -> Block (poison-fill destination before reverse pass)
         for block in &mut block_slices {
             for slice in block {
-                stream.memset_zeros(slice)?;
+                let (dptr, _guard) = slice.device_ptr_mut(&stream);
+                unsafe {
+                    memset_d8_async(
+                        dptr,
+                        0xDE,
+                        inner * std::mem::size_of::<f32>(),
+                        stream.cu_stream(),
+                    )?;
+                }
             }
         }
         stream.synchronize()?;
@@ -804,7 +888,7 @@ mod tests {
 
         let block_ptrs_device = stream.clone_htod(block_ptr_values.as_slice())?;
 
-        // Create operational buffers
+        // Create operational buffers (poison-filled)
         let mut operational_slices = Vec::with_capacity(num_blocks);
         let mut operational_ptrs_host = Vec::with_capacity(num_blocks);
         let mut operational_ptr_values = Vec::with_capacity(num_blocks);
@@ -814,6 +898,14 @@ mod tests {
                 let (ptr_raw, _guard) = slice.device_ptr_mut(&stream);
                 operational_ptrs_host.push(ptr_raw as usize as *mut c_void);
                 operational_ptr_values.push(ptr_raw as usize);
+                unsafe {
+                    memset_d8_async(
+                        ptr_raw,
+                        0xDE,
+                        operational_volume * std::mem::size_of::<f32>(),
+                        stream.cu_stream(),
+                    )?;
+                }
             }
             operational_slices.push(slice);
         }
@@ -868,10 +960,18 @@ mod tests {
             }
         }
 
-        // Clear block data and test unpack
+        // Poison-fill block data before unpack
         for block in &mut block_slices {
             for slice in block {
-                stream.memset_zeros(slice)?;
+                let (dptr, _guard) = slice.device_ptr_mut(&stream);
+                unsafe {
+                    memset_d8_async(
+                        dptr,
+                        0xDE,
+                        inner * std::mem::size_of::<f32>(),
+                        stream.cu_stream(),
+                    )?;
+                }
             }
         }
         stream.synchronize()?;

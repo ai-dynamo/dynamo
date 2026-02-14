@@ -16,16 +16,17 @@ use std::ffi::c_void;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use cudarc::driver::result::memset_d8_async;
 use cudarc::driver::{
     CudaContext, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, DriverError,
     ValidAsZeroBits,
 };
 use cudarc::runtime::sys as cuda_runtime;
+use half::{bf16, f16};
 use kvbm_kernels::{
     BlockLayout, OperationalCopyBackend, OperationalCopyDirection, TensorDataType,
     block_from_universal, operational_copy, universal_from_block,
 };
-use half::{bf16, f16};
 use ndarray::{Array5, s};
 use rand::Rng;
 
@@ -152,6 +153,37 @@ fn assert_close<T: TestDtype>(actual: &[T], expected: &[T], context: &str) {
     }
 }
 
+/// Byte-exact comparison for operational copies (flat memcpy, no type conversion).
+fn assert_bytes_exact<T: TestDtype>(actual: &[T], expected: &[T], context: &str) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{context}: length mismatch ({} vs {})",
+        actual.len(),
+        expected.len()
+    );
+    let byte_len = actual.len() * std::mem::size_of::<T>();
+    let actual_bytes =
+        unsafe { std::slice::from_raw_parts(actual.as_ptr() as *const u8, byte_len) };
+    let expected_bytes =
+        unsafe { std::slice::from_raw_parts(expected.as_ptr() as *const u8, byte_len) };
+    if actual_bytes != expected_bytes {
+        for (i, (a, e)) in actual_bytes.iter().zip(expected_bytes.iter()).enumerate() {
+            if a != e {
+                let elem_idx = i / std::mem::size_of::<T>();
+                let byte_in_elem = i % std::mem::size_of::<T>();
+                panic!(
+                    "{context}: byte mismatch at offset {i} (element {elem_idx}, \
+                     byte {byte_in_elem}): 0x{a:02X} vs 0x{e:02X} \
+                     (actual={:?}, expected={:?})",
+                    actual[elem_idx].clone().to_f64(),
+                    expected[elem_idx].clone().to_f64()
+                );
+            }
+        }
+    }
+}
+
 /// Set up a CUDA context and stream.  Returns `None` if no GPU is available.
 fn cuda_setup() -> Option<(Arc<CudaStream>, cuda_runtime::cudaStream_t)> {
     let count = CudaContext::device_count().ok()?;
@@ -196,7 +228,7 @@ fn upload_blocks<T: TestDtype>(
     Ok((all_slices, ptrs_device))
 }
 
-/// Allocate `count` zero-initialized device buffers of `volume` elements each.
+/// Allocate `count` poison-filled (0xDE) device buffers of `volume` elements each.
 /// Returns the slices and a device pointer table.
 fn alloc_buffers<T: TestDtype>(
     stream: &Arc<CudaStream>,
@@ -205,12 +237,16 @@ fn alloc_buffers<T: TestDtype>(
 ) -> Result<(Vec<CudaSlice<T>>, CudaSlice<usize>), DriverError> {
     let mut slices: Vec<CudaSlice<T>> = Vec::with_capacity(count);
     let mut ptr_values: Vec<usize> = Vec::with_capacity(count);
+    let byte_count = volume * std::mem::size_of::<T>();
 
     for _ in 0..count {
         let mut slice = unsafe { stream.alloc::<T>(volume)? };
         {
             let (ptr, _guard) = slice.device_ptr_mut(stream);
             ptr_values.push(ptr as usize);
+            unsafe {
+                memset_d8_async(ptr, 0xDE, byte_count, stream.cu_stream())?;
+            }
         }
         slices.push(slice);
     }
@@ -250,7 +286,7 @@ fn upload_blocks_with_host_ptrs<T: TestDtype>(
     Ok((all_slices, ptrs_device, host_ptrs))
 }
 
-/// Allocate buffers and also collect host-side raw mutable pointer array.
+/// Allocate poison-filled (0xDE) buffers and also collect host-side raw mutable pointer array.
 fn alloc_buffers_with_host_ptrs<T: TestDtype>(
     stream: &Arc<CudaStream>,
     count: usize,
@@ -259,6 +295,7 @@ fn alloc_buffers_with_host_ptrs<T: TestDtype>(
     let mut slices: Vec<CudaSlice<T>> = Vec::with_capacity(count);
     let mut ptr_values: Vec<usize> = Vec::with_capacity(count);
     let mut host_ptrs: Vec<*mut c_void> = Vec::with_capacity(count);
+    let byte_count = volume * std::mem::size_of::<T>();
 
     for _ in 0..count {
         let mut slice = unsafe { stream.alloc::<T>(volume)? };
@@ -267,6 +304,9 @@ fn alloc_buffers_with_host_ptrs<T: TestDtype>(
             let addr = ptr as usize;
             ptr_values.push(addr);
             host_ptrs.push(addr as *mut c_void);
+            unsafe {
+                memset_d8_async(ptr, 0xDE, byte_count, stream.cu_stream())?;
+            }
         }
         slices.push(slice);
     }
@@ -275,14 +315,19 @@ fn alloc_buffers_with_host_ptrs<T: TestDtype>(
     Ok((slices, ptrs_device, host_ptrs))
 }
 
-/// Zero all block chunk slices.
-fn zero_blocks<T: TestDtype>(
+/// Poison-fill (0xDE) all block chunk slices. `chunk_volume` is the element count per chunk.
+fn poison_fill_blocks<T: TestDtype>(
     stream: &Arc<CudaStream>,
     block_slices: &mut [Vec<CudaSlice<T>>],
+    chunk_volume: usize,
 ) -> Result<(), DriverError> {
+    let byte_count = chunk_volume * std::mem::size_of::<T>();
     for batch in block_slices.iter_mut() {
         for slice in batch.iter_mut() {
-            stream.memset_zeros(slice)?;
+            let (dptr, _guard) = slice.device_ptr_mut(stream);
+            unsafe {
+                memset_d8_async(dptr, 0xDE, byte_count, stream.cu_stream())?;
+            }
         }
     }
     Ok(())
@@ -356,8 +401,8 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) -> Result<
         assert_close::<T>(&host, &expected_flat, &format!("universal batch {i}"));
     }
 
-    // --- Reverse: zero blocks, then universal -> blocks ---
-    zero_blocks(&stream, &mut block_slices)?;
+    // --- Reverse: poison-fill blocks, then universal -> blocks ---
+    poison_fill_blocks(&stream, &mut block_slices, nh * nt * hd)?;
     stream.synchronize()?;
 
     {
@@ -484,7 +529,7 @@ fn operational_roundtrip_inner<T: TestDtype>() -> Result<(), DriverError> {
         let host_op = stream.clone_dtoh(op_slice)?;
         for (ci, ref_chunk) in ref_batch.iter().enumerate() {
             let op_chunk = &host_op[ci * inner..(ci + 1) * inner];
-            assert_close::<T>(
+            assert_bytes_exact::<T>(
                 op_chunk,
                 ref_chunk,
                 &format!("operational batch {bi} chunk {ci}"),
@@ -492,8 +537,8 @@ fn operational_roundtrip_inner<T: TestDtype>() -> Result<(), DriverError> {
         }
     }
 
-    // --- Reverse: zero blocks, then operational -> block ---
-    zero_blocks(&stream, &mut block_slices)?;
+    // --- Reverse: poison-fill blocks, then operational -> block ---
+    poison_fill_blocks(&stream, &mut block_slices, inner)?;
     stream.synchronize()?;
 
     {
@@ -523,7 +568,7 @@ fn operational_roundtrip_inner<T: TestDtype>() -> Result<(), DriverError> {
     for (bi, (batch, ref_batch)) in block_slices.iter().zip(ref_blocks.iter()).enumerate() {
         for (ci, (slice, expected)) in batch.iter().zip(ref_batch.iter()).enumerate() {
             let host = stream.clone_dtoh(slice)?;
-            assert_close::<T>(&host, expected, &format!("block batch {bi} chunk {ci}"));
+            assert_bytes_exact::<T>(&host, expected, &format!("block batch {bi} chunk {ci}"));
         }
     }
 
@@ -614,8 +659,8 @@ fn operational_backend_inner(backend: OperationalCopyBackend) -> Result<(), Driv
     assert_eq!(pack_status, cuda_runtime::cudaError::cudaSuccess);
     stream.synchronize()?;
 
-    // Zero blocks, then Operational -> Block
-    zero_blocks(&stream, &mut block_slices)?;
+    // Poison-fill blocks, then Operational -> Block
+    poison_fill_blocks(&stream, &mut block_slices, inner)?;
     stream.synchronize()?;
 
     let unpack_status = {
@@ -647,17 +692,17 @@ fn operational_backend_inner(backend: OperationalCopyBackend) -> Result<(), Driv
     assert_eq!(unpack_status, cuda_runtime::cudaError::cudaSuccess);
     stream.synchronize()?;
 
-    // Verify roundtrip against reference blocks.
+    // Verify roundtrip against reference blocks (byte-exact: operational copy is flat memcpy).
     for (ci, (slice, expected)) in block_slices[0].iter().zip(ref_blocks[0].iter()).enumerate() {
         let host = stream.clone_dtoh(slice)?;
-        assert_close::<f32>(&host, expected, &format!("backend {backend:?} chunk {ci}"));
+        assert_bytes_exact::<f32>(&host, expected, &format!("backend {backend:?} chunk {ci}"));
     }
 
     // Also verify the operational buffer for completeness.
     let host_op = stream.clone_dtoh(&operational_slices[0])?;
     for (ci, ref_chunk) in ref_blocks[0].iter().enumerate() {
         let op_chunk = &host_op[ci * inner..(ci + 1) * inner];
-        assert_close::<f32>(
+        assert_bytes_exact::<f32>(
             op_chunk,
             ref_chunk,
             &format!("backend {backend:?} operational chunk {ci}"),
@@ -787,4 +832,87 @@ fn empty_batch_noop() -> Result<(), DriverError> {
     assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CPU-only validation of make_blocks reference implementation
+// ---------------------------------------------------------------------------
+
+/// Verify `make_blocks` for NHD layout against first-principles index arithmetic.
+/// Uses deterministic position-encoded values so each element maps to a unique expected value.
+#[test]
+fn make_blocks_reference_nhd() {
+    let nh = 3usize;
+    let nl = 2usize;
+    let no = 2usize;
+    let nt = 4usize;
+    let hd = 5usize;
+
+    let universal =
+        Array5::from_shape_fn((nh, nl, no, nt, hd), |(nh_i, nl_i, no_i, nt_i, hd_i)| {
+            ((((nh_i * nl + nl_i) * no + no_i) * nt + nt_i) * hd + hd_i) as f32
+        });
+
+    let blocks = make_blocks(&universal, BlockLayout::NHD);
+    assert_eq!(blocks.len(), nl * no);
+
+    for nl_i in 0..nl {
+        for no_i in 0..no {
+            let block = &blocks[nl_i * no + no_i];
+            assert_eq!(block.len(), nt * nh * hd);
+            for nt_i in 0..nt {
+                for nh_i in 0..nh {
+                    for hd_i in 0..hd {
+                        // NHD block offset: [nt, nh, hd]
+                        let offset = (nt_i * nh + nh_i) * hd + hd_i;
+                        let expected =
+                            ((((nh_i * nl + nl_i) * no + no_i) * nt + nt_i) * hd + hd_i) as f32;
+                        assert_eq!(
+                            block[offset], expected,
+                            "NHD mismatch at nl={nl_i} no={no_i} nt={nt_i} nh={nh_i} hd={hd_i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Verify `make_blocks` for HND layout against first-principles index arithmetic.
+#[test]
+fn make_blocks_reference_hnd() {
+    let nh = 3usize;
+    let nl = 2usize;
+    let no = 2usize;
+    let nt = 4usize;
+    let hd = 5usize;
+
+    let universal =
+        Array5::from_shape_fn((nh, nl, no, nt, hd), |(nh_i, nl_i, no_i, nt_i, hd_i)| {
+            ((((nh_i * nl + nl_i) * no + no_i) * nt + nt_i) * hd + hd_i) as f32
+        });
+
+    let blocks = make_blocks(&universal, BlockLayout::HND);
+    assert_eq!(blocks.len(), nl * no);
+
+    for nl_i in 0..nl {
+        for no_i in 0..no {
+            let block = &blocks[nl_i * no + no_i];
+            assert_eq!(block.len(), nh * nt * hd);
+            for nh_i in 0..nh {
+                for nt_i in 0..nt {
+                    for hd_i in 0..hd {
+                        // HND block offset: [nh, nt, hd]
+                        let offset = (nh_i * nt + nt_i) * hd + hd_i;
+                        let expected =
+                            ((((nh_i * nl + nl_i) * no + no_i) * nt + nt_i) * hd + hd_i) as f32;
+                        assert_eq!(
+                            block[offset], expected,
+                            "HND mismatch at nl={nl_i} no={no_i} nh={nh_i} nt={nt_i} hd={hd_i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

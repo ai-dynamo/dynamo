@@ -32,12 +32,19 @@ testing-cuda = []
 # non-standard transfer paths. The default vectorized_copy kernel handles
 # most FC↔LW transfers efficiently without permutation.
 permute_kernels = []
+# Enable kvbench example (pulls in clap for CLI)
+kvbench = ["dep:clap"]
+
+[[example]]
+name = "kvbench"
+required-features = ["kvbench"]
 
 [dependencies]
 # Note: Not using workspace = true so this crate can be built from standalone
 # workspaces (like lib/bindings/kvbm) that don't inherit main workspace deps
 cudarc = { workspace = true }
 once_cell = "1.19"
+clap = { version = "4", features = ["derive"], optional = true }
 
 [dev-dependencies]
 ndarray = "0.17.2"

@@ -5,24 +5,20 @@
 extern "C" __global__ void
 vectorised_copy(void** src_ptrs, void** dst_ptrs, size_t copy_size_in_bytes, int num_pairs)
 {
-  int pair_id = blockIdx.x;
   int block_stride = gridDim.x;
 
-  // Determine the alignment case for the entire block
-  // To avoid thread divergence, checking alignment for the entire block
-  bool vector_copy_16 =
-      (uintptr_t(src_ptrs[pair_id]) % 16 == 0 && uintptr_t(dst_ptrs[pair_id]) % 16 == 0 && copy_size_in_bytes >= 16);
-  bool vector_copy_8 = !vector_copy_16 && (uintptr_t(src_ptrs[pair_id]) % 8 == 0 &&
-                                           uintptr_t(dst_ptrs[pair_id]) % 8 == 0 && copy_size_in_bytes >= 8);
-  bool vector_copy_4 =
-      !vector_copy_8 && !vector_copy_16 &&
-      (uintptr_t(src_ptrs[pair_id]) % 4 == 0 && uintptr_t(dst_ptrs[pair_id]) % 4 == 0 && copy_size_in_bytes >= 4);
-
-  for (; pair_id < num_pairs; pair_id += block_stride) {
+  for (int pair_id = blockIdx.x; pair_id < num_pairs; pair_id += block_stride) {
     char* src = static_cast<char*>(src_ptrs[pair_id]);
     char* dst = static_cast<char*>(dst_ptrs[pair_id]);
     int tid = threadIdx.x;
     int block_size = blockDim.x;
+
+    // Determine alignment per-pair (all threads in the block see the same pair_id, so no divergence)
+    bool vector_copy_16 = (uintptr_t(src) % 16 == 0 && uintptr_t(dst) % 16 == 0 && copy_size_in_bytes >= 16);
+    bool vector_copy_8 =
+        !vector_copy_16 && (uintptr_t(src) % 8 == 0 && uintptr_t(dst) % 8 == 0 && copy_size_in_bytes >= 8);
+    bool vector_copy_4 = !vector_copy_8 && !vector_copy_16 &&
+                         (uintptr_t(src) % 4 == 0 && uintptr_t(dst) % 4 == 0 && copy_size_in_bytes >= 4);
 
     if (vector_copy_16) {
       // Vectorized copy: copy as int4 (16-byte units)

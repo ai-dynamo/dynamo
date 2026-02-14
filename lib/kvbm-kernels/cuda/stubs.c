@@ -116,16 +116,29 @@ kvbm_kernels_has_memcpy_batch_async(void)
 // Stub for memcpy_batch - returns not supported since we can't do CUDA ops
 cudaError_t
 kvbm_kernels_memcpy_batch(
-    const void* const* src_ptrs_host, void* const* dst_ptrs_host, size_t size_per_copy, size_t num_copies,
+    const void* const* src_ptrs_host, void* const* dst_ptrs_host, size_t size_per_copy, size_t num_copies, int mode,
     cudaStream_t stream)
 {
   (void)src_ptrs_host;
   (void)dst_ptrs_host;
   (void)size_per_copy;
   (void)num_copies;
+  (void)mode;
   (void)stream;
   STUB_ABORT("kvbm_kernels_memcpy_batch");
   return 1;  // Unreachable
+}
+
+cudaError_t
+kvbm_kernels_memcpy_batch_diagnostic(
+    cudaStream_t stream, int* out_err_code, void** dev_ptrs_from_caller, size_t caller_dev_count)
+{
+  (void)stream;
+  (void)dev_ptrs_from_caller;
+  (void)caller_dev_count;
+  *out_err_code = 1;
+  STUB_ABORT("kvbm_kernels_memcpy_batch_diagnostic");
+  return 1;
 }
 
 // Returns true if this is the stub library (no real CUDA kernels).
