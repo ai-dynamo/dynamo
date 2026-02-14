@@ -393,10 +393,12 @@ fn expand_traces_with_offsets(
             let trace = Arc::try_unwrap(trace).unwrap_or_else(|arc| (*arc).clone());
             let mut expanded = Vec::with_capacity(trace.len() * trace_duplication_factor);
             for entry in trace {
-                for d in 1..trace_duplication_factor {
-                    expanded.push(offset_trace_entry(&entry, hash_offset_base * d as u64));
-                }
-                expanded.push(entry); // move, no clone
+                // Compute offset copies from a reference before moving the original.
+                let offsets: Vec<_> = (1..trace_duplication_factor)
+                    .map(|d| offset_trace_entry(&entry, hash_offset_base * d as u64))
+                    .collect();
+                expanded.push(entry); // move original first, no clone
+                expanded.extend(offsets);
             }
             Arc::new(expanded)
         })
