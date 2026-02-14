@@ -48,7 +48,6 @@ use self::kvbm_backend::KvbmLogicalKvManager;
 use self::manual_backend::ManualKvManager;
 
 /// Enum-based KV manager that dispatches to either the manual or kvbm-logical backend.
-/// The scheduler and ActiveSequence remain completely untouched.
 pub enum KvManager {
     Manual(ManualKvManager),
     KvbmLogical(KvbmLogicalKvManager),
