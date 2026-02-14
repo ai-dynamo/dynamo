@@ -232,11 +232,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
-                # If request is not finished yet, but there are no outputs, return an error.
+                # Empty, non-final chunks can happen during scheduler idle ticks.
+                # Keep waiting for the next chunk unless cancellation was requested.
                 if not output_ids and not finish_reason:
-                    if not context.is_stopped():
-                        yield {"finish_reason": "error", "token_ids": []}
-                    break
+                    if context.is_stopped():
+                        break
+                    continue
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
