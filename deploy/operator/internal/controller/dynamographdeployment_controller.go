@@ -23,7 +23,7 @@ import (
 	"sort"
 	"strings"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
@@ -67,10 +67,6 @@ const (
 	DGDStateReady   State = "successful"
 	DGDStatePending State = "pending"
 )
-
-type etcdStorage interface {
-	DeleteKeys(ctx context.Context, prefix string) error
-}
 
 // rbacManager interface for managing RBAC resources
 type rbacManager interface {
@@ -695,6 +691,16 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 		}
 		// Sort for deterministic output
 		sort.Strings(servicesToCheck)
+
+		// For a new restart request with services, immediately return Restarting phase without checking readiness.
+		if len(servicesToCheck) > 0 {
+			return &nvidiacomv1alpha1.RestartStatus{
+				ObservedID: specID,
+				Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+				InProgress: servicesToCheck,
+			}
+		}
+		// If no services, fall through to the empty check below
 	} else if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
 		// Continuing existing restart: use current InProgress list
 		servicesToCheck = dgd.Status.Restart.InProgress

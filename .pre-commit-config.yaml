@@ -98,3 +98,4 @@ repos:
         - pydantic
         - filelock
         - pyyaml
+        - prometheus_client>=0.23.1

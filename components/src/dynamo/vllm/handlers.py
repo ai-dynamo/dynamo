@@ -22,16 +22,17 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelType,
-    ZmqKvEventPublisher,
     lora_name_to_id,
-    register_llm,
-    unregister_llm,
+    register_model,
+    unregister_model,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -252,7 +253,7 @@ class BaseWorkerHandler(ABC):
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.kv_publishers: list[ZmqKvEventPublisher] | None = None
+        self.kv_publishers: list[KvEventPublisher] | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
@@ -436,20 +437,6 @@ class BaseWorkerHandler(ABC):
                 self._lora_load_locks[lora_name] = lock
             return lock
 
-    def _normalize_finish_reason(self, finish_reason: str) -> str:
-        """
-        Normalize vLLM finish reasons to Dynamo-compatible values.
-
-        vLLM may return finish reasons that aren't recognized by Dynamo's Rust layer.
-        This method maps them to compatible values.
-        [TODO]: Remove this method and add the right code in the Rust layer.
-        """
-        # Map vLLM's "abort" to Dynamo's "cancelled"
-        if finish_reason.startswith("abort"):
-            logging.debug(f"Normalizing finish reason: {finish_reason} to cancelled")
-            return "cancelled"
-        return finish_reason
-
     async def load_lora(self, request=None):
         """
         Load a LoRA adapter dynamically into the vLLM's AsyncLLM engine.
@@ -584,7 +571,7 @@ class BaseWorkerHandler(ABC):
                             }
 
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                            await register_llm(
+                            await register_model(
                                 model_input=ModelInput.Tokens,
                                 model_type=ModelType.Chat | ModelType.Completions,
                                 endpoint=self.generate_endpoint,
@@ -704,7 +691,7 @@ class BaseWorkerHandler(ABC):
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
                         try:
-                            await unregister_llm(
+                            await unregister_model(
                                 endpoint=self.generate_endpoint,
                                 lora_name=lora_name,
                             )
@@ -806,7 +793,6 @@ class BaseWorkerHandler(ABC):
         Decode base64-encoded prompt embeddings in PyTorch format.
 
         Format: PyTorch tensor serialized with torch.save() and base64-encoded.
-        This matches NIM-LLM's implementation for compatibility.
 
         Args:
             prompt_embeds_base64: Base64-encoded PyTorch tensor
@@ -1224,9 +1210,7 @@ class BaseWorkerHandler(ABC):
                     out["top_logprobs"] = top_logprobs
 
                 if output.finish_reason:
-                    out["finish_reason"] = self._normalize_finish_reason(
-                        output.finish_reason
-                    )
+                    out["finish_reason"] = normalize_finish_reason(output.finish_reason)
                     out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
                         request_output=res,
                         embedding_sequence_length=embedding_sequence_length,
@@ -1351,8 +1335,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             logger.debug(
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
-
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
 
         trace_headers = build_trace_headers(context)
 
@@ -1396,7 +1379,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params
         )
 
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1440,9 +1423,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "role": "assistant",
                             "content": delta_text,
                         },
-                        "finish_reason": self._normalize_finish_reason(
-                            output.finish_reason
-                        ),
+                        "finish_reason": normalize_finish_reason(output.finish_reason),
                     }
 
                     chunk = {
@@ -1566,7 +1547,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
             )
 
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
 
         trace_headers = build_trace_headers(context)
 

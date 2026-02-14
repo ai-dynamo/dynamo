@@ -37,6 +37,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use super::metrics::WORKER_LOAD_METRICS;
 use super::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank,
 };
@@ -71,6 +72,17 @@ const EXPIRY_DURATION: Duration = Duration::from_secs(300);
 
 // TODO: use the common request_id if it exists in the repo
 pub type RequestId = String;
+
+/// Bundled parameters for adding a request to the sequence tracker.
+pub struct SequenceRequest {
+    pub request_id: RequestId,
+    pub token_sequence: Option<Vec<SequenceHash>>,
+    pub isl: usize,
+    pub overlap: u32,
+    pub expected_output_tokens: Option<u32>,
+    pub worker: WorkerWithDpRank,
+    pub lora_name: Option<String>,
+}
 
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
 #[derive(Debug, Getters)]
@@ -415,15 +427,18 @@ pub struct ActiveSequencesMultiWorker {
     /// Publisher for metrics (namespace-scoped)
     metrics_publisher: EventPublisher,
     replica_sync: bool,
+    /// Worker type for Prometheus metrics labeling ("prefill" or "decode")
+    worker_type: &'static str,
 }
 
 impl ActiveSequencesMultiWorker {
     pub async fn new(
         component: Component,
         block_size: usize,
-        workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
+        workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
         replica_sync: bool,
         router_id: u64,
+        worker_type: &'static str,
     ) -> Result<Self> {
         assert!(block_size > 1, "block_size must be greater than 1");
 
@@ -434,7 +449,7 @@ impl ActiveSequencesMultiWorker {
 
         // Expand workers by their dp_rank
         for (worker_id, config) in workers_with_configs {
-            let dp_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1);
+            let dp_size = config.data_parallel_size;
 
             for dp_rank in 0..dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
@@ -462,6 +477,7 @@ impl ActiveSequencesMultiWorker {
             metrics_publisher,
             router_id,
             replica_sync,
+            worker_type,
         };
 
         // Start the subscription loop only if replica_sync is enabled
@@ -705,17 +721,14 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Update the set of workers, adding and removing as needed
-    pub fn update_workers(
-        &self,
-        new_workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
-    ) {
+    pub fn update_workers(&self, new_workers_with_configs: HashMap<u64, ModelRuntimeConfig>) {
         let current_workers: HashSet<WorkerWithDpRank> =
             self.senders.iter().map(|entry| *entry.key()).collect();
 
         // Expand new workers by their dp_rank
         let mut new_workers: HashSet<WorkerWithDpRank> = HashSet::new();
         for (worker_id, config) in &new_workers_with_configs {
-            let dp_size = config.as_ref().map(|c| c.data_parallel_size).unwrap_or(1);
+            let dp_size = config.data_parallel_size;
 
             for dp_rank in 0..dp_size {
                 new_workers.insert(WorkerWithDpRank::new(*worker_id, dp_rank));
@@ -768,23 +781,27 @@ impl ActiveSequencesMultiWorker {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn add_request(
-        &self,
-        request_id: RequestId,
-        token_sequence: Option<Vec<SequenceHash>>,
-        isl: usize,
-        overlap: u32,
-        expected_output_tokens: Option<u32>,
-        worker: WorkerWithDpRank,
-        lora_name: Option<String>,
-    ) -> Result<(), SequenceError> {
-        // Check for worker existence
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
+    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        let SequenceRequest {
+            request_id,
+            token_sequence,
+            isl,
+            overlap,
+            expected_output_tokens,
+            worker,
+            lora_name,
+        } = req;
 
-        // Check for duplicate request
+        // Clone the sender upfront so we don't hold the DashMap Ref across
+        // the .await points below. Also eliminates the TOCTOU between
+        // contains_key and a later get().unwrap().
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
+
         if let Some(existing_worker) = self.request_to_worker.get(&request_id) {
             return Err(SequenceError::DuplicateRequest {
                 request_id,
@@ -792,10 +809,8 @@ impl ActiveSequencesMultiWorker {
             });
         }
 
-        // Create response channel
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
 
-        // Publish event only if replica_sync is enabled
         if self.replica_sync {
             let event = ActiveSequenceEvent {
                 request_id: request_id.clone(),
@@ -812,17 +827,13 @@ impl ActiveSequencesMultiWorker {
             self.event_publisher.publish(&event).await?;
         }
 
-        // Update local state with full WorkerWithDpRank
         self.request_to_worker.insert(request_id.clone(), worker);
 
-        // Store lora_name for later use in Free/MarkPrefillCompleted events
         if let Some(lora) = lora_name {
             self.request_to_lora.insert(request_id.clone(), lora);
         }
 
-        self.senders
-            .get(&worker)
-            .unwrap()
+        sender
             .send(UpdateSequences::AddRequest {
                 request_id,
                 token_sequence,
@@ -833,18 +844,69 @@ impl ActiveSequencesMultiWorker {
             })
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
-        // Wait for response and handle removed requests
         let removed_requests = resp_rx
             .await
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
-        // Remove expired requests from request_to_worker mapping
         for expired_id in &removed_requests {
             self.request_to_worker.remove(expired_id);
             self.request_to_lora.remove(expired_id);
         }
 
-        // Publish ActiveLoad metrics for this worker
+        self.publish_active_load_for_worker(worker).await;
+
+        Ok(())
+    }
+
+    /// Send a command to the worker assigned to a request, optionally publishing
+    /// a replica-sync event and cleaning up request mappings afterward.
+    async fn send_to_request_worker(
+        &self,
+        request_id: &RequestId,
+        event_data: ActiveSequenceEventData,
+        command_fn: impl FnOnce(RequestId) -> UpdateSequences,
+        remove_mapping: bool,
+    ) -> Result<(), SequenceError> {
+        let worker = self
+            .request_to_worker
+            .get(request_id)
+            .map(|entry| *entry)
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
+
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
+
+        if self.replica_sync {
+            let lora_name = self
+                .request_to_lora
+                .get(request_id)
+                .map(|entry| entry.value().clone());
+
+            let event = ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker,
+                data: event_data,
+                router_id: self.router_id,
+                lora_name,
+            };
+            self.event_publisher.publish(&event).await?;
+        }
+
+        sender
+            .send(command_fn(request_id.clone()))
+            .map_err(|_| SequenceError::WorkerChannelClosed)?;
+
+        if remove_mapping {
+            self.request_to_worker.remove(request_id);
+            self.request_to_lora.remove(request_id);
+        }
+
         self.publish_active_load_for_worker(worker).await;
 
         Ok(())
@@ -855,51 +917,18 @@ impl ActiveSequencesMultiWorker {
     /// Note: This operation is idempotent. Calling it multiple times for the same request
     /// will log a warning but not return an error (double free is allowed).
     pub async fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
-        // Check if request exists - if not, it's already been freed (idempotent)
-        let Some(worker) = self.request_to_worker.get(request_id).map(|entry| *entry) else {
+        if !self.request_to_worker.contains_key(request_id) {
             tracing::debug!("Request {request_id} not found, already freed (idempotent)");
             return Ok(());
-        };
-
-        // Verify worker still exists
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
         }
 
-        // Publish event only if replica_sync is enabled
-        if self.replica_sync {
-            // Look up lora_name from mapping
-            let lora_name = self
-                .request_to_lora
-                .get(request_id)
-                .map(|entry| entry.value().clone());
-
-            let event = ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::Free,
-                router_id: self.router_id,
-                lora_name,
-            };
-            self.event_publisher.publish(&event).await?;
-        }
-
-        // Update local state
-        self.senders
-            .get(&worker)
-            .unwrap()
-            .send(UpdateSequences::Free {
-                request_id: request_id.clone(),
-            })
-            .map_err(|_| SequenceError::WorkerChannelClosed)?;
-
-        self.request_to_worker.remove(request_id);
-        self.request_to_lora.remove(request_id);
-
-        // Publish ActiveLoad metrics for this worker
-        self.publish_active_load_for_worker(worker).await;
-
-        Ok(())
+        self.send_to_request_worker(
+            request_id,
+            ActiveSequenceEventData::Free,
+            |rid| UpdateSequences::Free { request_id: rid },
+            true,
+        )
+        .await
     }
 
     /// Mark prefill as completed for a request
@@ -910,50 +939,13 @@ impl ActiveSequencesMultiWorker {
         &self,
         request_id: &RequestId,
     ) -> Result<(), SequenceError> {
-        let worker = self
-            .request_to_worker
-            .get(request_id)
-            .map(|entry| *entry)
-            .ok_or_else(|| SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            })?;
-
-        // Verify worker still exists
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
-
-        // Publish event only if replica_sync is enabled
-        if self.replica_sync {
-            // Look up lora_name from mapping
-            let lora_name = self
-                .request_to_lora
-                .get(request_id)
-                .map(|entry| entry.value().clone());
-
-            let event = ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::MarkPrefillCompleted,
-                router_id: self.router_id,
-                lora_name,
-            };
-            self.event_publisher.publish(&event).await?;
-        }
-
-        // Update local state
-        self.senders
-            .get(&worker)
-            .unwrap()
-            .send(UpdateSequences::MarkPrefillCompleted {
-                request_id: request_id.clone(),
-            })
-            .map_err(|_| SequenceError::WorkerChannelClosed)?;
-
-        // Publish ActiveLoad metrics for this worker
-        self.publish_active_load_for_worker(worker).await;
-
-        Ok(())
+        self.send_to_request_worker(
+            request_id,
+            ActiveSequenceEventData::MarkPrefillCompleted,
+            |rid| UpdateSequences::MarkPrefillCompleted { request_id: rid },
+            false,
+        )
+        .await
     }
 
     /// Add an output block with optional fractional decay weight
@@ -973,18 +965,19 @@ impl ActiveSequencesMultiWorker {
                 request_id: request_id.clone(),
             })?;
 
-        // Verify worker still exists
-        if !self.senders.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
-        }
+        // Clone sender upfront to avoid TOCTOU between contains_key and get().unwrap()
+        let sender = self
+            .senders
+            .get(&worker)
+            .ok_or(SequenceError::WorkerNotFound { worker })?
+            .value()
+            .clone();
 
         // Create response channel
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
 
         // Send command to worker
-        self.senders
-            .get(&worker)
-            .unwrap()
+        sender
             .send(UpdateSequences::AddOutputBlock {
                 request_id: request_id.clone(),
                 decay_fraction,
@@ -1011,9 +1004,16 @@ impl ActiveSequencesMultiWorker {
 
     /// Helper method to query a single worker for active blocks/tokens and publish ActiveLoad
     async fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank) {
-        let Some(sender) = self.senders.get(&worker) else {
-            tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
-            return;
+        // Clone the sender and drop the DashMap Ref immediately.
+        // Holding a Ref across .await points can deadlock: if the task yields
+        // and update_workers() needs a write lock on the same shard, the
+        // runtime thread blocks forever.
+        let sender = {
+            let Some(entry) = self.senders.get(&worker) else {
+                tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
+                return;
+            };
+            entry.value().clone()
         };
 
         // Query active blocks
@@ -1045,7 +1045,16 @@ impl ActiveSequencesMultiWorker {
             }
         };
 
-        // Publish ActiveLoad
+        // Update Prometheus gauges directly (router's own bookkeeping)
+        WORKER_LOAD_METRICS.observe(
+            worker.worker_id,
+            worker.dp_rank,
+            self.worker_type,
+            active_blocks,
+            active_tokens,
+        );
+
+        // Also publish ActiveLoad to NATS for other subscribers (if NATS is available)
         let active_load = ActiveLoad {
             worker_id: worker.worker_id,
             dp_rank: worker.dp_rank,
@@ -1054,13 +1063,20 @@ impl ActiveSequencesMultiWorker {
         };
 
         if let Err(e) = self.metrics_publisher.publish(&active_load).await {
-            tracing::warn!("Failed to publish ActiveLoad for worker {worker:?}: {e:?}");
+            // This is expected if NATS is not available - the local gauge update above already succeeded
+            tracing::trace!("Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}");
         }
     }
 
     /// Get the number of workers
     pub fn num_workers(&self) -> usize {
         self.senders.len()
+    }
+
+    /// Get the worker type for this router ("prefill" or "decode").
+    /// Used for Prometheus metric labeling.
+    pub fn worker_type(&self) -> &'static str {
+        self.worker_type
     }
 
     /// Generic method to query all workers with a given command
@@ -1145,6 +1161,11 @@ impl ActiveSequencesMultiWorker {
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
     ) {
+        #[cfg(feature = "bench")]
+        let start = Instant::now();
+        #[cfg(feature = "bench")]
+        let num_workers = self.senders.len();
+
         let mut potential_blocks = HashMap::new();
         let mut potential_tokens = HashMap::new();
         let token_sequence_shared = token_sequence.map(Arc::new);
@@ -1176,6 +1197,9 @@ impl ActiveSequencesMultiWorker {
             }
         }
 
+        #[cfg(feature = "bench")]
+        let send_elapsed = start.elapsed();
+
         // Collect results from all workers
         for (worker, receiver) in receivers {
             match tokio::time::timeout(tokio::time::Duration::from_secs(1), receiver).await {
@@ -1190,6 +1214,17 @@ impl ActiveSequencesMultiWorker {
                     tracing::error!("Timeout waiting for response from worker {:?}", worker);
                 }
             }
+        }
+
+        #[cfg(feature = "bench")]
+        {
+            let total_elapsed = start.elapsed();
+            tracing::info!(
+                num_workers,
+                send_us = send_elapsed.as_micros() as u64,
+                total_us = total_elapsed.as_micros() as u64,
+                "potential_blocks_and_tokens completed"
+            );
         }
 
         (potential_blocks, potential_tokens)
@@ -1288,11 +1323,11 @@ mod tests {
         // Create runtime config for worker 0 with dp_size=2
         let mut config_worker_0 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
         config_worker_0.data_parallel_size = 2;
-        workers_with_configs.insert(0, Some(config_worker_0));
+        workers_with_configs.insert(0, config_worker_0);
 
         // Create runtime config for worker 1 with dp_size=1 (default)
         let config_worker_1 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
-        workers_with_configs.insert(1, Some(config_worker_1));
+        workers_with_configs.insert(1, config_worker_1);
 
         let seq_manager_1 = Arc::new(
             ActiveSequencesMultiWorker::new(
@@ -1301,12 +1336,20 @@ mod tests {
                 workers_with_configs.clone(),
                 true,
                 1,
+                crate::discovery::WORKER_TYPE_DECODE,
             )
             .await?,
         );
         let seq_manager_2 = Arc::new(
-            ActiveSequencesMultiWorker::new(component, block_size, workers_with_configs, true, 2)
-                .await?,
+            ActiveSequencesMultiWorker::new(
+                component,
+                block_size,
+                workers_with_configs,
+                true,
+                2,
+                crate::discovery::WORKER_TYPE_DECODE,
+            )
+            .await?,
         );
 
         // Give some time for the subscription loops to start
@@ -1316,41 +1359,41 @@ mod tests {
 
         // Add request_0 to worker 0, dp_rank 0: sequence [0, 1, 2]
         seq_manager_1
-            .add_request(
-                "request_0".to_string(),
-                Some(vec![0, 1, 2]),
-                12,   // ISL (3 blocks * 4 block_size)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::new(0, 0),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_0".to_string(),
+                token_sequence: Some(vec![0, 1, 2]),
+                isl: 12,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::new(0, 0),
+                lora_name: None,
+            })
             .await?;
 
         // Add request_1 to worker 0, dp_rank 1: sequence [3, 4]
         seq_manager_1
-            .add_request(
-                "request_1".to_string(),
-                Some(vec![3, 4]),
-                8,    // ISL (2 blocks * 4 block_size)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::new(0, 1),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_1".to_string(),
+                token_sequence: Some(vec![3, 4]),
+                isl: 8,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::new(0, 1),
+                lora_name: None,
+            })
             .await?;
 
         // Add request_2 to worker 1, dp_rank 0: sequence [0, 1, 2, 3] using seq_manager_2
         seq_manager_2
-            .add_request(
-                "request_2".to_string(),
-                Some(vec![0, 1, 2, 3]),
-                16,   // ISL (4 blocks * 4 block_size)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::new(1, 0),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_2".to_string(),
+                token_sequence: Some(vec![0, 1, 2, 3]),
+                isl: 16,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::new(1, 0),
+                lora_name: None,
+            })
             .await?;
 
         // Give some time for synchronization
@@ -1452,9 +1495,18 @@ mod tests {
         // Create multi-worker sequence managers with ALL workers [0, 1, 2]
         // Both use the same component to ensure event synchronization works
         let mut workers_with_configs = HashMap::new();
-        workers_with_configs.insert(0, None);
-        workers_with_configs.insert(1, None);
-        workers_with_configs.insert(2, None);
+        workers_with_configs.insert(
+            0,
+            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
+        );
+        workers_with_configs.insert(
+            1,
+            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
+        );
+        workers_with_configs.insert(
+            2,
+            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
+        );
 
         let seq_manager_1 = Arc::new(
             ActiveSequencesMultiWorker::new(
@@ -1463,12 +1515,20 @@ mod tests {
                 workers_with_configs.clone(),
                 true,
                 1,
+                crate::discovery::WORKER_TYPE_DECODE,
             )
             .await?,
         );
         let seq_manager_2 = Arc::new(
-            ActiveSequencesMultiWorker::new(component, block_size, workers_with_configs, true, 2)
-                .await?,
+            ActiveSequencesMultiWorker::new(
+                component,
+                block_size,
+                workers_with_configs,
+                true,
+                2,
+                crate::discovery::WORKER_TYPE_DECODE,
+            )
+            .await?,
         );
 
         // Give some time for the subscription loops to start
@@ -1478,41 +1538,41 @@ mod tests {
 
         // Add request_0 to worker 0 with no token sequence
         seq_manager_1
-            .add_request(
-                "request_0".to_string(),
-                None, // No token sequence
-                12,   // ISL (12 tokens)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::from_worker_id(0),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_0".to_string(),
+                token_sequence: None,
+                isl: 12,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::from_worker_id(0),
+                lora_name: None,
+            })
             .await?;
 
         // Add request_1 to worker 1 with no token sequence
         seq_manager_1
-            .add_request(
-                "request_1".to_string(),
-                None, // No token sequence
-                8,    // ISL (8 tokens)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::from_worker_id(1),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_1".to_string(),
+                token_sequence: None,
+                isl: 8,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::from_worker_id(1),
+                lora_name: None,
+            })
             .await?;
 
         // Add request_2 to worker 2 with no token sequence using seq_manager_2
         seq_manager_2
-            .add_request(
-                "request_2".to_string(),
-                None, // No token sequence
-                16,   // ISL (16 tokens)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::from_worker_id(2),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_2".to_string(),
+                token_sequence: None,
+                isl: 16,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::from_worker_id(2),
+                lora_name: None,
+            })
             .await?;
 
         // Give some time for synchronization

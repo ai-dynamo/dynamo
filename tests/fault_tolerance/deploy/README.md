@@ -21,8 +21,17 @@ A declarative test framework for Dynamo fault tolerance testing on Kubernetes. T
 
 ## Quick Start
 
+### Install Dynamo Platform
+
+Follow the [instructions](../../../docs/pages/kubernetes/installation-guide.md) to install `Dynamo` in your Kubernetes cluster.
+
+### Mount Workspace and Kube Config
+
+Ensure you are able to run a `Dynamo` deployment directly from your host.
+
+Then run the development container mounting the workspace and your kube config.
+
 ```bash
-# Run inside the Dynamo container with mounted workspace and kube config
 ./container/run.sh --mount-workspace -it -v ~/.kube:/root/.kube
 
 # Run a specific test

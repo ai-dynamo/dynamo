@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Reusable CI Test Suite Workflow
@@ -69,7 +69,6 @@ defaults:
 env:
   REGISTRY_IMAGE: ai-dynamo/dynamo
   IMAGE_PREFIX: ${{ inputs.image_prefix }}
-
 ############################## BUILD JOBS ##############################
 
 jobs:
@@ -80,7 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, trtllm, sglang]
+        framework: [vllm, sglang]
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
@@ -100,17 +99,15 @@ jobs:
         with:
           framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/amd64
-          base_image_tag: ''
-          runtime_image_tag: ''
-          cuda_version: ''
+          platform: amd64
+          cuda_version: '12.9'
+          image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
@@ -133,17 +130,9 @@ jobs:
       matrix:
         include:
           - framework: vllm
-            base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
-            runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
-            cuda_version: '12.9'
-          - framework: trtllm
-            base_image_tag: '25.06-py3'
-            runtime_image_tag: ''
             cuda_version: '12.9'
           - framework: sglang
-            base_image_tag: ''
-            runtime_image_tag: ''
-            cuda_version: ''
+            cuda_version: '12.9'
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
@@ -163,17 +152,15 @@ jobs:
         with:
           framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/arm64
-          base_image_tag: ${{ matrix.base_image_tag }}
-          runtime_image_tag: ${{ matrix.runtime_image_tag }}
+          platform: arm64
           cuda_version: ${{ matrix.cuda_version }}
+          image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
@@ -195,7 +182,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, sglang]
+        framework: [vllm, trtllm, sglang]
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
@@ -215,17 +202,15 @@ jobs:
         with:
           framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/amd64
-          base_image_tag: ''
-          runtime_image_tag: ''
-          cuda_version: '13.0'
+          platform: amd64
+          cuda_version: ${{ matrix.framework == 'trtllm' && '13.1' || '13.0' }}
+          image_tag: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
       - name: Tag and Push CUDA 13 Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
@@ -233,6 +218,7 @@ jobs:
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-amd64
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-amd64-run-${{ github.run_id }}
+            ${{ matrix.framework == 'trtllm' && format('{0}:{1}-{2}-amd64', env.REGISTRY_IMAGE, env.IMAGE_PREFIX, matrix.framework) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -246,7 +232,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, sglang]
+        framework: [vllm, trtllm, sglang]
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
@@ -266,17 +252,15 @@ jobs:
         with:
           framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/arm64
-          base_image_tag: ''
-          runtime_image_tag: ''
-          cuda_version: '13.0'
+          platform: arm64
+          cuda_version: ${{ matrix.framework == 'trtllm' && '13.1' || '13.0' }}
+          image_tag: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
       - name: Tag and Push CUDA 13 Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
@@ -284,6 +268,7 @@ jobs:
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64-run-${{ github.run_id }}
+            ${{ matrix.framework == 'trtllm' && format('{0}:{1}-{2}-arm64', env.REGISTRY_IMAGE, env.IMAGE_PREFIX, matrix.framework) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -294,7 +279,7 @@ jobs:
 
   unit-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
-    needs: [build-amd64, build-arm64]
+    needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
     if: always() && inputs.skip_tests != true
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
@@ -323,7 +308,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -427,7 +412,7 @@ jobs:
 
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
-    needs: [build-amd64, build-arm64]
+    needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
     if: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
@@ -458,7 +443,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -561,7 +546,7 @@ jobs:
 
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
-    needs: [build-amd64, build-arm64]
+    needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
     if: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
@@ -572,10 +557,10 @@ jobs:
         arch:
           - arch: amd64
             runner: prod-builder-amd-gpu-v1
-            timeout: 120
+            timeout: 180
           - arch: arm64
             runner: prod-builder-arm-v1
-            timeout: 120
+            timeout: 180
     steps:
       - uses: actions/checkout@v4
         with:
@@ -594,7 +579,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
@@ -697,7 +682,7 @@ jobs:
 
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
-    needs: [build-amd64, build-arm64]
+    needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
     if: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
@@ -730,7 +715,7 @@ jobs:
           echo "Repository: ${{ github.repository }}"
           echo "Run ID: ${{ github.run_id }}"
 
-          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} ${{ matrix.framework == 'trtllm' && 'CUDA13 ' || '' }}(${{ matrix.arch.arch }})"
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status

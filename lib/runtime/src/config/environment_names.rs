@@ -20,6 +20,7 @@
 //! - **Model**: Model loading and caching
 //! - **Worker**: Worker lifecycle and shutdown
 //! - **Testing**: Test-specific configuration
+//! - **Mocker**: Mocker (mock scheduler/KV manager) configuration
 
 /// Logging and tracing environment variables
 pub mod logging {
@@ -356,6 +357,18 @@ pub mod build {
     pub const OUT_DIR: &str = "OUT_DIR";
 }
 
+/// Mocker (mock scheduler/KV manager) environment variables
+pub mod mocker {
+    /// Enable structured KV cache allocation/eviction trace logs (set to "1" or "true" to enable)
+    pub const DYN_MOCKER_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
+
+    /// Use the original direct() code path in the mocker request dispatch.
+    ///
+    /// This path is race-prone during startup; prefer leaving it unset unless you are
+    /// explicitly trying to reproduce the original behavior.
+    pub const DYN_MOCKER_SYNC_DIRECT: &str = "DYN_MOCKER_SYNC_DIRECT";
+}
+
 /// Testing environment variables
 pub mod testing {
     /// Enable queued-up request processing in tests
@@ -454,6 +467,9 @@ mod tests {
             cuda::DYNAMO_FATBIN_PATH,
             // Build
             build::OUT_DIR,
+            // Mocker
+            mocker::DYN_MOCKER_KV_CACHE_TRACE,
+            mocker::DYN_MOCKER_SYNC_DIRECT,
             // Testing
             testing::DYN_QUEUED_UP_PROCESSING,
             testing::DYN_SOAK_RUN_DURATION,

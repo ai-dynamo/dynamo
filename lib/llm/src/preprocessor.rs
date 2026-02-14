@@ -23,16 +23,17 @@ use dynamo_async_openai::types::{
 use futures::Stream;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-#[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
+use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
@@ -72,6 +73,32 @@ pub struct LLMMetricAnnotation {
     pub output_tokens: usize,
     pub chunk_tokens: usize,
     pub cached_tokens: Option<usize>,
+    /// Prefill worker ID (for TTFT attribution in disaggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+    /// Prefill worker DP rank
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
+    /// Prefill worker type ("prefill" or "decode") for Prometheus metric labeling.
+    /// Stored at routing time to avoid expensive MDC lookup when updating TTFT metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_type: Option<String>,
+    /// Decode worker ID (for ITL attribution in disaggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+    /// Decode worker DP rank
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_dp_rank: Option<u32>,
+    /// Decode worker type ("prefill" or "decode") for Prometheus metric labeling.
+    /// Stored at routing time to avoid expensive MDC lookup when updating ITL metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenize_latency: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detokenize_total_latency: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detokenize_count: Option<u64>,
 }
 
 impl LLMMetricAnnotation {
@@ -117,7 +144,6 @@ pub struct OpenAIPreprocessor {
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
-    #[cfg(feature = "media-nixl")]
     media_loader: Option<MediaLoader>,
 }
 
@@ -137,7 +163,7 @@ impl OpenAIPreprocessor {
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
-        let lora_name = mdc.lora_name.clone();
+        let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
         let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
@@ -153,7 +179,6 @@ impl OpenAIPreprocessor {
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
 
-        #[cfg(feature = "media-nixl")]
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
@@ -167,7 +192,6 @@ impl OpenAIPreprocessor {
             lora_name,
             runtime_config,
             tool_call_parser,
-            #[cfg(feature = "media-nixl")]
             media_loader,
         }))
     }
@@ -192,13 +216,14 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
+        tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
         let mut builder = self.builder(request)?;
         let formatted_prompt = self
             .apply_template(request)
             .with_context(|| "Failed to apply prompt template")?;
         let annotations = self
-            .gather_tokens(request, &mut builder, formatted_prompt)
+            .gather_tokens(request, &mut builder, formatted_prompt, tracker)
             .with_context(|| "Failed to gather tokens")?;
         self.gather_multi_modal_data(request, &mut builder)
             .await
@@ -249,13 +274,14 @@ impl OpenAIPreprocessor {
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
+            let hints = nvext.agent_hints.as_ref();
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
-                enable_local_updates: nvext.enable_local_updates,
-                expected_output_tokens: nvext.expected_output_tokens,
+                expected_output_tokens: hints.and_then(|h| h.osl),
+                priority_jump: hints.and_then(|h| h.latency_sensitivity),
                 lora_name,
             };
             builder.routing(Some(routing));
@@ -311,7 +337,6 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
     ) -> Result<()> {
         let mut media_map: MultimodalDataMap = HashMap::new();
-        #[cfg(feature = "media-nixl")]
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
 
@@ -341,7 +366,6 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
-                #[cfg(feature = "media-nixl")]
                 if self.media_loader.is_some() {
                     fetch_tasks.push((type_str, content_part.clone()));
                     continue;
@@ -356,7 +380,6 @@ impl OpenAIPreprocessor {
         }
 
         // Execute all fetch tasks
-        #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
@@ -402,6 +425,7 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
+        tracker: Option<&RequestTracker>,
     ) -> Result<HashMap<String, String>> {
         let mut annotations = HashMap::new();
         // match request type before any conversion/processing
@@ -460,12 +484,12 @@ impl OpenAIPreprocessor {
                                     tracing::warn!(
                                         "backend_instance_id provided but no token_data; tokenizing prompt"
                                     );
-                                    let encoding = self.tokenizer.encode(&prompt)?;
+                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
                                     (encoding.token_ids().to_vec(), false)
                                 }
                             } else {
                                 // No backend_instance_id provided, continue the normal flow.
-                                let encoding = self.tokenizer.encode(&prompt)?;
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -482,7 +506,7 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.tokenizer.encode(&texts[0])?;
+                                let encoding = self.encode_with_timing(&texts[0], tracker)?;
                                 builder.token_ids(encoding.token_ids().to_vec());
                             } else {
                                 bail!(
@@ -496,6 +520,19 @@ impl OpenAIPreprocessor {
             }
         }
         Ok(annotations)
+    }
+
+    fn encode_with_timing(
+        &self,
+        prompt: &str,
+        tracker: Option<&RequestTracker>,
+    ) -> anyhow::Result<Encoding> {
+        let encode_start = Instant::now();
+        let encoding = self.tokenizer.encode(prompt)?;
+        if let Some(t) = tracker {
+            t.record_tokenize_latency(encode_start.elapsed());
+        }
+        Ok(encoding)
     }
 
     /// Preprocess an embedding request, handling both text and token ID inputs.
@@ -657,12 +694,35 @@ impl OpenAIPreprocessor {
                             .map_err(|e| e.to_string())
                     });
 
-                    // Create LLM metrics annotation
+                    // Create LLM metrics annotation with prefill/decode worker info from tracker.
+                    // Worker types are stored at routing time to avoid expensive MDC lookup.
+                    let tracker = inner.response_generator.tracker();
+                    let prefill_worker_id = tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                    let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                    let prefill_worker_type = tracker
+                        .as_ref()
+                        .and_then(|t| t.prefill_worker_type())
+                        .map(String::from);
+                    let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                    let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                    let decode_worker_type = tracker
+                        .as_ref()
+                        .and_then(|t| t.decode_worker_type())
+                        .map(String::from);
                     let llm_metrics = LLMMetricAnnotation {
                         input_tokens: isl,
                         output_tokens: current_osl,
                         chunk_tokens,
                         cached_tokens: None,
+                        prefill_worker_id,
+                        prefill_dp_rank,
+                        prefill_worker_type,
+                        decode_worker_id,
+                        decode_dp_rank,
+                        decode_worker_type,
+                        tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                        detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
+                        detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -695,6 +755,20 @@ impl OpenAIPreprocessor {
 
                         let usage_chunk = inner.response_generator.create_usage_chunk();
                         let usage = inner.response_generator.get_usage();
+                        let tracker = inner.response_generator.tracker();
+                        let prefill_worker_id =
+                            tracker.as_ref().and_then(|t| t.prefill_worker_id());
+                        let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
+                        let prefill_worker_type = tracker
+                            .as_ref()
+                            .and_then(|t| t.prefill_worker_type())
+                            .map(String::from);
+                        let decode_worker_id = tracker.as_ref().and_then(|t| t.decode_worker_id());
+                        let decode_dp_rank = tracker.as_ref().and_then(|t| t.decode_dp_rank());
+                        let decode_worker_type = tracker
+                            .as_ref()
+                            .and_then(|t| t.decode_worker_type())
+                            .map(String::from);
                         let llm_metrics = LLMMetricAnnotation {
                             input_tokens: usage.prompt_tokens as usize,
                             output_tokens: usage.completion_tokens as usize,
@@ -703,6 +777,17 @@ impl OpenAIPreprocessor {
                                 .prompt_tokens_details
                                 .as_ref()
                                 .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                            prefill_worker_id,
+                            prefill_dp_rank,
+                            prefill_worker_type,
+                            decode_worker_id,
+                            decode_dp_rank,
+                            decode_worker_type,
+                            tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                            detokenize_total_latency: tracker
+                                .as_ref()
+                                .and_then(|t| t.detokenize_total_latency()),
+                            detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
 
                         // Create annotation string
@@ -739,6 +824,7 @@ impl OpenAIPreprocessor {
                 }
             }
         })
+        .fuse()
     }
 
     /// Transform engine embedding output stream to OpenAI embedding response stream
@@ -884,14 +970,23 @@ impl OpenAIPreprocessor {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
                         for choice in data.choices.iter_mut() {
-                            if let Some(text) = choice.delta.content.as_ref() {
+                            // Reasoning parsing only applies to text content
+                            if let Some(
+                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(
+                                    text,
+                                ),
+                            ) = choice.delta.content.as_ref()
+                            {
                                 let parser_result =
                                     parser.parse_reasoning_streaming_incremental(text, &[]);
 
                                 // Update this specific choice with parsed content
-                                choice.delta.content = parser_result.get_some_normal_text();
+                                choice.delta.content = parser_result.get_some_normal_text().map(
+                                    dynamo_async_openai::types::ChatCompletionMessageContent::Text,
+                                );
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
+                            // For multimodal content, pass through unchanged
                         }
                         Ok(data)
                     })
@@ -905,6 +1000,7 @@ impl OpenAIPreprocessor {
                 None
             }
         })
+        .fuse()
     }
 }
 
@@ -953,12 +1049,16 @@ impl
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
+        let tracker = response_generator.tracker();
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations) = self.preprocess_request(&request).await?;
+        let (mut common_request, annotations) = self
+            .preprocess_request(&request, tracker.as_deref())
+            .await?;
+        tracing::trace!(request = ?common_request, "Pre-processed request");
 
         // Attach the timing tracker to the request so downstream components can record metrics
-        common_request.tracker = response_generator.tracker();
+        common_request.tracker = tracker;
 
         let mut response_generator = Box::new(response_generator);
 
@@ -1105,6 +1205,7 @@ impl
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
+        let tracker = response_generator.tracker();
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
 
@@ -1117,7 +1218,7 @@ impl
             HashMap::new()
         } else {
             // Normal path: tokenize the prompt
-            self.gather_tokens(&request, &mut builder, None)?
+            self.gather_tokens(&request, &mut builder, None, tracker.as_deref())?
         };
 
         // Gather multimodal data (works with both embeddings and text prompts)
@@ -1126,7 +1227,7 @@ impl
         let mut common_request = builder.build()?;
 
         // Attach the timing tracker to the request so downstream components can record metrics
-        common_request.tracker = response_generator.tracker();
+        common_request.tracker = tracker;
 
         // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
         if common_request.prompt_embeds.is_none() {

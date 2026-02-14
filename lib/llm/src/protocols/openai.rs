@@ -20,6 +20,7 @@ pub mod nvext;
 pub mod responses;
 pub mod tools;
 pub mod validate;
+pub mod videos;
 
 use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
@@ -232,6 +233,11 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
 
     /// Get the current usage statistics with properly calculated total_tokens.
     fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage;
+
+    /// Returns the request tracker if available, for accessing worker timing metrics.
+    fn tracker(&self) -> Option<std::sync::Arc<common::timing::RequestTracker>> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

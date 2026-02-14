@@ -42,6 +42,9 @@
 **/target/*
 **/*safetensors
 container/Dockerfile*
+container/**/*.Dockerfile
+container/render.py
+container/context.yaml
 .venv
 .venv-docs
 

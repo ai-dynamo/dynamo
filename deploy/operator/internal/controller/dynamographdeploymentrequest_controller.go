@@ -47,6 +47,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 )
@@ -169,36 +170,105 @@ const (
 	BackendSGLang = "sglang"
 	BackendTRTLLM = "trtllm"
 
-	// Profiling config field names
-	ConfigKeyDeployment = "deployment"
-	ConfigKeyModelCache = "modelCache"
-	ConfigKeyPVCName    = "pvcName"
-	ConfigKeyPVCPath    = "pvcPath"
-	ConfigKeyMountPath  = "mountPath"
+	// Profiling config field names for v1alpha1; note: will be removed in v1beta1
+	ConfigKeyDeployment       = "deployment"
+	ConfigKeyModelCache       = "modelCache"
+	ConfigKeyPVCName          = "pvcName"
+	ConfigKeyPVCPath          = "pvcPath"
+	ConfigKeyMountPath        = "mountPath"
+	ConfigKeyHardware         = "hardware"
+	ConfigKeyEngine           = "engine"
+	ConfigKeyOutputDir        = "output_dir"
+	ConfigKeyNumGpusPerNode   = "numGpusPerNode"
+	ConfigKeyGPUModel         = "gpuModel"
+	ConfigKeyGPUVramMib       = "gpuVramMib"
+	ConfigKeySystem           = "system"
+	ConfigKeyMinNumGpusPerEng = "minNumGpusPerEngine"
+	ConfigKeyMaxNumGpusPerEng = "maxNumGpusPerEngine"
+	ConfigKeyBackend          = "backend"
+	ConfigKeyConfig           = "config"
+	ConfigKeyNamespace        = "namespace"
+	ConfigKeyModel            = "model"
+	ConfigKeyDGDImage         = "dgd_image"
 )
 
 // shell script template for the output copier sidecar
 const sidecarScriptTemplate = `
 set -e
 set -o pipefail
-# Wait for the profiler container to complete, not just for the file to exist
-# This ensures we capture the final config, not intermediate results
+
+# Wait for profiler container to terminate (no timeout - profiling can take hours)
 echo "Waiting for profiler to complete..."
+START_TIME=$(date +%s)
+LAST_PROGRESS_LOG=$START_TIME
+PROGRESS_INTERVAL=300
+
 while true; do
-  # Check if profiler container has finished (either Completed or Error state)
-  # Use kubectl to check the pod's container status
-  STATUS=$(kubectl get pod $HOSTNAME -n {{.Namespace}} -o jsonpath='{.status.containerStatuses[?(@.name=="profiler")].state}' 2>/dev/null || echo "")
-  if echo "$STATUS" | grep -q "terminated"; then
-    echo "Profiler container has terminated"
+  CURRENT_TIME=$(date +%s)
+  ELAPSED=$((CURRENT_TIME - START_TIME))
+
+  # Log progress every 5 minutes
+  if [ $((CURRENT_TIME - LAST_PROGRESS_LOG)) -ge $PROGRESS_INTERVAL ]; then
+    echo "Still waiting... ($(($ELAPSED / 60)) minutes elapsed)"
+    LAST_PROGRESS_LOG=$CURRENT_TIME
+  fi
+
+  # Check if profiler container terminated
+  CONTAINER_STATUS=$(kubectl get pod $HOSTNAME -n {{.Namespace}} -o jsonpath='{.status.containerStatuses[?(@.name=="profiler")].state}' 2>/dev/null || echo "")
+  if echo "$CONTAINER_STATUS" | grep -q "terminated"; then
+    echo "Profiler terminated (ran for $(($ELAPSED / 60)) minutes)"
     break
   fi
   sleep 5
 done
 
-# Now wait for the output file to exist
-echo "Waiting for output file {{.OutputPath}}/{{.OutputFile}}..."
-while [ ! -f {{.OutputPath}}/{{.OutputFile}} ]; do sleep 2; done
-echo "Output file found, creating ConfigMap..."
+# Check profiler status file (2 minute timeout)
+echo "Checking profiler status..."
+STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
+TIMEOUT=120
+CHECK_START=$(date +%s)
+
+# Wait for status file to exist
+while [ ! -f "$STATUS_FILE" ]; do
+  ELAPSED=$(($(date +%s) - CHECK_START))
+  if [ $ELAPSED -ge $TIMEOUT ]; then
+    echo "ERROR: Status file not found after ${TIMEOUT}s"
+    exit 1
+  fi
+  sleep 2
+done
+
+# Read and parse status from YAML file
+STATUS=$(grep "^status:" "$STATUS_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
+
+if [ -z "$STATUS" ]; then
+  echo "ERROR: Invalid status file format"
+  exit 1
+fi
+
+# Check status value
+case "$STATUS" in
+  success)
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    echo "Profiler succeeded: $MESSAGE"
+    ;;
+  failed)
+    ERROR=$(grep "^error:" "$STATUS_FILE" | sed 's/^error: *//' | tr -d '"' | tr -d "'")
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    echo "ERROR: Profiler failed: ${ERROR:-$MESSAGE}"
+    exit 1
+    ;;
+  running)
+    echo "ERROR: Profiler still running (unexpected)"
+    exit 1
+    ;;
+  *)
+    echo "ERROR: Unknown status: $STATUS"
+    exit 1
+    ;;
+esac
+
+echo "Creating ConfigMap..."
 
 # Start building ConfigMap YAML with DGD spec
 cat >/tmp/cm.yaml <<EOF
@@ -220,6 +290,12 @@ if [ -f {{.OutputPath}}/{{.MockerOutputFile}} ]; then
   echo "  {{.MockerOutputFile}}: |" >> /tmp/cm.yaml
   sed 's/^/    /' {{.OutputPath}}/{{.MockerOutputFile}} >> /tmp/cm.yaml
   echo "Added mocker config to ConfigMap"
+fi
+
+# Add profiler status file for debugging
+if [ -f {{.OutputPath}}/profiler_status.yaml ]; then
+  echo "  profiler_status.yaml: |" >> /tmp/cm.yaml
+  sed 's/^/    /' {{.OutputPath}}/profiler_status.yaml >> /tmp/cm.yaml
 fi
 
 # Note: Profiling data (raw_data.npz converted to JSON) is included in the
@@ -885,8 +961,103 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		}
 	}
 
+	if err := r.validateGPUHardwareInfo(ctx, dgdr); err != nil {
+		return err
+	}
+
 	// The profiler will validate the rest of the configuration
 	return nil
+}
+
+// toFloat64 converts a numeric value (int or float64) to float64.
+// Returns 0 if the value is neither int nor float64.
+func toFloat64(val interface{}) float64 {
+	switch v := val.(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	default:
+		return 0
+	}
+}
+
+// validateGPUHardwareInfo ensures GPU hardware information is available when required for profiling
+func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
+	logger := log.FromContext(ctx)
+
+	// Check for hardware info and GPU ranges
+	// TODO: will be cleaner once we swap to new DGDR schema (#6130)
+	var config map[string]interface{}
+	if dgdr.Spec.ProfilingConfig.Config != nil {
+		if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+			// Config parse errors will be caught later, skip validation here
+			return nil
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+
+	hardwareVal, hasHardware := config[ConfigKeyHardware]
+	var hasManualHardwareConfig bool
+	if hasHardware && hardwareVal != nil {
+		if hardwareConfig, ok := hardwareVal.(map[string]interface{}); ok {
+			_, hasGPUModel := hardwareConfig[ConfigKeyGPUModel]
+			_, hasGPUVram := hardwareConfig[ConfigKeyGPUVramMib]
+			_, hasNumGPUs := hardwareConfig[ConfigKeyNumGpusPerNode]
+			hasManualHardwareConfig = hasGPUModel || hasGPUVram || hasNumGPUs
+		}
+	}
+
+	var hasExplicitGPURanges bool
+	if engineVal, hasEngine := config[ConfigKeyEngine]; hasEngine && engineVal != nil {
+		if engineConfig, ok := engineVal.(map[string]interface{}); ok {
+			minGPUs, hasMin := engineConfig[ConfigKeyMinNumGpusPerEng]
+			maxGPUs, hasMax := engineConfig[ConfigKeyMaxNumGpusPerEng]
+			if hasMin && hasMax {
+				minVal := toFloat64(minGPUs)
+				maxVal := toFloat64(maxGPUs)
+
+				// Validate that min <= max
+				if minVal > maxVal {
+					return fmt.Errorf("invalid GPU range: %s (%v) cannot be greater than %s (%v)",
+						ConfigKeyMinNumGpusPerEng, minVal, ConfigKeyMaxNumGpusPerEng, maxVal)
+				}
+
+				hasExplicitGPURanges = minVal > 0 && maxVal > 0
+			}
+		}
+	}
+
+	// If manual config or explicit ranges are provided, validation passes
+	if hasManualHardwareConfig || hasExplicitGPURanges {
+		return nil
+	}
+
+	_, err := gpu.DiscoverGPUs(ctx, r.Client)
+	if err == nil {
+		// GPU discovery is available, validation passes
+		return nil
+	}
+
+	logger.Info("GPU discovery not available", "reason", err.Error())
+
+	isNamespaceScoped := r.Config.RestrictedNamespace != ""
+	if isNamespaceScoped {
+		return fmt.Errorf(`GPU hardware info required but cannot be auto-discovered (namespace-scoped operator lacks node read permissions).
+
+Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s.
+
+See: https://github.com/ai-dynamo/dynamo/issues/6257`,
+			ConfigKeyHardware, ConfigKeyNumGpusPerNode, ConfigKeyGPUModel, ConfigKeyGPUVramMib,
+			ConfigKeyEngine, ConfigKeyMinNumGpusPerEng, ConfigKeyEngine, ConfigKeyMaxNumGpusPerEng)
+	}
+
+	return fmt.Errorf(`GPU hardware info required but auto-discovery failed. Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s.
+
+See profiling documentation for configuration details.`,
+		ConfigKeyHardware, ConfigKeyNumGpusPerNode, ConfigKeyGPUModel, ConfigKeyGPUVramMib,
+		ConfigKeyEngine, ConfigKeyMinNumGpusPerEng, ConfigKeyEngine, ConfigKeyMaxNumGpusPerEng)
 }
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource
@@ -928,13 +1099,29 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 	}
 
+	// Run GPU discovery before creating job (cluster-wide and namespace-restricted operators if they have node read permissions)
+	var gpuInfo *gpu.GPUInfo
+	logger.Info("Attempting GPU discovery for profiling job")
+	discoveredInfo, err := gpu.DiscoverGPUs(ctx, r.Client)
+	if err != nil {
+		// This path is expected for namespace-restricted operators without node read permissions
+		logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
+			"reason", err.Error())
+	} else {
+		gpuInfo = discoveredInfo
+		logger.Info("GPU discovery completed successfully",
+			"gpusPerNode", gpuInfo.GPUsPerNode,
+			"model", gpuInfo.Model,
+			"vramMiB", gpuInfo.VRAMPerGPU,
+			"system", gpuInfo.System)
+	}
+
 	// Use SyncResource to create/update the job
 	modified, job, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*batchv1.Job, bool, error) {
 		jobName := getProfilingJobName(dgdr)
 		outputConfigMapName := getOutputConfigMapName(dgdr)
 
-		// Parse and prepare profiling config
-		configYAML, err := r.prepareProfilingConfig(dgdr)
+		configYAML, err := r.prepareProfilingConfig(dgdr, gpuInfo)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1008,12 +1195,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			"--profile-config", string(configYAML),
 		}
 
-		// Add --enable-gpu-discovery flag based on DGDR spec
-		// GPU discovery requires cluster-wide node access
-		if dgdr.Spec.EnableGpuDiscovery {
-			profilerArgs = append(profilerArgs, "--enable-gpu-discovery")
-		}
-
 		// Use profiler image from profilingConfig
 		imageName := dgdr.Spec.ProfilingConfig.ProfilerImage
 		logger.Info("Using profiler image", "image", imageName)
@@ -1021,7 +1202,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		profilerContainer := corev1.Container{
 			Name:         ContainerNameProfiler,
 			Image:        imageName,
-			Command:      []string{"python", "-m", "benchmarks.profiler.profile_sla"},
+			Command:      []string{"python", "-m", "dynamo.profiler.profile_sla"},
 			Args:         profilerArgs,
 			Env:          profilerEnv,
 			VolumeMounts: volumeMounts,
@@ -1151,6 +1332,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			podSpec.Tolerations = dgdr.Spec.ProfilingConfig.Tolerations
 		}
 
+		// Apply nodeSelector if specified in the DGDR
+		if len(dgdr.Spec.ProfilingConfig.NodeSelector) > 0 {
+			podSpec.NodeSelector = dgdr.Spec.ProfilingConfig.NodeSelector
+		}
+
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
@@ -1184,7 +1370,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 }
 
 // prepareProfilingConfig parses and modifies the profiling config
-func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) ([]byte, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, gpuInfo *gpu.GPUInfo) ([]byte, error) {
 	// Parse the profiling config from JSON
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
@@ -1192,53 +1378,84 @@ func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nv
 	}
 
 	// Set deployment.namespace if not already set
-	deploymentVal, hasDeployment := config["deployment"]
+	deploymentVal, hasDeployment := config[ConfigKeyDeployment]
 	var deploymentConfig map[string]interface{}
 	if !hasDeployment || deploymentVal == nil {
 		deploymentConfig = make(map[string]interface{})
-		config["deployment"] = deploymentConfig
+		config[ConfigKeyDeployment] = deploymentConfig
 	} else {
 		var ok bool
 		deploymentConfig, ok = deploymentVal.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("profilingConfig.config.deployment must be an object, got %T", deploymentVal)
+			return nil, fmt.Errorf("profilingConfig.config.%s must be an object, got %T", ConfigKeyDeployment, deploymentVal)
 		}
 	}
-	if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
-		deploymentConfig["namespace"] = dgdr.Namespace
+	if _, hasNamespace := deploymentConfig[ConfigKeyNamespace]; !hasNamespace {
+		deploymentConfig[ConfigKeyNamespace] = dgdr.Namespace
 	}
 
 	// Set deployment.model from spec.model
-	deploymentConfig["model"] = dgdr.Spec.Model
+	deploymentConfig[ConfigKeyModel] = dgdr.Spec.Model
 
 	// Set deployment.dgd_image from deploymentOverrides.workersImage if provided
 	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
-		deploymentConfig["dgd_image"] = dgdr.Spec.DeploymentOverrides.WorkersImage
+		deploymentConfig[ConfigKeyDGDImage] = dgdr.Spec.DeploymentOverrides.WorkersImage
 	}
 
 	// Set output_dir if not already set
-	if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
-		config["output_dir"] = ProfilingOutputPath
+	if _, hasOutputDir := config[ConfigKeyOutputDir]; !hasOutputDir {
+		config[ConfigKeyOutputDir] = ProfilingOutputPath
 	}
 
 	// Set engine.backend from spec.backend
-	engineVal, hasEngine := config["engine"]
+	engineVal, hasEngine := config[ConfigKeyEngine]
 	var engineConfig map[string]interface{}
 	if !hasEngine || engineVal == nil {
 		engineConfig = make(map[string]interface{})
-		config["engine"] = engineConfig
+		config[ConfigKeyEngine] = engineConfig
 	} else {
 		var ok bool
 		engineConfig, ok = engineVal.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("profilingConfig.config.engine must be an object, got %T", engineVal)
+			return nil, fmt.Errorf("profilingConfig.config.%s must be an object, got %T", ConfigKeyEngine, engineVal)
 		}
 	}
-	engineConfig["backend"] = dgdr.Spec.Backend
+	engineConfig[ConfigKeyBackend] = dgdr.Spec.Backend
 
 	// If ConfigMapRef is provided, set engine.config path
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
-		engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
+		engineConfig[ConfigKeyConfig] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
+	}
+
+	// User-specified values take precedence over auto-discovered values
+	if gpuInfo != nil {
+		hardwareVal, hasHardware := config["hardware"]
+		var hardwareConfig map[string]interface{}
+		if !hasHardware || hardwareVal == nil {
+			hardwareConfig = make(map[string]interface{})
+			config["hardware"] = hardwareConfig
+		} else {
+			var ok bool
+			hardwareConfig, ok = hardwareVal.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("profilingConfig.config.hardware must be an object, got %T", hardwareVal)
+			}
+		}
+
+		if _, hasNumGpus := hardwareConfig[ConfigKeyNumGpusPerNode]; !hasNumGpus {
+			hardwareConfig[ConfigKeyNumGpusPerNode] = gpuInfo.GPUsPerNode
+		}
+		if _, hasGpuModel := hardwareConfig[ConfigKeyGPUModel]; !hasGpuModel {
+			hardwareConfig[ConfigKeyGPUModel] = gpuInfo.Model
+		}
+		if _, hasGpuVram := hardwareConfig[ConfigKeyGPUVramMib]; !hasGpuVram {
+			hardwareConfig[ConfigKeyGPUVramMib] = gpuInfo.VRAMPerGPU
+		}
+		if gpuInfo.System != "" {
+			if _, hasSystem := hardwareConfig[ConfigKeySystem]; !hasSystem {
+				hardwareConfig[ConfigKeySystem] = gpuInfo.System
+			}
+		}
 	}
 
 	// Serialize config to YAML for passing to profiler

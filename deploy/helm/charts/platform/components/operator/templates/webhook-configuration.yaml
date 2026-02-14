@@ -169,5 +169,57 @@ webhooks:
     - dynamographdeploymentrequests
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  {{- if .Values.namespaceRestriction.enabled }}
+  name: {{ include "dynamo-operator.fullname" . }}-mutating-{{ .Release.Namespace }}
+  {{- else }}
+  name: {{ include "dynamo-operator.fullname" . }}-mutating
+  {{- end }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "dynamo-operator.fullname" . }}-serving-cert
+  {{- end }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
+    {{- if .Values.webhook.caBundle }}
+    caBundle: {{ .Values.webhook.caBundle }}
+    {{- end }}
+    {{- end }}
+    service:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /mutate-nvidia-com-v1alpha1-dynamographdeployment
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  name: mdynamographdeployment.kb.io
+  {{- if .Values.webhook.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
+  {{- else if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  {{- end }}
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    resources:
+    - dynamographdeployments
+  sideEffects: None
+  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
 {{- end }}
 

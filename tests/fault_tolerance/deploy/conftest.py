@@ -16,22 +16,15 @@
 import pytest
 
 
+# Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
+# Only fault_tolerance-specific options are defined here.
 def pytest_addoption(parser):
-    parser.addoption("--image", type=str, default=None)
-    parser.addoption("--namespace", type=str, default="fault-tolerance-test")
     parser.addoption(
         "--client-type",
         type=str,
         default=None,
         choices=["aiperf", "legacy"],
         help="Client type for load generation: 'aiperf' (default) or 'legacy'",
-    )
-    parser.addoption(
-        "--skip-service-restart",
-        action="store_true",
-        default=False,
-        help="Skip restarting NATS and etcd services before deployment. "
-        "By default, these services are restarted.",
     )
     parser.addoption(
         "--storage-class",
@@ -49,7 +42,9 @@ def image(request):
 
 @pytest.fixture
 def namespace(request):
-    return request.config.getoption("--namespace")
+    """Get Kubernetes namespace from CLI option, with fault-tolerance-specific default."""
+    value = request.config.getoption("--namespace")
+    return value if value is not None else "fault-tolerance-test"
 
 
 @pytest.fixture
@@ -60,8 +55,17 @@ def client_type(request):
 
 @pytest.fixture
 def skip_service_restart(request):
-    """Get skip restart services flag from command line."""
-    return request.config.getoption("--skip-service-restart")
+    """Whether to skip restarting NATS and etcd services.
+
+    Fault tolerance tests default to RESTARTING services (for clean state).
+    The --skip-service-restart flag can override this behavior.
+
+    Returns:
+        If --skip-service-restart is passed: True (skip restart)
+        If flag not passed: False (FT tests restart by default)
+    """
+    value = request.config.getoption("--skip-service-restart")
+    return value if value is not None else False  # Default: restart for FT tests
 
 
 @pytest.fixture

@@ -14,10 +14,12 @@ use dynamo_runtime::{
         frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
     },
 };
-use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
+use prometheus::{
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+};
 use serde::Serialize;
 use std::{
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
@@ -28,6 +30,72 @@ use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 pub use prometheus::Registry;
 
 use super::RouteDoc;
+
+/// Worker type label values for Prometheus timing metrics
+pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+
+/// Global Prometheus gauge for last observed TTFT per worker (in seconds)
+/// Labels: worker_id, dp_rank, worker_type
+pub static WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
+    GaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS
+            ),
+            "Last observed time to first token per worker (seconds)",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_last_time_to_first_token gauge")
+});
+
+/// Global Prometheus gauge for last observed input sequence tokens per worker
+/// Labels: worker_id, dp_rank, worker_type
+/// Updated atomically with TTFT - represents the input token count from the same request
+pub static WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::WORKER_LAST_INPUT_SEQUENCE_TOKENS
+            ),
+            "Last observed input sequence tokens per worker",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_last_input_sequence_tokens gauge")
+});
+
+/// Global Prometheus gauge for last observed ITL per worker (in seconds)
+/// Labels: worker_id, dp_rank, worker_type
+pub static WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
+    GaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS
+            ),
+            "Last observed inter-token latency per worker (seconds)",
+        ),
+        &["worker_id", "dp_rank", "worker_type"],
+    )
+    .expect("Failed to create worker_last_inter_token_latency gauge")
+});
+
+/// Register the global per-worker TTFT/ITL/input-tokens Prometheus metrics with the given registry.
+///
+/// This should be called once during HTTP service setup to expose the metrics
+/// via the `/metrics` endpoint.
+///
+/// # Errors
+/// Returns an error if the metrics are already registered with the registry.
+pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.clone()))?;
+    registry.register(Box::new(WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.clone()))?;
+    registry.register(Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()))?;
+    Ok(())
+}
 
 /// Generate log-spaced histogram buckets with values rounded to 2 significant figures.
 ///
@@ -43,7 +111,7 @@ use super::RouteDoc;
 /// # Note
 /// With 2 significant figures, there are roughly 90 unique values per order of magnitude.
 /// Requesting more buckets than can be uniquely represented will result in deduplication.
-fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
+pub fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
     if count == 0 {
         return vec![];
     }
@@ -85,7 +153,7 @@ fn generate_log_buckets(min: f64, max: f64, count: usize) -> Vec<f64> {
 }
 
 /// Round a number to a specified number of significant figures
-fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
+pub fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
     if value == 0.0 {
         return 0.0;
     }
@@ -166,6 +234,7 @@ pub struct Metrics {
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
     cached_tokens: HistogramVec,
+    tokenizer_latency: HistogramVec,
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
@@ -222,6 +291,9 @@ pub enum Endpoint {
     /// OAI Images
     Images,
 
+    /// OAI Videos
+    Videos,
+
     /// OAI Responses
     Responses,
 
@@ -259,6 +331,21 @@ pub struct ResponseMetricCollector {
     osl: usize,
     // we track if cached_tokens has been observed to ensure we only increment once per request
     cached_tokens_observed: bool,
+    // we track if tokenize latency has been observed to ensure we only increment once per request
+    tokenize_latency_observed: bool,
+    // latest accumulated detokenize latency and sample count reported by tracker
+    detokenize_latency_total: Duration,
+    detokenize_count_total: u64,
+    // Prefill worker info for TTFT attribution (set from LLMMetricAnnotation)
+    prefill_worker_id: Option<u64>,
+    prefill_dp_rank: Option<u32>,
+    // Prefill worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
+    prefill_worker_type: Option<String>,
+    // Decode worker info for ITL attribution (set from LLMMetricAnnotation)
+    decode_worker_id: Option<u64>,
+    decode_dp_rank: Option<u32>,
+    // Decode worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
+    decode_worker_type: Option<String>,
 }
 
 impl Default for Metrics {
@@ -278,6 +365,7 @@ impl Metrics {
     /// - `{prefix}_request_duration_seconds` - HistogramVec for the duration of requests
     /// - `{prefix}_input_sequence_tokens` - HistogramVec for input sequence length in tokens
     /// - `{prefix}_output_sequence_tokens` - HistogramVec for output sequence length in tokens
+    /// - `{prefix}_tokenizer_latency_ms` - HistogramVec for tokenizer latency in milliseconds
     /// - `{prefix}_output_tokens_total` - IntCounterVec for total output tokens generated (real-time updates)
     /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
@@ -453,6 +541,18 @@ impl Metrics {
         )
         .unwrap();
 
+        let tokenizer_latency = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::TOKENIZER_LATENCY_MS),
+                "Tokenizer latency in milliseconds",
+            )
+            .buckets(vec![
+                0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0,
+            ]),
+            &[frontend_service::OPERATION_LABEL],
+        )
+        .unwrap();
+
         // Runtime configuration metrics
         // Note: Some of these metrics represent counter-like values from source systems,
         // but are implemented as gauges because they are copied/synchronized from upstream
@@ -529,6 +629,7 @@ impl Metrics {
             input_sequence_length,
             output_sequence_length,
             cached_tokens,
+            tokenizer_latency,
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
@@ -626,6 +727,7 @@ impl Metrics {
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
         registry.register(Box::new(self.cached_tokens.clone()))?;
+        registry.register(Box::new(self.tokenizer_latency.clone()))?;
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
@@ -844,6 +946,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Images => write!(f, "images"),
+            Endpoint::Videos => write!(f, "videos"),
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::Tensor => write!(f, "tensor"),
         }
@@ -857,6 +960,7 @@ impl Endpoint {
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
             Endpoint::Images => "images",
+            Endpoint::Videos => "videos",
             Endpoint::Responses => "responses",
             Endpoint::Tensor => "tensor",
         }
@@ -891,6 +995,47 @@ impl ResponseMetricCollector {
             start_time: Instant::now(),
             osl: 0,
             cached_tokens_observed: false,
+            tokenize_latency_observed: false,
+            detokenize_latency_total: Duration::ZERO,
+            detokenize_count_total: 0,
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+        }
+    }
+
+    /// Set the worker info for per-worker TTFT/ITL metrics.
+    /// In disaggregated mode, TTFT is attributed to prefill worker, ITL to decode worker.
+    /// Worker types are stored at routing time to avoid expensive MDC lookup when updating metrics.
+    pub fn set_worker_info(
+        &mut self,
+        prefill_worker_id: Option<u64>,
+        prefill_dp_rank: Option<u32>,
+        prefill_worker_type: Option<String>,
+        decode_worker_id: Option<u64>,
+        decode_dp_rank: Option<u32>,
+        decode_worker_type: Option<String>,
+    ) {
+        if self.prefill_worker_id.is_none() {
+            self.prefill_worker_id = prefill_worker_id;
+        }
+        if self.prefill_dp_rank.is_none() {
+            self.prefill_dp_rank = prefill_dp_rank;
+        }
+        if self.prefill_worker_type.is_none() {
+            self.prefill_worker_type = prefill_worker_type;
+        }
+        if self.decode_worker_id.is_none() {
+            self.decode_worker_id = decode_worker_id;
+        }
+        if self.decode_dp_rank.is_none() {
+            self.decode_dp_rank = decode_dp_rank;
+        }
+        if self.decode_worker_type.is_none() {
+            self.decode_worker_type = decode_worker_type;
         }
     }
 
@@ -914,6 +1059,32 @@ impl ResponseMetricCollector {
                 .cached_tokens
                 .with_label_values(&[&self.model])
                 .observe(tokens as f64);
+        }
+    }
+
+    /// Observe tokenize/detokenize latencies in milliseconds.
+    /// Tokenize is observed once per request; detokenize is accumulated and observed at request end.
+    pub fn observe_tokenize_latencies(
+        &mut self,
+        tokenize_latency: Option<Duration>,
+        detokenize_latency: Option<Duration>,
+        detokenize_count: Option<u64>,
+    ) {
+        if let Some(latency) = tokenize_latency
+            && !self.tokenize_latency_observed
+        {
+            self.tokenize_latency_observed = true;
+            self.metrics
+                .tokenizer_latency
+                .with_label_values(&[frontend_service::operation::TOKENIZE])
+                .observe(latency.as_secs_f64() * 1000.0);
+        }
+
+        if let Some(latency) = detokenize_latency {
+            self.detokenize_latency_total = latency;
+        }
+        if let Some(count) = detokenize_count {
+            self.detokenize_count_total = count;
         }
     }
 
@@ -941,6 +1112,28 @@ impl ResponseMetricCollector {
                 .with_label_values(&[&self.model])
                 .observe(ttft);
 
+            // Update per-worker TTFT and input sequence tokens gauges - attributed to prefill worker.
+            // Both gauges are updated atomically from the same request to correlate latency with input size.
+            // Use stored worker_type (from routing time) to avoid MDC lookup.
+            // Falls back to WORKER_TYPE_PREFILL if not available.
+            if let Some(worker_id) = self.prefill_worker_id {
+                let worker_id_str = worker_id.to_string();
+                let dp_rank_str = self
+                    .prefill_dp_rank
+                    .map_or("0".to_string(), |r| r.to_string());
+                let worker_type = self
+                    .prefill_worker_type
+                    .as_deref()
+                    .unwrap_or(WORKER_TYPE_PREFILL);
+                let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+                WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                    .with_label_values(labels)
+                    .set(ttft);
+                WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                    .with_label_values(labels)
+                    .set(isl as i64);
+            }
+
             // Publish ISL
             // TODO: publish ISL as soon as the tokenization process completes
             self.metrics
@@ -960,6 +1153,23 @@ impl ResponseMetricCollector {
                     .with_label_values(&[&self.model])
                     .observe(itl);
             }
+
+            // Update per-worker ITL gauge - attributed to decode worker.
+            // Use stored worker_type (from routing time) to avoid MDC lookup.
+            // Falls back to WORKER_TYPE_DECODE if not available.
+            if let Some(worker_id) = self.decode_worker_id {
+                let worker_id_str = worker_id.to_string();
+                let dp_rank_str = self
+                    .decode_dp_rank
+                    .map_or("0".to_string(), |r| r.to_string());
+                let worker_type = self
+                    .decode_worker_type
+                    .as_deref()
+                    .unwrap_or(WORKER_TYPE_DECODE);
+                WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                    .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
+                    .set(itl);
+            }
         }
 
         self.last_response_time = Some(current_duration);
@@ -968,6 +1178,15 @@ impl ResponseMetricCollector {
 
 impl Drop for ResponseMetricCollector {
     fn drop(&mut self) {
+        if !self.detokenize_latency_total.is_zero() && self.detokenize_count_total > 0 {
+            let avg_detokenize_latency_ms = (self.detokenize_latency_total.as_secs_f64() * 1000.0)
+                / self.detokenize_count_total as f64;
+            self.metrics
+                .tokenizer_latency
+                .with_label_values(&[frontend_service::operation::DETOKENIZE])
+                .observe(avg_detokenize_latency_ms);
+        }
+
         // Publish final OSL when the collector is dropped
         self.metrics
             .output_sequence_length
@@ -992,6 +1211,19 @@ pub fn process_response_and_observe_metrics<T>(
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_cached_tokens(metrics.cached_tokens);
+        response_collector.observe_tokenize_latencies(
+            metrics.tokenize_latency,
+            metrics.detokenize_total_latency,
+            metrics.detokenize_count,
+        );
+        response_collector.set_worker_info(
+            metrics.prefill_worker_id,
+            metrics.prefill_dp_rank,
+            metrics.prefill_worker_type,
+            metrics.decode_worker_id,
+            metrics.decode_dp_rank,
+            metrics.decode_worker_type,
+        );
 
         // Drop http_queue_guard on first token for non-streaming (same as streaming)
         if response_collector.is_first_token()
@@ -1033,6 +1265,19 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_cached_tokens(metrics.cached_tokens);
+        response_collector.observe_tokenize_latencies(
+            metrics.tokenize_latency,
+            metrics.detokenize_total_latency,
+            metrics.detokenize_count,
+        );
+        response_collector.set_worker_info(
+            metrics.prefill_worker_id,
+            metrics.prefill_dp_rank,
+            metrics.prefill_worker_type,
+            metrics.decode_worker_id,
+            metrics.decode_dp_rank,
+            metrics.decode_worker_type,
+        );
 
         // Drop http_queue_guard on first token for streaming
         if response_collector.is_first_token()
@@ -1099,9 +1344,6 @@ pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Route
 
 /// Unified metrics handler
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
-    // Gather and encode metrics
-    // Note: If nim_on_demand is enabled, the NimMetricsCollector registered with the registry
-    // will automatically call poll_nim_backend_stats when gather() is invoked
     let encoder = prometheus::TextEncoder::new();
     let metric_families = state.registry.gather();
     let mut buffer = vec![];
@@ -1508,6 +1750,7 @@ mod tests {
 
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
         let mut collector = metrics.clone().create_response_collector(model);
 
         // Create a metrics annotation event (event without SSE data payload)
@@ -1526,6 +1769,15 @@ mod tests {
             output_tokens: 20,
             chunk_tokens: 5,
             cached_tokens: Some(15),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: Some(Duration::from_millis(8)),
+            detokenize_total_latency: Some(Duration::from_micros(100)),
+            detokenize_count: Some(2),
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
@@ -1543,6 +1795,9 @@ mod tests {
         // Should return Ok(None) for metrics annotation events
         assert!(matches!(result, Ok(None)));
 
+        // Drop collector so the detokenize observation fires in Drop
+        drop(collector);
+
         // Should have observed the cached tokens from the metrics annotation event
         let metric_families = registry.gather();
         let histogram_family = metric_families
@@ -1554,6 +1809,37 @@ mod tests {
                 .get_histogram()
                 .get_sample_count(),
             1
+        );
+
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_tokenizer_metric_name)
+            .expect("histogram should be registered");
+
+        // Find the tokenize and detokenize observations by label
+        let tokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "tokenize"))
+            .expect("tokenize metric should exist");
+        assert_eq!(tokenize_metric.get_histogram().get_sample_count(), 1);
+        // 8ms
+        assert!(
+            (tokenize_metric.get_histogram().get_sample_sum() - 8.0).abs() < 0.001,
+            "tokenize latency should be 8.0ms"
+        );
+
+        let detokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "detokenize"))
+            .expect("detokenize metric should exist");
+        assert_eq!(detokenize_metric.get_histogram().get_sample_count(), 1);
+        // Average: 100us total / 2 samples = 50us = 0.05ms
+        assert!(
+            (detokenize_metric.get_histogram().get_sample_sum() - 0.05).abs() < 0.001,
+            "detokenize average latency should be 0.05ms, got {}",
+            detokenize_metric.get_histogram().get_sample_sum()
         );
     }
 
@@ -1568,6 +1854,7 @@ mod tests {
 
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
         let mut collector = metrics.clone().create_response_collector(model);
 
         // Create a metrics annotation event
@@ -1585,6 +1872,15 @@ mod tests {
             output_tokens: 20,
             chunk_tokens: 5,
             cached_tokens: Some(15),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: Some(Duration::from_millis(8)),
+            detokenize_total_latency: Some(Duration::from_micros(100)),
+            detokenize_count: Some(2),
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
@@ -1594,6 +1890,9 @@ mod tests {
         // Process via the non-streaming metrics hook
         let mut http_queue_guard = None;
         process_response_and_observe_metrics(&annotated, &mut collector, &mut http_queue_guard);
+
+        // Drop collector so the detokenize observation fires in Drop
+        drop(collector);
 
         // Should have observed the cached tokens from the metrics annotation event
         let metric_families = registry.gather();
@@ -1606,6 +1905,32 @@ mod tests {
                 .get_histogram()
                 .get_sample_count(),
             1
+        );
+
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_tokenizer_metric_name)
+            .expect("histogram should be registered");
+
+        // Find the tokenize and detokenize observations by label
+        let tokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "tokenize"))
+            .expect("tokenize metric should exist");
+        assert_eq!(tokenize_metric.get_histogram().get_sample_count(), 1);
+
+        let detokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "detokenize"))
+            .expect("detokenize metric should exist");
+        assert_eq!(detokenize_metric.get_histogram().get_sample_count(), 1);
+        // Average: 100us total / 2 samples = 50us = 0.05ms
+        assert!(
+            (detokenize_metric.get_histogram().get_sample_sum() - 0.05).abs() < 0.001,
+            "detokenize average latency should be 0.05ms, got {}",
+            detokenize_metric.get_histogram().get_sample_sum()
         );
     }
 }

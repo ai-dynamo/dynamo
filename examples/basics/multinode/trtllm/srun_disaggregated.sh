@@ -35,7 +35,7 @@ if [[ -z ${IMAGE} ]]; then
   echo "ERROR: You need to set the IMAGE environment variable to the " \
        "Dynamo+TRTLLM docker image or .sqsh file from 'enroot import' " \
        "See how to build one from source here: " \
-       "https://github.com/ai-dynamo/dynamo/tree/main/docs/backends/trtllm/README.md#build-container"
+       "https://github.com/ai-dynamo/dynamo/tree/main/docs/pages/backends/trtllm/README.md#build-container"
   exit 1
 fi
 
@@ -44,6 +44,7 @@ fi
 # the stdout/stderr to files.
 echo "Launching frontend services in background."
 srun \
+  --mpi pmix \
   --overlap \
   --container-image "${IMAGE}" \
   --container-mounts "${MOUNTS}" \
