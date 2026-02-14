@@ -32,6 +32,10 @@
 #    - Updates docs.yml with new version entry
 #    - Publishes docs to Fern after releasing
 #
+# 4. PREVIEW (PRs): Generates Fern docs preview URL and posts as PR comment
+#    - Triggers on pull requests when docs/** files change
+#    - Runs fern generate --docs --preview, extracts URL, comments on PR
+#
 # Note: The publish step is included inline because pushes made with GITHUB_TOKEN
 # do not trigger other workflows (GitHub's anti-recursion guard), so we cannot
 # rely on a separate publish-fern-docs.yml workflow for bot-initiated pushes.
@@ -39,6 +43,9 @@
 name: Fern Docs
 
 on:
+  pull_request:
+    paths:
+      - 'docs/**'
   push:
     branches:
       - main
@@ -136,6 +143,66 @@ jobs:
       - name: Check for broken links
         working-directory: docs
         run: fern docs broken-links
+
+  #############################################################################
+  # PREVIEW - Run on PRs when docs/** change; post preview URL as comment
+  #############################################################################
+
+  fern-preview:
+    name: Preview Fern Docs
+    needs: changed-files
+    if: |
+      github.ref_type != 'tag' &&
+      needs.changed-files.outputs.docs == 'true' &&
+      (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Fern CLI tool
+        run: npm install -g fern-api
+
+      # Fern CLI expects a fern/ directory; same pattern as other Fern jobs
+      - name: Create fern directory symlink
+        working-directory: docs
+        run: ln -s . fern
+
+      - name: Generate preview URL
+        id: generate-docs
+        working-directory: docs
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+        run: |
+          OUTPUT=$(fern generate --docs --preview 2>&1)
+          FERN_EXIT=$?
+          echo "$OUTPUT"
+          URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K.*(?= \()') || true
+          if [ $FERN_EXIT -ne 0 ] || [ -z "$URL" ]; then
+            echo "::error::Failed to generate or extract preview URL (exit $FERN_EXIT). Check the log above."
+            echo "has_url=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Fern docs preview generation failed. Check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details." > "$GITHUB_WORKSPACE/preview_url.txt"
+            exit 0
+          fi
+          echo "has_url=true" >> "$GITHUB_OUTPUT"
+          echo "Preview URL: $URL"
+          echo "🌿 Preview your docs: $URL" > "$GITHUB_WORKSPACE/preview_url.txt"
+
+      - name: Comment URL in PR
+        uses: thollander/actions-comment-pull-request@v2.4.3
+        with:
+          filePath: preview_url.txt
+          comment_tag: preview-docs
+          mode: upsert
+
+      - name: Fail job if preview generation failed
+        if: steps.generate-docs.outputs.has_url != 'true'
+        run: |
+          echo "::error::Fern docs preview was not generated. See the PR comment for details."
+          exit 1
 
   #############################################################################
   # SYNC vNEXT - Run on push to main when docs/** files change
