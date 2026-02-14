@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Router benchmark only — for quick feedback while developing.
+# Runs the same e2e router benchmark test as nightly, without the full pipeline.
+# Uses a pre-built image (default: main-vllm-amd64) so no build step.
+
+name: Router Benchmark CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Runtime image tag (e.g. main-vllm-amd64, nightly-vllm-amd64)'
+        required: true
+        default: 'main-vllm-amd64'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY_IMAGE: ai-dynamo/dynamo
+
+jobs:
+  router-benchmark:
+    name: Router benchmark (4 GPU)
+    runs-on: prod-tester-gb200-4-v1
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run E2E Router Benchmark Tests (gpu_4)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ inputs.image_tag }}
+          pytest_marks: "vllm and e2e and router_benchmark and nightly and gpu_4"
+          framework: vllm
+          test_type: e2e-router-benchmark
+          platform_arch: amd64
+          hf_token: ${{ secrets.HF_TOKEN }}
