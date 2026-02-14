@@ -21,7 +21,7 @@ use cudarc::driver::{
     ValidAsZeroBits,
 };
 use cudarc::runtime::sys as cuda_runtime;
-use dynamo_kvbm_kernels::{
+use kvbm_kernels::{
     BlockLayout, OperationalCopyBackend, OperationalCopyDirection, TensorDataType,
     block_from_universal, operational_copy, universal_from_block,
 };

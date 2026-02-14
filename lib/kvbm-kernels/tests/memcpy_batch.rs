@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr, DriverError};
 use cudarc::runtime::sys as cuda_runtime;
-use dynamo_kvbm_kernels::{is_memcpy_batch_available, is_using_stubs, memcpy_batch};
+use kvbm_kernels::{is_memcpy_batch_available, is_using_stubs, memcpy_batch};
 
 // ---------------------------------------------------------------------------
 // Helpers

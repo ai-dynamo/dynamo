@@ -8,7 +8,7 @@
 
 #![cfg(stub_kernels)]
 
-use dynamo_kvbm_kernels::{is_memcpy_batch_available, is_using_stubs};
+use kvbm_kernels::{is_memcpy_batch_available, is_using_stubs};
 
 #[test]
 fn stubs_active() {
