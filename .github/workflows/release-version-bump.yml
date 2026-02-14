@@ -65,6 +65,7 @@ jobs:
   version-bump-to-main:
     name: Open PR to main
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Determine tag
         id: tag
@@ -73,6 +74,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
           if [ "$EVENT_NAME" = "release" ]; then
             TAG="$RELEASE_TAG"
           else
@@ -103,6 +105,7 @@ jobs:
           BEHAVIOR: ${{ inputs.post_release_behavior || 'fail' }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
+          set -euo pipefail
           if [ "$BEHAVIOR" = "skip" ]; then
             echo "::notice::Post-release $TAG detected. Skipping auto version bump (post_release_behavior=skip)."
             echo "To bump this post-release, run this workflow manually via Actions > workflow_dispatch with component checkboxes."
@@ -127,17 +130,16 @@ jobs:
             exit 1
           fi
 
-      # Exit early if skip was selected for post-release
-      - name: Check skip flag
+      # Note: When SKIP_REST=true, all subsequent steps are guarded by
+      # `if: env.SKIP_REST != 'true'` and will be individually skipped.
+      - name: Post-release skip notice
         if: env.SKIP_REST == 'true'
-        run: |
-          echo "Skipping remaining steps for post-release."
-          exit 0
+        run: echo "Post-release skip is active. All subsequent steps will be individually skipped."
 
       # Step 1: Checkout the release tag to read context.yaml
       - name: Checkout release tag
         if: env.SKIP_REST != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           ref: ${{ steps.tag.outputs.tag }}
           path: release-ref
@@ -210,7 +212,7 @@ jobs:
       # Step 3: Checkout main branch
       - name: Checkout main
         if: env.SKIP_REST != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           ref: main
           fetch-depth: 0
@@ -219,13 +221,13 @@ jobs:
       # Step 4: Set up tools
       - name: Set up Python
         if: env.SKIP_REST != 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
 
       - name: Set up Go
         if: env.SKIP_REST != 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
         with:
           go-version-file: main-checkout/deploy/operator/go.mod
 
@@ -234,12 +236,14 @@ jobs:
       - name: Install controller-gen
         if: env.SKIP_REST != 'true'
         run: |
+          set -euo pipefail
           cd main-checkout/deploy/operator
           make controller-gen
 
       - name: Install helm-docs
         if: env.SKIP_REST != 'true'
         run: |
+          set -euo pipefail
           HELM_DOCS_VERSION="1.14.2"
           curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" \
             | tar -xzf - helm-docs
@@ -249,8 +253,10 @@ jobs:
       - name: Create version-bump branch
         if: env.SKIP_REST != 'true'
         working-directory: main-checkout
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          VERSION="${{ steps.tag.outputs.version }}"
+          set -euo pipefail
           BRANCH="chore/bump-version-to-${VERSION}"
           git checkout -b "$BRANCH"
           echo "branch=$BRANCH" >> $GITHUB_ENV
@@ -258,50 +264,70 @@ jobs:
       - name: Build skip flags
         if: env.SKIP_REST != 'true'
         id: flags
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          UPDATE_CORE: ${{ inputs.update_core }}
+          UPDATE_CONTAINERS: ${{ inputs.update_containers }}
+          UPDATE_HELM: ${{ inputs.update_helm }}
+          UPDATE_DOCS: ${{ inputs.update_docs }}
         run: |
+          set -euo pipefail
           SKIP_FLAGS=""
 
           # For auto-triggered full releases, all components are updated.
           # For manual triggers, respect the checkbox inputs.
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${{ inputs.update_core }}" != "true" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$UPDATE_CORE" != "true" ]; then
               SKIP_FLAGS="$SKIP_FLAGS --skip-core"
             fi
-            if [ "${{ inputs.update_containers }}" != "true" ]; then
+            if [ "$UPDATE_CONTAINERS" != "true" ]; then
               SKIP_FLAGS="$SKIP_FLAGS --skip-containers"
             fi
-            if [ "${{ inputs.update_helm }}" != "true" ]; then
+            if [ "$UPDATE_HELM" != "true" ]; then
               SKIP_FLAGS="$SKIP_FLAGS --skip-helm"
             fi
-            if [ "${{ inputs.update_docs }}" != "true" ]; then
+            if [ "$UPDATE_DOCS" != "true" ]; then
               SKIP_FLAGS="$SKIP_FLAGS --skip-docs"
             fi
           fi
 
           echo "skip_flags=$SKIP_FLAGS" >> $GITHUB_OUTPUT
-          echo "Skip flags: $SKIP_FLAGS"
+          echo "Skip flags: ${SKIP_FLAGS:-none}"
 
       - name: Run version bump script
         if: env.SKIP_REST != 'true'
         working-directory: main-checkout
+        env:
+          BUMP_VERSION: ${{ steps.tag.outputs.version }}
+          BUMP_VLLM: ${{ steps.metadata.outputs.vllm_version }}
+          BUMP_SGLANG: ${{ steps.metadata.outputs.sglang_version }}
+          BUMP_TRTLLM: ${{ steps.metadata.outputs.trtllm_version }}
+          BUMP_NIXL: ${{ steps.metadata.outputs.nixl_version }}
+          BUMP_CUDA_VLLM: ${{ steps.metadata.outputs.cuda_versions_vllm }}
+          BUMP_CUDA_SGLANG: ${{ steps.metadata.outputs.cuda_versions_sglang }}
+          BUMP_CUDA_TRTLLM: ${{ steps.metadata.outputs.cuda_versions_trtllm }}
+          BUMP_RELEASE_DATE: ${{ steps.metadata.outputs.release_date }}
+          BUMP_SKIP_FLAGS: ${{ steps.flags.outputs.skip_flags }}
         run: |
+          set -euo pipefail
           python3 .github/scripts/bump_version.py \
-            --new-version "${{ steps.tag.outputs.version }}" \
-            --vllm-version "${{ steps.metadata.outputs.vllm_version }}" \
-            --sglang-version "${{ steps.metadata.outputs.sglang_version }}" \
-            --trtllm-version "${{ steps.metadata.outputs.trtllm_version }}" \
-            --nixl-version "${{ steps.metadata.outputs.nixl_version }}" \
-            --cuda-versions-vllm "${{ steps.metadata.outputs.cuda_versions_vllm }}" \
-            --cuda-versions-sglang "${{ steps.metadata.outputs.cuda_versions_sglang }}" \
-            --cuda-versions-trtllm "${{ steps.metadata.outputs.cuda_versions_trtllm }}" \
-            --release-date "${{ steps.metadata.outputs.release_date }}" \
-            ${{ steps.flags.outputs.skip_flags }}
+            --new-version "$BUMP_VERSION" \
+            --vllm-version "$BUMP_VLLM" \
+            --sglang-version "$BUMP_SGLANG" \
+            --trtllm-version "$BUMP_TRTLLM" \
+            --nixl-version "$BUMP_NIXL" \
+            --cuda-versions-vllm "$BUMP_CUDA_VLLM" \
+            --cuda-versions-sglang "$BUMP_CUDA_SGLANG" \
+            --cuda-versions-trtllm "$BUMP_CUDA_TRTLLM" \
+            --release-date "$BUMP_RELEASE_DATE" \
+            $BUMP_SKIP_FLAGS
 
       # Step 6: Regenerate CRDs
       - name: Regenerate CRDs
         if: env.SKIP_REST != 'true'
         working-directory: main-checkout/deploy/operator
         run: |
+          set -euo pipefail
           make generate
           make manifests
 
@@ -309,14 +335,18 @@ jobs:
       - name: Regenerate Helm docs
         if: env.SKIP_REST != 'true'
         working-directory: main-checkout/deploy/helm/charts/platform
-        run: helm-docs
+        run: |
+          set -euo pipefail
+          helm-docs
 
       # Step 8: Commit and create PR
       - name: Commit changes
         if: env.SKIP_REST != 'true'
         working-directory: main-checkout
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          VERSION="${{ steps.tag.outputs.version }}"
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
@@ -335,8 +365,10 @@ jobs:
       - name: Push branch
         if: env.SKIP_REST != 'true'
         working-directory: main-checkout
+        env:
+          BRANCH: ${{ env.branch }}
         run: |
-          BRANCH="${{ env.branch }}"
+          set -euo pipefail
           # Delete remote branch if it already exists (stale from a previous run)
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
             echo "Remote branch $BRANCH already exists, deleting stale branch..."
@@ -357,6 +389,7 @@ jobs:
           TRTLLM_VER: ${{ steps.metadata.outputs.trtllm_version }}
           NIXL_VER: ${{ steps.metadata.outputs.nixl_version }}
         run: |
+          set -euo pipefail
           if [ "$IS_POST" = "true" ]; then
             TITLE="chore: bump version to ${VERSION} (post-release)"
           else

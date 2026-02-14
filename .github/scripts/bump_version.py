@@ -426,16 +426,11 @@ def update_feature_matrix(repo: Path, new_ver: str, dry_run: bool) -> list[str]:
 def update_support_matrix(
     repo: Path,
     new_ver: str,
-    vllm_ver: Optional[str],
-    sglang_ver: Optional[str],
-    trtllm_ver: Optional[str],
-    nixl_ver: Optional[str],
     dry_run: bool,
 ) -> list[str]:
     """Finalize the released version row in support-matrix.md.
 
-    Removes '*(in progress)*' from the version row and ensures backend
-    versions are filled in.
+    Removes '*(in progress)*' from the version row.
     """
     filepath = repo / "docs/pages/reference/support-matrix.md"
     if not filepath.exists():
@@ -780,6 +775,14 @@ def main():
     new_ver = args.new_version
     old_ver = args.old_version or detect_current_version(repo)
 
+    if old_ver == new_ver:
+        print(
+            f"WARNING: old version ({old_ver}) == new version ({new_ver}). "
+            "Nothing to bump.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
     if args.dry_run:
         print(f"DRY RUN: Would bump {old_ver} -> {new_ver}")
     else:
@@ -829,17 +832,7 @@ def main():
     if not args.skip_docs:
         print("\n=== Category 3: Reference documentation ===")
         all_changes.extend(update_feature_matrix(repo, new_ver, args.dry_run))
-        all_changes.extend(
-            update_support_matrix(
-                repo,
-                new_ver,
-                args.vllm_version,
-                args.sglang_version,
-                args.trtllm_version,
-                args.nixl_version,
-                args.dry_run,
-            )
-        )
+        all_changes.extend(update_support_matrix(repo, new_ver, args.dry_run))
         all_changes.extend(
             update_release_artifacts(
                 repo,
@@ -871,7 +864,12 @@ def main():
         print(f"  {'[DRY] ' if args.dry_run else '✅ '}{change}")
 
     if not all_changes:
-        print("  No changes needed.")
+        print(
+            "WARNING: No files were changed. This may indicate the old version "
+            f"({old_ver}) was not found in any target files, or all categories "
+            "were skipped.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
