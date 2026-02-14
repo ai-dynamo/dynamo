@@ -726,6 +726,11 @@ func (in *DynamoGraphDeploymentRequestList) DeepCopyObject() runtime.Object {
 func (in *DynamoGraphDeploymentRequestSpec) DeepCopyInto(out *DynamoGraphDeploymentRequestSpec) {
 	*out = *in
 	in.ProfilingConfig.DeepCopyInto(&out.ProfilingConfig)
+	if in.EnableGPUDiscovery != nil {
+		in, out := &in.EnableGPUDiscovery, &out.EnableGPUDiscovery
+		*out = new(bool)
+		**out = **in
+	}
 	if in.DeploymentOverrides != nil {
 		in, out := &in.DeploymentOverrides, &out.DeploymentOverrides
 		*out = new(DeploymentOverridesSpec)
