@@ -75,7 +75,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let model_name = name.display().to_string();
 
     // Check local directory first and return immediately if config.json is found
-    if name.exists() && name.is_dir() && name.join("config.json").exists() {
+    if name.is_dir() && name.join("config.json").exists() {
         let path = name.to_path_buf();
         tracing::info!("Using existing local model path '{model_name}', skipping download");
         return Ok(path);
