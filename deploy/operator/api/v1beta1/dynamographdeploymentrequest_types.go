@@ -166,11 +166,10 @@ const (
 )
 
 // OptimizationType specifies the profiling optimization strategy.
-// +kubebuilder:validation:Enum=hybrid;latency;throughput
+// +kubebuilder:validation:Enum=latency;throughput
 type OptimizationType string
 
 const (
-	OptimizationTypeHybrid     OptimizationType = "hybrid"
 	OptimizationTypeLatency    OptimizationType = "latency"
 	OptimizationTypeThroughput OptimizationType = "throughput"
 )
@@ -204,14 +203,25 @@ type WorkloadSpec struct {
 	// OSL is the Output Sequence Length (number of tokens).
 	// +optional
 	OSL *int32 `json:"osl,omitempty"`
+
+	// Concurrency is the target concurrency level.
+	// Required (or RequestRate) when the planner is disabled.
+	// +optional
+	Concurrency *float64 `json:"concurrency,omitempty"`
+
+	// RequestRate is the target request rate (req/s).
+	// Required (or Concurrency) when the planner is disabled.
+	// +optional
+	RequestRate *float64 `json:"requestRate,omitempty"`
 }
 
 // SLASpec defines the service-level agreement targets.
 type SLASpec struct {
 	// OptimizationType controls the profiling optimization strategy.
+	// Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
 	// +optional
-	// +kubebuilder:validation:Enum=hybrid;latency;throughput
-	OptimizationType OptimizationType `json:"optimization_type,omitempty"`
+	// +kubebuilder:validation:Enum=latency;throughput
+	OptimizationType OptimizationType `json:"optimizationType,omitempty"`
 
 	// TTFT is the Time To First Token target in milliseconds.
 	// +optional
@@ -220,6 +230,11 @@ type SLASpec struct {
 	// ITL is the Inter-Token Latency target in milliseconds.
 	// +optional
 	ITL *float64 `json:"itl,omitempty"`
+
+	// E2ELatency is the target end-to-end request latency in milliseconds.
+	// Alternative to specifying TTFT + ITL.
+	// +optional
+	E2ELatency *float64 `json:"e2eLatency,omitempty"`
 }
 
 // ModelCacheSpec references a PVC containing pre-downloaded model weights.
@@ -229,9 +244,43 @@ type ModelCacheSpec struct {
 	// +optional
 	PVCName string `json:"pvcName,omitempty"`
 
-	// PVCPath is the subpath within the PVC where the model is stored.
+	// ModelPathInPVC is the path to the model checkpoint directory within the PVC
+	// (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
 	// +optional
-	PVCPath string `json:"pvcPath,omitempty"`
+	ModelPathInPVC string `json:"modelPathInPvc,omitempty"`
+
+	// PVCMountPath is the mount path for the PVC inside the container.
+	// +optional
+	// +kubebuilder:default="/opt/model-cache"
+	PVCMountPath string `json:"pvcMountPath,omitempty"`
+}
+
+// ModelSpec defines the model to deploy.
+type ModelSpec struct {
+	// ModelName is the model name or identifier (e.g. "meta-llama/Llama-3.1-405B").
+	// Can be a HuggingFace ID or a private model name. Always required.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ModelName string `json:"modelName"`
+
+	// ModelCache is the optional PVC model cache configuration.
+	// When provided, weights are loaded from the PVC instead of downloading from HF.
+	// +optional
+	ModelCache *ModelCacheSpec `json:"modelCache,omitempty"`
+}
+
+// BackendSpec defines the inference backend and container image configuration.
+type BackendSpec struct {
+	// Backend specifies the inference backend to use for profiling and deployment.
+	// +optional
+	// +kubebuilder:default=auto
+	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
+	Backend BackendType `json:"backend,omitempty"`
+
+	// DynamoImage is the full K8s dynamo image reference
+	// (e.g. "nvcr.io/nvidia/dynamo-runtime:latest").
+	// +optional
+	DynamoImage string `json:"dynamoImage,omitempty"`
 }
 
 // OverridesSpec allows customizing the profiling job and the generated DynamoGraphDeployment.
@@ -249,40 +298,93 @@ type OverridesSpec struct {
 	DGD *runtime.RawExtension `json:"dgd,omitempty"`
 }
 
+// PlannerPreDeploymentSweepMode controls pre-deployment sweeping thoroughness for planner profiling.
+// +kubebuilder:validation:Enum=none;rapid;thorough
+type PlannerPreDeploymentSweepMode string
+
+const (
+	PlannerPreDeploymentSweepModeNone     PlannerPreDeploymentSweepMode = "none"
+	PlannerPreDeploymentSweepModeRapid    PlannerPreDeploymentSweepMode = "rapid"
+	PlannerPreDeploymentSweepModeThorough PlannerPreDeploymentSweepMode = "thorough"
+)
+
+// PlannerSpec configures the SLA planner for autoscaling in the generated DGD.
+type PlannerSpec struct {
+	// Enabled indicates whether the planner is enabled.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling.
+	// "none" means no pre-deployment sweep (only load-based scaling).
+	// "rapid" uses AI Configurator to simulate engine performance.
+	// "thorough" uses real GPUs to measure engine performance (takes several hours).
+	// +optional
+	// +kubebuilder:validation:Enum=none;rapid;thorough
+	PlannerPreDeploymentSweeping *PlannerPreDeploymentSweepMode `json:"plannerPreDeploymentSweeping,omitempty"`
+
+	// PlannerArgsList is a list of additional planner arguments.
+	// +optional
+	PlannerArgsList []string `json:"plannerArgsList,omitempty"`
+}
+
+// MockerSpec configures the simulated (mocker) backend.
+type MockerSpec struct {
+	// Enabled indicates whether to deploy mocker workers instead of real inference workers.
+	// Useful for large-scale testing without GPUs.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+}
+
 // FeaturesSpec controls optional Dynamo platform features in the generated deployment.
 type FeaturesSpec struct {
-	// Planner enables the SLA planner for autoscaling in the generated DGD.
+	// Planner configures the SLA planner for autoscaling in the generated DGD.
 	// +optional
-	Planner *bool `json:"planner,omitempty"`
+	Planner *PlannerSpec `json:"planner,omitempty"`
 
 	// KVRouter enables KV-cache-aware routing in the generated DGD.
 	// +optional
 	KVRouter *bool `json:"kvRouter,omitempty"`
 
-	// Mocker deploys a simulated (mocker) backend instead of a real inference engine.
-	// Useful for large-scale testing without GPUs.
+	// Mocker configures the simulated (mocker) backend for testing without GPUs.
 	// +optional
-	Mocker *bool `json:"mocker,omitempty"`
+	Mocker *MockerSpec `json:"mocker,omitempty"`
+}
+
+// HardwareSpec describes the hardware resources available for profiling and deployment.
+// These fields are typically auto-filled by the operator from cluster discovery.
+type HardwareSpec struct {
+	// GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").
+	// +optional
+	GPUSKU string `json:"gpuSku,omitempty"`
+
+	// VRAMMB is the VRAM per GPU in MiB.
+	// +optional
+	VRAMMB *float64 `json:"vramMb,omitempty"`
+
+	// TotalGPUs is the total number of GPUs available in the cluster.
+	// +optional
+	TotalGPUs *int32 `json:"totalGpus,omitempty"`
+
+	// NumGPUsPerNode is the number of GPUs per node.
+	// +optional
+	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
 // Only the Model field is required; all other fields are optional and have sensible defaults.
 type DynamoGraphDeploymentRequestSpec struct {
-	// Model specifies the model to deploy (e.g., "meta-llama/Llama-3-70b", "Qwen/Qwen3-0.6B").
-	// This can be a HuggingFace model ID or a served model name.
+	// Model specifies the model to deploy including optional PVC cache configuration.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Model string `json:"model"`
+	Model ModelSpec `json:"model"`
 
-	// Backend specifies the inference backend to use for profiling and deployment.
+	// Backend specifies the inference backend and container image configuration.
 	// +optional
-	// +kubebuilder:default=auto
-	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
-	Backend BackendType `json:"backend,omitempty"`
+	Backend *BackendSpec `json:"backend,omitempty"`
 
-	// Image specifies the container image for profiling and deployment workers.
+	// Hardware describes the hardware resources available for profiling and deployment.
+	// Typically auto-filled by the operator from cluster discovery.
 	// +optional
-	Image string `json:"image,omitempty"`
+	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
 	// Workload defines the expected workload characteristics for SLA-based profiling.
 	// +optional
@@ -291,11 +393,6 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// SLA defines service-level agreement targets that drive profiling optimization.
 	// +optional
 	SLA *SLASpec `json:"sla,omitempty"`
-
-	// ModelCache references a PVC containing pre-downloaded model weights.
-	// Use this to avoid re-downloading large models during profiling and deployment.
-	// +optional
-	ModelCache *ModelCacheSpec `json:"modelCache,omitempty"`
 
 	// Overrides allows customizing the profiling job and the generated DynamoGraphDeployment.
 	// +optional
@@ -414,8 +511,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
-// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
-// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
+// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model.modelName`
+// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend.backend`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Profiling",type=string,JSONPath=`.status.profilingPhase`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`,priority=1

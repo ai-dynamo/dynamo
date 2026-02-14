@@ -534,13 +534,62 @@ spec:
                       description: KVRouter enables KV-cache-aware routing in the generated DGD.
                       type: boolean
                     mocker:
-                      description: |-
-                        Mocker deploys a simulated (mocker) backend instead of a real inference engine.
-                        Useful for large-scale testing without GPUs.
-                      type: boolean
+                      description: Mocker configures the simulated (mocker) backend for testing without GPUs.
+                      properties:
+                        enabled:
+                          description: |-
+                            Enabled indicates whether to deploy mocker workers instead of real inference workers.
+                            Useful for large-scale testing without GPUs.
+                          type: boolean
+                      type: object
                     planner:
-                      description: Planner enables the SLA planner for autoscaling in the generated DGD.
-                      type: boolean
+                      description: Planner configures the SLA planner for autoscaling in the generated DGD.
+                      properties:
+                        enabled:
+                          description: Enabled indicates whether the planner is enabled.
+                          type: boolean
+                        plannerArgsList:
+                          description: PlannerArgsList is a list of additional planner arguments.
+                          items:
+                            type: string
+                          type: array
+                        plannerPreDeploymentSweeping:
+                          allOf:
+                            - enum:
+                                - none
+                                - rapid
+                                - thorough
+                            - enum:
+                                - none
+                                - rapid
+                                - thorough
+                          description: |-
+                            PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling.
+                            "none" means no pre-deployment sweep (only load-based scaling).
+                            "rapid" uses AI Configurator to simulate engine performance.
+                            "thorough" uses real GPUs to measure engine performance (takes several hours).
+                          type: string
+                      type: object
+                  type: object
+                hardware:
+                  description: |-
+                    Hardware describes the hardware resources available for profiling and deployment.
+                    Typically auto-filled by the operator from cluster discovery.
+                  properties:
+                    gpuSku:
+                      description: GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").
+                      type: string
+                    numGpusPerNode:
+                      description: NumGPUsPerNode is the number of GPUs per node.
+                      format: int32
+                      type: integer
+                    totalGpus:
+                      description: TotalGPUs is the total number of GPUs available in the cluster.
+                      format: int32
+                      type: integer
+                    vramMb:
+                      description: VRAMMB is the VRAM per GPU in MiB.
+                      type: number
                   type: object
                 image:
                   description: Image specifies the container image for profiling and deployment workers.
@@ -556,6 +605,10 @@ spec:
                     ModelCache references a PVC containing pre-downloaded model weights.
                     Use this to avoid re-downloading large models during profiling and deployment.
                   properties:
+                    pvcMountPath:
+                      default: /opt/model-cache
+                      description: PVCMountPath is the mount path for the PVC inside the container.
+                      type: string
                     pvcName:
                       description: |-
                         PVCName is the name of the PersistentVolumeClaim containing model weights.
@@ -8984,20 +9037,25 @@ spec:
                 sla:
                   description: SLA defines service-level agreement targets that drive profiling optimization.
                   properties:
+                    e2eLatency:
+                      description: |-
+                        E2ELatency is the target end-to-end request latency in milliseconds.
+                        Alternative to specifying TTFT + ITL.
+                      type: number
                     itl:
                       description: ITL is the Inter-Token Latency target in milliseconds.
                       type: number
-                    optimization_type:
+                    optimizationType:
                       allOf:
                         - enum:
-                            - hybrid
                             - latency
                             - throughput
                         - enum:
-                            - hybrid
                             - latency
                             - throughput
-                      description: OptimizationType controls the profiling optimization strategy.
+                      description: |-
+                        OptimizationType controls the profiling optimization strategy.
+                        Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
                       type: string
                     ttft:
                       description: TTFT is the Time To First Token target in milliseconds.
@@ -9006,6 +9064,11 @@ spec:
                 workload:
                   description: Workload defines the expected workload characteristics for SLA-based profiling.
                   properties:
+                    concurrency:
+                      description: |-
+                        Concurrency is the target concurrency level.
+                        Required (or RequestRate) when the planner is disabled.
+                      type: number
                     isl:
                       description: ISL is the Input Sequence Length (number of tokens).
                       format: int32
@@ -9014,6 +9077,11 @@ spec:
                       description: OSL is the Output Sequence Length (number of tokens).
                       format: int32
                       type: integer
+                    requestRate:
+                      description: |-
+                        RequestRate is the target request rate (req/s).
+                        Required (or Concurrency) when the planner is disabled.
+                      type: number
                   type: object
               required:
                 - model
