@@ -9,16 +9,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use dynamo_tokens::PositionalLineageHash;
+use dynamo_tokens::blocks::UniqueBlock;
 use kvbm_logical::registry::BlockRegistry;
 use kvbm_logical::tinylfu::TinyLFUTracker;
 use kvbm_logical::{BlockManager, ImmutableBlock, MutableBlock};
-use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::PositionalLineageHash;
 use uuid::Uuid;
 
-use crate::protocols::{
-    KvCacheEventSink, MockMeta, MockerEvictionBackend, MoveBlock, PrefillCost,
-};
+use crate::protocols::{KvCacheEventSink, MockMeta, MockerEvictionBackend, MoveBlock, PrefillCost};
 use crate::sequence::ActiveSequence;
 
 /// KV manager backend powered by kvbm-logical's production `BlockManager`.
@@ -111,11 +109,7 @@ impl KvbmLogicalKvManager {
         }
     }
 
-    fn process_use(
-        &mut self,
-        blocks: &[UniqueBlock],
-        plhs: &[PositionalLineageHash],
-    ) -> bool {
+    fn process_use(&mut self, blocks: &[UniqueBlock], plhs: &[PositionalLineageHash]) -> bool {
         // PLH vec may be shorter than blocks (partial blocks have no PLH)
         for (i, block) in blocks.iter().enumerate() {
             match block {
@@ -144,9 +138,7 @@ impl KvbmLogicalKvManager {
                         return false;
                     };
                     let mutable = allocated.pop().unwrap();
-                    let complete = mutable
-                        .stage(plh, self.block_size)
-                        .expect("stage failed");
+                    let complete = mutable.stage(plh, self.block_size).expect("stage failed");
                     let immutable = self.block_manager.register_block(complete);
                     self.active_full
                         .entry(*seq_hash)
@@ -220,8 +212,7 @@ impl KvbmLogicalKvManager {
     }
 
     pub fn num_active_blocks(&self) -> usize {
-        self.active_partial.len()
-            + self.active_full.values().map(|v| v.len()).sum::<usize>()
+        self.active_partial.len() + self.active_full.values().map(|v| v.len()).sum::<usize>()
     }
 
     pub fn num_inactive_blocks(&self) -> usize {
@@ -296,8 +287,7 @@ impl KvbmLogicalKvManager {
         }
 
         let new_blocks = seq_blocks.len() - overlap_blocks;
-        let cached_tokens =
-            (overlap_blocks * self.block_size).min(sequence.num_input_tokens());
+        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.num_input_tokens());
         let new_tokens = sequence.num_input_tokens() - cached_tokens;
 
         PrefillCost {
@@ -313,7 +303,13 @@ mod tests {
     use kvbm_logical::metrics::MetricsSnapshot;
 
     fn make_manager(capacity: usize, block_size: usize) -> KvbmLogicalKvManager {
-        KvbmLogicalKvManager::new(capacity, block_size, 0, None, MockerEvictionBackend::Lineage)
+        KvbmLogicalKvManager::new(
+            capacity,
+            block_size,
+            0,
+            None,
+            MockerEvictionBackend::Lineage,
+        )
     }
 
     fn plh(val: u64) -> PositionalLineageHash {
@@ -324,7 +320,11 @@ mod tests {
         mgr.block_manager.metrics().snapshot()
     }
 
-    fn use_full(mgr: &mut KvbmLogicalKvManager, seq_hash: u64, plh_val: PositionalLineageHash) -> bool {
+    fn use_full(
+        mgr: &mut KvbmLogicalKvManager,
+        seq_hash: u64,
+        plh_val: PositionalLineageHash,
+    ) -> bool {
         mgr.process(&MoveBlock::Use(
             vec![UniqueBlock::FullBlock(seq_hash)],
             vec![],
@@ -638,7 +638,10 @@ mod tests {
         let s = snap(&mgr);
         // Block should be reused: either via match_blocks or from PRT upgrade.
         // Either way, no NEW allocation is needed.
-        assert_eq!(s.allocations, alloc_before, "no new allocation needed — block reused");
+        assert_eq!(
+            s.allocations, alloc_before,
+            "no new allocation needed — block reused"
+        );
     }
 
     #[test]
@@ -777,15 +780,12 @@ mod tests {
 
         // Use all full blocks (the first N that are FullBlock)
         for block in seq.unique_blocks() {
-            match block {
-                UniqueBlock::FullBlock(h) => {
-                    let plh_val = seq.positional_lineage_hashes();
-                    let idx = seq.unique_blocks().iter().position(|b| b == block).unwrap();
-                    if let Some(p) = plh_val.get(idx) {
-                        use_full(&mut mgr, *h, *p);
-                    }
+            if let UniqueBlock::FullBlock(h) = block {
+                let plh_val = seq.positional_lineage_hashes();
+                let idx = seq.unique_blocks().iter().position(|b| b == block).unwrap();
+                if let Some(p) = plh_val.get(idx) {
+                    use_full(&mut mgr, *h, *p);
                 }
-                _ => {}
             }
         }
 
@@ -907,7 +907,10 @@ mod tests {
         }
         assert_eq!(mgr.num_active_blocks(), 6);
         let s = snap(&mgr);
-        assert!(s.allocations >= 7, "should have at least original allocations");
+        assert!(
+            s.allocations >= 7,
+            "should have at least original allocations"
+        );
     }
 
     // ========================================================================
@@ -916,8 +919,7 @@ mod tests {
 
     #[test]
     fn test_eviction_backend_lru() {
-        let mut mgr =
-            KvbmLogicalKvManager::new(4, 16, 0, None, MockerEvictionBackend::Lru);
+        let mut mgr = KvbmLogicalKvManager::new(4, 16, 0, None, MockerEvictionBackend::Lru);
 
         // Fill capacity
         for i in 0..4 {
@@ -941,8 +943,7 @@ mod tests {
     #[test]
     fn test_eviction_backend_multi_lru() {
         let cap = 4;
-        let mut mgr =
-            KvbmLogicalKvManager::new(cap, 16, 0, None, MockerEvictionBackend::MultiLru);
+        let mut mgr = KvbmLogicalKvManager::new(cap, 16, 0, None, MockerEvictionBackend::MultiLru);
 
         // Fill capacity
         for i in 0..4u64 {

@@ -388,7 +388,7 @@ impl MockEngineArgs {
                     return Err(anyhow::anyhow!(
                         "Invalid kv_manager_backend: '{}'. Valid values: manual, kvbm_logical",
                         other
-                    ))
+                    ));
                 }
             };
             builder = builder.kv_manager_backend(backend);
@@ -406,7 +406,7 @@ impl MockEngineArgs {
                     return Err(anyhow::anyhow!(
                         "Invalid eviction_backend: '{}'. Valid values: lru, multi_lru, lineage",
                         other
-                    ))
+                    ));
                 }
             };
             builder = builder.eviction_backend(eviction);

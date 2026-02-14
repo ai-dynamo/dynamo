@@ -752,7 +752,11 @@ mod tests {
         }
 
         let elapsed = start_time.elapsed();
-        let token_label = if use_shared_tokens { "caching" } else { "random" };
+        let token_label = if use_shared_tokens {
+            "caching"
+        } else {
+            "random"
+        };
         println!(
             "{label} completed in: {elapsed:?} for {token_label} case with \
              prefix_caching={enable_prefix_caching}, chunked_prefill={enable_chunked_prefill}, \

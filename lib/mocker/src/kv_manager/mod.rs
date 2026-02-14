@@ -72,23 +72,19 @@ impl KvManager {
         eviction_backend: MockerEvictionBackend,
     ) -> Self {
         match backend {
-            KvManagerBackend::Manual => {
-                Self::Manual(ManualKvManager::new_with_event_sink(
-                    max_capacity,
-                    block_size,
-                    kv_event_sink,
-                    dp_rank,
-                ))
-            }
-            KvManagerBackend::KvbmLogical => {
-                Self::KvbmLogical(KvbmLogicalKvManager::new(
-                    max_capacity,
-                    block_size,
-                    dp_rank,
-                    kv_event_sink,
-                    eviction_backend,
-                ))
-            }
+            KvManagerBackend::Manual => Self::Manual(ManualKvManager::new_with_event_sink(
+                max_capacity,
+                block_size,
+                kv_event_sink,
+                dp_rank,
+            )),
+            KvManagerBackend::KvbmLogical => Self::KvbmLogical(KvbmLogicalKvManager::new(
+                max_capacity,
+                block_size,
+                dp_rank,
+                kv_event_sink,
+                eviction_backend,
+            )),
         }
     }
 
