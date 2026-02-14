@@ -1974,37 +1974,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-kvbm-logical"
-version = "0.9.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "bincode 2.0.1",
- "bytes",
- "dashmap 6.1.0",
- "derive_builder",
- "dynamo-tokens",
- "futures",
- "lru 0.16.3",
- "parking_lot",
- "prometheus",
- "proptest",
- "rand 0.9.2",
- "rand_chacha 0.9.0",
- "rmp-serde",
- "rstest 0.26.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "xxhash-rust",
-]
-
-[[package]]
 name = "dynamo-llm"
 version = "0.9.0"
 dependencies = [
@@ -4198,6 +4167,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "kvbm-logical"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "bincode 2.0.1",
+ "bytes",
+ "dashmap 6.1.0",
+ "derive_builder",
+ "dynamo-tokens",
+ "futures",
+ "lru 0.16.3",
+ "parking_lot",
+ "prometheus",
+ "proptest",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
+ "rmp-serde",
+ "rstest 0.26.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "lalrpop-util"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5943,6 +5943,7 @@ dependencies = [
  "lazy_static",
  "memchr",
  "parking_lot",
+ "protobuf",
  "thiserror 2.0.18",
 ]
 
@@ -6068,6 +6069,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
 dependencies = [
  "prost 0.14.3",
+]
+
+[[package]]
+name = "protobuf"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d65a1d4ddae7d8b5de68153b48f6aa3bba8cb002b243dbdbc55a5afbc98f99f4"
+dependencies = [
+ "once_cell",
+ "protobuf-support",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "protobuf-support"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e36c2f31e0a47f9280fb347ef5e461ffcd2c52dd520d8e216b52f93b0b0d7d6"
+dependencies = [
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -7995,9 +8016,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.49.0"
+version = "1.48.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72a2903cd7736441aac9df9d7688bd0ce48edccaadf181c3b90be801e81d3d86"
+checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
 dependencies = [
  "bytes",
  "libc",
