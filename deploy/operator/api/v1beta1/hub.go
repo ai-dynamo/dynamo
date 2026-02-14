@@ -29,5 +29,8 @@ func (*DynamoGraphDeployment) Hub() {}
 // Hub marks DynamoGraphDeploymentScalingAdapter as the hub type for conversion.
 func (*DynamoGraphDeploymentScalingAdapter) Hub() {}
 
+// Hub marks DynamoGraphDeploymentRequest as the hub type for conversion.
+func (*DynamoGraphDeploymentRequest) Hub() {}
+
 // Hub marks DynamoModel as the hub type for conversion.
 func (*DynamoModel) Hub() {}
