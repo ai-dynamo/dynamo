@@ -4,6 +4,10 @@
 # Router benchmark only — for quick feedback while developing.
 # Runs the same e2e router benchmark test as nightly, without the full pipeline.
 # Uses a pre-built image (default: main-vllm-amd64) so no build step.
+#
+# Trigger from a branch:
+#   - Push to any branch that has this file (runs on push when workflow or test changes).
+#   - After merge to default: Actions → "Router Benchmark CI" → Run workflow.
 
 name: Router Benchmark CI
 
@@ -15,6 +19,11 @@ on:
         required: true
         default: 'main-vllm-amd64'
         type: string
+  push:
+    paths:
+      - '.github/workflows/router-benchmark-ci.yml'
+      - 'tests/router/test_router_benchmark_vllm.py'
+      - 'tests/router/common.py'
 
 permissions:
   contents: read
