@@ -40,15 +40,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: false  # Runner may not have git-lfs; benchmark does not need LFS
-      - name: Login to Container Registries
-        uses: ./.github/actions/docker-login
+      # ECR only (runner may not have aws CLI; use SDK-based action)
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
         with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          mask-password: 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
       - name: Pull image
         shell: bash
         env:
