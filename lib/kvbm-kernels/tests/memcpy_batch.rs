@@ -33,10 +33,7 @@ fn cuda_setup() -> Option<(Arc<CudaStream>, cuda_runtime::cudaStream_t)> {
 
 /// Allocate a device buffer, fill it with `data`, and return the slice + its
 /// raw device address.
-fn upload(
-    stream: &Arc<CudaStream>,
-    data: &[u8],
-) -> Result<(CudaSlice<u8>, usize), DriverError> {
+fn upload(stream: &Arc<CudaStream>, data: &[u8]) -> Result<(CudaSlice<u8>, usize), DriverError> {
     let slice = stream.clone_htod(data)?;
     let addr = {
         let (ptr, _guard) = slice.device_ptr(stream);

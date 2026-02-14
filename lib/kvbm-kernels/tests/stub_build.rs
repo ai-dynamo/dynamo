@@ -12,7 +12,10 @@ use dynamo_kvbm_kernels::{is_memcpy_batch_available, is_using_stubs};
 
 #[test]
 fn stubs_active() {
-    assert!(is_using_stubs(), "expected is_using_stubs() == true under stub build");
+    assert!(
+        is_using_stubs(),
+        "expected is_using_stubs() == true under stub build"
+    );
 }
 
 #[test]

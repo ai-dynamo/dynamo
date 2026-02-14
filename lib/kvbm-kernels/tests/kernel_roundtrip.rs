@@ -22,11 +22,11 @@ use cudarc::driver::{
 };
 use cudarc::runtime::sys as cuda_runtime;
 use dynamo_kvbm_kernels::{
-    block_from_universal, operational_copy, universal_from_block, BlockLayout,
-    OperationalCopyBackend, OperationalCopyDirection, TensorDataType,
+    BlockLayout, OperationalCopyBackend, OperationalCopyDirection, TensorDataType,
+    block_from_universal, operational_copy, universal_from_block,
 };
 use half::{bf16, f16};
-use ndarray::{s, Array5};
+use ndarray::{Array5, s};
 use rand::Rng;
 
 // ---------------------------------------------------------------------------
@@ -224,14 +224,7 @@ fn alloc_buffers<T: TestDtype>(
 fn upload_blocks_with_host_ptrs<T: TestDtype>(
     stream: &Arc<CudaStream>,
     ref_blocks: &[Vec<Vec<T>>],
-) -> Result<
-    (
-        Vec<Vec<CudaSlice<T>>>,
-        CudaSlice<usize>,
-        Vec<*const c_void>,
-    ),
-    DriverError,
-> {
+) -> Result<(Vec<Vec<CudaSlice<T>>>, CudaSlice<usize>, Vec<*const c_void>), DriverError> {
     let nb = ref_blocks.len();
     let chunks_per_batch = ref_blocks.first().map_or(0, |b| b.len());
     let mut all_slices: Vec<Vec<CudaSlice<T>>> = Vec::with_capacity(nb);
@@ -357,17 +350,9 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) -> Result<
     stream.synchronize()?;
 
     // Verify each universal buffer matches the original tensor.
-    for (i, (slice, expected)) in universal_slices
-        .iter()
-        .zip(universals.iter())
-        .enumerate()
-    {
+    for (i, (slice, expected)) in universal_slices.iter().zip(universals.iter()).enumerate() {
         let host = stream.clone_dtoh(slice)?;
-        let expected_flat: Vec<T> = expected
-            .as_standard_layout()
-            .as_slice()
-            .unwrap()
-            .to_vec();
+        let expected_flat: Vec<T> = expected.as_standard_layout().as_slice().unwrap().to_vec();
         assert_close::<T>(&host, &expected_flat, &format!("universal batch {i}"));
     }
 
@@ -397,11 +382,7 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) -> Result<
     }
     stream.synchronize()?;
 
-    for (bi, (batch, ref_batch)) in block_slices
-        .iter()
-        .zip(ref_blocks.iter())
-        .enumerate()
-    {
+    for (bi, (batch, ref_batch)) in block_slices.iter().zip(ref_blocks.iter()).enumerate() {
         for (ci, (slice, expected)) in batch.iter().zip(ref_batch.iter()).enumerate() {
             let host = stream.clone_dtoh(slice)?;
             assert_close::<T>(&host, expected, &format!("block batch {bi} chunk {ci}"));
@@ -498,15 +479,16 @@ fn operational_roundtrip_inner<T: TestDtype>() -> Result<(), DriverError> {
     stream.synchronize()?;
 
     // Verify: operational[batch] should be [chunk0_flat, chunk1_flat, ...].
-    for (bi, (op_slice, ref_batch)) in operational_slices
-        .iter()
-        .zip(ref_blocks.iter())
-        .enumerate()
+    for (bi, (op_slice, ref_batch)) in operational_slices.iter().zip(ref_blocks.iter()).enumerate()
     {
         let host_op = stream.clone_dtoh(op_slice)?;
         for (ci, ref_chunk) in ref_batch.iter().enumerate() {
             let op_chunk = &host_op[ci * inner..(ci + 1) * inner];
-            assert_close::<T>(op_chunk, ref_chunk, &format!("operational batch {bi} chunk {ci}"));
+            assert_close::<T>(
+                op_chunk,
+                ref_chunk,
+                &format!("operational batch {bi} chunk {ci}"),
+            );
         }
     }
 
@@ -538,11 +520,7 @@ fn operational_roundtrip_inner<T: TestDtype>() -> Result<(), DriverError> {
     }
     stream.synchronize()?;
 
-    for (bi, (batch, ref_batch)) in block_slices
-        .iter()
-        .zip(ref_blocks.iter())
-        .enumerate()
-    {
+    for (bi, (batch, ref_batch)) in block_slices.iter().zip(ref_blocks.iter()).enumerate() {
         for (ci, (slice, expected)) in batch.iter().zip(ref_batch.iter()).enumerate() {
             let host = stream.clone_dtoh(slice)?;
             assert_close::<T>(&host, expected, &format!("block batch {bi} chunk {ci}"));
@@ -589,7 +567,9 @@ fn operational_backend_inner(backend: OperationalCopyBackend) -> Result<(), Driv
     let mut rng = rand::rng();
     let universals: Vec<Array5<f32>> = (0..nb)
         .map(|_| {
-            Array5::from_shape_fn((nh, nl, no, nt, hd), |_| rng.random::<f64>() as f32 * 2.0 - 1.0)
+            Array5::from_shape_fn((nh, nl, no, nt, hd), |_| {
+                rng.random::<f64>() as f32 * 2.0 - 1.0
+            })
         })
         .collect();
 
@@ -668,11 +648,7 @@ fn operational_backend_inner(backend: OperationalCopyBackend) -> Result<(), Driv
     stream.synchronize()?;
 
     // Verify roundtrip against reference blocks.
-    for (ci, (slice, expected)) in block_slices[0]
-        .iter()
-        .zip(ref_blocks[0].iter())
-        .enumerate()
-    {
+    for (ci, (slice, expected)) in block_slices[0].iter().zip(ref_blocks[0].iter()).enumerate() {
         let host = stream.clone_dtoh(slice)?;
         assert_close::<f32>(&host, expected, &format!("backend {backend:?} chunk {ci}"));
     }
