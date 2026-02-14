@@ -3,7 +3,7 @@
 
 # Router benchmark only — for quick feedback while developing.
 # Runs the same e2e router benchmark test as nightly, without the full pipeline.
-# Always pulls the latest main branch image (main-vllm-amd64) from ECR.
+# Always pulls the latest main branch image (main-vllm-amd64) from Azure ACR.
 #
 # Trigger from a branch:
 #   - Push to any branch that has this file (runs on push when workflow or test changes).
@@ -35,22 +35,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: false  # Runner may not have git-lfs; benchmark does not need LFS
-      - name: Login to Amazon ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to Azure ACR
+        uses: ./.github/actions/docker-login
         with:
-          mask-password: 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Pull image
         shell: bash
         env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
         run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_TAG }}"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_TAG }}" "${{ env.IMAGE_TAG }}"
+          docker pull "${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_TAG }}"
+          docker tag "${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_TAG }}" "${{ env.IMAGE_TAG }}"
       - name: Run E2E Router Benchmark Tests (gpu_4)
         uses: ./.github/actions/pytest
         with:
