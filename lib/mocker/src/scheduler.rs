@@ -29,7 +29,7 @@
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
 use crate::evictor::LRUEvictor;
-use crate::kv_manager::KvManager;
+use crate::kv_manager::{KvBackend, KvManager};
 use crate::perf_model::PerfModel;
 use crate::protocols::{
     DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost,

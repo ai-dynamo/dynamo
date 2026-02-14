@@ -16,8 +16,8 @@ use kvbm_logical::tinylfu::TinyLFUTracker;
 use kvbm_logical::{BlockManager, ImmutableBlock, MutableBlock};
 use uuid::Uuid;
 
-use crate::protocols::{KvCacheEventSink, MockMeta, MockerEvictionBackend, MoveBlock, PrefillCost};
-use crate::sequence::ActiveSequence;
+use crate::kv_manager::KvBackend;
+use crate::protocols::{KvCacheEventSink, MockMeta, MockerEvictionBackend, MoveBlock};
 
 /// KV manager backend powered by kvbm-logical's production `BlockManager`.
 ///
@@ -79,33 +79,6 @@ impl KvbmLogicalKvManager {
             _kv_event_sink: kv_event_sink,
             active_partial: HashMap::new(),
             active_full: HashMap::new(),
-        }
-    }
-
-    pub fn max_capacity(&self) -> usize {
-        self.max_capacity
-    }
-
-    pub fn block_size(&self) -> usize {
-        self.block_size
-    }
-
-    /// Process a MoveBlock signal. Returns false if allocation fails (triggers preemption).
-    pub fn process(&mut self, event: &MoveBlock) -> bool {
-        match event {
-            MoveBlock::Use(blocks, _local_hashes, plhs) => self.process_use(blocks, plhs),
-            MoveBlock::Destroy(blocks) => {
-                self.process_destroy(blocks);
-                true
-            }
-            MoveBlock::Deref(blocks) => {
-                self.process_deref(blocks);
-                true
-            }
-            MoveBlock::Promote(uuid, seq_hash, _parent_hash, _local_hash, plh) => {
-                self.process_promote(*uuid, *seq_hash, *plh);
-                true
-            }
         }
     }
 
@@ -210,33 +183,51 @@ impl KvbmLogicalKvManager {
             .or_default()
             .push(immutable);
     }
+}
 
-    pub fn num_active_blocks(&self) -> usize {
+impl KvBackend for KvbmLogicalKvManager {
+    fn process(&mut self, event: &MoveBlock) -> bool {
+        match event {
+            MoveBlock::Use(blocks, _local_hashes, plhs) => self.process_use(blocks, plhs),
+            MoveBlock::Destroy(blocks) => {
+                self.process_destroy(blocks);
+                true
+            }
+            MoveBlock::Deref(blocks) => {
+                self.process_deref(blocks);
+                true
+            }
+            MoveBlock::Promote(uuid, seq_hash, _parent_hash, _local_hash, plh) => {
+                self.process_promote(*uuid, *seq_hash, *plh);
+                true
+            }
+        }
+    }
+
+    fn max_capacity(&self) -> usize {
+        self.max_capacity
+    }
+
+    fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    fn num_active_blocks(&self) -> usize {
         self.active_partial.len() + self.active_full.values().map(|v| v.len()).sum::<usize>()
     }
 
-    pub fn num_inactive_blocks(&self) -> usize {
-        // total - available gives us in-use (active + inactive pool).
-        // We want just inactive pool: in_use - active.
+    fn num_inactive_blocks(&self) -> usize {
         let total = self.block_manager.total_blocks();
         let available = self.block_manager.available_blocks();
         let in_use = total - available;
         in_use.saturating_sub(self.num_active_blocks())
     }
 
-    pub fn current_capacity(&self) -> usize {
+    fn current_capacity(&self) -> usize {
         self.block_manager.total_blocks() - self.block_manager.available_blocks()
     }
 
-    pub fn current_capacity_perc(&self) -> f64 {
-        self.current_capacity() as f64 / self.max_capacity as f64
-    }
-
-    pub fn get_active_perc(&self) -> f64 {
-        self.num_active_blocks() as f64 / self.max_capacity as f64
-    }
-
-    pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
+    fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         blocks
             .iter()
             .filter(|block| match block {
@@ -252,54 +243,29 @@ impl KvbmLogicalKvManager {
             .count()
     }
 
-    pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
-        let seq_blocks = sequence.unique_blocks();
-        let plhs = sequence.positional_lineage_hashes();
-
-        // Find the longest prefix that exists in cache
-        let mut overlap_blocks = 0;
-        for (i, block) in seq_blocks.iter().enumerate() {
-            match block {
-                UniqueBlock::FullBlock(seq_hash) => {
-                    // Check our active set first
-                    if self.active_full.contains_key(seq_hash) {
-                        overlap_blocks += 1;
-                        continue;
-                    }
-                    // Check block_manager registry for cached blocks (read-only)
-                    if let Some(plh) = plhs.get(i) {
-                        let presence = self
-                            .block_manager
-                            .block_registry()
-                            .check_presence::<MockMeta>(&[*plh]);
-                        if presence.first().is_some_and(|(_, present)| *present) {
-                            overlap_blocks += 1;
-                            continue;
-                        }
-                    }
-                    break;
-                }
-                UniqueBlock::PartialBlock(_) => {
-                    // Partial blocks don't contribute to cache overlap
-                    break;
-                }
+    fn is_block_cached(&self, seq_hash: u64, plh: Option<PositionalLineageHash>) -> bool {
+        // Check active set first
+        if self.active_full.contains_key(&seq_hash) {
+            return true;
+        }
+        // Check block_manager registry for cached blocks (read-only)
+        if let Some(plh) = plh {
+            let presence = self
+                .block_manager
+                .block_registry()
+                .check_presence::<MockMeta>(&[plh]);
+            if presence.first().is_some_and(|(_, present)| *present) {
+                return true;
             }
         }
-
-        let new_blocks = seq_blocks.len() - overlap_blocks;
-        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.num_input_tokens());
-        let new_tokens = sequence.num_input_tokens() - cached_tokens;
-
-        PrefillCost {
-            new_blocks,
-            new_tokens,
-        }
+        false
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequence::ActiveSequence;
     use kvbm_logical::metrics::MetricsSnapshot;
 
     fn make_manager(capacity: usize, block_size: usize) -> KvbmLogicalKvManager {

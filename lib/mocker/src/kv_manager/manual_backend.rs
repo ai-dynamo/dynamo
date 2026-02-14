@@ -21,8 +21,9 @@ use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
 
 use crate::evictor::LRUEvictor;
-use crate::protocols::{KvCacheEventSink, MoveBlock, PrefillCost};
-use crate::sequence::ActiveSequence;
+use crate::kv_manager::KvBackend;
+use crate::protocols::{KvCacheEventSink, MoveBlock};
+use dynamo_tokens::PositionalLineageHash;
 
 /// Check the env var to enable KV cache allocation/eviction trace logs.
 static KV_CACHE_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
@@ -167,8 +168,19 @@ impl ManualKvManager {
         }
     }
 
-    /// Process a MoveBlock instruction synchronously
-    pub fn process(&mut self, event: &MoveBlock) -> bool {
+    /// Get the keys of inactive blocks
+    pub fn get_inactive_blocks(&self) -> Vec<&UniqueBlock> {
+        self.inactive_blocks.keys().collect()
+    }
+
+    /// Get the keys of active blocks
+    pub fn get_active_blocks(&self) -> Vec<&UniqueBlock> {
+        self.active_blocks.keys().collect()
+    }
+}
+
+impl KvBackend for ManualKvManager {
+    fn process(&mut self, event: &MoveBlock) -> bool {
         match event {
             MoveBlock::Use(hashes, local_hashes, _plhs) => {
                 let mut blocks_stored = Vec::<u64>::new();
@@ -287,8 +299,27 @@ impl ManualKvManager {
         true
     }
 
-    /// Get the count of blocks that aren't in active or inactive pools
-    pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
+    fn max_capacity(&self) -> usize {
+        self.max_capacity
+    }
+
+    fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    fn num_active_blocks(&self) -> usize {
+        self.active_blocks.len()
+    }
+
+    fn num_inactive_blocks(&self) -> usize {
+        self.inactive_blocks.len()
+    }
+
+    fn current_capacity(&self) -> usize {
+        self.active_blocks.len() + self.inactive_blocks.len()
+    }
+
+    fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         blocks
             .iter()
             .filter(|&block| {
@@ -297,67 +328,8 @@ impl ManualKvManager {
             .count()
     }
 
-    /// Get the current capacity (active blocks + inactive blocks)
-    pub fn current_capacity(&self) -> usize {
-        let active = self.active_blocks.len();
-        let inactive = self.inactive_blocks.len();
-        active + inactive
-    }
-
-    /// Get the current capacity as a percentage of the maximum capacity
-    pub fn current_capacity_perc(&self) -> f64 {
-        let current = self.current_capacity() as f64;
-        current / self.max_capacity as f64
-    }
-
-    /// Get the number of active blocks
-    pub fn num_active_blocks(&self) -> usize {
-        self.active_blocks.len()
-    }
-
-    /// Get the percentage of active blocks relative to maximum capacity
-    pub fn get_active_perc(&self) -> f64 {
-        self.active_blocks.len() as f64 / self.max_capacity as f64
-    }
-
-    /// Get the number of inactive blocks
-    pub fn num_inactive_blocks(&self) -> usize {
-        self.inactive_blocks.len()
-    }
-
-    /// Get the keys of inactive blocks
-    pub fn get_inactive_blocks(&self) -> Vec<&UniqueBlock> {
-        self.inactive_blocks.keys().collect()
-    }
-
-    /// Get the keys of active blocks
-    pub fn get_active_blocks(&self) -> Vec<&UniqueBlock> {
-        self.active_blocks.keys().collect()
-    }
-
-    /// Check if a sequence can be scheduled and calculate cost if possible
-    pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
-        let seq_blocks = sequence.unique_blocks();
-
-        // Find the longest prefix that exists in cache
-        // We must stop at the first cache miss since KV states are computed sequentially
-        let mut overlap_blocks = 0;
-        for block in seq_blocks {
-            if !self.active_blocks.contains_key(block) && !self.inactive_blocks.contains(block) {
-                // First cache miss - can't use anything after this point
-                break;
-            }
-            overlap_blocks += 1;
-        }
-
-        let new_blocks = seq_blocks.len() - overlap_blocks;
-        // Clamp cached_tokens to handle partial blocks (last block may have < block_size tokens)
-        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.num_input_tokens());
-        let new_tokens = sequence.num_input_tokens() - cached_tokens;
-
-        PrefillCost {
-            new_blocks,
-            new_tokens,
-        }
+    fn is_block_cached(&self, seq_hash: u64, _plh: Option<PositionalLineageHash>) -> bool {
+        let block = UniqueBlock::FullBlock(seq_hash);
+        self.active_blocks.contains_key(&block) || self.inactive_blocks.contains(&block)
     }
 }

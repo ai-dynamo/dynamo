@@ -33,13 +33,14 @@
 //! is returned to the scheduler for preemption. Initial KV block allocations for new requests
 //! should not fail due to the watermark checking.
 
+mod backend;
 mod kvbm_backend;
 mod manual_backend;
 
-use crate::protocols::{
-    KvCacheEventSink, KvManagerBackend, MockerEvictionBackend, MoveBlock, PrefillCost,
-};
-use crate::sequence::ActiveSequence;
+pub use backend::KvBackend;
+
+use crate::protocols::{KvCacheEventSink, KvManagerBackend, MockerEvictionBackend, MoveBlock};
+use dynamo_tokens::PositionalLineageHash;
 use dynamo_tokens::blocks::UniqueBlock;
 use std::sync::Arc;
 
@@ -89,74 +90,62 @@ impl KvManager {
             )),
         }
     }
+}
 
-    pub fn process(&mut self, event: &MoveBlock) -> bool {
+impl KvBackend for KvManager {
+    fn process(&mut self, event: &MoveBlock) -> bool {
         match self {
             Self::Manual(m) => m.process(event),
             Self::KvbmLogical(m) => m.process(event),
         }
     }
 
-    pub fn max_capacity(&self) -> usize {
+    fn max_capacity(&self) -> usize {
         match self {
             Self::Manual(m) => m.max_capacity(),
             Self::KvbmLogical(m) => m.max_capacity(),
         }
     }
 
-    pub fn block_size(&self) -> usize {
+    fn block_size(&self) -> usize {
         match self {
             Self::Manual(m) => m.block_size(),
             Self::KvbmLogical(m) => m.block_size(),
         }
     }
 
-    pub fn num_active_blocks(&self) -> usize {
+    fn num_active_blocks(&self) -> usize {
         match self {
             Self::Manual(m) => m.num_active_blocks(),
             Self::KvbmLogical(m) => m.num_active_blocks(),
         }
     }
 
-    pub fn num_inactive_blocks(&self) -> usize {
+    fn num_inactive_blocks(&self) -> usize {
         match self {
             Self::Manual(m) => m.num_inactive_blocks(),
             Self::KvbmLogical(m) => m.num_inactive_blocks(),
         }
     }
 
-    pub fn current_capacity(&self) -> usize {
+    fn current_capacity(&self) -> usize {
         match self {
             Self::Manual(m) => m.current_capacity(),
             Self::KvbmLogical(m) => m.current_capacity(),
         }
     }
 
-    pub fn current_capacity_perc(&self) -> f64 {
-        match self {
-            Self::Manual(m) => m.current_capacity_perc(),
-            Self::KvbmLogical(m) => m.current_capacity_perc(),
-        }
-    }
-
-    pub fn get_active_perc(&self) -> f64 {
-        match self {
-            Self::Manual(m) => m.get_active_perc(),
-            Self::KvbmLogical(m) => m.get_active_perc(),
-        }
-    }
-
-    pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
+    fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         match self {
             Self::Manual(m) => m.probe_new_blocks(blocks),
             Self::KvbmLogical(m) => m.probe_new_blocks(blocks),
         }
     }
 
-    pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
+    fn is_block_cached(&self, seq_hash: u64, plh: Option<PositionalLineageHash>) -> bool {
         match self {
-            Self::Manual(m) => m.get_prefill_cost(sequence),
-            Self::KvbmLogical(m) => m.get_prefill_cost(sequence),
+            Self::Manual(m) => m.is_block_cached(seq_hash, plh),
+            Self::KvbmLogical(m) => m.is_block_cached(seq_hash, plh),
         }
     }
 }
