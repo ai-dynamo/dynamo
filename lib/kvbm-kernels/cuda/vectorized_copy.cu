@@ -28,7 +28,7 @@ vectorised_copy(void** src_ptrs, void** dst_ptrs, size_t copy_size_in_bytes, int
     } else if (vector_copy_8) {
       // Vectorized copy: copy as int2 (8-byte units)
       for (size_t i = tid; i < copy_size_in_bytes / 8; i += block_size) {
-        reinterpret_cast<int2*>(dst)[i] = reinterpret_cast<int2*>(src)[i];
+        reinterpret_cast<int2*>(dst)[i] = reinterpret_cast<const int2*>(src)[i];
       }
     } else if (vector_copy_4) {
       // Vectorized copy: copy as uint32_t (4-byte units)
