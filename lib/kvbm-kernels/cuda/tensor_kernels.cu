@@ -851,9 +851,11 @@ kvbm_kernels_memcpy_batch(
     if (mode == MemcpyBatchMode::BatchWithoutFallback) {
       return err;
     }
+#ifdef KVBM_TENSOR_KERNELS_DEBUG
     fprintf(
         stderr, "cudaMemcpyBatchAsync failed with error %d (%s), falling back to individual cudaMemcpyAsync\n",
         (int)err, cudaGetErrorString(err));
+#endif
     return launch_memcpy_async_fallback();
   }
   return err;
