@@ -230,7 +230,7 @@ class LoadGenerator:
             logger.warning(f"Failed to parse aiperf results: {e}")
             return {}
 
-    async def run_scaling_test(self) -> Dict[str, Any]:
+    async def run_scaling_test(self, mode: str = "throughput") -> Dict[str, Any]:
         """
         Run a graduated scaling test for prefill scaling.
 
@@ -238,17 +238,23 @@ class LoadGenerator:
         - Phase 1: 8 req/s (baseline, should maintain 1P1D)
         - Phase 2: 18 req/s (should trigger prefill scaling to 2P1D)
 
+        Args:
+            mode: Scaling mode - "throughput" or "load".
+                  "load" uses a longer baseline for regression warmup.
+
         Returns:
             Dictionary with complete test results
         """
         logger.info(
-            "Starting graduated prefill scaling test scenario (targeting 1P1D -> 2P1D)"
+            f"Starting graduated prefill scaling test scenario (targeting 1P1D -> 2P1D, mode={mode})"
         )
         logger.info("Using conservative graduated approach with metric generation")
 
         # Graduated test parameters (optimized for prefill scaling)
+        # Load-based scaling needs longer baseline for regression warmup
+        baseline_duration = 120 if mode == "load" else 90
         phases: List[Dict[str, Any]] = [
-            {"rate": 8.0, "duration": 90, "name": "baseline"},
+            {"rate": 8.0, "duration": baseline_duration, "name": "baseline"},
             {"rate": 18.0, "duration": 120, "name": "prefill_scaling_trigger"},
         ]
         transition_delay = 30
