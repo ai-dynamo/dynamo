@@ -4174,7 +4174,6 @@ dependencies = [
  "cc",
  "clap 4.5.58",
  "cudarc",
- "dynamo-config",
  "half 2.7.1",
  "ndarray 0.17.2",
  "once_cell",

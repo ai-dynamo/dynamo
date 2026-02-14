@@ -27,7 +27,7 @@
 // Cost: two event records + two stream-waits per call (sub-microsecond).
 
 static cudaStream_t
-get_batch_stream()
+kvbm_kernels_get_batch_stream()
 {
   static cudaStream_t s = nullptr;
   static std::once_flag flag;
@@ -41,9 +41,9 @@ get_batch_stream()
 /// cudaMemcpyBatchAsync on it.
 template <typename F>
 static cudaError_t
-run_on_batch_stream(cudaStream_t caller_stream, F&& batch_fn)
+kvbm_kernels_run_on_batch_stream(cudaStream_t caller_stream, F&& batch_fn)
 {
-  cudaStream_t bs = get_batch_stream();
+  cudaStream_t bs = kvbm_kernels_get_batch_stream();
 
   // Ordering: make batch stream wait for prior work on caller's stream
   cudaEvent_t ev;
@@ -171,7 +171,7 @@ block_inner_offset(size_t nt_idx, size_t nh_idx, size_t hd_idx, size_t nt, size_
 // Choose a conservative grid size so every thread handles a roughly equal
 // share of the work even when the total element count spans many blocks.
 inline int
-compute_grid_dim(size_t total_elements, int block_dim)
+kvbm_kernels_compute_grid_dim(size_t total_elements, int block_dim)
 {
   if (total_elements == 0) {
     return 0;
@@ -184,11 +184,23 @@ compute_grid_dim(size_t total_elements, int block_dim)
   return static_cast<int>(blocks);
 }
 
+// Returns the log2 shift amount if x is a non-zero power of 2, otherwise -1.
+// Used on the host side to pre-compute whether kernel divisors can use
+// cheap bit-shift/mask operations instead of expensive integer division.
+// Example: po2_shift(64) returns 6, po2_shift(48) returns -1.
+inline int
+kvbm_kernels_po2_shift(size_t x)
+{
+  if (x == 0 || (x & (x - 1)) != 0)
+    return -1;
+  return __builtin_ctzll(static_cast<unsigned long long>(x));
+}
+
 // Flatten the [nh, nl, no, nt, hd] coordinates into a linear index so a single
 // launch can cover many independent blocks in one pass.
 template <typename T, BlockLayout Layout>
 __global__ void
-block_to_universal_kernel(
+kvbm_kernels_block_to_universal_kernel(
     const T* const* block_chunks, T* const* universal_blocks, size_t block_stride, size_t total_per_block,
     size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd)
 {
@@ -225,11 +237,11 @@ block_to_universal_kernel(
   }
 }
 
-// The inverse of block_to_universal_kernel: peel apart the same linear index
+// The inverse of kvbm_kernels_block_to_universal_kernel: peel apart the same linear index
 // and scatter back into the layer/outer stacks.
 template <typename T, BlockLayout Layout>
 __global__ void
-universal_to_block_kernel(
+kvbm_kernels_universal_to_block_kernel(
     const T* const* universal_blocks, T* const* block_chunks, size_t block_stride, size_t total_per_block,
     size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd)
 {
@@ -270,7 +282,7 @@ universal_to_block_kernel(
 // (nl * no) chunk table. chunk_elements == inner.
 template <typename T>
 __global__ void
-operational_pack_kernel(
+kvbm_kernels_operational_pack_kernel(
     const T* const* block_chunks, T* const* operational_blocks, size_t block_stride, size_t chunk_elements,
     size_t total_per_block, size_t num_blocks)
 {
@@ -297,7 +309,7 @@ operational_pack_kernel(
 
 template <typename T>
 __global__ void
-operational_unpack_kernel(
+kvbm_kernels_operational_unpack_kernel(
     const T* const* operational_blocks, T* const* block_chunks, size_t block_stride, size_t chunk_elements,
     size_t total_per_block, size_t num_blocks)
 {
@@ -326,13 +338,15 @@ operational_unpack_kernel(
 // This kernel handles both pack (block->operational) and unpack (operational->block) directions.
 // Inspired by LMCache's approach of using 64-bit vectorized memory access.
 __global__ void
-operational_copy_vectorized_kernel(
+kvbm_kernels_operational_copy_vectorized_kernel(
     const int64_t* const* src_chunks, int64_t* const* dst_chunks,
     size_t chunk_stride,           // nl * no for block side
     size_t chunk_elements_64bit,   // inner * elem_size / 8
     size_t total_per_block_64bit,  // chunk_elements_64bit * chunk_count
     size_t num_blocks,
-    bool pack_direction)  // true = block->operational (pack)
+    bool pack_direction,  // true = block->operational (pack)
+    int total_shift,      // log2(total_per_block_64bit) if power-of-2, else -1
+    int chunk_shift)      // log2(chunk_elements_64bit) if power-of-2, else -1
 {
   // Use 128 threads per block for better occupancy with 64-bit loads
   size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -340,11 +354,28 @@ operational_copy_vectorized_kernel(
   size_t total = total_per_block_64bit * num_blocks;
 
   while (thread_id < total) {
-    size_t block_idx = thread_id / total_per_block_64bit;
-    size_t residual = thread_id % total_per_block_64bit;
+    // Decompose flat thread_id into (block_idx, chunk_idx, inner_idx).
+    // When the divisor is a power of 2 (shift >= 0), use bit shift/mask
+    // instead of integer division — saves ~20-30 cycles per division on GPU.
+    size_t block_idx, residual, chunk_idx, inner_idx;
 
-    size_t chunk_idx = residual / chunk_elements_64bit;
-    size_t inner_idx = residual % chunk_elements_64bit;
+    // Decompose: thread_id = block_idx * total_per_block_64bit + residual
+    if (total_shift >= 0) {
+      block_idx = thread_id >> total_shift;
+      residual = thread_id & (total_per_block_64bit - 1);
+    } else {
+      block_idx = thread_id / total_per_block_64bit;
+      residual = thread_id % total_per_block_64bit;
+    }
+
+    // Decompose: residual = chunk_idx * chunk_elements_64bit + inner_idx
+    if (chunk_shift >= 0) {
+      chunk_idx = residual >> chunk_shift;
+      inner_idx = residual & (chunk_elements_64bit - 1);
+    } else {
+      chunk_idx = residual / chunk_elements_64bit;
+      inner_idx = residual % chunk_elements_64bit;
+    }
 
     if (pack_direction) {
       // Block -> Operational (pack)
@@ -366,7 +397,7 @@ operational_copy_vectorized_kernel(
 
 // Launch the vectorized operational copy kernel
 cudaError_t
-launch_operational_copy_vectorized(
+kvbm_kernels_launch_operational_copy_vectorized(
     void* const* operational_ptrs_device, void* const* block_ptrs_device, size_t num_blocks, size_t nl, size_t no,
     size_t inner_bytes, OperationalCopyDirection direction, cudaStream_t stream)
 {
@@ -385,10 +416,16 @@ launch_operational_copy_vectorized(
 
   // Use 128 threads for better occupancy with 64-bit loads (following LMCache pattern)
   constexpr int kBlockDim = 128;
-  int grid_dim = compute_grid_dim(total, kBlockDim);
+  int grid_dim = kvbm_kernels_compute_grid_dim(total, kBlockDim);
   if (grid_dim == 0) {
     return cudaSuccess;
   }
+
+  // Pre-compute shift amounts for power-of-2 fast path.
+  // Common LLM dims (nh=8, nt=16/32/64, hd=64/128, elem_size=2/4) yield
+  // power-of-2 chunk sizes, enabling bit shifts instead of integer division.
+  int total_shift = kvbm_kernels_po2_shift(total_per_block_64bit);
+  int chunk_shift = kvbm_kernels_po2_shift(chunk_elements_64bit);
 
   bool pack_direction = (direction == OperationalCopyDirection::BlockToOperational);
 
@@ -396,14 +433,15 @@ launch_operational_copy_vectorized(
     // Block -> Operational
     const int64_t* const* src = reinterpret_cast<const int64_t* const*>(block_ptrs_device);
     int64_t* const* dst = reinterpret_cast<int64_t* const*>(operational_ptrs_device);
-    operational_copy_vectorized_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
-        src, dst, chunk_count, chunk_elements_64bit, total_per_block_64bit, num_blocks, true);
+    kvbm_kernels_operational_copy_vectorized_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+        src, dst, chunk_count, chunk_elements_64bit, total_per_block_64bit, num_blocks, true, total_shift, chunk_shift);
   } else {
     // Operational -> Block
     const int64_t* const* src = reinterpret_cast<const int64_t* const*>(operational_ptrs_device);
     int64_t* const* dst = reinterpret_cast<int64_t* const*>(block_ptrs_device);
-    operational_copy_vectorized_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
-        src, dst, chunk_count, chunk_elements_64bit, total_per_block_64bit, num_blocks, false);
+    kvbm_kernels_operational_copy_vectorized_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+        src, dst, chunk_count, chunk_elements_64bit, total_per_block_64bit, num_blocks, false, total_shift,
+        chunk_shift);
   }
 
   return cudaGetLastError();
@@ -411,7 +449,7 @@ launch_operational_copy_vectorized(
 
 template <typename T>
 cudaError_t
-launch_block_to_universal_impl(
+kvbm_kernels_launch_block_to_universal_impl(
     void* const* universal_ptrs_device, const void* const* block_ptrs_device, size_t num_blocks, size_t nh, size_t nl,
     size_t no, size_t nt, size_t hd, BlockLayout layout, cudaStream_t stream)
 {
@@ -427,7 +465,7 @@ launch_block_to_universal_impl(
   }
 
   constexpr int kBlockDim = 256;
-  int grid_dim = compute_grid_dim(total, kBlockDim);
+  int grid_dim = kvbm_kernels_compute_grid_dim(total, kBlockDim);
   if (grid_dim == 0) {
     return cudaSuccess;
   }
@@ -436,10 +474,10 @@ launch_block_to_universal_impl(
   T* const* universal_blocks = reinterpret_cast<T* const*>(const_cast<void* const*>(universal_ptrs_device));
 
   if (layout == BlockLayout::NHD) {
-    block_to_universal_kernel<T, BlockLayout::NHD><<<grid_dim, kBlockDim, 0, stream>>>(
+    kvbm_kernels_block_to_universal_kernel<T, BlockLayout::NHD><<<grid_dim, kBlockDim, 0, stream>>>(
         chunks, universal_blocks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd);
   } else {
-    block_to_universal_kernel<T, BlockLayout::HND><<<grid_dim, kBlockDim, 0, stream>>>(
+    kvbm_kernels_block_to_universal_kernel<T, BlockLayout::HND><<<grid_dim, kBlockDim, 0, stream>>>(
         chunks, universal_blocks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd);
   }
 
@@ -448,7 +486,7 @@ launch_block_to_universal_impl(
 
 template <typename T>
 cudaError_t
-launch_block_from_universal_impl(
+kvbm_kernels_launch_block_from_universal_impl(
     const void* const* universal_ptrs_device, void* const* block_ptrs_device, size_t num_blocks, size_t nh, size_t nl,
     size_t no, size_t nt, size_t hd, BlockLayout layout, cudaStream_t stream)
 {
@@ -464,7 +502,7 @@ launch_block_from_universal_impl(
   }
 
   constexpr int kBlockDim = 256;
-  int grid_dim = compute_grid_dim(total, kBlockDim);
+  int grid_dim = kvbm_kernels_compute_grid_dim(total, kBlockDim);
   if (grid_dim == 0) {
     return cudaSuccess;
   }
@@ -473,10 +511,10 @@ launch_block_from_universal_impl(
   T* const* chunks = reinterpret_cast<T* const*>(const_cast<void* const*>(block_ptrs_device));
 
   if (layout == BlockLayout::NHD) {
-    universal_to_block_kernel<T, BlockLayout::NHD><<<grid_dim, kBlockDim, 0, stream>>>(
+    kvbm_kernels_universal_to_block_kernel<T, BlockLayout::NHD><<<grid_dim, kBlockDim, 0, stream>>>(
         universal_blocks, chunks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd);
   } else {
-    universal_to_block_kernel<T, BlockLayout::HND><<<grid_dim, kBlockDim, 0, stream>>>(
+    kvbm_kernels_universal_to_block_kernel<T, BlockLayout::HND><<<grid_dim, kBlockDim, 0, stream>>>(
         universal_blocks, chunks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd);
   }
 
@@ -485,7 +523,7 @@ launch_block_from_universal_impl(
 
 template <typename T>
 cudaError_t
-launch_operational_copy_impl(
+kvbm_kernels_launch_operational_copy_impl(
     void* const* operational_ptrs_device, void* const* block_ptrs_device, size_t num_blocks, size_t nl, size_t no,
     size_t inner, OperationalCopyDirection direction, cudaStream_t stream)
 {
@@ -502,7 +540,7 @@ launch_operational_copy_impl(
   size_t chunk_elements = inner;
   size_t total_per_block = chunk_elements * chunk_count;
   size_t total = total_per_block * num_blocks;
-  int grid_dim = compute_grid_dim(total, kBlockDim);
+  int grid_dim = kvbm_kernels_compute_grid_dim(total, kBlockDim);
   if (grid_dim == 0) {
     return cudaSuccess;
   }
@@ -511,11 +549,11 @@ launch_operational_copy_impl(
 
   if (direction == OperationalCopyDirection::BlockToOperational) {
     const T* const* block_chunks = reinterpret_cast<const T* const*>(block_ptrs_device);
-    operational_pack_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
+    kvbm_kernels_operational_pack_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
         block_chunks, operational_blocks, chunk_count, chunk_elements, total_per_block, num_blocks);
   } else {
     T* const* block_chunks = reinterpret_cast<T* const*>(block_ptrs_device);
-    operational_unpack_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
+    kvbm_kernels_operational_unpack_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
         reinterpret_cast<const T* const*>(operational_ptrs_device), block_chunks, chunk_count, chunk_elements,
         total_per_block, num_blocks);
   }
@@ -535,16 +573,16 @@ kvbm_kernels_launch_universal_from_block(
 
   switch (dtype) {
     case TensorDataType::F16:
-      return launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F16>::type>(
+      return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F16>::type>(
           universal_ptrs_device, block_ptrs_device, num_blocks, nh, nl, no, nt, hd, layout, stream);
     case TensorDataType::BF16:
-      return launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::BF16>::type>(
+      return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::BF16>::type>(
           universal_ptrs_device, block_ptrs_device, num_blocks, nh, nl, no, nt, hd, layout, stream);
     case TensorDataType::F32:
-      return launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F32>::type>(
+      return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F32>::type>(
           universal_ptrs_device, block_ptrs_device, num_blocks, nh, nl, no, nt, hd, layout, stream);
     case TensorDataType::F64:
-      return launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F64>::type>(
+      return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F64>::type>(
           universal_ptrs_device, block_ptrs_device, num_blocks, nh, nl, no, nt, hd, layout, stream);
     default:
       return cudaErrorInvalidValue;
@@ -561,16 +599,16 @@ kvbm_kernels_launch_block_from_universal(
 
   switch (dtype) {
     case TensorDataType::F16:
-      return launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F16>::type>(
+      return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F16>::type>(
           universal_ptrs_device, block_ptrs_device, num_blocks, nh, nl, no, nt, hd, layout, stream);
     case TensorDataType::BF16:
-      return launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::BF16>::type>(
+      return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::BF16>::type>(
           universal_ptrs_device, block_ptrs_device, num_blocks, nh, nl, no, nt, hd, layout, stream);
     case TensorDataType::F32:
-      return launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F32>::type>(
+      return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F32>::type>(
           universal_ptrs_device, block_ptrs_device, num_blocks, nh, nl, no, nt, hd, layout, stream);
     case TensorDataType::F64:
-      return launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F64>::type>(
+      return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F64>::type>(
           universal_ptrs_device, block_ptrs_device, num_blocks, nh, nl, no, nt, hd, layout, stream);
     default:
       return cudaErrorInvalidValue;
@@ -642,19 +680,19 @@ kvbm_kernels_launch_operational_copy(
     }
     switch (dtype) {
       case TensorDataType::F16:
-        return launch_operational_copy_impl<typename DTypeTraits<TensorDataType::F16>::type>(
+        return kvbm_kernels_launch_operational_copy_impl<typename DTypeTraits<TensorDataType::F16>::type>(
             operational_ptrs_device, const_cast<void* const*>(block_ptrs_device), num_blocks, nl, no, inner, direction,
             stream);
       case TensorDataType::BF16:
-        return launch_operational_copy_impl<typename DTypeTraits<TensorDataType::BF16>::type>(
+        return kvbm_kernels_launch_operational_copy_impl<typename DTypeTraits<TensorDataType::BF16>::type>(
             operational_ptrs_device, const_cast<void* const*>(block_ptrs_device), num_blocks, nl, no, inner, direction,
             stream);
       case TensorDataType::F32:
-        return launch_operational_copy_impl<typename DTypeTraits<TensorDataType::F32>::type>(
+        return kvbm_kernels_launch_operational_copy_impl<typename DTypeTraits<TensorDataType::F32>::type>(
             operational_ptrs_device, const_cast<void* const*>(block_ptrs_device), num_blocks, nl, no, inner, direction,
             stream);
       case TensorDataType::F64:
-        return launch_operational_copy_impl<typename DTypeTraits<TensorDataType::F64>::type>(
+        return kvbm_kernels_launch_operational_copy_impl<typename DTypeTraits<TensorDataType::F64>::type>(
             operational_ptrs_device, const_cast<void* const*>(block_ptrs_device), num_blocks, nl, no, inner, direction,
             stream);
       default:
@@ -686,7 +724,7 @@ kvbm_kernels_launch_operational_copy(
     cudaMemcpyAttributes attr = {};
     attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
 
-    return run_on_batch_stream(stream, [&](cudaStream_t bs) -> cudaError_t {
+    return kvbm_kernels_run_on_batch_stream(stream, [&](cudaStream_t bs) -> cudaError_t {
 #if CUDART_VERSION >= 13000
       // CUDA 13.0+: 8-parameter API (no failIdx)
       return cudaMemcpyBatchAsync(
@@ -714,7 +752,7 @@ kvbm_kernels_launch_operational_copy(
     if (!is_8byte_aligned || !block_ptrs_device) {
       return cudaErrorNotSupported;
     }
-    return launch_operational_copy_vectorized(
+    return kvbm_kernels_launch_operational_copy_vectorized(
         operational_ptrs_device, const_cast<void* const*>(block_ptrs_device), num_blocks, nl, no, total_bytes,
         direction, stream);
   };
@@ -830,7 +868,7 @@ kvbm_kernels_memcpy_batch(
   cudaMemcpyAttributes attr = {};
   attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
 
-  cudaError_t err = run_on_batch_stream(stream, [&](cudaStream_t bs) -> cudaError_t {
+  cudaError_t err = kvbm_kernels_run_on_batch_stream(stream, [&](cudaStream_t bs) -> cudaError_t {
 #if CUDART_VERSION >= 13000
     // CUDA 13.0+: 8-parameter API (no failIdx)
     return cudaMemcpyBatchAsync(
@@ -984,20 +1022,19 @@ kvbm_kernels_is_stub_build()
   return false;
 }
 
-// Vectorized copy kernel for arbitrary pointer pairs.
-// Design choices:
-// - Each CUDA block handles one or more pairs (grid-strided loop)
-// - All threads in a block cooperate on the SAME pair (no warp divergence)
-// - Alignment is checked PER PAIR inside the loop (fixes bug where first pair's alignment was used for all)
-// - Prefers 16-byte > 8-byte > 4-byte vectorization for maximum memory bandwidth
-// - Falls back to byte-by-byte for remainder or unaligned data
-//
-// Performance notes:
-// - 128 threads per block provides good occupancy
-// - int4 (16-byte) loads achieve peak memory bandwidth on modern GPUs
-// - Alignment check is cheap compared to memory access time
+/// Vectorized memory copy kernel for arbitrary device-visible pointer pairs.
+///
+/// Each block handles one or more (src, dst) pairs using a grid-strided loop.
+/// Per-pair alignment detection selects the widest safe vector width:
+///   - 16-byte (int4) if both pointers are 16-byte aligned
+///   - 8-byte  (int2) if both pointers are 8-byte aligned
+///   - 4-byte  (int)  if both pointers are 4-byte aligned
+///   - 1-byte fallback for any remainder
+///
+/// Source and destination pointers may be device memory or pinned host memory —
+/// any memory reachable via CUDA unified addressing is valid.
 __global__ void
-vectorized_copy(void** src_ptrs, void** dst_ptrs, size_t copy_size_in_bytes, int num_pairs)
+kvbm_kernels_vectorized_copy_kernel(void** src_ptrs, void** dst_ptrs, size_t copy_size_in_bytes, int num_pairs)
 {
   int pair_id = blockIdx.x;
   int block_stride = gridDim.x;
@@ -1014,27 +1051,27 @@ vectorized_copy(void** src_ptrs, void** dst_ptrs, size_t copy_size_in_bytes, int
 
     size_t vectorized_bytes = 0;
 
-    if ((src_addr % 16 == 0) && (dst_addr % 16 == 0) && (copy_size_in_bytes >= 16)) {
+    if (((src_addr & 0xF) == 0) && ((dst_addr & 0xF) == 0) && (copy_size_in_bytes >= 16)) {
       // Best case: 16-byte vectorized copy using int4
-      size_t num_int4 = copy_size_in_bytes / 16;
+      size_t num_int4 = copy_size_in_bytes >> 4;
       for (size_t i = tid; i < num_int4; i += block_size) {
         reinterpret_cast<int4*>(dst)[i] = reinterpret_cast<const int4*>(src)[i];
       }
-      vectorized_bytes = num_int4 * 16;
-    } else if ((src_addr % 8 == 0) && (dst_addr % 8 == 0) && (copy_size_in_bytes >= 8)) {
+      vectorized_bytes = num_int4 << 4;
+    } else if (((src_addr & 0x7) == 0) && ((dst_addr & 0x7) == 0) && (copy_size_in_bytes >= 8)) {
       // 8-byte vectorized copy using int2 (matches LMCache int64_t approach)
-      size_t num_int2 = copy_size_in_bytes / 8;
+      size_t num_int2 = copy_size_in_bytes >> 3;
       for (size_t i = tid; i < num_int2; i += block_size) {
         reinterpret_cast<int2*>(dst)[i] = reinterpret_cast<const int2*>(src)[i];
       }
-      vectorized_bytes = num_int2 * 8;
-    } else if ((src_addr % 4 == 0) && (dst_addr % 4 == 0) && (copy_size_in_bytes >= 4)) {
+      vectorized_bytes = num_int2 << 3;
+    } else if (((src_addr & 0x3) == 0) && ((dst_addr & 0x3) == 0) && (copy_size_in_bytes >= 4)) {
       // 4-byte vectorized copy
-      size_t num_int = copy_size_in_bytes / 4;
+      size_t num_int = copy_size_in_bytes >> 2;
       for (size_t i = tid; i < num_int; i += block_size) {
         reinterpret_cast<int*>(dst)[i] = reinterpret_cast<const int*>(src)[i];
       }
-      vectorized_bytes = num_int * 4;
+      vectorized_bytes = num_int << 2;
     }
 
     // Handle remaining bytes (from vectorized remainder or full scalar fallback)
@@ -1069,7 +1106,8 @@ kvbm_kernels_launch_vectorized_copy(
   constexpr int kBlockDim = 128;
   int grid_dim = std::min(num_pairs, 65535);
 
-  vectorized_copy<<<grid_dim, kBlockDim, 0, stream>>>(src_ptrs_device, dst_ptrs_device, copy_size_bytes, num_pairs);
+  kvbm_kernels_vectorized_copy_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+      src_ptrs_device, dst_ptrs_device, copy_size_bytes, num_pairs);
 
   return cudaGetLastError();
 }

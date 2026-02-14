@@ -169,7 +169,7 @@ pub fn is_memcpy_batch_available() -> bool {
 /// ```ignore
 /// #[test]
 /// fn my_cuda_test() {
-///     if dynamo_kvbm_kernels::is_using_stubs() {
+///     if kvbm_kernels::is_using_stubs() {
 ///         eprintln!("Skipping CUDA test: stub kernels in use");
 ///         return;
 ///     }
@@ -314,22 +314,30 @@ pub unsafe fn block_from_universal(
     }
 }
 
-/// Launch vectorized copy between arbitrary pointer pairs.
+/// Launch vectorized copy between arbitrary device-visible pointer pairs.
 ///
 /// This kernel automatically selects optimal vectorization (4/8/16 bytes) based on
 /// pointer alignment. It is useful for copying between non-contiguous memory regions
 /// where each pair has the same copy size.
 ///
+/// Both source and destination pointers may refer to any device-visible memory,
+/// including device allocations (`cudaMalloc`) and pinned host memory
+/// (`cudaMallocHost` / `cudaHostAlloc`). CUDA unified addressing resolves the
+/// actual location at runtime.
+///
 /// # Arguments
-/// * `src_ptrs_device` - Device pointer to array of source pointers
-/// * `dst_ptrs_device` - Device pointer to array of destination pointers
-/// * `copy_size_bytes` - Size of each copy in bytes
+/// * `src_ptrs_device` - Device pointer to array of source pointers (each pointing to device-visible memory)
+/// * `dst_ptrs_device` - Device pointer to array of destination pointers (each pointing to device-visible memory)
+/// * `copy_size_bytes` - Size of each copy in bytes (same for all pairs)
 /// * `num_pairs` - Number of pointer pairs to copy
 /// * `stream` - CUDA stream for async execution
 ///
 /// # Safety
-/// The caller must ensure all pointers are valid device pointers and the copy
-/// sizes do not exceed the allocated memory at each pointer.
+/// - All pointers in the src/dst arrays must be valid device-visible pointers
+///   (device memory or pinned host memory)
+/// - Each pointer must have at least `copy_size_bytes` bytes accessible
+/// - The pointer arrays themselves must be in device memory with at least `num_pairs` entries
+/// - `stream` must be a valid CUDA stream handle
 pub unsafe fn vectorized_copy(
     src_ptrs_device: *mut *mut c_void,
     dst_ptrs_device: *mut *mut c_void,

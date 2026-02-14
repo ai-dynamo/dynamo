@@ -55,7 +55,7 @@ dynamo-mocker = { path = "lib/mocker", version = "0.9.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "0.9.0", features = ["metrics"] }
 dynamo-async-openai = { path = "lib/async-openai", version = "0.9.0", features = ["byot"] }
 dynamo-parsers = { path = "lib/parsers", version = "0.9.0" }
-dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.9.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.9.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "0.9.0" }
 
 # External dependencies
