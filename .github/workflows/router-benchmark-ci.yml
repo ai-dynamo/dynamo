@@ -40,24 +40,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: false  # Runner may not have git-lfs; benchmark does not need LFS
-      # ECR only (runner may not have aws CLI; use SDK-based action)
-      - name: Login to Amazon ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
-        with:
-          mask-password: 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      # Pull from Azure ACR; runner has ACR access (cluster secret / pre-configured docker)
       - name: Pull image
         shell: bash
         env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
-          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
-          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+          docker pull ${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Router Benchmark Tests (gpu_4)
         uses: ./.github/actions/pytest
         with:
