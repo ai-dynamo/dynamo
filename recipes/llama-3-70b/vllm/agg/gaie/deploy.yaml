@@ -57,7 +57,7 @@ spec:
         - name: HF_HOME
           value: /opt/models
       replicas: 1
-    VllmPrefillWorker:
+    VllmDecodeWorker:
       componentType: worker
       envFromSecret: hf-token-secret
       volumeMounts:

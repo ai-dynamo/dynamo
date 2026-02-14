@@ -959,14 +959,24 @@ pub unsafe extern "C" fn destroy(handle: RouterHandlesPtr) {
 /// - Call `free_request()` when the stream ends
 /// - Call `free_routing_result()` to free the result
 ///
+/// # Arguments
+/// - `handle`: Router handles created by `create_routers`
+/// - `request_json`: JSON string of the OpenAI-compatible chat completion request
+/// - `pods_json`: JSON string of available pods from the EPP plugin (nullable).
+///   When provided, restricts routing to the given set of pods.
+///   Expected format: JSON array of objects with at least `"address"` field.
+/// - `out_result`: Output routing result
+///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
 /// - `request_json` must be a valid null-terminated C string containing JSON
+/// - `pods_json` must be a valid null-terminated C string containing JSON, or null
 /// - `out_result` must be a valid pointer
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn route_request(
     handle: RouterHandlesPtr,
     request_json: *const c_char,
+    pods_json: *const c_char,
     out_result: *mut CRoutingResult,
 ) -> QueryRouterResult {
     if handle.is_null() || request_json.is_null() || out_result.is_null() {
@@ -974,6 +984,25 @@ pub unsafe extern "C" fn route_request(
     }
 
     let handles = unsafe { &*handle };
+
+    // Parse pods JSON if provided (nullable — when null, routing uses discovery as before)
+    let _pods: Option<Vec<serde_json::Value>> = if !pods_json.is_null() {
+        match unsafe { CStr::from_ptr(pods_json) }.to_str() {
+            Ok(s) if !s.is_empty() => match serde_json::from_str::<Vec<serde_json::Value>>(s) {
+                Ok(pods) => {
+                    tracing::info!(pod_count = pods.len(), "Received pods from EPP plugin");
+                    Some(pods)
+                }
+                Err(e) => {
+                    tracing::error!(error = ?e, "Failed to parse pods JSON");
+                    return QueryRouterResult::ErrInvalidParam;
+                }
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     // Get preprocessor
     let preprocessor = match &handles.preprocessor {

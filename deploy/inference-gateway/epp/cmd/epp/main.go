@@ -42,6 +42,7 @@ import (
 
 	// Dynamo plugins
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
+	labelfilter "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/label_filter"
 )
 
 func main() {
@@ -51,6 +52,9 @@ func main() {
 	//   - PreRequest: Registers request with router bookkeeping after scheduling is finalized
 	//   - ResponseComplete: Cleans up router bookkeeping when response completes
 	plugins.Register("kv-aware-scorer", dynscorer.KVAwareScorerFactory)
+
+	// - label-filter: Filters pods by a configured label key/value pair
+	plugins.Register("label-filter", labelfilter.LabelFilterFactory)
 
 	// Run using standard GAIE runner (it registers built-in plugins automatically)
 	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {

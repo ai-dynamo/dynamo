@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llama3-70b-disagg-sn
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Epp:
+      envFromSecret: hf-token-secret
+      componentType: epp
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+      eppConfig:
+        # This configuration uses Dynamo's KV-aware scorer for intelligent routing
+        config:
+          # Plugins define the behavior of EPP
+          plugins:
+            - type: label-filter
+            - type: dyn-kv-prefill
+            - type: dyn-kv
+            - type: max-score-picker
+            - type: pd-profile-handler
+          # Scheduling profiles configure which plugins are used and their weights
+          schedulingProfiles:
+          - name: prefill
+            plugins:
+            - pluginRef: label-filter
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "prefill"
+                allowsNoLabel: false
+            - pluginRef: dyn-kv-prefill
+              weight: 1.0
+            - pluginRef: picker  
+          - name: decode
+            plugins:
+            - pluginRef: label-filter
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "decode"
+                allowsNoLabel: false
+            - pluginRef: dyn-kv
+              weight: 1.0
+            - pluginRef: picker  
+    Frontend:
+      componentType: frontend
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          workingDir: /workspace/examples/backends/vllm
+      envs:
+        - name: HF_HOME
+          value: /opt/models
+      replicas: 1
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: MODEL_PATH
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: HF_HOME
+              value: /opt/models
+          args:
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 2 --data-parallel-size 1 --is-prefill-worker --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          workingDir: /workspace/examples/backends/vllm
+      replicas: 2
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: MODEL_PATH
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
+            - name: HF_HOME
+              value: /opt/models
+          args:
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          workingDir: /workspace/examples/backends/vllm
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

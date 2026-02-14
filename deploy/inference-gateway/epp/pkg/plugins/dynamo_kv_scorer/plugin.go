@@ -271,7 +271,7 @@ func (k *KVAwareScorer) Score(
 ) map[schedtypes.Pod]float64 {
 	logger := log.FromContext(ctx)
 
-	workerID, prefillWorkerID, tokenData, err := k.callDynamoRouter(ctx, req)
+	workerID, prefillWorkerID, tokenData, err := k.callDynamoRouter(ctx, req, pods)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "Dynamo call failed; proceeding without worker id")
 	} else if workerID != "" {
@@ -437,6 +437,7 @@ func (k *KVAwareScorer) ResponseComplete(
 func (k *KVAwareScorer) callDynamoRouter(
 	ctx context.Context,
 	req *schedtypes.LLMRequest,
+	pods []schedtypes.Pod,
 ) (workerID string, prefillWorkerID string, tokenData []int64, err error) {
 	logger := log.FromContext(ctx)
 
@@ -472,7 +473,7 @@ func (k *KVAwareScorer) callDynamoRouter(
 	defer C.free(unsafe.Pointer(cRequestJSON))
 
 	var result C.CRoutingResult
-	rc := C.route_request(router, cRequestJSON, &result)
+	rc := C.route_request(router, cRequestJSON, pods, &result)
 	if rc != C.QUERY_ROUTER_OK {
 		return "", "", nil, fmt.Errorf("route_request failed with code %d", rc)
 	}
