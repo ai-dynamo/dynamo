@@ -84,7 +84,7 @@ IMAGE_TAG_RE = re.compile(
 
 # Wheel filenames and pip install specs:
 #   ai_dynamo_runtime-0.7.0-cp310-..., ai-dynamo==0.8.1, ai-dynamo[vllm]==0.8.1.post1
-WHEEL_FILE_RE = re.compile(r"(ai[_-]dynamo(?:[_-]runtime)?)" rf"([=-]=?)({_VER})")
+WHEEL_FILE_RE = re.compile(r"(ai[_-]dynamo(?:[_-]runtime)?)" rf"(==|-)({_VER})")
 
 # dynamoVersion: "0.6.0" or "0.9.0.post1" in operator samples
 DYNAMO_VERSION_FIELD_RE = re.compile(rf'(dynamoVersion:\s*")({_VER})(")')

@@ -229,11 +229,7 @@ jobs:
         with:
           go-version-file: main-checkout/deploy/operator/go.mod
 
-      - name: Install yq
-        if: env.SKIP_REST != 'true'
-        run: |
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
+      # yq already installed in "Extract backend metadata" step above
 
       - name: Install controller-gen
         if: env.SKIP_REST != 'true'
@@ -324,18 +320,17 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -s -m "chore: bump version to ${VERSION}" -m "$(cat <<EOF
-          Automated version bump from release v${VERSION}.
-
-          Updates:
-          - Core version files (pyproject.toml, Cargo.toml, setup.py)
-          - Helm chart versions
-          - Operator CRD source and regenerated files
-          - Documentation (support matrix, feature matrix, release artifacts)
-          - Container image tags across docs, recipes, and examples
-          - Cargo.lock files
-          EOF
-          )"
+          printf -v MSG '%s\n' \
+            "Automated version bump from release v${VERSION}." \
+            "" \
+            "Updates:" \
+            "- Core version files (pyproject.toml, Cargo.toml, setup.py)" \
+            "- Helm chart versions" \
+            "- Operator CRD source and regenerated files" \
+            "- Documentation (support matrix, feature matrix, release artifacts)" \
+            "- Container image tags across docs, recipes, and examples" \
+            "- Cargo.lock files"
+          git commit -s -m "chore: bump version to ${VERSION}" -m "$MSG"
 
       - name: Push branch
         if: env.SKIP_REST != 'true'
@@ -368,37 +363,37 @@ jobs:
             TITLE="chore: bump version to ${VERSION}"
           fi
 
+          printf -v BODY '%s\n' \
+            "## Summary" \
+            "" \
+            "Automated version bump from release v${VERSION}." \
+            "" \
+            "**Backend versions** (derived from \`container/context.yaml\` on the release tag):" \
+            "- vLLM: \`${VLLM_VER}\`" \
+            "- SGLang: \`${SGLANG_VER}\`" \
+            "- TRT-LLM: \`${TRTLLM_VER}\`" \
+            "- NIXL: \`${NIXL_VER}\`" \
+            "" \
+            "**Scope flags**: \`${SKIP_FLAGS:-all components updated}\`" \
+            "" \
+            "### Changes" \
+            "" \
+            "- **Core version files**: pyproject.toml, Cargo.toml, lib/bindings/python/Cargo.toml, lib/gpu_memory_service/setup.py" \
+            "- **Helm charts**: CRDs, platform, operator Chart.yaml + regenerated README" \
+            "- **Operator CRDs**: Go source doc comments updated, CRDs regenerated via \`make generate && make manifests\`" \
+            "- **Reference docs**: support-matrix.md, feature-matrix.md, release-artifacts.md" \
+            "- **Image tags**: Updated across README, docs, recipes, and examples (discovery-based scan)" \
+            "- **Cargo.lock**: Regenerated" \
+            "" \
+            "## Test plan" \
+            "" \
+            "- [ ] Verify version strings are correct in key files" \
+            "- [ ] Verify CRD files pass \`make check\` in deploy/operator/" \
+            "- [ ] Verify no stale version references remain (\`python3 .github/scripts/bump_version.py --check\`)"
+
           gh pr create \
             --base main \
             --title "$TITLE" \
-            --body "$(cat <<PR_EOF
-          ## Summary
-
-          Automated version bump from release v${VERSION}.
-
-          **Backend versions** (derived from \`container/context.yaml\` on the release tag):
-          - vLLM: \`${VLLM_VER}\`
-          - SGLang: \`${SGLANG_VER}\`
-          - TRT-LLM: \`${TRTLLM_VER}\`
-          - NIXL: \`${NIXL_VER}\`
-
-          **Scope flags**: \`${SKIP_FLAGS:-all components updated}\`
-
-          ### Changes
-
-          - **Core version files**: pyproject.toml, Cargo.toml, lib/bindings/python/Cargo.toml, lib/gpu_memory_service/setup.py
-          - **Helm charts**: CRDs, platform, operator Chart.yaml + regenerated README
-          - **Operator CRDs**: Go source doc comments updated, CRDs regenerated via \`make generate && make manifests\`
-          - **Reference docs**: support-matrix.md, feature-matrix.md, release-artifacts.md
-          - **Image tags**: Updated across README, docs, recipes, and examples (discovery-based scan)
-          - **Cargo.lock**: Regenerated
-
-          ## Test plan
-
-          - [ ] Verify version strings are correct in key files
-          - [ ] Verify CRD files pass \`make check\` in deploy/operator/
-          - [ ] Verify no stale version references remain (\`python3 .github/scripts/bump_version.py --check\`)
-          PR_EOF
-          )" \
+            --body "$BODY" \
             --label "release" \
             --label "chore"
