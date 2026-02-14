@@ -698,8 +698,10 @@ mod tests {
                 .collect();
             expected_data.push(data.clone());
             let slice = stream.clone_htod(&data)?;
-            let (ptr, _guard) = slice.device_ptr(&stream);
-            src_ptr_values.push(ptr as usize);
+            {
+                let (ptr, _guard) = slice.device_ptr(&stream);
+                src_ptr_values.push(ptr as usize);
+            }
             src_slices.push(slice);
         }
 
@@ -709,8 +711,10 @@ mod tests {
 
         for _ in 0..num_pairs {
             let mut slice = unsafe { stream.alloc::<u8>(copy_size)? };
-            let (ptr, _guard) = slice.device_ptr_mut(&stream);
-            dst_ptr_values.push(ptr as usize);
+            {
+                let (ptr, _guard) = slice.device_ptr_mut(&stream);
+                dst_ptr_values.push(ptr as usize);
+            }
             dst_slices.push(slice);
         }
 

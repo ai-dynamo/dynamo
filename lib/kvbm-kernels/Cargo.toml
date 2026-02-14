@@ -39,6 +39,12 @@ permute_kernels = []
 cudarc = { workspace = true }
 once_cell = "1.19"
 
+[dev-dependencies]
+ndarray = "0.16"
+half = "2"
+rand = { workspace = true }
+cudarc = { workspace = true, features = ["f16"] }
+
 [build-dependencies]
 dynamo-config = { path = "../config" }
 cc = "1.0"
