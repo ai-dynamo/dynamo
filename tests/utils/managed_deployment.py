@@ -133,7 +133,7 @@ class ServiceSpec:
 
     @property
     def tensor_parallel_size(self) -> int:
-        """Get tensor parallel size from vLLM arguments"""
+        """Get tensor parallel size from container arguments."""
         try:
             args_list = self._spec["extraPodSpec"]["mainContainer"]["args"]
         except KeyError:
