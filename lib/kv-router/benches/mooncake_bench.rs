@@ -8,6 +8,7 @@ use dynamo_kv_router::indexer::{
 };
 use dynamo_kv_router::protocols::RouterEvent;
 use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
+use dynamo_tokens::compute_hash_v2;
 use rand::prelude::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -254,6 +255,17 @@ fn tokens_from_request(request: &MooncakeRequest, block_size: u32) -> Vec<u32> {
         .collect()
 }
 
+const SALT_HASH: u64 = 1337;
+
+/// Compute the LocalBlockHash for a block-level hash_id the same way the mock
+/// engine does: expand to `block_size` repeated u32 tokens, then XXH3 hash.
+fn local_block_hash_from_id(hash_id: u64, block_size: u32) -> LocalBlockHash {
+    let tokens: Vec<u32> = (0..block_size).map(|_| hash_id as u32).collect();
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(tokens.as_ptr() as *const u8, tokens.len() * 4) };
+    LocalBlockHash(compute_hash_v2(bytes, SALT_HASH))
+}
+
 /// Create a styled progress bar, optionally with a known total length.
 fn make_progress_bar(total: Option<u64>) -> ProgressBar {
     let progress = match total {
@@ -418,7 +430,7 @@ fn prepare_worker_traces(
                         request
                             .hash_ids
                             .iter()
-                            .map(|id| LocalBlockHash(*id))
+                            .map(|id| local_block_hash_from_id(*id, args.block_size))
                             .collect(),
                     ),
                 })
