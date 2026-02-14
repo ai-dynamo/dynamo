@@ -138,6 +138,7 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
+        let (routing_token_ids, block_mm_infos) = Self::routing_inputs(request);
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
         let preselected_id = match phase {
@@ -151,7 +152,6 @@ impl KvPushRouter {
         };
 
         let Some(id) = preselected_id else {
-            let (routing_token_ids, block_mm_infos) = Self::routing_inputs(request);
             let (best_worker, overlap_amount) = self
                 .chooser
                 .find_best_match(
@@ -203,14 +203,14 @@ impl KvPushRouter {
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
-            .get_overlap_blocks(&request.token_ids, worker)
+            .get_overlap_blocks(routing_token_ids, worker)
             .await?;
 
         if !is_query_only {
             self.chooser
                 .add_request(
                     context_id.to_string(),
-                    &request.token_ids,
+                    routing_token_ids,
                     overlap_blocks,
                     expected_output_tokens,
                     worker,

@@ -13,12 +13,26 @@ def image_to_bytes(img: Any) -> bytes:
     """Convert a supported image object to PNG bytes for hashing."""
     from PIL import Image
 
+    if isinstance(img, bytes):
+        return img
+
     if isinstance(img, Image.Image):
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
-    if isinstance(img, bytes):
-        return img
+
+    # Frontend-decoding can provide image tensors as numpy arrays.
+    try:
+        import numpy as np
+
+        if isinstance(img, np.ndarray):
+            pil_img = Image.fromarray(img)
+            buf = io.BytesIO()
+            pil_img.save(buf, format="PNG")
+            return buf.getvalue()
+    except ImportError:
+        pass
+
     raise TypeError(f"Unsupported image type for hashing: {type(img)}")
 
 
