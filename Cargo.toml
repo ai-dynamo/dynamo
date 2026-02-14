@@ -10,6 +10,7 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
+    "lib/kvbm-kernels",
     "lib/kvbm-logical",
     "lib/async-openai",
     "lib/parsers",
@@ -54,6 +55,7 @@ dynamo-mocker = { path = "lib/mocker", version = "0.9.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "0.9.0", features = ["metrics"] }
 dynamo-async-openai = { path = "lib/async-openai", version = "0.9.0", features = ["byot"] }
 dynamo-parsers = { path = "lib/parsers", version = "0.9.0" }
+dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.9.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "0.9.0" }
 
 # External dependencies
@@ -71,7 +73,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.17.8", features = ["cuda-12020"] }
+cudarc = { version = "0.19.0", features = ["cuda-12020"] }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
