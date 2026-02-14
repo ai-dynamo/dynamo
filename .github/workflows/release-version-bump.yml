@@ -68,11 +68,15 @@ jobs:
     steps:
       - name: Determine tag
         id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
+          if [ "$EVENT_NAME" = "release" ]; then
+            TAG="$RELEASE_TAG"
           else
-            TAG="${{ inputs.tag }}"
+            TAG="$INPUT_TAG"
           fi
 
           # Validate tag format: vX.Y.Z or vX.Y.Z.postN
@@ -95,11 +99,10 @@ jobs:
       # Post-release gate: fail or skip based on behavior setting
       - name: Post-release gate
         if: steps.tag.outputs.is_post == 'true' && github.event_name == 'release'
+        env:
+          BEHAVIOR: ${{ inputs.post_release_behavior || 'fail' }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          # Default behavior for auto-triggered post-releases
-          BEHAVIOR="${{ inputs.post_release_behavior || 'fail' }}"
-          TAG="${{ steps.tag.outputs.tag }}"
-
           if [ "$BEHAVIOR" = "skip" ]; then
             echo "::notice::Post-release $TAG detected. Skipping auto version bump (post_release_behavior=skip)."
             echo "To bump this post-release, run this workflow manually via Actions > workflow_dispatch with component checkboxes."
@@ -143,6 +146,9 @@ jobs:
       - name: Extract backend metadata
         if: env.SKIP_REST != 'true'
         id: metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_CREATED_AT: ${{ github.event.release.created_at }}
         run: |
           set -euo pipefail
           CTX="release-ref/container/context.yaml"
@@ -183,8 +189,8 @@ jobs:
           echo "cuda_versions_trtllm=$CUDA_TRTLLM" >> $GITHUB_OUTPUT
 
           # Release date
-          if [ "${{ github.event_name }}" = "release" ]; then
-            RELEASE_DATE=$(date -d "${{ github.event.release.created_at }}" "+%b %d, %Y" 2>/dev/null || date "+%b %d, %Y")
+          if [ "$EVENT_NAME" = "release" ]; then
+            RELEASE_DATE=$(date -d "$RELEASE_CREATED_AT" "+%b %d, %Y" 2>/dev/null || date "+%b %d, %Y")
           else
             RELEASE_DATE=$(date "+%b %d, %Y")
           fi
@@ -318,9 +324,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -s -m "$(cat <<EOF
-          chore: bump version to ${VERSION}
-
+          git commit -s -m "chore: bump version to ${VERSION}" -m "$(cat <<EOF
           Automated version bump from release v${VERSION}.
 
           Updates:
@@ -336,18 +340,28 @@ jobs:
       - name: Push branch
         if: env.SKIP_REST != 'true'
         working-directory: main-checkout
-        run: git push -u origin "${{ env.branch }}"
+        run: |
+          BRANCH="${{ env.branch }}"
+          # Delete remote branch if it already exists (stale from a previous run)
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Remote branch $BRANCH already exists, deleting stale branch..."
+            git push origin --delete "$BRANCH"
+          fi
+          git push -u origin "$BRANCH"
 
       - name: Create PR
         if: env.SKIP_REST != 'true'
         working-directory: main-checkout
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          IS_POST: ${{ steps.tag.outputs.is_post }}
+          SKIP_FLAGS: ${{ steps.flags.outputs.skip_flags }}
+          VLLM_VER: ${{ steps.metadata.outputs.vllm_version }}
+          SGLANG_VER: ${{ steps.metadata.outputs.sglang_version }}
+          TRTLLM_VER: ${{ steps.metadata.outputs.trtllm_version }}
+          NIXL_VER: ${{ steps.metadata.outputs.nixl_version }}
         run: |
-          VERSION="${{ steps.tag.outputs.version }}"
-          IS_POST="${{ steps.tag.outputs.is_post }}"
-          SKIP_FLAGS="${{ steps.flags.outputs.skip_flags }}"
-
           if [ "$IS_POST" = "true" ]; then
             TITLE="chore: bump version to ${VERSION} (post-release)"
           else
@@ -357,16 +371,16 @@ jobs:
           gh pr create \
             --base main \
             --title "$TITLE" \
-            --body "$(cat <<EOF
+            --body "$(cat <<PR_EOF
           ## Summary
 
           Automated version bump from release v${VERSION}.
 
           **Backend versions** (derived from \`container/context.yaml\` on the release tag):
-          - vLLM: \`${{ steps.metadata.outputs.vllm_version }}\`
-          - SGLang: \`${{ steps.metadata.outputs.sglang_version }}\`
-          - TRT-LLM: \`${{ steps.metadata.outputs.trtllm_version }}\`
-          - NIXL: \`${{ steps.metadata.outputs.nixl_version }}\`
+          - vLLM: \`${VLLM_VER}\`
+          - SGLang: \`${SGLANG_VER}\`
+          - TRT-LLM: \`${TRTLLM_VER}\`
+          - NIXL: \`${NIXL_VER}\`
 
           **Scope flags**: \`${SKIP_FLAGS:-all components updated}\`
 
@@ -384,7 +398,7 @@ jobs:
           - [ ] Verify version strings are correct in key files
           - [ ] Verify CRD files pass \`make check\` in deploy/operator/
           - [ ] Verify no stale version references remain (\`python3 .github/scripts/bump_version.py --check\`)
-          EOF
+          PR_EOF
           )" \
             --label "release" \
             --label "chore"

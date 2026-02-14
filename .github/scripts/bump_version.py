@@ -502,14 +502,22 @@ def update_release_artifacts(
             f"| [Docs](https://docs.nvidia.com/dynamo/v-{ver_dashed}/) |"
         )
         # Insert after the table header row
-        content = re.sub(
-            r"(### GitHub Releases\n\n\| Version \|.*\n\|[-| ]+\n)",
-            rf"\1{new_row}\n",
-            content,
-        )
-        changes.append(
-            f"release-artifacts.md: added v{new_ver} to GitHub Releases table"
-        )
+        table_pattern = r"(### GitHub Releases\n\n\| Version \|.*\n\|[-| ]+\n)"
+        if re.search(table_pattern, content):
+            content = re.sub(
+                table_pattern,
+                rf"\1{new_row}\n",
+                content,
+            )
+            changes.append(
+                f"release-artifacts.md: added v{new_ver} to GitHub Releases table"
+            )
+        else:
+            print(
+                "WARNING: Could not find GitHub Releases table pattern in "
+                "release-artifacts.md. Skipping table row insertion.",
+                file=sys.stderr,
+            )
 
     if content != original:
         changes.append(f"release-artifacts.md: updated Current Release to v{new_ver}")
@@ -554,7 +562,7 @@ def scan_and_replace(repo: Path, new_ver: str, dry_run: bool) -> list[str]:
                 continue
 
             try:
-                content = filepath.read_text(encoding="utf-8", errors="ignore")
+                content = filepath.read_text(encoding="utf-8", errors="surrogateescape")
             except (OSError, UnicodeDecodeError):
                 continue
 
@@ -578,7 +586,9 @@ def scan_and_replace(repo: Path, new_ver: str, dry_run: bool) -> list[str]:
             if new_content != content:
                 changes.append(f"{rel_path}: updated version references -> {new_ver}")
                 if not dry_run:
-                    filepath.write_text(new_content)
+                    filepath.write_text(
+                        new_content, encoding="utf-8", errors="surrogateescape"
+                    )
 
     return changes
 
@@ -622,27 +632,35 @@ def check_stale_versions(repo: Path, expected_ver: str) -> list[str]:
 
             try:
                 lines = filepath.read_text(
-                    encoding="utf-8", errors="ignore"
+                    encoding="utf-8", errors="surrogateescape"
                 ).splitlines()
             except (OSError, UnicodeDecodeError):
                 continue
 
             for lineno, line in enumerate(lines, 1):
+                # Track spans already reported to avoid double-reporting
+                # overlapping matches (e.g., IMAGE_TAG_RE covers SHORT_IMAGE_TAG_RE)
+                reported_spans: set[tuple[int, int]] = set()
+
                 for m in IMAGE_TAG_RE.finditer(line):
                     ver = m.group(2)
                     if ver != expected_ver and not ver.startswith(expected_ver + "."):
                         stale.append(
                             f"STALE: {rel_path}:{lineno} -- {m.group(0)} (expected {expected_ver})"
                         )
+                    reported_spans.add((m.start(), m.end()))
+
                 for m in SHORT_IMAGE_TAG_RE.finditer(line):
-                    ver = m.group(2)
-                    # Avoid double-reporting if IMAGE_TAG_RE already matched
-                    if IMAGE_TAG_RE.search(line):
+                    # Skip if this match overlaps with an already-reported IMAGE_TAG_RE match
+                    if any(m.start() >= s and m.end() <= e for s, e in reported_spans):
                         continue
+                    ver = m.group(2)
                     if ver != expected_ver and not ver.startswith(expected_ver + "."):
                         stale.append(
                             f"STALE: {rel_path}:{lineno} -- {m.group(0)} (expected {expected_ver})"
                         )
+                    reported_spans.add((m.start(), m.end()))
+
                 for m in WHEEL_FILE_RE.finditer(line):
                     ver = m.group(3)
                     if ver != expected_ver and not ver.startswith(expected_ver + "."):
