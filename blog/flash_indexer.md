@@ -16,9 +16,9 @@ This is the story of how we built that index---the **Flash Indexer**---evolving 
 
 Every block in the system carries a few pieces of identity:
 
-- **Local block hash** (`u64`): A hash of the tokens *within* a single block (e.g., 64 tokens). Content-addressable---two blocks with the same tokens have the same local hash, regardless of where they appear in a sequence.
+- **Local block hash** (`u64`): A hash of the tokens *within* a single block (e.g., 64 tokens). Content-addressable---two blocks with the same tokens have the same local hash, regardless of where they appear in a sequence. Crucially, this is also what the frontend computes on the query side: the Dynamo frontend controls the local hashing algorithm directly, so both the event write path and the query read path produce the same local hashes for the same tokens.
 
-- **External sequence block hash** (`u64`): A cumulative rolling hash of the entire sequence up to and including this block. This is what makes a block's identity *positional*: two blocks with identical tokens but different prefixes produce different sequence hashes.
+- **External sequence block hash** (`u64`): A cumulative rolling hash of the entire sequence up to and including this block. This is what makes a block's identity *positional*: two blocks with identical tokens but different prefixes produce different sequence hashes. Unlike local hashes, sequence hashes are typically produced by the inference engine itself, and we generally cannot control the engine's hashing algorithm---unless a contract is enforced (more on this shortly).
 
   ```
   seq_hash[0] = local_hash[0]
@@ -27,9 +27,28 @@ Every block in the system carries a few pieces of identity:
 
 - **Locale info**: Where the block physically lives. This includes the worker instance, data-parallel rank, LoRA adapter, storage medium, and more. For simplicity, we'll just consider *worker identity* throughout this post.
 
+#### Why Chunk Hashes?
+
+There is a deliberate asymmetry here. Local hashes are *chunk hashes*---they depend only on the tokens inside a single block, with no rolling context from the prefix. This is a conscious design choice driven by the read path.
+
+When a `find_matches` request arrives, the router frontend needs to hash the query's tokens to produce the local hashes it will probe the index with. There are *many* frontends serving a high volume of requests, and each request may span hundreds or thousands of blocks. If local hashes required rolling context (knowing the full prefix to compute each block's hash), the frontend would need to compute a sequential rolling hash for every position---serialized, expensive, and hard to parallelize. With chunk hashes, each block's hash is independent: the frontend can hash them cheaply and in parallel.
+
+The engine-side publisher, by contrast, only needs to compute the rolling sequence hash for its own KV events, and there's one publisher per engine processing events sequentially. The asymmetry in workload---many frontends doing reads vs. one publisher per engine doing writes---is what makes chunk hashes the right default for local hashes.
+
+But this comes at a cost. Chunk hashes do not uniquely identify a block's position in a sequence. This isn't a hash collision in the classical sense---it's a fundamental property. Consider the sequence: *"Predict the next token. Learn from the error. Predict the next token."* Blocks 0 and 2 contain identical tokens, so they produce the same chunk hash. Yet they occupy entirely different positions in the sequence with entirely different histories. A rolling sequence hash would distinguish them; a chunk hash cannot. The same phenomenon arises constantly in practice: shared system prompts, common preambles, and repeated phrases all produce identical chunk hashes at different positions across different sequences. This collision problem will shape every data structure decision that follows.
+
 > **A note on the contract.** If the inference engine follows the hashing contract we expect---using the same rolling hash algorithm as the indexer---then the external sequence hash is simply the deterministic composition of local hashes. We can recompute it on the indexer side and never need the engine to send it explicitly. In practice, engines may use their own internal hashing, so the system handles both cases.
 
-An external component---the **publisher**---coordinates with the inference engine to relay KV events to the indexer. Each event contains, at minimum, a worker ID, the local block hash, and the external sequence block hash.
+### The Workload
+
+The indexer handles two kinds of traffic: **events** (writes) and **requests** (reads).
+
+**KV Events** are produced by the **publisher**---a wrapper around each inference engine that acts as the bridge between the engine's internal world and the indexer's. In the Dynamo design, the publisher subscribes to raw KV events from the engine (containing the engine's external sequence hashes and the token IDs of each block), computes the local block hash from the token content (using the same hashing algorithm as the frontend router, so the two sides always agree), and tags each event with metadata: the `worker_id` (extracted from Dynamo's discovery mechanism), a monotonically increasing `event_id` (for gap detection and ordering), and the `dp_rank`. It then publishes these enriched events over pub/sub (via NATS or ZMQ) to every KV indexer instance. There are two event types that matter:
+
+- **Store**: A worker has computed and cached a new block. The event carries `(worker_id, local_hash, seq_hash)`. This happens when a request triggers a prefill or decode that extends the KV cache with new blocks. The indexer must record that this worker now holds this block.
+- **Remove**: A worker has evicted a block from its cache (to make room for new ones, or because a sequence finished). The event carries `(worker_id, seq_hash)`. The indexer must delete the corresponding entry.
+
+In practice, the event stream is bursty: a single prefill can produce dozens of store events at once (one per new block), and eviction sweeps can produce a burst of removes. The indexer must absorb these at the rate the engines produce them---falling behind means the index goes stale and routing decisions degrade.
 
 ```mermaid
 flowchart LR
@@ -43,7 +62,13 @@ flowchart LR
     R -->|routed request| E1
 ```
 
-The indexer's job: ingest these events as fast as they arrive, and answer **prefix match queries**---given a sequence of local hashes representing an incoming request, which workers have a matching prefix, and how deep does the match go?
+**Requests** are prefix match queries issued by the router frontend on every incoming inference request. The frontend tokenizes the prompt, chunks the tokens into blocks, computes the chunk hashes, and hands the indexer a sequence of local hashes: `[local_hash_0, local_hash_1, ..., local_hash_D]`. The indexer's job: walk the sequence and, for each worker, determine how deep the prefix overlap goes. The result is a set of `(worker_id, match_depth)` scores that the router uses to pick the best worker---the one with the deepest cached prefix, minimizing redundant computation.
+
+Requests are the hot path. Every millisecond of user-facing latency counts, and the indexer sits directly in the critical path between "request arrives" and "request gets routed." The design goal: make requests as fast as possible, even if it means events do a bit more bookkeeping.
+
+#### Serving at planetary scale
+
+So far, the indexer has been a core component of our KV router, battle-tested by many teams in production and shown to deliver significant latency and throughput improvements. As we see prefix-aware routing becoming the new default standard for LLM serving, we take great care in making sure the indexer itself is never the bottleneck---even at planetary scale. And in fact, as we walk through this story, it won't be. Far from it. By the end, network latency, tokenization, and hashing will be the real bottlenecks, not indexing. This is why we plan to make the indexer a standalone microservice: a handful of indexer instances (more for high availability and network locality than for performance) serving thousands of stateless frontends that handle preprocessing, tokenization, and hashing, and millions of backend workers at planetary scale.
 
 ---
 
@@ -194,11 +219,9 @@ fn find_matches(&self, query: &[LocalHash]) -> HashMap<WorkerId, u32> {
 }
 ```
 
-This is a big win. But there's a collision problem hiding in the forward index.
+This is a big win. But there's a collision problem hiding in the forward index---the chunk hash problem we introduced in the Background.
 
-Local hashes can be **chunk hashes**: hashes of just the tokens within one block, with no rolling context from the prefix. This is attractive because it means the relay publisher---the component that sits between the engine and the indexer, and shares the indexer's hashing contract---doesn't need to compute a rolling hash at all. Less work on the relay side, simpler integration.
-
-The problem: chunk hashes are collision-prone. Two completely different sequences can share identical blocks at the same position (think common system prompts, shared preambles, etc.). The forward `index` keyed on `LocalHash` conflates them---a worker that cached "Hello, how can I help you?" as block 0 in one conversation will appear as a match for *every* conversation that starts with the same tokens, even if the continuations diverge entirely.
+Because local hashes are chunk hashes (content-only, no positional context), the forward `index` keyed on `LocalHash` conflates blocks that share the same tokens regardless of where they appear. A worker that cached a common system prompt as block 0 in one conversation will appear as a match for *every* conversation that starts with the same tokens, even if the continuations diverge entirely.
 
 The `lookup` table, keyed by `ExternalHash` (rolling hash of the entire prefix), doesn't have this problem---it's collision-free by construction. But the `lookup` is per-worker, so we can't query it without iterating workers, which is exactly what we're trying to avoid. The fast path (`index`) is imprecise; the precise path (`lookup`) is slow.
 
@@ -329,6 +352,12 @@ Since events for a given worker are serialized on one thread, there is no write-
 
 The actor pattern is gone for reads. `find_matches` touches the shared `Arc<ConcurrentRadixTree>` directly, on the caller's thread, with zero channel overhead.
 
+### The Read-Write Tension
+
+There is a fundamental tension here worth calling out. Events and requests are competing for the same data structure, and optimizing for one can hurt the other. A data structure that is maximally efficient for reads (flat, cache-friendly, minimal indirection) may be expensive to update; one that is easy to mutate (tree-structured, with localized writes) may be slow to traverse.
+
+The `RwLock` itself embodies this tension. A reader-biased `RwLock` (like Rust's standard `std::sync::RwLock`) can starve writers under heavy read load---`find_matches` calls pile up and event processing falls behind, making the index go stale. A writer-biased lock risks the opposite: events get priority but request latency spikes. A fair lock avoids starvation but adds overhead to every acquisition. The right choice depends on the workload mix, and in practice we lean toward reader-biased semantics because request latency is user-facing while events can tolerate a small amount of queuing---but only up to a point, beyond which staleness degrades routing quality. This balancing act is something we revisit with each new indexer design.
+
 ---
 
 ## 6. The Leap
@@ -339,7 +368,7 @@ Unless you rethink the data structure entirely.
 
 ### Position as a First-Class Dimension
 
-What if, instead of encoding parent-child relationships in a tree, we used a flat map with a compound key: `(position, local_hash)`?
+What if, instead of encoding parent-child relationships in a tree, we used a flat map with a compound key: `(position, local_hash)`, where `position` is the block's depth from the root---i.e., its index in the sequence (0 for the first block, 1 for the second, and so on)?
 
 ```rust
 struct PositionalIndexer {
@@ -418,7 +447,7 @@ while current_pos < len - 1 && !active.is_empty() {
 }
 ```
 
-In the best case (all workers share the full prefix), `find_matches` does `D / J` lookups instead of `D`. In the worst case (workers drop at every jump), it degrades to a linear scan---but no worse than the tree.
+In the best case (all workers share the full prefix), `find_matches` does `D / J` lookups instead of `D`. In the worst case (workers drop at every jump), it degrades to a linear scan with extra overhead from overshooting---slightly worse than the tree, since each failed jump wastes a probe before scanning back.
 
 ### Lazy Hash Computation
 
@@ -427,6 +456,42 @@ One more trick. Most `(position, local_hash)` entries are `SeqEntry::Single`---o
 Since `Multi` entries are rare (they require chunk hash collisions at the same position with different prefixes), this saves hash computation on nearly every position check.
 
 The complexity drops from `O(D × W)` to `O(D/J + W)`, where `J` is the jump size and `W` accounts for the drain bookkeeping. For typical workloads with high prefix sharing, the jump optimization skips the vast majority of positions.
+
+---
+
+## Benchmarking
+
+Claims are cheap; numbers aren't. We maintain a benchmark harness (`mooncake_bench`) that replays real production trace data against each indexer backend, so every design change is validated under realistic conditions. The trace data comes from Mooncake and is publicly available, so you can reproduce these results yourself.
+
+### Setup
+
+The benchmark works in two phases:
+
+1. **Event generation.** The trace is a JSONL file of timestamped requests, each carrying a sequence of block-level hash IDs. We randomly partition these requests across `N` simulated workers, then replay each worker's partition through a mock engine (with configurable GPU block count, block size, and prefix caching enabled). The mock engine processes requests in real-time and emits the same KV cache events (store, remove, clear) that a real engine would produce---complete with eviction pressure and prefix reuse patterns. These events are collected and timestamped.
+
+2. **Benchmark replay.** Each worker's request trace and event trace are merged into a single time-ordered sequence and rescaled to fit the benchmark duration. Workers are spawned as concurrent tasks, each replaying its merged trace at the original inter-entry timing. Every `find_matches` call is timed (via `minstant` for nanosecond-precision monotonic timestamps), and every KV event is applied to the indexer under test. After all workers finish, the event queue is flushed and we verify that the indexer kept up (if more than 5% of events remain in the queue at the end, the run is invalid).
+
+The harness supports all indexer backends (`RadixTree`, `RadixTreeSharded`, `ConcurrentRadixTree`, `NestedMap`) and allows tuning worker count, duplication factor, jump size, and event worker threads from the CLI.
+
+### What We Measure
+
+The metric we care about most is the **throughput-latency curve**: as we scale up the combined rate of KV events and `find_matches` requests, at what point does the p99 latency jump? That inflection point---the **phase transition** where queueing kicks in---defines the **threshold throughput**: the maximum sustained load the indexer can reliably handle without latency degradation.
+
+Below the threshold, the indexer is invisible: sub-microsecond p99 latency, and the real bottlenecks are network, tokenization, and hashing. Above it, events start backing up in the channel, latencies spike, and the indexer becomes the constraint. Every optimization in this post was motivated by pushing that threshold higher.
+
+---
+
+## Future Optimizations
+
+The Flash Indexer is already far from being the bottleneck---even a single instance comfortably handles the event and request rates of large deployments. But we're always looking ahead to a future where thousands of frontends serve billions of workers, and these optimizations would start to matter:
+
+1. **Binary search within jumps.** The positional indexer's flat structure supports random access by position, which means we can replace the linear scan-back after a failed jump with a binary search over the skipped range. This would tighten the worst case from `O(J)` per failed jump to `O(log J)`.
+
+2. **Hierarchical routing.** A sparse indexer at the top level that tracks coarse-grained prefix coverage across groups of deployments, with full indexers at the bottom each serving a subset. Queries hit the sparse layer first to narrow down which group to probe, avoiding a broadcast to every indexer.
+
+3. **Stack-allocated position arrays.** The `DashMap<(usize, LocalHash), SeqEntry>` uses heap-allocated hash map entries. If we know the maximum sequence depth up front---which we can derive from the block size and the model's maximum sequence length---we can replace the hash map with a fixed-size array on the stack, eliminating hashing and allocation overhead entirely for the position dimension.
+
+For now, network latency, tokenization, and hashing dominate the end-to-end cost. But when deployments grow large enough that those stop being the bottleneck, these are the levers we'll pull.
 
 ---
 
