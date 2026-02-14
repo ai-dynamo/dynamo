@@ -58,6 +58,8 @@ _SINGLE_IMAGE_FRESH_COLOR = (123, 45, 67)
 _DOUBLE_IMAGE_FRESH_COLOR = (89, 210, 34)
 _STAIRCASE_IMAGE_FRESH_COLOR = (17, 99, 201)
 _SWAP_ORDER_FRESH_COLORS = [(14, 141, 77), (211, 66, 101), (44, 91, 233)]
+# Contract with lib/llm/src/kv_router/push_router.rs "[ROUTING]" debug log.
+# Keep this parser in sync with the router log format.
 _ROUTING_RECORD_PATTERN = re.compile(
     r"\[ROUTING\].*with\s*(\d+)/(\d+)\s*blocks overlap"
 )
