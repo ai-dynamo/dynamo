@@ -37,7 +37,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     is_prefill_worker: bool
     is_decode_worker: bool
     custom_jinja_template: Optional[str] = None
-    store_kv: str
+    discovery_backend: str
     request_plane: str
     event_plane: str
     enable_local_indexer: bool = True
@@ -85,6 +85,7 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser(
         description="Dynamo vLLM worker configuration",
         formatter_class=argparse.RawTextHelpFormatter,
+        allow_abbrev=False,
     )
 
     # Build argument parser
@@ -215,6 +216,14 @@ def update_dynamo_config_with_engine(
             )
         dynamo_config.connector = normalized  # type: ignore[assignment]
 
+    # Validate ModelExpress P2P server URL
+    if getattr(engine_config, "load_format", None) in ("mx-source", "mx-target"):
+        if not dynamo_config.model_express_url:
+            raise ValueError(
+                f"--model-express-url or MODEL_EXPRESS_URL env var is required "
+                f"when using --load-format={engine_config.load_format}"
+            )
+
 
 def update_engine_config_with_dynamo(
     dynamo_config: Config, engine_config: AsyncEngineArgs
@@ -307,8 +316,7 @@ def create_kv_events_config(
     if dynamo_config.is_decode_worker:
         logger.info(
             f"Decode worker detected (is_decode_worker={dynamo_config.is_decode_worker}): "
-            "kv_events_config disabled (decode workers don't publish KV events)",
-            dynamo_config.is_decode_worker,
+            f"kv_events_config disabled (decode workers don't publish KV events)"
         )
         return None
 

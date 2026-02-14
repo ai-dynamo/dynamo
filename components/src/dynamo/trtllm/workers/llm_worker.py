@@ -42,8 +42,7 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisherConfig,
-    register_llm,
+    register_model,
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.constants import DisaggregationMode
@@ -438,7 +437,7 @@ async def init_llm_worker(
         # Encode workers do NOT register - they're internal workers only
         # Prefill and decode workers register - frontend detects their role via ModelType
         if config.disaggregation_mode != DisaggregationMode.ENCODE:
-            await register_llm(
+            await register_model(
                 model_input,
                 model_type,
                 endpoint,
@@ -476,14 +475,11 @@ async def init_llm_worker(
             consolidator_publisher = None
             if consolidator_output_endpoint:
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
-                consolidator_config = ZmqKvEventPublisherConfig(
-                    worker_id=int(endpoint.connection_id()),
+                consolidator_publisher = KvEventPublisher(
+                    component,
                     kv_block_size=config.kv_block_size,
                     zmq_endpoint=consolidator_output_connect_endpoint,
-                    zmq_topic="",  # Empty topic = all topics
-                )
-                consolidator_publisher = KvEventPublisher(
-                    component, zmq_config=consolidator_config
+                    zmq_topic="",
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "

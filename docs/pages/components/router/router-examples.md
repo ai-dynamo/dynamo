@@ -10,23 +10,23 @@ For quick start instructions, see the [Router README](README.md). This document 
 
 ## Table of Contents
 
-- [Using KvPushRouter Python API](#using-kvpushrouter-python-api)
+- [Using KvRouter Python API](#using-kvrouter-python-api)
 - [K8s Examples](#k8s-examples)
 - [Routing Patterns](#routing-patterns)
 - [Custom Routing Example: Minimizing TTFT](#custom-routing-example-minimizing-ttft)
 - [KV Event Publishing for Custom Engines](#kv-event-publishing-for-custom-engines)
 - [Global Router (Hierarchical Routing)](#global-router-hierarchical-routing)
 
-## Using KvPushRouter Python API
+## Using KvRouter Python API
 
-Instead of launching the KV Router via command line, you can create a `KvPushRouter` object directly in Python. This allows per-request routing configuration overrides.
+Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. This allows per-request routing configuration overrides.
 
 >[!Warning]
-> **Multiple Routers in Same Process**: If you need to run multiple `KvPushRouter` instances for fault tolerance or load distribution, you must launch them in **separate processes** (e.g., using `python -m dynamo.frontend` with different ports). Creating multiple `KvPushRouter` objects in the same Python process is not supported - they share the same cancellation token from the component's primary lease, so dropping one router will cancel all routers in that process. For in-process routing, use a single `KvPushRouter` instance.
+> **Multiple Routers in Same Process**: If you need to run multiple `KvRouter` instances for fault tolerance or load distribution, you must launch them in **separate processes** (e.g., using `python -m dynamo.frontend` with different ports). Creating multiple `KvRouter` objects in the same Python process is not supported - they share the same cancellation token from the component's primary lease, so dropping one router will cancel all routers in that process. For in-process routing, use a single `KvRouter` instance.
 
 ### Methods
 
-The `KvPushRouter` provides the following methods:
+The `KvRouter` provides the following methods:
 
 - **`generate(token_ids, model, ...)`**: Route and execute a request, returning an async stream of responses. Automatically handles worker selection, state tracking, and lifecycle management.
 
@@ -53,7 +53,7 @@ python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf
 
 ```python
 import asyncio
-from dynamollm import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamollm import DistributedRuntime, KvRouter, KvRouterConfig
 
 async def main():
     # Get runtime and create endpoint
@@ -64,7 +64,7 @@ async def main():
 
     # Create KV router
     kv_router_config = KvRouterConfig()
-    router = KvPushRouter(
+    router = KvRouter(
         endpoint=endpoint,
         block_size=16,
         kv_router_config=kv_router_config
@@ -163,7 +163,7 @@ extraPodSpec:
 
 ## Routing Patterns
 
-The `KvPushRouter` supports multiple usage patterns depending on your control requirements:
+The `KvRouter` supports multiple usage patterns depending on your control requirements:
 
 ### 1. Automatic Routing (Recommended)
 Call `generate()` directly and let the router handle everything:
@@ -222,7 +222,7 @@ Here's an example of using `get_potential_loads()` to implement custom routing t
 
 ```python
 import asyncio
-from dynamo.llm import DistributedRuntime, KvPushRouter, KvRouterConfig
+from dynamo.llm import DistributedRuntime, KvRouter, KvRouterConfig
 
 async def minimize_ttft_routing():
     # Setup router
@@ -231,7 +231,7 @@ async def minimize_ttft_routing():
     component = namespace.component("backend")
     endpoint = component.endpoint("generate")
 
-    router = KvPushRouter(
+    router = KvRouter(
         endpoint=endpoint,
         block_size=16,
         kv_router_config=KvRouterConfig()
@@ -377,11 +377,11 @@ class CustomEnginePublisher:
 #### Integration with Your Engine
 
 ```python
-from dynamo.llm import register_llm
+from dynamo.llm import register_model
 
 async def main():
     # Register your engine with Dynamo
-    component, endpoint = await register_llm(
+    component, endpoint = await register_model(
         model="my-model",
         generator=my_generate_fn,
     )
@@ -447,24 +447,18 @@ flowchart LR
 
 #### Part 1: ZMQ Subscriber (Dynamo Bindings)
 
-If your engine already publishes to ZMQ, use `ZmqKvEventPublisher` to subscribe and forward to NATS:
+If your engine already publishes to ZMQ, use `KvEventPublisher` with `zmq_endpoint` to subscribe and forward to NATS:
 
 ```python
-from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.llm import KvEventPublisher
 
-# Configure the ZMQ subscriber
-config = ZmqKvEventPublisherConfig(
-    worker_id=endpoint.connection_id(),
+# Create publisher - it automatically subscribes to ZMQ and forwards to NATS
+kv_publisher = KvEventPublisher(
+    component=component,
     kv_block_size=block_size,
     zmq_endpoint="tcp://127.0.0.1:5557",  # Where your engine publishes
     zmq_topic="",                          # Subscribe to all topics
     enable_local_indexer=False,
-)
-
-# Create publisher - it automatically subscribes to ZMQ and forwards to NATS
-kv_publisher = ZmqKvEventPublisher(
-    component=component,
-    config=config,
 )
 ```
 
