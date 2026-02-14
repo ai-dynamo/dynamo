@@ -10,7 +10,7 @@ workers using diffusion models (Wan, Flux, Cosmos, etc.).
 import asyncio
 import logging
 
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.utils.trtllm_utils import Config
 
@@ -40,7 +40,7 @@ async def init_video_diffusion_worker(
         namespace=config.namespace,
         component=config.component,
         endpoint=config.endpoint,
-        store_kv=config.store_kv,
+        discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
         model_path=config.model_path,
@@ -85,15 +85,14 @@ async def init_video_diffusion_worker(
         raise RuntimeError(
             "ModelType.Videos not available in dynamo-runtime. "
             "Video diffusion requires a compatible dynamo-runtime version. "
-            "See docs/backends/trtllm/README.md for setup instructions."
+            "See docs/pages/backends/trtllm/README.md for setup instructions."
         )
     model_type = ModelType.Videos
 
     logging.info(f"Registering model '{model_name}' with ModelType={model_type}")
 
-    # register_llm is a misnomer — it's actually Dynamo's generic model
-    # registration function and the video diffisuion model is not an llm
-    await register_llm(
+    # register_model is Dynamo's generic model registration function
+    await register_model(
         ModelInput.Text,
         model_type,
         endpoint,

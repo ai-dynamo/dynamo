@@ -21,7 +21,7 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.llm import fetch_llm
+from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
 
@@ -98,12 +98,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Dump debug config to the specified file path. If not specified, the config will be dumped to stdout at INFO level.",
     },
-    "store-kv": {
-        "flags": ["--store-kv"],
+    "discovery-backend": {
+        "flags": ["--discovery-backend"],
         "type": str,
-        "choices": ["etcd", "file", "mem"],
-        "default": os.environ.get("DYN_STORE_KV", "etcd"),
-        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        "choices": ["kubernetes", "etcd", "file", "mem"],
+        "default": os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        "help": "Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     },
     "request-plane": {
         "flags": ["--request-plane"],
@@ -137,13 +137,17 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Filesystem URL for storing generated images using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
     },
-    "image-diffusion-base-url": {
-        "flags": ["--image-diffusion-base-url"],
+    "video-generation-worker": {
+        "flags": ["--video-generation-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as video generation worker for video generation (T2V/I2V)",
+    },
+    "video-generation-fs-url": {
+        "flags": ["--video-generation-fs-url"],
         "type": str,
-        "default": os.environ.get(
-            "DYN_IMAGE_DIFFUSION_BASE_URL", "http://localhost:8008/"
-        ),
-        "help": "Base URL for rewriting image URLs in responses (e.g., http://localhost:8008/). When set, generated image URLs will use this base instead of filesystem URLs. Can be set via DYN_IMAGE_DIFFUSION_URL_BASE env var.",
+        "default": None,
+        "help": "Filesystem URL for storing generated videos using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
     },
 }
 
@@ -153,7 +157,7 @@ class DynamoArgs:
     namespace: str
     component: str
     endpoint: str
-    store_kv: str
+    discovery_backend: str
     request_plane: str
     event_plane: str
 
@@ -189,7 +193,10 @@ class DynamoArgs:
     # image diffusion options
     image_diffusion_worker: bool = False
     image_diffusion_fs_url: Optional[str] = None
-    image_diffusion_base_url: Optional[str] = None
+
+    # video generation options
+    video_generation_worker: bool = False
+    video_generation_fs_url: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -434,6 +441,8 @@ async def parse_args(args: list[str]) -> Config:
             endpoint = f"dyn://{namespace}.backend.generate"
         elif getattr(parsed_args, "image_diffusion_worker", False):
             endpoint = f"dyn://{namespace}.backend.generate"
+        elif getattr(parsed_args, "video_generation_worker", False):
+            endpoint = f"dyn://{namespace}.backend.generate"
         elif (
             hasattr(parsed_args, "disaggregation_mode")
             and parsed_args.disaggregation_mode == "prefill"
@@ -498,45 +507,51 @@ async def parse_args(args: list[str]) -> Config:
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
     # Download the model if necessary using modelexpress.
-    # We don't set `parsed_args.model_path` to the local path fetch_llm returns
+    # We don't set `parsed_args.model_path` to the local path fetch_model returns
     # because sglang will send this to its pipeline-parallel workers, which may
     # not have the local path.
     # sglang will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
     if not os.path.exists(model_path):
-        await fetch_llm(model_path)
+        await fetch_model(model_path)
 
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
-    # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
+    # fetch_model (download the model) here, in `parse_args`. `parse_args` should not
     # contain code to download a model, it should only parse the args.
 
-    # For diffusion workers, create a minimal dummy ServerArgs since diffusion
+    # For diffusion/video workers, create a minimal dummy ServerArgs since diffusion
     # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
     image_diffusion_worker = getattr(parsed_args, "image_diffusion_worker", False)
+    video_generation_worker = getattr(parsed_args, "video_generation_worker", False)
 
-    if image_diffusion_worker:
-        logging.info(f"Image diffusion worker detected with model: {model_path}")
+    if image_diffusion_worker or video_generation_worker:
+        worker_type = (
+            "image diffusion" if image_diffusion_worker else "video generation"
+        )
+        logging.info(
+            f"{worker_type.title()} worker detected with model: {model_path}, creating minimal ServerArgs stub"
+        )
+        # Create a minimal ServerArgs-like object that bypasses model config loading
+        # Diffusion/video workers don't actually use ServerArgs - they use DiffGenerator
+        import types
 
-        # Need to use ServerArgs not intended for sglang[diffusion], multimodal_gen has its own ServerArgs.
-        server_args = ServerArgs("none")  # HACK: Avoid triggering __post_init__
-
+        server_args = types.SimpleNamespace()
+        # Copy over any attrs that might be needed, but avoid triggering __post_init__
         server_args.model_path = model_path
         server_args.served_model_name = parsed_args.served_model_name
         server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
         server_args.log_level = getattr(parsed_args, "log_level", "info")
+        server_args.skip_tokenizer_init = True
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
+        server_args.tp_size = getattr(parsed_args, "tp_size", 1)
+        server_args.dp_size = getattr(parsed_args, "dp_size", 1)
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False
-        server_args.tp_size = getattr(parsed_args, "tensor_parallel_size", 1)
-        server_args.dp_size = getattr(parsed_args, "data_parallel_size", 1)
-
-        parsed_args.use_sglang_tokenizer = True
-        parsed_args.dyn_endpoint_types = "images"
-
+        server_args.load_format = None
         logging.info(
-            f"Created stub ServerArgs for diffusion: model_path={server_args.model_path}"
+            f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
         )
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
@@ -580,7 +595,7 @@ async def parse_args(args: list[str]) -> Config:
         namespace=parsed_namespace,
         component=parsed_component_name,
         endpoint=parsed_endpoint_name,
-        store_kv=parsed_args.store_kv,
+        discovery_backend=parsed_args.discovery_backend,
         request_plane=parsed_args.request_plane,
         event_plane=parsed_args.event_plane,
         tool_call_parser=tool_call_parser,
@@ -595,7 +610,8 @@ async def parse_args(args: list[str]) -> Config:
         diffusion_worker=diffusion_worker,
         image_diffusion_worker=getattr(parsed_args, "image_diffusion_worker", False),
         image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
-        image_diffusion_base_url=getattr(parsed_args, "image_diffusion_base_url", None),
+        video_generation_worker=getattr(parsed_args, "video_generation_worker", False),
+        video_generation_fs_url=getattr(parsed_args, "video_generation_fs_url", None),
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=not parsed_args.durable_kv_events,
         use_kv_events=use_kv_events,

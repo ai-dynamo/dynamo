@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import logging
 import os
+import signal
 import sys
 import time
+from collections import defaultdict
+from typing import Any, Awaitable, Callable, DefaultDict
 
 import sglang as sgl
 import uvloop
@@ -23,11 +27,13 @@ from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
+    VideoGenerationHealthCheckPayload,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher, setup_sgl_metrics
 from dynamo.sglang.register import (
     register_image_diffusion_model,
-    register_llm_with_readiness_gate,
+    register_model_with_readiness_gate,
+    register_video_generation_model,
 )
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
@@ -39,9 +45,12 @@ from dynamo.sglang.request_handlers import (
     MultimodalProcessorHandler,
     MultimodalWorkerHandler,
     PrefillWorkerHandler,
+    VideoGenerationWorkerHandler,
 )
 
 configure_dynamo_logging()
+
+RUN_DEFERRED_HANDLERS: Callable[[], Awaitable[None]] | None = None
 
 
 async def _handle_non_leader_node(
@@ -80,6 +89,108 @@ async def _handle_non_leader_node(
         publisher.cleanup()
 
 
+SignalCallback = Callable[..., Any]
+
+
+def install_graceful_shutdown(
+    loop: asyncio.AbstractEventLoop,
+    runtime: Any,
+    *,
+    signals: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT),
+) -> tuple[asyncio.Event, Callable[[], Awaitable[None]]]:
+    """
+    Set up graceful shutdown + callback chaining.
+
+    What it does:
+      - Owns OS-level SIGTERM/SIGINT via signal.signal(...)
+      - Captures (suppresses) loop.add_signal_handler(SIGTERM/SIGINT, ...) registrations
+        and runs them during shutdown (sync or async)
+      - Calls runtime.shutdown() during shutdown (sync or async)
+      - Sets and returns an asyncio.Event you can await to know shutdown was requested
+
+    Returns:
+      (shutdown_event, run_deferred_handlers)
+    """
+    shutdown_event = asyncio.Event()
+
+    # Deferred handlers registered via loop.add_signal_handler for these signals
+    deferred_handlers: DefaultDict[int, list[tuple[SignalCallback, tuple[Any, ...]]]] = defaultdict(list)  # type: ignore[assignment]
+
+    # Previous OS handlers (for optional chaining)
+    old_os_handlers: dict[int, Any] = {}
+
+    shutdown_started = False
+    shutdown_signum: int | None = None
+    deferred_handlers_ran = False
+
+    async def run_deferred_handlers() -> None:
+        nonlocal deferred_handlers_ran
+        if not shutdown_started or deferred_handlers_ran:
+            return
+        deferred_handlers_ran = True
+
+        signums = (
+            [shutdown_signum]
+            if shutdown_signum is not None
+            else list(deferred_handlers.keys())
+        )
+        for sig in signums:
+            for cb, args in list(deferred_handlers.get(sig, [])):
+                try:
+                    res = cb(*args)
+                    if inspect.isawaitable(res):
+                        await res
+                except Exception:
+                    logging.exception("Deferred signal callback failed: %r", cb)
+
+    async def _shutdown_sequence(signum: int, frame: Any | None) -> None:
+        nonlocal shutdown_started, shutdown_signum
+        if shutdown_started:
+            return
+        shutdown_signum = signum
+        shutdown_started = True
+
+        logging.info("Received signal %s, starting graceful shutdown", signum)
+        shutdown_event.set()
+
+        try:
+            runtime.shutdown()
+        except Exception:
+            logging.exception("runtime.shutdown() failed")
+
+    def _schedule_shutdown(signum: int, frame: Any | None) -> None:
+        def _kick() -> None:
+            asyncio.create_task(_shutdown_sequence(signum, frame))
+
+        loop.call_soon_threadsafe(_kick)
+
+    def _os_signal_handler(signum: int, frame: Any) -> None:
+        # Keep the OS handler tiny; do real work in the loop thread.
+        _schedule_shutdown(signum, frame)
+
+    # Install OS-level handlers
+    for sig in signals:
+        old_os_handlers[sig] = signal.signal(sig, _os_signal_handler)
+
+    # Intercept loop.add_signal_handler for SIGTERM/SIGINT and defer them
+    orig_add = loop.add_signal_handler
+
+    def watching_add_signal_handler(sig: int, callback: SignalCallback, *args: Any):
+        if sig in signals:
+            logging.info(
+                "Captured loop.add_signal_handler(%s, %r, ...) (deferred).",
+                sig,
+                callback,
+            )
+            deferred_handlers[sig].append((callback, args))
+            return None
+        return orig_add(sig, callback, *args)
+
+    loop.add_signal_handler = watching_add_signal_handler  # type: ignore[assignment]
+
+    return shutdown_event, run_deferred_handlers
+
+
 async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
@@ -91,36 +202,44 @@ async def worker():
         config.server_args.load_format = setup_gms(config.server_args)
 
     dynamo_args = config.dynamo_args
-    runtime, _ = create_runtime(
-        store_kv=dynamo_args.store_kv,
+    runtime, loop = create_runtime(
+        discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
         use_kv_events=dynamo_args.use_kv_events,
     )
 
+    # Set up signal handlers using signal module to allow chaining
+    global RUN_DEFERRED_HANDLERS
+    shutdown_event, RUN_DEFERRED_HANDLERS = install_graceful_shutdown(loop, runtime)
+    logging.info("Signal handlers set up for graceful shutdown (with chaining)")
+
     if config.dynamo_args.image_diffusion_worker:
         await init_image_diffusion(runtime, config)
+    elif config.dynamo_args.video_generation_worker:
+        await init_video_generation(runtime, config)
     elif config.dynamo_args.embedding_worker:
-        await init_embedding(runtime, config)
+        await init_embedding(runtime, config, shutdown_event)
     elif config.dynamo_args.multimodal_processor:
-        await init_multimodal_processor(runtime, config)
+        await init_multimodal_processor(runtime, config, shutdown_event)
     elif config.dynamo_args.multimodal_encode_worker:
-        await init_multimodal_encode_worker(runtime, config)
+        await init_multimodal_encode_worker(runtime, config, shutdown_event)
     elif config.dynamo_args.multimodal_worker:
         if config.serving_mode != DisaggregationMode.PREFILL:
-            await init_multimodal_worker(runtime, config)
+            await init_multimodal_worker(runtime, config, shutdown_event)
         else:
-            await init_multimodal_prefill_worker(runtime, config)
+            await init_multimodal_prefill_worker(runtime, config, shutdown_event)
     elif config.dynamo_args.diffusion_worker:
-        await init_diffusion(runtime, config)
+        await init_diffusion(runtime, config, shutdown_event)
     elif config.serving_mode != DisaggregationMode.PREFILL:
-        await init(runtime, config)
-
+        await init(runtime, config, shutdown_event)
     else:
-        await init_prefill(runtime, config)
+        await init_prefill(runtime, config, shutdown_event)
 
 
-async def init(runtime: DistributedRuntime, config: Config):
+async def init(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
@@ -158,7 +277,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     handler = DecodeWorkerHandler(
-        component, engine, config, publisher, generate_endpoint
+        component, engine, config, publisher, generate_endpoint, shutdown_event
     )
     handler.register_engine_routes(runtime)
 
@@ -188,7 +307,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -205,12 +324,17 @@ async def init(runtime: DistributedRuntime, config: Config):
         try:
             await metrics_task
         except asyncio.CancelledError:
-            logging.info("Metrics task succesfully cancelled")
+            logging.info("Metrics task successfully cancelled")
             pass
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
-async def init_prefill(runtime: DistributedRuntime, config: Config):
+async def init_prefill(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
@@ -242,7 +366,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     await _warmup_prefill_engine(engine, server_args)
 
     handler = PrefillWorkerHandler(
-        component, engine, config, publisher, generate_endpoint
+        component, engine, config, publisher, generate_endpoint, shutdown_event
     )
     handler.register_engine_routes(runtime)
 
@@ -261,7 +385,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -282,9 +406,14 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             logging.info("Metrics task successfully cancelled")
             pass
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
-async def init_diffusion(runtime: DistributedRuntime, config: Config):
+async def init_diffusion(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize diffusion language model worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -324,7 +453,7 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     handler = DiffusionWorkerHandler(
-        component, engine, config, publisher, generate_endpoint
+        component, engine, config, publisher, generate_endpoint, shutdown_event
     )
     handler.register_engine_routes(runtime)
 
@@ -345,7 +474,7 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -365,9 +494,14 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
             logging.info("Metrics task successfully cancelled")
             pass
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
-async def init_embedding(runtime: DistributedRuntime, config: Config):
+async def init_embedding(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize embedding worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -387,7 +521,9 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = EmbeddingWorkerHandler(component, engine, config, publisher)
+    handler = EmbeddingWorkerHandler(
+        component, engine, config, publisher, shutdown_event
+    )
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()
@@ -402,7 +538,7 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -423,6 +559,9 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
             logging.info("Metrics task successfully cancelled")
             pass
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
@@ -504,9 +643,94 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
-async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
+async def init_video_generation(runtime: DistributedRuntime, config: Config):
+    """Initialize video generation worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    # Initialize DiffGenerator (not sgl.Engine) - same as image diffusion
+    from sglang.multimodal_gen import DiffGenerator
+
+    if not server_args.model_path:
+        raise ValueError("--model is required for video generation workers")
+
+    # Parallelism configuration
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    num_gpus = tp_size * dp_size
+
+    # Distributed configuration
+    dist_timeout = getattr(server_args, "dist_timeout", None)
+
+    generator = DiffGenerator.from_pretrained(
+        model_path=server_args.model_path,
+        # Parallelism configuration
+        num_gpus=num_gpus,
+        tp_size=tp_size,
+        dp_size=dp_size,
+        # Distributed configuration
+        dist_timeout=dist_timeout,
+    )
+
+    # Initialize fsspec filesystems for video storage
+    fs_url = dynamo_args.video_generation_fs_url
+
+    # Initialize primary filesystem
+    if not fs_url:
+        raise ValueError(
+            "--video-generation-fs-url is required for video generation workers"
+        )
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    handler = VideoGenerationWorkerHandler(
+        component,
+        generator,
+        config,
+        publisher=None,
+        fs=get_fs(fs_url),
+    )
+
+    # Create proper health check payload that sends a minimal video request
+    health_check_payload = VideoGenerationHealthCheckPayload(
+        model_path=server_args.model_path
+    ).to_dict()
+
+    ready_event = asyncio.Event()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[],  # No LLM metrics labels
+                health_check_payload=health_check_payload,
+            ),
+            register_video_generation_model(
+                generator,
+                generate_endpoint,
+                server_args,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve video generation endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_processor(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal processor component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
     component = runtime.namespace(dynamo_args.namespace).component(
@@ -525,7 +749,9 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 
     ready_event = asyncio.Event()
 
-    handler = MultimodalProcessorHandler(component, config, encode_worker_client)
+    handler = MultimodalProcessorHandler(
+        component, config, encode_worker_client, shutdown_event
+    )
 
     logging.info("Waiting for Encoder Worker Instances ...")
     await encode_worker_client.wait_for_instances()
@@ -540,7 +766,7 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
                     (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
                 ],
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 None,  # engine
                 generate_endpoint,
                 server_args,
@@ -554,9 +780,14 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
-async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_encode_worker(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal encode worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -574,7 +805,9 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         .client()
     )
 
-    handler = MultimodalEncodeWorkerHandler(component, config, pd_worker_client)
+    handler = MultimodalEncodeWorkerHandler(
+        component, config, pd_worker_client, shutdown_event
+    )
     await handler.async_init(runtime)
 
     await pd_worker_client.wait_for_instances()
@@ -595,9 +828,14 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
-async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_worker(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal worker component.
 
     This worker is always an internal component that should not register with
@@ -622,9 +860,13 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
             .endpoint("generate")
             .client()
         )
-        handler = MultimodalWorkerHandler(component, engine, config, prefill_client)
+        handler = MultimodalWorkerHandler(
+            component, engine, config, prefill_client, shutdown_event
+        )
     else:
-        handler = MultimodalWorkerHandler(component, engine, config)
+        handler = MultimodalWorkerHandler(
+            component, engine, config, None, shutdown_event
+        )
 
     await handler.async_init()
 
@@ -644,9 +886,14 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
-async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Config):
+async def init_multimodal_prefill_worker(
+    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+):
     """Initialize multimodal prefill worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -658,7 +905,7 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    handler = MultimodalPrefillWorkerHandler(component, engine, config)
+    handler = MultimodalPrefillWorkerHandler(component, engine, config, shutdown_event)
     await handler.async_init()
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
@@ -677,6 +924,9 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
         raise
     finally:
         handler.cleanup()
+        if RUN_DEFERRED_HANDLERS is not None:
+            logging.info("Running deferred handlers")
+            await RUN_DEFERRED_HANDLERS()
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:

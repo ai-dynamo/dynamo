@@ -26,6 +26,7 @@ from .utils import DynamoFrontendProcess, run_migration_test
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.sglang,
     pytest.mark.gpu_1,
     pytest.mark.e2e,

@@ -153,7 +153,13 @@ pub struct RequestTracker {
     phase_semaphore: Arc<Semaphore>,
 
     /// How long it took to tokenize the input
-    tokenizer_latency: OnceLock<Duration>,
+    tokenize_latency: OnceLock<Duration>,
+
+    /// Accumulated time spent detokenizing output tokens for this request (nanoseconds)
+    detokenize_total_ns: AtomicU64,
+
+    /// Number of detokenize samples accumulated for this request
+    detokenize_count: AtomicU64,
 }
 
 impl RequestTracker {
@@ -184,7 +190,9 @@ impl RequestTracker {
             decode_worker_type: OnceLock::new(),
             phase: Mutex::new(RequestPhase::Aggregated),
             phase_semaphore: Arc::new(Semaphore::new(1)),
-            tokenizer_latency: OnceLock::new(),
+            tokenize_latency: OnceLock::new(),
+            detokenize_total_ns: AtomicU64::new(0),
+            detokenize_count: AtomicU64::new(0),
         }
     }
 
@@ -338,12 +346,40 @@ impl RequestTracker {
         }
     }
 
-    pub fn record_tokenizer_latency(&self, l: Duration) {
-        let _ = self.tokenizer_latency.set(l);
+    pub fn record_tokenize_latency(&self, l: Duration) {
+        let _ = self.tokenize_latency.set(l);
     }
 
-    pub fn tokenizer_latency(&self) -> Option<Duration> {
-        self.tokenizer_latency.get().copied()
+    pub fn tokenize_latency(&self) -> Option<Duration> {
+        self.tokenize_latency.get().copied()
+    }
+
+    pub fn record_detokenize_latency(&self, l: Duration) {
+        // u128 -> u64 is safe because max u64 in nanos is over 500 years
+        let delta_ns = u64::try_from(l.as_nanos()).unwrap_or(u64::MAX);
+        // On an x86 system these atomics are very cheap
+        let _ = self.detokenize_total_ns.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            // Saturating add to avoid wrapping to a nonsensical average on overflow.
+            |current| Some(current.saturating_add(delta_ns)),
+        );
+        self.detokenize_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn detokenize_total_latency(&self) -> Option<Duration> {
+        let total_ns = self.detokenize_total_ns.load(Ordering::Relaxed);
+        let count = self.detokenize_count.load(Ordering::Relaxed);
+        if count == 0 {
+            // We recorded no observations
+            None
+        } else {
+            Some(Duration::from_nanos(total_ns))
+        }
+    }
+
+    pub fn detokenize_count(&self) -> u64 {
+        self.detokenize_count.load(Ordering::Relaxed)
     }
 
     /// Get worker ID information if any worker IDs have been recorded.

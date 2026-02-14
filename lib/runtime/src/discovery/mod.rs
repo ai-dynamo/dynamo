@@ -707,4 +707,9 @@ pub trait Discovery: Send + Sync {
         query: DiscoveryQuery,
         cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream>;
+
+    /// Clean up resources held by this discovery backend.
+    /// For KV store backends, this deletes owned registrations immediately rather than
+    /// waiting for TTL expiry. Default is a no-op for backends that don't need cleanup.
+    fn shutdown(&self) {}
 }

@@ -174,7 +174,7 @@ class KubernetesConnector(PlannerConnector):
                     self.graph_deployment_name
                 )
 
-            # TODO: benchmarks/profiler/utils/config.py already contains DGD config parsing
+            # TODO: dynamo/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
             prefill_model_name = None
             decode_model_name = None

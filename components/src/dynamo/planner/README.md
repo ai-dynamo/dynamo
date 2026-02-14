@@ -42,5 +42,5 @@ When both modes are enabled, throughput-based scaling provides a lower bound on 
 
 ## Documentation
 
-- **User docs**: [Planner Guide](../../../../fern/pages/components/planner/planner-guide.md) (deployment, configuration, examples)
-- **Design docs**: [Planner Design](../../../../fern/pages/design-docs/planner-design.md) (architecture, algorithms)
+- **User docs**: [Planner Guide](../../../../docs/pages/components/planner/planner-guide.md) (deployment, configuration, examples)
+- **Design docs**: [Planner Design](../../../../docs/pages/design-docs/planner-design.md) (architecture, algorithms)
