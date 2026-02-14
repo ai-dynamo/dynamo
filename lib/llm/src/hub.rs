@@ -74,7 +74,10 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     // This aligns with workers, which skips fetch_llm when model_path exists.
     if name.exists() && name.is_dir() {
         let path = name.to_path_buf();
-        tracing::info!("Using existing local model path {:?}, skipping download", path);
+        tracing::info!(
+            "Using existing local model path {:?}, skipping download",
+            path
+        );
         return Ok(path);
     }
 
@@ -196,9 +199,15 @@ mod tests {
 
         let result = from_hf(&dir_path, false).await;
 
-        assert!(result.is_ok(), "from_hf should succeed for existing directory");
+        assert!(
+            result.is_ok(),
+            "from_hf should succeed for existing directory"
+        );
         let path = result.unwrap();
-        assert_eq!(path, dir_path, "should return the same path, skipping download");
+        assert_eq!(
+            path, dir_path,
+            "should return the same path, skipping download"
+        );
     }
 
     #[tokio::test]
