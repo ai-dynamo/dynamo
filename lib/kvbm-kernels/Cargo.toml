@@ -53,5 +53,4 @@ rand = { workspace = true }
 cudarc = { workspace = true, features = ["f16"] }
 
 [build-dependencies]
-dynamo-config = { path = "../config" }
 cc = "1.0"
