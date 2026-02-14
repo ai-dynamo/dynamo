@@ -169,7 +169,7 @@ impl KvPushRouter {
                 .await?;
 
             if !is_query_only {
-                tracing::info!(
+                tracing::debug!(
                     request_id = %context_id,
                     worker_id = best_worker.worker_id,
                     dp_rank = best_worker.dp_rank,
