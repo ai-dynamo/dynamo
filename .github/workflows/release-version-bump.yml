@@ -1,0 +1,390 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Phase 2: Port version bump to main after a GitHub release is published.
+#
+# Full releases (vX.Y.Z):
+#   Auto-triggered on release:published. Updates all version references and
+#   opens a PR to main.
+#
+# Post-releases (vX.Y.Z.postN):
+#   Two options controlled by `post_release_behavior` input:
+#   - "fail" (default): Auto-trigger fails with instructions to use manual trigger
+#   - "skip": Auto-trigger silently skips, no PR created
+#   To bump a post-release, use workflow_dispatch with component checkboxes.
+#
+# Phase 1 (release branch prep) is integrated into release.yml.
+
+name: Release Version Bump
+
+on:
+  release:
+    types: [published]
+
+  # Manual trigger for post-releases or re-runs
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0 or v0.9.0.post1)'
+        required: true
+        type: string
+      post_release_behavior:
+        description: 'How auto-trigger handles post-release tags (fail = red X with instructions, skip = silent green check)'
+        required: false
+        type: choice
+        options:
+          - fail
+          - skip
+        default: fail
+      update_core:
+        description: 'Update core version files (pyproject.toml, Cargo.toml, setup.py)'
+        required: false
+        type: boolean
+        default: true
+      update_containers:
+        description: 'Update container image tags across docs, recipes, examples'
+        required: false
+        type: boolean
+        default: true
+      update_helm:
+        description: 'Update Helm Chart.yaml versions'
+        required: false
+        type: boolean
+        default: true
+      update_docs:
+        description: 'Update reference docs (support-matrix, feature-matrix, release-artifacts)'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  version-bump-to-main:
+    name: Open PR to main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+
+          # Validate tag format: vX.Y.Z or vX.Y.Z.postN
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
+            echo "::error::Invalid tag format: $TAG. Must be vX.Y.Z or vX.Y.Z.postN"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          IS_POST="false"
+          if [[ "$TAG" =~ \.post[0-9]+$ ]]; then
+            IS_POST="true"
+          fi
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "is_post=$IS_POST" >> $GITHUB_OUTPUT
+          echo "Tag: $TAG, Version: $VERSION, Post-release: $IS_POST"
+
+      # Post-release gate: fail or skip based on behavior setting
+      - name: Post-release gate
+        if: steps.tag.outputs.is_post == 'true' && github.event_name == 'release'
+        run: |
+          # Default behavior for auto-triggered post-releases
+          BEHAVIOR="${{ inputs.post_release_behavior || 'fail' }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+
+          if [ "$BEHAVIOR" = "skip" ]; then
+            echo "::notice::Post-release $TAG detected. Skipping auto version bump (post_release_behavior=skip)."
+            echo "To bump this post-release, run this workflow manually via Actions > workflow_dispatch with component checkboxes."
+            echo "SKIP_REST=true" >> $GITHUB_ENV
+            exit 0
+          else
+            echo "## Post-release detected" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Tag \`$TAG\` is a post-release. Post-releases require manual scope selection." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### How to proceed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "1. Go to **Actions** > **Release Version Bump** > **Run workflow**" >> $GITHUB_STEP_SUMMARY
+            echo "2. Enter tag: \`$TAG\`" >> $GITHUB_STEP_SUMMARY
+            echo "3. Select which components to update:" >> $GITHUB_STEP_SUMMARY
+            echo "   - **update_core**: pyproject.toml, Cargo.toml, setup.py" >> $GITHUB_STEP_SUMMARY
+            echo "   - **update_containers**: Image tags in docs, recipes, examples" >> $GITHUB_STEP_SUMMARY
+            echo "   - **update_helm**: Helm Chart.yaml versions" >> $GITHUB_STEP_SUMMARY
+            echo "   - **update_docs**: support-matrix, feature-matrix, release-artifacts" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "::error::Post-release $TAG detected. Post-releases require manual scope selection. Run this workflow via Actions > workflow_dispatch with the component checkboxes."
+            exit 1
+          fi
+
+      # Exit early if skip was selected for post-release
+      - name: Check skip flag
+        if: env.SKIP_REST == 'true'
+        run: |
+          echo "Skipping remaining steps for post-release."
+          exit 0
+
+      # Step 1: Checkout the release tag to read context.yaml
+      - name: Checkout release tag
+        if: env.SKIP_REST != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          path: release-ref
+
+      # Step 2: Parse backend metadata from container/context.yaml
+      - name: Extract backend metadata
+        if: env.SKIP_REST != 'true'
+        id: metadata
+        run: |
+          set -euo pipefail
+          CTX="release-ref/container/context.yaml"
+
+          # Install yq
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+          # vLLM version: strip 'v' prefix
+          VLLM_VER=$(yq '.vllm.vllm_ref' "$CTX" | sed 's/^v//')
+          echo "vllm_version=$VLLM_VER" >> $GITHUB_OUTPUT
+
+          # SGLang version: from runtime_image_tag, strip 'v' prefix and '-runtime'/'-cu*-runtime' suffix
+          SGLANG_TAG=$(yq '.sglang."cuda12.9".runtime_image_tag // .sglang.runtime_image_tag // ""' "$CTX")
+          SGLANG_VER=$(echo "$SGLANG_TAG" | sed 's/^v//; s/-cu[0-9]*-runtime$//; s/-runtime$//')
+          echo "sglang_version=$SGLANG_VER" >> $GITHUB_OUTPUT
+
+          # TRT-LLM version: from pip_wheel, extract version after ==
+          TRTLLM_WHEEL=$(yq '.trtllm.pip_wheel' "$CTX")
+          TRTLLM_VER=$(echo "$TRTLLM_WHEEL" | sed 's/.*==//')
+          echo "trtllm_version=$TRTLLM_VER" >> $GITHUB_OUTPUT
+
+          # NIXL version
+          NIXL_VER=$(yq '.dynamo.nixl_ref' "$CTX")
+          echo "nixl_version=$NIXL_VER" >> $GITHUB_OUTPUT
+
+          # CUDA versions for vLLM
+          CUDA_VLLM=$(yq '[.vllm | keys | .[] | select(test("^cuda"))] | map(sub("^cuda"; "")) | join(",")' "$CTX")
+          echo "cuda_versions_vllm=$CUDA_VLLM" >> $GITHUB_OUTPUT
+
+          # CUDA versions for SGLang
+          CUDA_SGLANG=$(yq '[.sglang | keys | .[] | select(test("^cuda"))] | map(sub("^cuda"; "")) | join(",")' "$CTX")
+          echo "cuda_versions_sglang=$CUDA_SGLANG" >> $GITHUB_OUTPUT
+
+          # CUDA versions for TRT-LLM (from runtime_image_tag)
+          TRTLLM_RUNTIME_TAG=$(yq '.trtllm.runtime_image_tag' "$CTX")
+          CUDA_TRTLLM=$(echo "$TRTLLM_RUNTIME_TAG" | grep -oP 'cuda\K[\d.]+')
+          echo "cuda_versions_trtllm=$CUDA_TRTLLM" >> $GITHUB_OUTPUT
+
+          # Release date
+          if [ "${{ github.event_name }}" = "release" ]; then
+            RELEASE_DATE=$(date -d "${{ github.event.release.created_at }}" "+%b %d, %Y" 2>/dev/null || date "+%b %d, %Y")
+          else
+            RELEASE_DATE=$(date "+%b %d, %Y")
+          fi
+          echo "release_date=$RELEASE_DATE" >> $GITHUB_OUTPUT
+
+          # Print summary
+          echo "=== Extracted Metadata ==="
+          echo "  vLLM: $VLLM_VER"
+          echo "  SGLang: $SGLANG_VER"
+          echo "  TRT-LLM: $TRTLLM_VER"
+          echo "  NIXL: $NIXL_VER"
+          echo "  CUDA (vLLM): $CUDA_VLLM"
+          echo "  CUDA (SGLang): $CUDA_SGLANG"
+          echo "  CUDA (TRT-LLM): $CUDA_TRTLLM"
+          echo "  Release date: $RELEASE_DATE"
+
+      # Step 3: Checkout main branch
+      - name: Checkout main
+        if: env.SKIP_REST != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          path: main-checkout
+
+      # Step 4: Set up tools
+      - name: Set up Python
+        if: env.SKIP_REST != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Go
+        if: env.SKIP_REST != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: main-checkout/deploy/operator/go.mod
+
+      - name: Install yq
+        if: env.SKIP_REST != 'true'
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Install controller-gen
+        if: env.SKIP_REST != 'true'
+        run: |
+          cd main-checkout/deploy/operator
+          make controller-gen
+
+      - name: Install helm-docs
+        if: env.SKIP_REST != 'true'
+        run: |
+          HELM_DOCS_VERSION="1.14.2"
+          curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xzf - helm-docs
+          sudo mv helm-docs /usr/local/bin/
+
+      # Step 5: Create branch and run version bump
+      - name: Create version-bump branch
+        if: env.SKIP_REST != 'true'
+        working-directory: main-checkout
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          BRANCH="chore/bump-version-to-${VERSION}"
+          git checkout -b "$BRANCH"
+          echo "branch=$BRANCH" >> $GITHUB_ENV
+
+      - name: Build skip flags
+        if: env.SKIP_REST != 'true'
+        id: flags
+        run: |
+          SKIP_FLAGS=""
+
+          # For auto-triggered full releases, all components are updated.
+          # For manual triggers, respect the checkbox inputs.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.update_core }}" != "true" ]; then
+              SKIP_FLAGS="$SKIP_FLAGS --skip-core"
+            fi
+            if [ "${{ inputs.update_containers }}" != "true" ]; then
+              SKIP_FLAGS="$SKIP_FLAGS --skip-containers"
+            fi
+            if [ "${{ inputs.update_helm }}" != "true" ]; then
+              SKIP_FLAGS="$SKIP_FLAGS --skip-helm"
+            fi
+            if [ "${{ inputs.update_docs }}" != "true" ]; then
+              SKIP_FLAGS="$SKIP_FLAGS --skip-docs"
+            fi
+          fi
+
+          echo "skip_flags=$SKIP_FLAGS" >> $GITHUB_OUTPUT
+          echo "Skip flags: $SKIP_FLAGS"
+
+      - name: Run version bump script
+        if: env.SKIP_REST != 'true'
+        working-directory: main-checkout
+        run: |
+          python3 .github/scripts/bump_version.py \
+            --new-version "${{ steps.tag.outputs.version }}" \
+            --vllm-version "${{ steps.metadata.outputs.vllm_version }}" \
+            --sglang-version "${{ steps.metadata.outputs.sglang_version }}" \
+            --trtllm-version "${{ steps.metadata.outputs.trtllm_version }}" \
+            --nixl-version "${{ steps.metadata.outputs.nixl_version }}" \
+            --cuda-versions-vllm "${{ steps.metadata.outputs.cuda_versions_vllm }}" \
+            --cuda-versions-sglang "${{ steps.metadata.outputs.cuda_versions_sglang }}" \
+            --cuda-versions-trtllm "${{ steps.metadata.outputs.cuda_versions_trtllm }}" \
+            --release-date "${{ steps.metadata.outputs.release_date }}" \
+            ${{ steps.flags.outputs.skip_flags }}
+
+      # Step 6: Regenerate CRDs
+      - name: Regenerate CRDs
+        if: env.SKIP_REST != 'true'
+        working-directory: main-checkout/deploy/operator
+        run: |
+          make generate
+          make manifests
+
+      # Step 7: Regenerate Helm docs
+      - name: Regenerate Helm docs
+        if: env.SKIP_REST != 'true'
+        working-directory: main-checkout/deploy/helm/charts/platform
+        run: helm-docs
+
+      # Step 8: Commit and create PR
+      - name: Commit changes
+        if: env.SKIP_REST != 'true'
+        working-directory: main-checkout
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -s -m "$(cat <<EOF
+          chore: bump version to ${VERSION}
+
+          Automated version bump from release v${VERSION}.
+
+          Updates:
+          - Core version files (pyproject.toml, Cargo.toml, setup.py)
+          - Helm chart versions
+          - Operator CRD source and regenerated files
+          - Documentation (support matrix, feature matrix, release artifacts)
+          - Container image tags across docs, recipes, and examples
+          - Cargo.lock files
+          EOF
+          )"
+
+      - name: Push branch
+        if: env.SKIP_REST != 'true'
+        working-directory: main-checkout
+        run: git push -u origin "${{ env.branch }}"
+
+      - name: Create PR
+        if: env.SKIP_REST != 'true'
+        working-directory: main-checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          IS_POST="${{ steps.tag.outputs.is_post }}"
+          SKIP_FLAGS="${{ steps.flags.outputs.skip_flags }}"
+
+          if [ "$IS_POST" = "true" ]; then
+            TITLE="chore: bump version to ${VERSION} (post-release)"
+          else
+            TITLE="chore: bump version to ${VERSION}"
+          fi
+
+          gh pr create \
+            --base main \
+            --title "$TITLE" \
+            --body "$(cat <<EOF
+          ## Summary
+
+          Automated version bump from release v${VERSION}.
+
+          **Backend versions** (derived from \`container/context.yaml\` on the release tag):
+          - vLLM: \`${{ steps.metadata.outputs.vllm_version }}\`
+          - SGLang: \`${{ steps.metadata.outputs.sglang_version }}\`
+          - TRT-LLM: \`${{ steps.metadata.outputs.trtllm_version }}\`
+          - NIXL: \`${{ steps.metadata.outputs.nixl_version }}\`
+
+          **Scope flags**: \`${SKIP_FLAGS:-all components updated}\`
+
+          ### Changes
+
+          - **Core version files**: pyproject.toml, Cargo.toml, lib/bindings/python/Cargo.toml, lib/gpu_memory_service/setup.py
+          - **Helm charts**: CRDs, platform, operator Chart.yaml + regenerated README
+          - **Operator CRDs**: Go source doc comments updated, CRDs regenerated via \`make generate && make manifests\`
+          - **Reference docs**: support-matrix.md, feature-matrix.md, release-artifacts.md
+          - **Image tags**: Updated across README, docs, recipes, and examples (discovery-based scan)
+          - **Cargo.lock**: Regenerated
+
+          ## Test plan
+
+          - [ ] Verify version strings are correct in key files
+          - [ ] Verify CRD files pass \`make check\` in deploy/operator/
+          - [ ] Verify no stale version references remain (\`python3 .github/scripts/bump_version.py --check\`)
+          EOF
+          )" \
+            --label "release" \
+            --label "chore"
