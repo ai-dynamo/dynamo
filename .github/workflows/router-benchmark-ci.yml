@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false  # Runner may not have git-lfs; benchmark does not need LFS
       - name: Login to Container Registries
         uses: ./.github/actions/docker-login
         with:
