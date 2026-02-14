@@ -6,7 +6,10 @@ use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded,
 };
-use dynamo_kv_router::protocols::RouterEvent;
+use dynamo_kv_router::protocols::{
+    ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
+    RouterEvent,
+};
 use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
 use rand::prelude::*;
 use std::fs::File;
@@ -128,6 +131,13 @@ struct Args {
     /// Duplicated workers replay identical traces with distinct worker IDs.
     #[clap(short = 'd', long, default_value = "1")]
     inference_worker_duplication_factor: usize,
+
+    /// How many times to duplicate the trace data with offset hashes at
+    /// replay time. Each duplication creates a structurally identical copy
+    /// of the prefix tree with disjoint hash values, increasing the number
+    /// of unique prefix groups.
+    #[clap(long, default_value = "1")]
+    trace_duplication_factor: usize,
 
     /// RNG seed for reproducible worker-to-trace assignment.
     #[clap(long, default_value = "42")]
@@ -270,6 +280,127 @@ fn make_progress_bar(total: Option<u64>) -> ProgressBar {
     );
 
     progress
+}
+
+/// Scan all hashes in the prepared worker traces to find the global maximum.
+/// Used to compute a safe per-duplication offset that keeps hash spaces disjoint.
+fn compute_max_hash(traces: &[Arc<Vec<WorkerTrace>>]) -> u64 {
+    let mut max_hash: u64 = 0;
+    for trace in traces {
+        for entry in trace.iter() {
+            match &entry.entry {
+                WorkerTraceEntry::Request(hashes) => {
+                    for h in hashes {
+                        max_hash = max_hash.max(h.0);
+                    }
+                }
+                WorkerTraceEntry::Event(event) => match &event.data {
+                    KvCacheEventData::Stored(store) => {
+                        if let Some(parent) = &store.parent_hash {
+                            max_hash = max_hash.max(parent.0);
+                        }
+                        for block in &store.blocks {
+                            max_hash = max_hash.max(block.tokens_hash.0);
+                            max_hash = max_hash.max(block.block_hash.0);
+                        }
+                    }
+                    KvCacheEventData::Removed(remove) => {
+                        for h in &remove.block_hashes {
+                            max_hash = max_hash.max(h.0);
+                        }
+                    }
+                    KvCacheEventData::Cleared => {}
+                },
+            }
+        }
+    }
+    max_hash
+}
+
+/// Create a new WorkerTrace entry with all hashes offset by the given amount.
+/// Preserves the prefix tree structure while making all hash values disjoint
+/// from the original. Both LocalBlockHash and ExternalSequenceBlockHash values
+/// are shifted by the same constant so parent_hash chains remain valid.
+fn offset_trace_entry(entry: &WorkerTrace, offset: u64) -> WorkerTrace {
+    WorkerTrace {
+        timestamp_us: entry.timestamp_us,
+        entry: match &entry.entry {
+            WorkerTraceEntry::Request(hashes) => WorkerTraceEntry::Request(
+                hashes
+                    .iter()
+                    .map(|h| LocalBlockHash(h.0 + offset))
+                    .collect(),
+            ),
+            WorkerTraceEntry::Event(event) => WorkerTraceEntry::Event(KvCacheEvent {
+                event_id: event.event_id,
+                dp_rank: event.dp_rank,
+                data: match &event.data {
+                    KvCacheEventData::Stored(store) => KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: store
+                            .parent_hash
+                            .map(|h| ExternalSequenceBlockHash(h.0 + offset)),
+                        blocks: store
+                            .blocks
+                            .iter()
+                            .map(|b| KvCacheStoredBlockData {
+                                tokens_hash: LocalBlockHash(b.tokens_hash.0 + offset),
+                                block_hash: ExternalSequenceBlockHash(b.block_hash.0 + offset),
+                                mm_extra_info: b.mm_extra_info.clone(),
+                            })
+                            .collect(),
+                    }),
+                    KvCacheEventData::Removed(remove) => {
+                        KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: remove
+                                .block_hashes
+                                .iter()
+                                .map(|h| ExternalSequenceBlockHash(h.0 + offset))
+                                .collect(),
+                        })
+                    }
+                    KvCacheEventData::Cleared => KvCacheEventData::Cleared,
+                },
+            }),
+        },
+    }
+}
+
+/// Pre-expand worker traces by appending offset copies of every entry.
+///
+/// For each original entry, `(trace_duplication_factor - 1)` copies are
+/// inserted immediately after it, each with all hashes shifted by
+/// `(max_hash + 1) * d`. The copies share the same `timestamp_us` so the
+/// existing same-timestamp batching in the replay loop handles them
+/// transparently.
+fn expand_traces_with_offsets(
+    worker_traces: Vec<Arc<Vec<WorkerTrace>>>,
+    trace_duplication_factor: usize,
+    compute_max_hash_fn: &dyn Fn(&[Arc<Vec<WorkerTrace>>]) -> u64,
+) -> Vec<Arc<Vec<WorkerTrace>>> {
+    if trace_duplication_factor <= 1 {
+        return worker_traces;
+    }
+
+    let hash_offset_base = compute_max_hash_fn(&worker_traces) + 1;
+    println!(
+        "Expanding traces: {}x duplication (hash offset base: {})",
+        trace_duplication_factor, hash_offset_base
+    );
+
+    worker_traces
+        .into_iter()
+        .map(|trace| {
+            let trace = Arc::try_unwrap(trace).unwrap_or_else(|arc| (*arc).clone());
+            let mut expanded = Vec::with_capacity(trace.len() * trace_duplication_factor);
+            for entry in trace {
+                for d in 1..trace_duplication_factor {
+                    expanded.push(offset_trace_entry(&entry, hash_offset_base * d as u64));
+                }
+                expanded.push(entry); // move, no clone
+            }
+            Arc::new(expanded)
+        })
+        .collect()
 }
 
 /// Replay each worker's request trace through a mock engine in real-time to
@@ -473,6 +604,15 @@ async fn run_benchmark(
         .into_iter()
         .map(|trace| Arc::new(trace))
         .collect::<Vec<_>>();
+
+    // Pre-expand traces with offset copies so the replay loop has zero
+    // per-entry overhead. Each original entry is followed by
+    // (trace_duplication_factor - 1) offset copies at the same timestamp.
+    let worker_traces = expand_traces_with_offsets(
+        worker_traces,
+        args.trace_duplication_factor,
+        &compute_max_hash,
+    );
 
     let progress = make_progress_bar(Some(
         worker_traces
