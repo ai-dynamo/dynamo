@@ -70,6 +70,14 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let name = name.as_ref();
     let model_name = name.display().to_string();
 
+    // If the name is an existing local directory, return it directly (no download).
+    // This aligns with workers, which skips fetch_llm when model_path exists.
+    if name.exists() && name.is_dir() {
+        let path = name.to_path_buf();
+        tracing::info!("Using existing local model path {:?}, skipping download", path);
+        return Ok(path);
+    }
+
     // In offline mode, check cache first and return immediately if found
     if is_offline_mode() {
         if let Some(cached_path) = get_cached_model_path(&model_name, ignore_weights) {
@@ -179,6 +187,19 @@ fn get_model_express_cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_from_hf_existing_local_dir_returns_path_without_download() {
+        // If name is an existing local directory, from_hf returns it directly (no download).
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let dir_path = temp_dir.path().to_path_buf();
+
+        let result = from_hf(&dir_path, false).await;
+
+        assert!(result.is_ok(), "from_hf should succeed for existing directory");
+        let path = result.unwrap();
+        assert_eq!(path, dir_path, "should return the same path, skipping download");
+    }
 
     #[tokio::test]
     async fn test_from_hf_with_model_express() {
