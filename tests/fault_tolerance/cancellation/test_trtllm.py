@@ -31,6 +31,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
@@ -62,8 +63,6 @@ class DynamoWorkerProcess(ManagedProcess):
         system_port = allocate_port(9100)
         self.system_port = system_port
         self.frontend_port = frontend_port
-        # Prefill workers require migration_limit=0 (no KV cache migration support)
-        migration_limit = "0" if mode == "prefill" else "3"
 
         command = [
             "python3",
@@ -77,8 +76,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "16384",
             "--max-num-tokens",
             "16384",
-            "--migration-limit",
-            migration_limit,
         ]
         if mode != "prefill_and_decode":
             with open("test_request_cancellation_trtllm_config.yaml", "w") as f:

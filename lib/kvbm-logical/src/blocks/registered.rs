@@ -1,7 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! RAII guards for registered blocks (primary and duplicate)
+//! Crate-internal RAII guards for blocks in the **Registered** state.
+//!
+//! [`PrimaryBlock`] is the canonical holder of a sequence hash in the
+//! registry. [`DuplicateBlock`] is an additional physical copy that shares
+//! the same hash and holds a strong reference to its primary. Both implement
+//! [`RegisteredBlock`](super::RegisteredBlock) so they can be stored behind
+//! a `dyn` trait object inside [`ImmutableBlock`](super::ImmutableBlock).
 
 use std::any::TypeId;
 use std::sync::{Arc, Weak};
@@ -22,17 +28,25 @@ pub(crate) struct WeakBlockEntry<T: BlockMetadata + Sync> {
     pub(crate) primary_block: Weak<PrimaryBlock<T>>,
 }
 
-/// RAII guard for [`Block<T, Registered>`] that automatically returns to RegisteredPool on drop
+/// RAII guard for the canonical registered block behind a given sequence hash.
+///
+/// On drop the inner `Arc<Block<T, Registered>>` is returned to the
+/// registered (inactive) pool via `return_fn`.
 pub(crate) struct PrimaryBlock<T: BlockMetadata> {
-    pub(crate) block: Option<Arc<Block<T, Registered>>>,
-    pub(crate) return_fn: RegisteredReturnFn<T>,
+    block: Option<Arc<Block<T, Registered>>>,
+    return_fn: RegisteredReturnFn<T>,
 }
 
-/// RAII guard for duplicate blocks that share the same sequence hash as a primary block
+/// RAII guard for a duplicate physical block that shares the same sequence
+/// hash as an existing [`PrimaryBlock`].
+///
+/// Holds a strong reference to its primary so the primary cannot be evicted
+/// while the duplicate exists. On drop the block is reset and returned to
+/// the reset pool via `return_fn`.
 pub(crate) struct DuplicateBlock<T: BlockMetadata> {
-    pub(crate) block: Option<Block<T, Registered>>,
-    pub(crate) return_fn: ResetReturnFn<T>,
-    pub(crate) _primary: Arc<PrimaryBlock<T>>,
+    block: Option<Block<T, Registered>>,
+    return_fn: ResetReturnFn<T>,
+    _primary: Arc<PrimaryBlock<T>>,
 }
 
 impl<T: BlockMetadata + Sync> PrimaryBlock<T> {

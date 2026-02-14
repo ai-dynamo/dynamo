@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-kvbm-logical"
+name = "kvbm-logical"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

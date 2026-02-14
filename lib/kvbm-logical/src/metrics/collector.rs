@@ -289,7 +289,7 @@ mod tests {
             .expect("should have allocations family");
         assert_eq!(alloc_family.get_field_type(), MetricType::COUNTER);
         let m = &alloc_family.get_metric()[0];
-        assert_eq!(m.get_counter().get_value(), 10.0);
+        assert_eq!(m.get_counter().value(), 10.0);
         assert_eq!(m.get_label()[0].get_name(), "pool");
         assert_eq!(m.get_label()[0].get_value(), "G1");
 
@@ -299,7 +299,7 @@ mod tests {
             .find(|f| f.get_name() == "kvbm_reset_pool_size")
             .expect("should have reset pool size family");
         assert_eq!(reset_family.get_field_type(), MetricType::GAUGE);
-        assert_eq!(reset_family.get_metric()[0].get_gauge().get_value(), 42.0);
+        assert_eq!(reset_family.get_metric()[0].get_gauge().value(), 42.0);
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
         let values: Vec<f64> = alloc_family
             .get_metric()
             .iter()
-            .map(|m| m.get_counter().get_value())
+            .map(|m| m.get_counter().value())
             .collect();
         assert!(values.contains(&5.0));
         assert!(values.contains(&10.0));
@@ -375,7 +375,7 @@ mod tests {
             .iter()
             .find(|f| f.get_name() == "kvbm_allocations_total")
             .expect("should find allocations in gathered metrics");
-        assert_eq!(alloc_family.get_metric()[0].get_counter().get_value(), 42.0);
+        assert_eq!(alloc_family.get_metric()[0].get_counter().value(), 42.0);
     }
 
     #[test]

@@ -1,3 +1,3 @@
 # Dynamo Logging on Kubernetes
 
-For detailed documentation on collecting and visualizing logs on Kubernetes, see [docs/kubernetes/observability/logging.md](../../../../docs/kubernetes/observability/logging.md).
+For detailed documentation on collecting and visualizing logs on Kubernetes, see [docs/pages/kubernetes/observability/logging.md](../../../../docs/pages/kubernetes/observability/logging.md).

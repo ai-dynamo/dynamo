@@ -23,7 +23,7 @@ import (
 	"sort"
 	"strings"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
@@ -67,10 +67,6 @@ const (
 	DGDStateReady   State = "successful"
 	DGDStatePending State = "pending"
 )
-
-type etcdStorage interface {
-	DeleteKeys(ctx context.Context, prefix string) error
-}
 
 // rbacManager interface for managing RBAC resources
 type rbacManager interface {

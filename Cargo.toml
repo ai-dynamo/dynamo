@@ -3,7 +3,6 @@
 
 [workspace]
 members = [
-    "launch/dynamo-run",
     "lib/llm",
     "lib/runtime",
     "lib/config",
@@ -16,13 +15,10 @@ members = [
     "lib/parsers",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
-    "lib/engines/*",
     "lib/config",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
-# - launch/dynamo-run
-# - lib/engines/*
 default-members = [
     "lib/llm",
     "lib/runtime",
@@ -54,11 +50,11 @@ dynamo-llm = { path = "lib/llm", version = "0.9.0" }
 dynamo-config = { path = "lib/config", version = "0.9.0" }
 dynamo-tokens = { path = "lib/tokens", version = "0.9.0" }
 dynamo-memory = { path = "lib/memory", version = "0.9.0" }
-dynamo-kvbm-logical = { path = "lib/kvbm-logical", version = "0.9.0" }
 dynamo-mocker = { path = "lib/mocker", version = "0.9.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "0.9.0", features = ["metrics"] }
 dynamo-async-openai = { path = "lib/async-openai", version = "0.9.0", features = ["byot"] }
 dynamo-parsers = { path = "lib/parsers", version = "0.9.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "0.9.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -96,7 +92,7 @@ humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.13", features = ["std", "async"] }
 parking_lot = "0.12.5"
-prometheus = { version = "0.14", default-features = false }
+prometheus = { version = "0.14"}
 rand = { version = "0.9.2" }
 reqwest = { version = "0.12.24", default-features = false, features = [
     "json",
@@ -112,9 +108,9 @@ tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
 zmq = { version = "0.10" }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "=1.48.0", features = ["full"] }
 tokio-stream = { version = "0.1" }
-tokio-util = { version = "0.7", features = ["codec", "net", "rt", "io-util"] }
+tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 axum = { version = "=0.8.4", features = ["macros"] }
 axum-core = { version = "0.5.2" }

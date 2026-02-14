@@ -41,10 +41,14 @@ use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
+#[cfg(target_os = "linux")]
+use tokio_timerfd::Delay;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use validator::Validate;
 
 /// Simple metrics struct for mocker's internal use
 #[derive(Clone, Default, Debug)]
@@ -259,12 +263,7 @@ impl Scheduler {
         kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
-        // Assert speedup_ratio is non-negative (0 means infinite speedup)
-        assert!(
-            args.speedup_ratio >= 0.0,
-            "speedup_ratio must be >= 0 (0 means infinite speedup), got: {}",
-            args.speedup_ratio
-        );
+        args.validate().expect("invalid MockEngineArgs");
 
         // Create channel for request handling
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
@@ -312,6 +311,7 @@ impl Scheduler {
                     args.speedup_ratio,
                 )
                 .await;
+
                 simulate_decode(
                     &mut state,
                     &mut kv_manager,
@@ -393,7 +393,7 @@ async fn simulate_prefill(
     worker_type: WorkerType,
     speedup_ratio: f64,
 ) -> Duration {
-    let start_time = tokio::time::Instant::now();
+    let start_time = Instant::now();
     let mut total_time = Duration::ZERO;
 
     while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
@@ -417,10 +417,21 @@ async fn simulate_prefill(
             break;
         }
     }
-    if speedup_ratio > 0.0 {
-        let deadline =
-            start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
-        tokio::time::sleep_until(deadline).await;
+
+    if speedup_ratio > 0.0 && total_time > Duration::ZERO {
+        let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+        let deadline = start_time + sleep_duration;
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(delay) = Delay::new(deadline) {
+                let _ = delay.await;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        }
     }
 
     total_time
@@ -436,7 +447,8 @@ async fn simulate_decode(
     block_size: usize,
     speedup_ratio: f64,
 ) -> Duration {
-    let start_time = tokio::time::Instant::now();
+    let start_time = Instant::now();
+
     // Compute decode timing
     let active_kv_tokens = kv_manager.num_active_blocks() * block_size;
 
@@ -499,10 +511,21 @@ async fn simulate_decode(
             state.complete(&uuid);
         }
     }
-    if speedup_ratio > 0.0 {
-        let deadline =
-            start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
-        tokio::time::sleep_until(deadline).await;
+
+    if speedup_ratio > 0.0 && total_time > Duration::ZERO {
+        let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+        let deadline = start_time + sleep_duration;
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(delay) = Delay::new(deadline) {
+                let _ = delay.await;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        }
     }
 
     total_time

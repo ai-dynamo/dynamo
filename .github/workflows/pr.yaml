@@ -177,12 +177,15 @@ jobs:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
+      target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      test_gpu_timeout_minutes: 35
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
   # ============================================================================
@@ -194,12 +197,14 @@ jobs:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
+      target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
   # ============================================================================
@@ -211,12 +216,14 @@ jobs:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
+      target: runtime
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trt-llm-{0}', github.sha) || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
 
@@ -227,12 +234,30 @@ jobs:
 
   deploy-operator:
     runs-on: prod-default-small-v2
-    if: needs.changed-files.outputs.core == 'true'
+    # Run when any deploy test will run: if core, any framework, or deploy files changed
+    if: |
+      always() &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
     outputs:
       NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
     steps:
     - uses: actions/checkout@v4
+    - name: Determine operator image tag
+      id: operator-tag
+      run: |
+        if [ "${{ needs.operator.result }}" == "success" ]; then
+          echo "tag=${{ needs.operator.outputs.operator_default_tag }}" >> $GITHUB_OUTPUT
+          echo "Using newly built operator image: ${{ needs.operator.outputs.operator_default_tag }}"
+        else
+          echo "tag=main-operator" >> $GITHUB_OUTPUT
+          echo "Using stable operator image: main-operator"
+        fi
     - name: Deploy Operator
       id: deploy-operator-step
       env:
@@ -289,7 +314,7 @@ jobs:
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.operator.outputs.operator_default_tag }} \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ steps.operator-tag.outputs.tag }} \
           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
@@ -318,7 +343,8 @@ jobs:
    # End-to-end tests for each framework with various deployment profiles
    # ============================================================================
   deploy-test-vllm:
-    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+    # Run if core, vllm, or deploy is changed
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     runs-on: prod-default-small-v2
     needs: [deploy-operator, vllm-pipeline]
     permissions:
@@ -331,44 +357,6 @@ jobs:
           - agg
           - agg_router
           - disagg
-          # - disagg_router
-    name: deploy-test-vllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: vllm
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          deployment_file: "deploy/${{ matrix.profile }}.yaml"
-          framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
-          model_name: "Qwen/Qwen3-0.6B"
-          test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
-
-
-
-  # For now, this job is separated from the job matrix above for easier flow control handling
-  # Uncomment the disagg_router matrix entry from the above job and delete the below job
-  # when we want to run them under the same conditions.
-  # Current conditions:
-  # - Run vllm disagg_router on all commits
-  # - Run rest of jobs only on push to main or manual trigger
-  deploy-test-vllm-disagg-router:
-    runs-on:  prod-default-small-v2
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    needs: [changed-files, deploy-operator, vllm-pipeline]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile:
           - disagg_router
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
@@ -384,15 +372,14 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
-          model_name: "Qwen/Qwen3-0.6B"
-          test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
-
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
+          platform_arch: amd64
 
   deploy-test-sglang:
     runs-on: prod-default-small-v2
-    # Run if push to main, or manually triggered
-    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+    # Run if core, sglang, or deploy is changed
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, sglang-pipeline]
     permissions:
       contents: read
@@ -417,15 +404,14 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
-          model_name: "Qwen/Qwen3-0.6B"
-          test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
-
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
+          platform_arch: amd64
 
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
-    # Run if push to main, or manually triggered
-    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+    # Run if core, trtllm, or deploy is changed
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, trtllm-pipeline]
     permissions:
       contents: read
@@ -452,9 +438,9 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
-          model_name: "Qwen/Qwen3-0.6B"
-          test_identifier: ${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ github.run_attempt }}
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
+          platform_arch: amd64
 
   # ============================================================================
   # CLEANUP JOBS
@@ -486,7 +472,7 @@ jobs:
     name: Cleanup AKS resources
     runs-on: prod-default-small-v2
     if: always()
-    needs: [deploy-operator, deploy-test-sglang, deploy-test-trtllm, deploy-test-vllm, deploy-test-vllm-disagg-router]
+    needs: [deploy-operator, deploy-test-sglang, deploy-test-trtllm, deploy-test-vllm]
     steps:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0

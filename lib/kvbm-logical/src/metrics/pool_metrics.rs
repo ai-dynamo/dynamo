@@ -149,8 +149,28 @@ impl BlockPoolMetrics {
     }
 
     #[inline(always)]
+    pub fn inc_reset_pool_size(&self) {
+        self.reset_pool_size.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn dec_reset_pool_size(&self) {
+        self.reset_pool_size.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn set_inactive_pool_size(&self, size: i64) {
         self.inactive_pool_size.store(size, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn inc_inactive_pool_size(&self) {
+        self.inactive_pool_size.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn dec_inactive_pool_size(&self) {
+        self.inactive_pool_size.fetch_sub(1, Ordering::Relaxed);
     }
 
     // ---- Snapshot for stats collector ----
@@ -254,6 +274,21 @@ mod tests {
         m.set_reset_pool_size(80);
         let snap = m.snapshot();
         assert_eq!(snap.reset_pool_size, 80);
+
+        // Test inc/dec for reset pool size
+        m.inc_reset_pool_size();
+        m.inc_reset_pool_size();
+        m.dec_reset_pool_size();
+        let snap = m.snapshot();
+        assert_eq!(snap.reset_pool_size, 81);
+
+        // Test inc/dec for inactive pool size
+        m.inc_inactive_pool_size();
+        m.inc_inactive_pool_size();
+        m.inc_inactive_pool_size();
+        m.dec_inactive_pool_size();
+        let snap = m.snapshot();
+        assert_eq!(snap.inactive_pool_size, 52);
     }
 
     #[test]

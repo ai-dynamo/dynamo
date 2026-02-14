@@ -9,9 +9,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dynamo_kvbm_logical::registry::BlockRegistry;
-use dynamo_kvbm_logical::tinylfu::TinyLFUTracker;
-use dynamo_kvbm_logical::{BlockManager, ImmutableBlock, MutableBlock};
+use kvbm_logical::registry::BlockRegistry;
+use kvbm_logical::tinylfu::TinyLFUTracker;
+use kvbm_logical::{BlockManager, ImmutableBlock, MutableBlock};
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::PositionalLineageHash;
 use uuid::Uuid;
@@ -310,7 +310,7 @@ impl KvbmLogicalKvManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kvbm_logical::metrics::MetricsSnapshot;
+    use kvbm_logical::metrics::MetricsSnapshot;
 
     fn make_manager(capacity: usize, block_size: usize) -> KvbmLogicalKvManager {
         KvbmLogicalKvManager::new(capacity, block_size, 0, None, MockerEvictionBackend::Lineage)

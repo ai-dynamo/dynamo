@@ -62,7 +62,7 @@ pub struct KvbmCacheEvents {
 
 /// RAII handle that triggers a Remove event when dropped.
 ///
-/// This handle is attached to a BlockRegistrationHandle as an Arc<dyn Any>.
+/// This handle is attached to a [`crate::registry::BlockRegistrationHandle`] as an [`std::sync::Arc<dyn std::any::Any>`].
 /// When all references to the block are dropped, this handle's Drop implementation
 /// sends a Remove event to clean up the hub's tracking state.
 pub struct EventReleaseHandle {

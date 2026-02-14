@@ -23,15 +23,20 @@ pub(crate) struct ResetPool<T> {
 }
 
 impl<T: BlockMetadata> ResetPool<T> {
-    pub(crate) fn new(blocks: Vec<Block<T, Reset>>, block_size: usize) -> Self {
+    pub(crate) fn new(
+        blocks: Vec<Block<T, Reset>>,
+        block_size: usize,
+        metrics: Option<Arc<BlockPoolMetrics>>,
+    ) -> Self {
         let allocator = DequeBlockAllocator::new();
-        Self::from_block_allocator(allocator, blocks, block_size)
+        Self::from_block_allocator(allocator, blocks, block_size, metrics)
     }
 
     pub(crate) fn from_block_allocator(
         mut allocator: impl BlockAllocator<T> + Send + Sync + 'static,
         blocks: Vec<Block<T, Reset>>,
         block_size: usize,
+        metrics: Option<Arc<BlockPoolMetrics>>,
     ) -> Self {
         for (i, block) in blocks.iter().enumerate() {
             if block.block_id() != i as BlockId {
@@ -46,26 +51,20 @@ impl<T: BlockMetadata> ResetPool<T> {
         let block_allocator = Arc::new(Mutex::new(allocator));
 
         let allocator_clone = block_allocator.clone();
+        let metrics_clone = metrics.clone();
         let return_fn = Arc::new(move |block: Block<T, Reset>| {
             allocator_clone.lock().insert(block);
+            if let Some(ref m) = metrics_clone {
+                m.inc_reset_pool_size();
+            }
         });
 
         Self {
             block_allocator,
             return_fn,
             block_size,
-            metrics: None,
+            metrics,
         }
-    }
-
-    /// Set the metrics handle for this pool.
-    pub(crate) fn set_metrics(&mut self, metrics: Arc<BlockPoolMetrics>) {
-        self.metrics = Some(metrics);
-    }
-
-    /// Get the metrics handle, if any.
-    pub(crate) fn metrics(&self) -> &Option<Arc<BlockPoolMetrics>> {
-        &self.metrics
     }
 
     /// Tries to allocate upto `count` blocks from the pool.
@@ -76,6 +75,9 @@ impl<T: BlockMetadata> ResetPool<T> {
         let available_count = std::cmp::min(count, allocator.len());
 
         for _ in 0..available_count {
+            if let Some(ref m) = self.metrics {
+                m.dec_reset_pool_size();
+            }
             blocks.push(MutableBlock::new(
                 allocator.pop().unwrap(),
                 self.return_fn.clone(),
@@ -159,7 +161,7 @@ mod tests {
     #[test]
     fn test_mutable_block_raii_return() {
         let blocks = create_test_blocks(3);
-        let pool = ResetPool::new(blocks, 4);
+        let pool = ResetPool::new(blocks, 4, None);
 
         assert_eq!(pool.len(), 3);
 
@@ -175,7 +177,7 @@ mod tests {
     #[test]
     fn test_pool_allocation_and_return_cycle() {
         let blocks = create_test_blocks(5);
-        let pool = ResetPool::new(blocks, 4);
+        let pool = ResetPool::new(blocks, 4, None);
 
         for _ in 0..3 {
             assert_eq!(pool.len(), 5);
