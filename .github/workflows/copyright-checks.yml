@@ -24,3 +24,13 @@ jobs:
           NVBUILD_VERBOSITY: DETAILED
         timeout-minutes: 2
         working-directory: /workspace
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [copyright-checks]
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    uses: ./.github/workflows/classify-workflow-errors-reusable.yml
+    secrets: inherit

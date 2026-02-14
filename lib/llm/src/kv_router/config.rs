@@ -17,6 +17,9 @@ pub struct RouterConfigOverride {
     #[builder(default)]
     #[validate(range(min = 0.0))]
     pub router_temperature: Option<f64>,
+
+    #[builder(default)]
+    pub assume_kv_reuse: Option<bool>,
 }
 
 /// KV Router configuration parameters
@@ -44,7 +47,7 @@ pub struct KvRouterConfig {
 
     /// Whether to track output blocks during generation (default: false)
     /// When enabled, the router adds placeholder blocks as tokens are generated
-    /// and applies fractional decay based on progress toward expected_output_tokens.
+    /// and applies fractional decay based on progress toward agent_hints.osl.
     pub router_track_output_blocks: bool,
 
     /// Whether to assume KV cache reuse when tracking active blocks (default: true).
@@ -71,6 +74,13 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0, max = 1.0))]
     pub router_prune_target_ratio: f64,
 
+    /// Queue threshold fraction for prefill token capacity.
+    /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
+    /// If None (default), queueing is disabled and all requests go directly to ready.
+    /// Must be > 0.
+    #[validate(range(min = 0.0))]
+    pub router_queue_threshold: Option<f64>,
+
     /// Number of event processing threads for the KV indexer.
     /// When > 1, uses ConcurrentRadixTree with a thread pool instead of the
     /// single-threaded RadixTree. Default: 1.
@@ -94,6 +104,7 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
+            router_queue_threshold: None,
             router_event_threads: 1,
         }
     }
@@ -129,6 +140,7 @@ impl KvRouterConfig {
         &self,
         tokens: &[u32],
         block_size: u32,
+        config_override: Option<&RouterConfigOverride>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -139,7 +151,12 @@ impl KvRouterConfig {
             return Some(Vec::new());
         }
 
-        if self.router_assume_kv_reuse {
+        // Use override if provided, otherwise use default config
+        let assume_kv_reuse = config_override
+            .and_then(|cfg| cfg.assume_kv_reuse)
+            .unwrap_or(self.router_assume_kv_reuse);
+
+        if assume_kv_reuse {
             // Compute actual block hashes and sequence hashes
             let block_hashes = compute_block_hash_for_seq(tokens, block_size, None);
             Some(compute_seq_hash_for_block(&block_hashes))

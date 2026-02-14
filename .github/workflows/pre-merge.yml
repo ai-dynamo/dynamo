@@ -68,7 +68,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
       contents: read
     steps:
@@ -124,13 +124,16 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
       contents: read
     steps:
     - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       with:
         lfs: true
+    - name: Verify Cargo lock file is in sync
+      working-directory: ${{ matrix.dir }}
+      run: cargo metadata --locked --format-version 1
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
@@ -157,3 +160,17 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [changed-files, pre-commit, rust-tests, rust-clippy]
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write  # Required for PR comments
+    uses: ./.github/workflows/classify-workflow-errors-reusable.yml
+    with:
+      enable_pr_comments: 'true'
+      max_parallel_jobs: '5'
+      python_version: '3.11'
+    secrets: inherit

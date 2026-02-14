@@ -17,8 +17,8 @@ import pytest
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from benchmarks.profiler.profile_sla import run_profile  # noqa: E402
-from benchmarks.profiler.utils.model_info import ModelInfo  # noqa: E402
+from dynamo.profiler.profile_sla import run_profile  # noqa: E402
+from dynamo.profiler.utils.model_info import ModelInfo  # noqa: E402
 
 pytestmark = [
     pytest.mark.aiconfigurator,

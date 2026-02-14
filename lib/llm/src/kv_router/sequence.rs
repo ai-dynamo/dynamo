@@ -73,6 +73,17 @@ const EXPIRY_DURATION: Duration = Duration::from_secs(300);
 // TODO: use the common request_id if it exists in the repo
 pub type RequestId = String;
 
+/// Bundled parameters for adding a request to the sequence tracker.
+pub struct SequenceRequest {
+    pub request_id: RequestId,
+    pub token_sequence: Option<Vec<SequenceHash>>,
+    pub isl: usize,
+    pub overlap: u32,
+    pub expected_output_tokens: Option<u32>,
+    pub worker: WorkerWithDpRank,
+    pub lora_name: Option<String>,
+}
+
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
 #[derive(Debug, Getters)]
 pub struct ActiveSequences {
@@ -770,17 +781,17 @@ impl ActiveSequencesMultiWorker {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn add_request(
-        &self,
-        request_id: RequestId,
-        token_sequence: Option<Vec<SequenceHash>>,
-        isl: usize,
-        overlap: u32,
-        expected_output_tokens: Option<u32>,
-        worker: WorkerWithDpRank,
-        lora_name: Option<String>,
-    ) -> Result<(), SequenceError> {
+    pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        let SequenceRequest {
+            request_id,
+            token_sequence,
+            isl,
+            overlap,
+            expected_output_tokens,
+            worker,
+            lora_name,
+        } = req;
+
         // Clone the sender upfront so we don't hold the DashMap Ref across
         // the .await points below. Also eliminates the TOCTOU between
         // contains_key and a later get().unwrap().
@@ -791,7 +802,6 @@ impl ActiveSequencesMultiWorker {
             .value()
             .clone();
 
-        // Check for duplicate request
         if let Some(existing_worker) = self.request_to_worker.get(&request_id) {
             return Err(SequenceError::DuplicateRequest {
                 request_id,
@@ -799,10 +809,8 @@ impl ActiveSequencesMultiWorker {
             });
         }
 
-        // Create response channel
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
 
-        // Publish event only if replica_sync is enabled
         if self.replica_sync {
             let event = ActiveSequenceEvent {
                 request_id: request_id.clone(),
@@ -819,10 +827,8 @@ impl ActiveSequencesMultiWorker {
             self.event_publisher.publish(&event).await?;
         }
 
-        // Update local state with full WorkerWithDpRank
         self.request_to_worker.insert(request_id.clone(), worker);
 
-        // Store lora_name for later use in Free/MarkPrefillCompleted events
         if let Some(lora) = lora_name {
             self.request_to_lora.insert(request_id.clone(), lora);
         }
@@ -838,18 +844,15 @@ impl ActiveSequencesMultiWorker {
             })
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
-        // Wait for response and handle removed requests
         let removed_requests = resp_rx
             .await
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
-        // Remove expired requests from request_to_worker mapping
         for expired_id in &removed_requests {
             self.request_to_worker.remove(expired_id);
             self.request_to_lora.remove(expired_id);
         }
 
-        // Publish ActiveLoad metrics for this worker
         self.publish_active_load_for_worker(worker).await;
 
         Ok(())
@@ -1356,41 +1359,41 @@ mod tests {
 
         // Add request_0 to worker 0, dp_rank 0: sequence [0, 1, 2]
         seq_manager_1
-            .add_request(
-                "request_0".to_string(),
-                Some(vec![0, 1, 2]),
-                12,   // ISL (3 blocks * 4 block_size)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::new(0, 0),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_0".to_string(),
+                token_sequence: Some(vec![0, 1, 2]),
+                isl: 12,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::new(0, 0),
+                lora_name: None,
+            })
             .await?;
 
         // Add request_1 to worker 0, dp_rank 1: sequence [3, 4]
         seq_manager_1
-            .add_request(
-                "request_1".to_string(),
-                Some(vec![3, 4]),
-                8,    // ISL (2 blocks * 4 block_size)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::new(0, 1),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_1".to_string(),
+                token_sequence: Some(vec![3, 4]),
+                isl: 8,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::new(0, 1),
+                lora_name: None,
+            })
             .await?;
 
         // Add request_2 to worker 1, dp_rank 0: sequence [0, 1, 2, 3] using seq_manager_2
         seq_manager_2
-            .add_request(
-                "request_2".to_string(),
-                Some(vec![0, 1, 2, 3]),
-                16,   // ISL (4 blocks * 4 block_size)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::new(1, 0),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_2".to_string(),
+                token_sequence: Some(vec![0, 1, 2, 3]),
+                isl: 16,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::new(1, 0),
+                lora_name: None,
+            })
             .await?;
 
         // Give some time for synchronization
@@ -1535,41 +1538,41 @@ mod tests {
 
         // Add request_0 to worker 0 with no token sequence
         seq_manager_1
-            .add_request(
-                "request_0".to_string(),
-                None, // No token sequence
-                12,   // ISL (12 tokens)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::from_worker_id(0),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_0".to_string(),
+                token_sequence: None,
+                isl: 12,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::from_worker_id(0),
+                lora_name: None,
+            })
             .await?;
 
         // Add request_1 to worker 1 with no token sequence
         seq_manager_1
-            .add_request(
-                "request_1".to_string(),
-                None, // No token sequence
-                8,    // ISL (8 tokens)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::from_worker_id(1),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_1".to_string(),
+                token_sequence: None,
+                isl: 8,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::from_worker_id(1),
+                lora_name: None,
+            })
             .await?;
 
         // Add request_2 to worker 2 with no token sequence using seq_manager_2
         seq_manager_2
-            .add_request(
-                "request_2".to_string(),
-                None, // No token sequence
-                16,   // ISL (16 tokens)
-                0,    // no overlap
-                None, // expected_output_tokens
-                WorkerWithDpRank::from_worker_id(2),
-                None, // lora_name
-            )
+            .add_request(SequenceRequest {
+                request_id: "request_2".to_string(),
+                token_sequence: None,
+                isl: 16,
+                overlap: 0,
+                expected_output_tokens: None,
+                worker: WorkerWithDpRank::from_worker_id(2),
+                lora_name: None,
+            })
             .await?;
 
         // Give some time for synchronization

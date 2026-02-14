@@ -44,7 +44,6 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
-  - 'launch/**'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
@@ -59,6 +58,7 @@ ignore:
   - 'container/templates/aws.Dockerfile'
   - 'container/templates/local_dev.Dockerfile'
   - 'container/templates/dev.Dockerfile'
+  - 'error_classification/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -110,6 +110,7 @@ deploy:
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
+  - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
 
 vllm:

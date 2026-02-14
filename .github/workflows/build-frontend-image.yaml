@@ -113,3 +113,17 @@ jobs:
       - name: "Check all dependent jobs"
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+
+  classify-workflow-errors:
+    if: always() && !cancelled()
+    needs: [changed-files, build-frontend-image, frontend-status-check]
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write  # Required for PR comments
+    uses: ./.github/workflows/classify-workflow-errors-reusable.yml
+    with:
+      enable_pr_comments: 'true'
+      max_parallel_jobs: '5'
+      python_version: '3.11'
+    secrets: inherit

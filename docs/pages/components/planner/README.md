@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Planner
 ---
 
 # Planner
@@ -42,7 +43,7 @@ The Planner monitors system performance and automatically scales prefill/decode 
 The fastest path to a planner-enabled deployment is through a DynamoGraphDeploymentRequest:
 
 ```bash
-kubectl apply -f benchmarks/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
+kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
 ```
 
 This automatically profiles your model and deploys with the SLA planner. See [SLA Planner Guide](planner-guide.md) for the full workflow.

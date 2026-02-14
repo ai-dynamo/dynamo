@@ -140,6 +140,16 @@ jobs:
             ${{ env.PYTEST_XML_FILE }}
             ${{ env.PYTEST_PARALLEL_XML_FILE }}
 
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [build-test]
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    uses: ./.github/workflows/classify-workflow-errors-reusable.yml
+    secrets: inherit
+
   event_file:
     name: "Event File"
     runs-on: ubuntu-latest
