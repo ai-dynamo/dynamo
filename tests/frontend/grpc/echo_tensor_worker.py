@@ -9,7 +9,7 @@
 import tritonclient.grpc.model_config_pb2 as mc
 import uvloop
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
@@ -53,8 +53,8 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
     )
     assert model_config == retrieved_model_config
 
-    # Use register_llm for tensor-based backends (skips HuggingFace downloads)
-    await register_llm(
+    # Use register_model for tensor-based backends (skips HuggingFace downloads)
+    await register_model(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
