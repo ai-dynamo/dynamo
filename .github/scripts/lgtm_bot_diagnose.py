@@ -81,7 +81,7 @@ def github_request(
     body = json.dumps(data).encode() if data else None
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         error_body = ""
@@ -351,7 +351,17 @@ def fetch_failed_logs(check_run_id: int) -> str:
 
 def diagnose_reviews(pr_number: int, pr_author: str) -> tuple[list[str], list[str]]:
     """Check review status."""
-    reviews = github_request(f"/repos/{OWNER}/{REPO}/pulls/{pr_number}/reviews")
+    reviews: list[dict] = []
+    page = 1
+    while True:
+        batch = github_request(
+            f"/repos/{OWNER}/{REPO}/pulls/{pr_number}/reviews"
+            f"?per_page=100&page={page}"
+        )
+        reviews.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
 
     latest_by_user: dict[str, dict] = {}
     for review in reviews:
@@ -690,13 +700,13 @@ def build_diagnostic_comment(
 
 def post_diagnostic_comment(pr_number: int, body: str) -> None:
     """Post or update the diagnostic comment."""
-    # Search from newest first — bot comments are typically recent
+    # Find existing diagnostic comment by marker
     existing = None
     page = 1
     while existing is None:
         comments = github_request(
             f"/repos/{OWNER}/{REPO}/issues/{pr_number}/comments"
-            f"?per_page=100&page={page}&direction=desc"
+            f"?per_page=100&page={page}"
         )
         if not comments:
             break

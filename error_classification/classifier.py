@@ -172,7 +172,7 @@ class ErrorClassifier:
 
         # Convert results to ErrorClassification objects
         classifications = []
-        for error_data in result.get("errors_found", []):
+        for idx, error_data in enumerate(result.get("errors_found", [])):
             error_text = error_data.get("log_excerpt", "")
 
             classification = ErrorClassification(
@@ -205,9 +205,11 @@ class ErrorClassifier:
                 occurrence_count=1,
                 first_seen=datetime.now(timezone.utc).isoformat(),
                 last_seen=datetime.now(timezone.utc).isoformat(),
-                prompt_tokens=result.get("prompt_tokens", 0),
-                completion_tokens=result.get("completion_tokens", 0),
-                cached_tokens=result.get("cached_tokens", 0),
+                # Assign full token counts only to the first error from this
+                # API call to avoid inflating aggregate totals.
+                prompt_tokens=result.get("prompt_tokens", 0) if idx == 0 else 0,
+                completion_tokens=result.get("completion_tokens", 0) if idx == 0 else 0,
+                cached_tokens=result.get("cached_tokens", 0) if idx == 0 else 0,
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
             classifications.append(classification)

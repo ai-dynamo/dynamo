@@ -173,7 +173,7 @@ class PRCommentator:
                 # Update existing comment
                 url = f"https://api.github.com/repos/{self.repo}/issues/comments/{existing_comment_id}"
                 response = requests.patch(
-                    url, headers=self.headers, json={"body": markdown}
+                    url, headers=self.headers, json={"body": markdown}, timeout=30
                 )
 
                 if response.status_code == 200:
@@ -189,7 +189,7 @@ class PRCommentator:
                 # Create new comment
                 url = f"https://api.github.com/repos/{self.repo}/issues/{pr_number}/comments"
                 response = requests.post(
-                    url, headers=self.headers, json={"body": markdown}
+                    url, headers=self.headers, json={"body": markdown}, timeout=30
                 )
 
                 if response.status_code == 201:
@@ -216,9 +216,9 @@ class PRCommentator:
             while True:
                 url = (
                     f"https://api.github.com/repos/{self.repo}/issues/{pr_number}/comments"
-                    f"?per_page=100&page={page}&direction=desc"
+                    f"?per_page=100&page={page}"
                 )
-                response = requests.get(url, headers=self.headers)
+                response = requests.get(url, headers=self.headers, timeout=30)
                 if response.status_code != 200:
                     break
 
@@ -329,8 +329,10 @@ class PRCommentator:
                 print(f"    API returned {len(pulls)} PR(s)")
                 if pulls and len(pulls) > 0:
                     pr_num = pulls[0].get("number")
-                    print(f"    First PR: #{pr_num}")
-                    return pr_num
+                    if pr_num is not None:
+                        pr_num = int(pr_num)
+                        print(f"    First PR: #{pr_num}")
+                        return pr_num
             else:
                 print(f"    API error: {response.text[:200]}")
         except Exception as e:

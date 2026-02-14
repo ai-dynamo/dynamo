@@ -56,6 +56,13 @@ class Config:
             or "aws/anthropic/bedrock-claude-opus-4-6"  # default NVIDIA Inference API model
         )
 
+        # Parse MAX_RPM with a clear error on invalid values
+        max_rpm_raw = os.getenv("MAX_RPM", "").strip()
+        try:
+            max_rpm = int(max_rpm_raw) if max_rpm_raw else 50
+        except ValueError:
+            raise ValueError(f"MAX_RPM must be an integer, got: {max_rpm_raw!r}")
+
         return cls(
             api_key=api_key,
             model=model,
@@ -63,7 +70,7 @@ class Config:
             api_base_url=os.getenv(
                 "API_BASE_URL", "https://inference-api.nvidia.com/v1"
             ),  # default NVIDIA
-            max_rpm=int(os.getenv("MAX_RPM", "50")),
+            max_rpm=max_rpm,
         )
 
     def validate(self) -> List[str]:

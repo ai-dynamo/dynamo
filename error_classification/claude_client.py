@@ -53,7 +53,7 @@ class RateLimiter:
                     print(f"⏳ Rate limit reached, waiting {wait_time:.1f}s")
                     time.sleep(wait_time)
 
-            self.requests.append(now)
+            self.requests.append(time.time())
 
 
 class ClaudeClient:

@@ -115,7 +115,7 @@ jobs:
             }
 
             async function updateChecklist(prNumber, body) {
-              // Search from newest first — checklist comment is frequently updated
+              // Find existing checklist comment by marker
               let existing = null;
               let page = 1;
               while (!existing) {
@@ -125,7 +125,6 @@ jobs:
                   issue_number: prNumber,
                   per_page: 100,
                   page,
-                  direction: 'desc',
                 });
                 if (comments.length === 0) break;
                 existing = comments.find(c => c.body && c.body.includes(CHECKLIST_MARKER));
@@ -274,11 +273,20 @@ jobs:
               // Fetch reviews so the checklist reflects current approval state
               let syncApproval = false;
               let syncChangesRequested = false;
-              const { data: syncReviews } = await github.rest.pulls.listReviews({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-              });
+              let syncReviews = [];
+              let syncReviewPage = 1;
+              while (true) {
+                const { data: batch } = await github.rest.pulls.listReviews({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  per_page: 100,
+                  page: syncReviewPage,
+                });
+                syncReviews = syncReviews.concat(batch);
+                if (batch.length < 100) break;
+                syncReviewPage++;
+              }
               const syncLatest = new Map();
               for (const review of syncReviews) {
                 if (review.user.login === pr.user.login) continue;
@@ -383,11 +391,20 @@ jobs:
             let hasApproval = false;
             let hasChangesRequested = false;
 
-            const { data: reviews } = await github.rest.pulls.listReviews({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-            });
+            let reviews = [];
+            let reviewPage = 1;
+            while (true) {
+              const { data: batch } = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+                page: reviewPage,
+              });
+              reviews = reviews.concat(batch);
+              if (batch.length < 100) break;
+              reviewPage++;
+            }
 
             const latestByUser = new Map();
             for (const review of reviews) {
@@ -494,6 +511,7 @@ jobs:
         run: |
           curl -sSf -X POST "$SLACK_WEBHOOK_URL" \
             -H 'Content-Type: application/json' \
+            2>/dev/null \
             -d "$(jq -n \
               --arg pr_num "$PR_NUMBER" \
               --arg pr_title "$PR_TITLE" \
