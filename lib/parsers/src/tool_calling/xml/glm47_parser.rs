@@ -153,8 +153,10 @@ fn parse_tool_call_block(
     let arg_value_end_escaped = regex::escape(&config.arg_value_end);
 
     // Pattern to match: <arg_key>key</arg_key><arg_value>value</arg_value>
+    // (?s) enables dotall mode so (.*?) matches across newlines — required
+    // because models often emit multi-line content in arg values.
     let pattern = format!(
-        r"{}([^<]+){}{}(.*?){}",
+        r"(?s){}([^<]+){}{}(.*?){}",
         arg_key_start_escaped,
         arg_key_end_escaped,
         arg_value_start_escaped,
@@ -311,6 +313,26 @@ mod tests {
 
         let end_pos = find_tool_call_end_position_glm47(chunk, &config);
         assert_eq!(&chunk[..end_pos], "<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>");
+    }
+
+    #[test]
+    fn test_parse_multiline_arg_value() {
+        let config = get_test_config();
+        let message = "<tool_call>write_file<arg_key>path</arg_key><arg_value>/tmp/hello.py</arg_value><arg_key>content</arg_key><arg_value>#!/usr/bin/env python3\nprint(\"Hello, World!\")\n</arg_value></tool_call>";
+
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "write_file");
+
+        let args: HashMap<String, Value> = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args.get("path").unwrap().as_str().unwrap(), "/tmp/hello.py");
+        assert!(
+            args.get("content").is_some(),
+            "content argument must be parsed even when it contains newlines"
+        );
+        let content = args.get("content").unwrap().as_str().unwrap();
+        assert!(content.contains("print(\"Hello, World!\")"));
     }
 
     #[test]
