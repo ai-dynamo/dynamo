@@ -5,9 +5,10 @@
 # Runs the same e2e router benchmark test as nightly, without the full pipeline.
 # Always pulls the latest main branch image (main-vllm-amd64) from Azure ACR.
 #
-# Trigger from a branch:
-#   - Push to any branch that has this file (runs on push when workflow or test changes).
-#   - After merge to default: Actions → "Router Benchmark CI" → Run workflow.
+# Triggers:
+#   - Pull request: runs when PR touches this workflow or the router benchmark test paths.
+#   - Push: runs on push to any branch when those paths change.
+#   - Manual: Actions → "Router Benchmark CI" → Run workflow.
 
 name: Router Benchmark CI
 
@@ -18,6 +19,16 @@ on:
       - '.github/workflows/router-benchmark-ci.yml'
       - 'tests/router/test_router_benchmark_vllm.py'
       - 'tests/router/common.py'
+  pull_request:
+    paths:
+      - '.github/workflows/router-benchmark-ci.yml'
+      - 'tests/router/test_router_benchmark_vllm.py'
+      - 'tests/router/common.py'
+
+# Cancel in-progress runs when the same PR is updated.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('router-benchmark-{0}', github.event.pull_request.number) || format('router-benchmark-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
