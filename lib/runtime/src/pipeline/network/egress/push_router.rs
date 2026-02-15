@@ -286,7 +286,7 @@ where
 
     /// Select the next worker according to the routing mode.
     /// Increments round-robin counter if applicable.
-    /// Panics if called on Direct or KV mode - those have their own selection mechanisms.
+    /// Panics if called on Direct, KV, or LeastLoaded mode - those have their own selection mechanisms.
     pub fn select_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -314,6 +314,7 @@ where
 
     /// Peek the next worker according to the routing mode without incrementing the counter.
     /// Useful for checking if a worker is suitable before committing to it.
+    /// Panics if called on Direct, KV, or LeastLoaded mode - those have their own selection mechanisms.
     pub fn peek_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
