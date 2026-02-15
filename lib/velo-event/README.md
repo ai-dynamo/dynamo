@@ -1,6 +1,6 @@
 # velo-event
 
-A generational event system for coordinating async tasks with minimal overhead.
+A generational event system for coordinating async tasks with [minimal overhead](https://drive.google.com/file/d/1s9M1I-dUbhqWLrMFB5ehPSM-qDQBGPZG).
 
 Events can be created, awaited, merged into precondition graphs, and poisoned
 on failure. The local implementation lives in this crate; a distributed event
