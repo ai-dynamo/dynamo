@@ -24,6 +24,9 @@ const (
 	EPPGRPCPort     = 9002
 	EPPGRPCPortName = "grpc"
 
+	DynamoNixlPort     = 19090
+	DynamoNixlPortName = "nixl"
+
 	MpiRunSshPort = 2222
 
 	// Default security context values
