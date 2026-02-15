@@ -1090,8 +1090,15 @@ impl
             context.clone(),
         );
 
-        // Try to parse reasoning content only if parser is configured
-        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some();
+        // Try to parse reasoning content only if parser is configured and enable_thinking is not false
+        let enable_thinking = request
+            .chat_template_args
+            .as_ref()
+            .and_then(|args| args.get("enable_thinking"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let should_parse_reasoning =
+            self.runtime_config.reasoning_parser.is_some() && enable_thinking;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
