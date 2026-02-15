@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use futures::StreamExt;
 use tokio::net::unix::pipe::Receiver;
 
@@ -41,6 +43,8 @@ pub struct Client {
     /// Interval for periodic reconciliation of instance_avail with instance_source.
     /// This ensures instances removed via `report_instance_down` are eventually restored.
     reconcile_interval: Duration,
+    /// Active connection count per instance for least-loaded routing: instance_id -> count
+    instance_connections: Arc<DashMap<u64, AtomicU64>>,
 }
 
 impl Client {
@@ -71,6 +75,7 @@ impl Client {
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
             reconcile_interval,
+            instance_connections: Arc::new(DashMap::new()),
         };
         client.monitor_instance_source();
         Ok(client)
@@ -148,6 +153,39 @@ impl Client {
         self.instance_free.store(Arc::new(free_ids));
     }
 
+    /// Increment the active connection count for an instance (for least-loaded routing).
+    pub fn increment_connections(&self, instance_id: u64) {
+        self.instance_connections
+            .entry(instance_id)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement the active connection count for an instance (for least-loaded routing).
+    pub fn decrement_connections(&self, instance_id: u64) {
+        if let Some(count) = self.instance_connections.get(&instance_id) {
+            count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Get the active connection count for an instance.
+    pub fn connection_count(&self, instance_id: u64) -> u64 {
+        self.instance_connections
+            .get(&instance_id)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Get the available instance with the lowest active connection count.
+    /// Returns None if no instances are available.
+    pub fn least_loaded_instance(&self) -> Option<u64> {
+        let instance_ids = self.instance_ids_avail();
+        instance_ids
+            .iter()
+            .min_by_key(|&&id| self.connection_count(id))
+            .copied()
+    }
+
     /// Monitor the key-value instance source and update instance_avail.
     ///
     /// This function also performs periodic reconciliation: if `instance_source` hasn't
@@ -171,6 +209,11 @@ impl Client {
                 // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.store(Arc::new(instance_ids.clone()));
+
+                // Clean up stale connection counters for instances that no longer exist
+                client
+                    .instance_connections
+                    .retain(|id, _| instance_ids.contains(id));
 
                 // Send update to watch channel subscribers
                 let _ = client.instance_avail_tx.send(instance_ids);

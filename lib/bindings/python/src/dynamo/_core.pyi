@@ -931,6 +931,7 @@ class RouterMode:
     Random: "RouterMode"
     KV: "RouterMode"
     Direct: "RouterMode"
+    LeastLoaded: "RouterMode"
     ...
 
 class RouterConfig:
