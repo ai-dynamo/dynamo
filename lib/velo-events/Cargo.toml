@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "velo-event"
+name = "velo-events"
 version.workspace = true
 edition.workspace = true
 description.workspace = true

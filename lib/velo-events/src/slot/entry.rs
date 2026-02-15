@@ -238,8 +238,8 @@ impl EventEntry {
 
         match completion {
             CompletionKind::Triggered => slot.complete_triggered(slot_gen),
-            CompletionKind::Poisoned(_) => {
-                let completion_arc = Arc::new(completion.clone());
+            poisoned @ CompletionKind::Poisoned(_) => {
+                let completion_arc = Arc::new(poisoned);
                 slot.complete(completion_arc, slot_gen);
             }
         }

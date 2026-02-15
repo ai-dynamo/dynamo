@@ -68,7 +68,12 @@ impl LocalEventSystem {
             match entry.begin_generation() {
                 Ok(generation) => {
                     if self.is_shutdown() {
-                        self.recycle_entry(entry);
+                        let handle = entry.key().handle(self.worker_id, generation);
+                        let poison = Arc::new(EventPoison::new(
+                            handle,
+                            "Event system shutdown in progress",
+                        ));
+                        let _ = self.poison_local_entry(entry, handle, poison);
                         bail!("Event system shutdown in progress");
                     }
                     let handle = entry.key().handle(self.worker_id, generation);

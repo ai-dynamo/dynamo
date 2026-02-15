@@ -3,7 +3,7 @@
 
 //! Factory for creating distributed event systems with a worker identity.
 
-use std::sync::Arc;
+use std::{num::NonZero, sync::Arc};
 
 use crate::local::LocalEventSystem;
 
@@ -20,10 +20,10 @@ pub struct DistributedEventFactory {
 
 impl DistributedEventFactory {
     /// Create a new factory (and its backing event system) for the given worker.
-    pub fn new(worker_id: u64) -> Self {
+    pub fn new(worker_id: NonZero<u64>) -> Self {
         Self {
-            worker_id,
-            system: LocalEventSystem::with_worker_id(worker_id),
+            worker_id: worker_id.get(),
+            system: LocalEventSystem::with_worker_id(worker_id.get()),
         }
     }
 

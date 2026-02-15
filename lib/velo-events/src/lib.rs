@@ -404,7 +404,7 @@ mod tests {
     async fn distributed_factory_stamps_worker_id() -> Result<()> {
         use crate::factory::DistributedEventFactory;
 
-        let factory = DistributedEventFactory::new(0x42);
+        let factory = DistributedEventFactory::new(0x42.try_into().unwrap());
         assert_eq!(factory.worker_id(), 0x42);
 
         let mgr = factory.event_manager();
