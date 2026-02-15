@@ -9,7 +9,7 @@ use std::process::Command;
 
 fn main() {
     // Declare the stub_kernels cfg so Rust knows it's a valid cfg option
-    println!("cargo::rustc-check-cfg=cfg(stub_kernels)");
+    println!("cargo:rustc-check-cfg=cfg(stub_kernels)");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let out_dir = env::var("OUT_DIR").unwrap();
