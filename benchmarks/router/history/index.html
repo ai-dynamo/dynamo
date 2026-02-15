@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router benchmark trends</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root { --bg: #0f1117; --card: #161b22; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 1.5rem; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    .meta { color: var(--muted); font-size: 0.875rem; margin-bottom: 1.5rem; }
+    .chart-wrap { background: var(--card); border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; max-width: 900px; }
+    .chart-wrap h2 { font-size: 1rem; margin: 0 0 0.75rem; color: var(--muted); }
+    .chart-container { position: relative; height: 280px; }
+    a { color: var(--accent); }
+    .empty { color: var(--muted); padding: 2rem; }
+  </style>
+</head>
+<body>
+  <h1>Router benchmark results over time</h1>
+  <p class="meta">CI runs on main. Data: <code>benchmark_history.json</code> · <a href="https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/router/history/README.md">How to view</a></p>
+  <div id="loading" class="meta">Loading history…</div>
+  <div id="empty" class="empty" style="display:none">No benchmark history yet. Runs on <code>main</code> are recorded automatically.</div>
+  <div id="charts" style="display:none">
+    <div class="chart-wrap">
+      <h2>Time to first token (TTFT) p50 (ms) by prefix ratio</h2>
+      <div class="chart-container"><canvas id="ttftChart"></canvas></div>
+    </div>
+    <div class="chart-wrap">
+      <h2>Inter-token latency (ITL) p50 (ms) by prefix ratio</h2>
+      <div class="chart-container"><canvas id="itlChart"></canvas></div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const loading = document.getElementById('loading');
+      const empty = document.getElementById('empty');
+      const charts = document.getElementById('charts');
+
+      function rawUrl() {
+        const path = window.location.pathname;
+        const parts = path.split('/').filter(Boolean);
+        if (parts[0] && parts[1] && (parts[2] === 'blob' || parts[2] === 'tree')) {
+          const branch = parts[3] || 'main';
+          return 'https://raw.githubusercontent.com/' + parts[0] + '/' + parts[1] + '/' + branch + '/benchmarks/router/history/benchmark_history.json';
+        }
+        return null;
+      }
+
+      const dataUrl = rawUrl() || 'benchmark_history.json';
+
+      fetch(dataUrl)
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('Failed to load')); })
+        .then(function (history) {
+          loading.style.display = 'none';
+          if (!Array.isArray(history) || history.length === 0) {
+            empty.style.display = 'block';
+            return;
+          }
+          charts.style.display = 'block';
+
+          const labels = history.map(function (e) {
+            const d = e.timestamp && e.timestamp.slice(0, 10);
+            return d || ('Run ' + e.run_id);
+          });
+          const runUrls = history.map(function (e) { return e.run_url; });
+
+          const prefixRatios = history[0].results && history[0].results.prefix_ratios
+            ? history[0].results.prefix_ratios
+            : [0];
+          const colors = ['#58a6ff', '#3fb950', '#d29922', '#f85149', '#a371f7'];
+
+          function dataset(metric, prefixIndex, label) {
+            return {
+              label: label,
+              data: history.map(function (e) {
+                const vals = e.results && e.results[metric];
+                return Array.isArray(vals) && vals[prefixIndex] != null ? vals[prefixIndex] : null;
+              }),
+              borderColor: colors[prefixIndex % colors.length],
+              backgroundColor: colors[prefixIndex % colors.length] + '20',
+              fill: false,
+              spanGaps: true
+            };
+          }
+
+          const ttftDatasets = prefixRatios.map(function (pr, i) {
+            return dataset('ttft_p50_values', i, 'Prefix ratio ' + pr);
+          });
+          const itlDatasets = prefixRatios.map(function (pr, i) {
+            return dataset('itl_p50_values', i, 'Prefix ratio ' + pr);
+          });
+
+          new Chart(document.getElementById('ttftChart'), {
+            type: 'line',
+            data: { labels: labels, datasets: ttftDatasets },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { position: 'top' } },
+              scales: {
+                x: { ticks: { maxRotation: 45, maxTicksLimit: 15 } },
+                y: { beginAtZero: true, title: { display: true, text: 'ms' } }
+              },
+              onClick: function (_, el) {
+                if (el.length && runUrls[el[0].index]) window.open(runUrls[el[0].index]);
+              }
+            }
+          });
+
+          new Chart(document.getElementById('itlChart'), {
+            type: 'line',
+            data: { labels: labels, datasets: itlDatasets },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { position: 'top' } },
+              scales: {
+                x: { ticks: { maxRotation: 45, maxTicksLimit: 15 } },
+                y: { beginAtZero: true, title: { display: true, text: 'ms' } }
+              },
+              onClick: function (_, el) {
+                if (el.length && runUrls[el[0].index]) window.open(runUrls[el[0].index]);
+              }
+            }
+          });
+        })
+        .catch(function () {
+          loading.style.display = 'none';
+          empty.style.display = 'block';
+          empty.textContent = 'Could not load benchmark_history.json. Open this page from the repo or use the raw JSON URL.';
+        });
+    })();
+  </script>
+</body>
+</html>
