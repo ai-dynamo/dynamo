@@ -76,6 +76,8 @@ def add_reaction(repo: str, comment_id: str, reaction: str) -> None:
 
 def get_check_status(repo: str, sha: str) -> dict:
     """Aggregate check-run status for a commit."""
+    # NOTE: per_page=100 covers most PRs. For repos with >100 check runs
+    # (heavy matrix builds), add pagination via gh api --paginate.
     data = gh_api(f"/repos/{repo}/commits/{sha}/check-runs?per_page=100")
     if not data:
         return {
@@ -181,7 +183,10 @@ def build_comment(
     if checks["failures"]:
         lines.append("### Failed Checks")
         for f in checks["failures"]:
-            lines.append(f"- [{f['name']}]({f['url']})")
+            if f["url"]:
+                lines.append(f"- [{f['name']}]({f['url']})")
+            else:
+                lines.append(f"- {f['name']}")
         lines.append("")
 
     # LLM analysis — the unique value-add
@@ -244,7 +249,7 @@ def post_or_update_comment(repo: str, pr_number: str, body: str) -> None:
 
     try:
         if existing_id:
-            subprocess.run(
+            r = subprocess.run(
                 [
                     "gh",
                     "api",
@@ -254,10 +259,14 @@ def post_or_update_comment(repo: str, pr_number: str, body: str) -> None:
                     "-F",
                     f"body=@{tmp}",
                 ],
+                capture_output=True,
+                text=True,
                 timeout=30,
             )
+            if r.returncode != 0:
+                print(f"Comment update failed: {r.stderr[:200]}", file=sys.stderr)
         else:
-            subprocess.run(
+            r = subprocess.run(
                 [
                     "gh",
                     "api",
@@ -267,8 +276,12 @@ def post_or_update_comment(repo: str, pr_number: str, body: str) -> None:
                     "-F",
                     f"body=@{tmp}",
                 ],
+                capture_output=True,
+                text=True,
                 timeout=30,
             )
+            if r.returncode != 0:
+                print(f"Comment post failed: {r.stderr[:200]}", file=sys.stderr)
     finally:
         os.unlink(tmp)
 

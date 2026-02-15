@@ -118,6 +118,10 @@ def classify_all(repo: str, sha: str) -> list[dict]:
     results = []
     for job in jobs:
         log = get_job_log(repo, job["job_id"])
+        if not log:
+            # Skip classification when log is empty (network error, etc.)
+            results.append({**job, "classification": None})
+            continue
         classification = client.classify_error(job["job_name"], log)
         results.append({**job, "classification": classification})
     return results
@@ -177,7 +181,7 @@ def _post_or_update_comment(repo: str, pr_number: str, body: str) -> None:
 
     try:
         if existing_id:
-            subprocess.run(
+            r = subprocess.run(
                 [
                     "gh",
                     "api",
@@ -187,10 +191,14 @@ def _post_or_update_comment(repo: str, pr_number: str, body: str) -> None:
                     "-F",
                     f"body=@{tmp}",
                 ],
+                capture_output=True,
+                text=True,
                 timeout=30,
             )
+            if r.returncode != 0:
+                print(f"Comment update failed: {r.stderr[:200]}", file=sys.stderr)
         else:
-            subprocess.run(
+            r = subprocess.run(
                 [
                     "gh",
                     "api",
@@ -200,8 +208,12 @@ def _post_or_update_comment(repo: str, pr_number: str, body: str) -> None:
                     "-F",
                     f"body=@{tmp}",
                 ],
+                capture_output=True,
+                text=True,
                 timeout=30,
             )
+            if r.returncode != 0:
+                print(f"Comment post failed: {r.stderr[:200]}", file=sys.stderr)
     finally:
         os.unlink(tmp)
 

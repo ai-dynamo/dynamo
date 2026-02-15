@@ -61,6 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write
       pull-requests: write
       checks: read
       statuses: read
@@ -106,9 +107,15 @@ jobs:
               github.rest.checks.listForRef,
               { owner, repo, ref: headSha, per_page: 100 }
             );
-            const ciChecks = allChecks.filter(c => c.name !== 'LGTM Bot');
+            // Exclude our own jobs from CI evaluation
+            const ownJobs = ['evaluate-lgtm', 'request-reviews'];
+            const ciChecks = allChecks.filter(
+              c => !ownJobs.includes(c.name)
+            );
+            // skipped and neutral are acceptable conclusions
+            const acceptable = ['success', 'skipped', 'neutral'];
             const allPassed = ciChecks.length > 0 &&
-              ciChecks.every(c => c.conclusion === 'success');
+              ciChecks.every(c => acceptable.includes(c.conclusion));
             const anyFailed = ciChecks.some(
               c => c.conclusion === 'failure'
             );
@@ -222,6 +229,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write
       pull-requests: write
     steps:
       - name: Request CODEOWNERS reviews
@@ -295,10 +303,24 @@ jobs:
                 '|------|--------|',
                 rows,
                 '',
-                '*Based on [CODEOWNERS](../blob/main/CODEOWNERS) and changed files.*',
+                '*Based on [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) and changed files.*',
               ].join('\n');
 
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: prNumber, body,
-              });
+              // Find-and-update to avoid duplicates on reopen
+              const allComments = await github.paginate(
+                github.rest.issues.listComments,
+                { owner, repo, issue_number: prNumber, per_page: 100 }
+              );
+              const existing = allComments.find(
+                c => c.body && c.body.includes(marker)
+              );
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner, repo, comment_id: existing.id, body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: prNumber, body,
+                });
+              }
             }
