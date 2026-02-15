@@ -41,6 +41,8 @@ jobs:
     name: Router benchmark (4 GPU)
     runs-on: prod-tester-gb200-4-v1
     timeout-minutes: 60
+    outputs:
+      platform_arch: ${{ steps.image-tag.outputs.platform_arch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -92,3 +94,59 @@ jobs:
           name: router-benchmark-results-${{ steps.image-tag.outputs.platform_arch }}-${{ github.run_id }}
           path: test-results/router_benchmark_results.json
           retention-days: 7
+
+  # Record benchmark result to history for trend visualization.
+  # On main: pushes to main. On PR: pushes to the PR branch so you can test the dashboard.
+  record-benchmark-history:
+    name: Record benchmark history
+    needs: router-benchmark
+    if: |
+      always() &&
+      needs.router-benchmark.result == 'success' &&
+      (github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+    runs-on: ubuntu-latest
+    continue-on-error: true  # Do not fail workflow if artifact is missing (e.g. no results file)
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || 'main' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull latest (branch or main)
+        run: |
+          BRANCH="${{ github.event_name == 'pull_request' && github.head_ref || 'main' }}"
+          git pull origin "$BRANCH" --rebase || true
+      - name: Download benchmark results artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: router-benchmark-results-${{ needs.router-benchmark.outputs.platform_arch }}-${{ github.run_id }}
+      - name: Append result to benchmark history
+        env:
+          RUN_ID: ${{ github.run_id }}
+          TIMESTAMP: ${{ github.event.repository.updated_at }}
+          REF: ${{ github.ref }}
+          BRANCH: ${{ github.ref_name }}
+          ARCH: ${{ needs.router-benchmark.outputs.platform_arch }}
+          COMMIT: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 .github/scripts/append_benchmark_history.py \
+            --artifact "$(find . -name 'router_benchmark_results.json' | head -1)" \
+            --history benchmarks/router/history/benchmark_history.json \
+            --run-id "$RUN_ID" \
+            --timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --ref "$REF" \
+            --branch "$BRANCH" \
+            --arch "$ARCH" \
+            --commit "$COMMIT" \
+            --run-url "$RUN_URL" \
+            --max-entries 200
+      - name: Commit and push benchmark history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add benchmarks/router/history/benchmark_history.json
+          git diff --staged --quiet || git commit -m "ci(router-benchmark): record benchmark history [skip ci]"
+          BRANCH="${{ github.event_name == 'pull_request' && github.head_ref || 'main' }}"
+          git push origin "HEAD:$BRANCH"
