@@ -96,14 +96,14 @@ jobs:
           retention-days: 7
 
   # Record benchmark result to history for trend visualization.
-  # On main: pushes to main. On PR: pushes to the PR branch so you can test the dashboard.
+  # Push to the same branch that triggered the run (PR branch, main, or workflow_dispatch branch).
   record-benchmark-history:
     name: Record benchmark history
     needs: router-benchmark
     if: |
       always() &&
       needs.router-benchmark.result == 'success' &&
-      (github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     continue-on-error: true  # Do not fail workflow if artifact is missing (e.g. no results file)
     permissions:
@@ -111,11 +111,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.head_ref || 'main' }}
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Pull latest (branch or main)
+      - name: Pull latest
         run: |
-          BRANCH="${{ github.event_name == 'pull_request' && github.head_ref || 'main' }}"
+          BRANCH="${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}"
           git pull origin "$BRANCH" --rebase || true
       - name: Download benchmark results artifact
         uses: actions/download-artifact@v4
@@ -148,5 +148,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add benchmarks/router/history/benchmark_history.json
           git diff --staged --quiet || git commit -m "ci(router-benchmark): record benchmark history [skip ci]"
-          BRANCH="${{ github.event_name == 'pull_request' && github.head_ref || 'main' }}"
+          BRANCH="${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}"
           git push origin "HEAD:$BRANCH"
