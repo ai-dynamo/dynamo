@@ -245,7 +245,7 @@ What if we could solve all three problems at once---collision safety, efficient 
 
 A radix tree (prefix tree) encodes parent-child relationships explicitly. Each node has a small `HashMap` of children keyed by `LocalHash`, plus a set of workers that have this block cached. To process a `find_matches` query, you start at the root and follow child pointers---each lookup is into a tiny per-node children map, not one global table.
 
-Crucially, the tree structure *scopes* the collision risk. Two blocks with the same `LocalHash` (chunk hash collision) can only collide if they are children of the *same parent*. Different prefixes lead to different parents, so they're naturally separated in the tree. And each node carries an `ExternalHash`---the rolling hash of the entire prefix---so even in the rare case of a true collision under the same parent, the per-worker lookup table can disambiguate.
+Crucially, the tree structure *scopes* the collision risk. Two blocks with the same `LocalHash` (chunk hash collision) can only collide if they are children of the *same parent*. Different prefixes lead to different parents, so they're naturally separated in the tree. And each node carries an `ExternalHash`---the rolling hash of the entire prefix---so even in the rare case of a true hash collision under the same parent (different token content producing the same 64-bit hash, but the structure handles it gracefully), the per-worker lookup table can disambiguate.
 
 This requires one new piece of information in KV events: the **parent hash**. Without it, we can't link child to parent. With it, the tree builds itself naturally as events arrive.
 

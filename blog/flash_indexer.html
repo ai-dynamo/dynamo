@@ -725,8 +725,10 @@ blocks with the same <code>LocalHash</code> (chunk hash collision) can
 only collide if they are children of the <em>same parent</em>. Different
 prefixes lead to different parents, so they’re naturally separated in
 the tree. And each node carries an <code>ExternalHash</code>—the rolling
-hash of the entire prefix—so even in the rare case of a true collision
-under the same parent, the per-worker lookup table can disambiguate.</p>
+hash of the entire prefix—so even in the rare case of a true hash
+collision under the same parent (different token content producing the
+same 64-bit hash, but the structure handles it gracefully), the
+per-worker lookup table can disambiguate.</p>
 <p>This requires one new piece of information in KV events: the
 <strong>parent hash</strong>. Without it, we can’t link child to parent.
 With it, the tree builds itself naturally as events arrive.</p>
