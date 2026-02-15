@@ -156,7 +156,6 @@ class HandlerBase(BaseGenerativeHandler):
                 selected_logprob = token_logprobs_dict[actual_token_id]
                 log_probs.append(float(selected_logprob.logprob))
             else:
-                # Senior MLE practice: Use sentinel for missing tokens
                 # instead of picking a random neighbor.
                 log_probs.append(-9999.0)
 
