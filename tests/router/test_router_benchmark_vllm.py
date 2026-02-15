@@ -183,6 +183,7 @@ def test_gpt_oss_tp2(
     request,
     runtime_services_dynamic_ports,
     request_plane,
+    store_kv,
     tmp_path,
 ):
     """
@@ -241,7 +242,7 @@ def test_gpt_oss_tp2(
         block_size=BLOCK_SIZE,
         frontend_port=frontend_port,
         namespace=DEFAULT_NAMESPACE,
-        store_backend="etcd",
+        store_backend=store_kv,
         request_plane=request_plane,
     ):
         logger.info(f"Starting KV router on port {frontend_port}")
