@@ -95,7 +95,7 @@ For more configuration options and tuning guidelines, see the [Router Guide](rou
 **Limitations:**
 - Static endpoints not supported—KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states
 
-For basic model registration without KV routing, use `--router-mode round-robin` or `--router-mode random` with both static and dynamic endpoints.
+For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, or `--router-mode least_loaded` with both static and dynamic endpoints.
 
 ## Next Steps
 
