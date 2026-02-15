@@ -3,9 +3,6 @@
 
 [package]
 name = "kvbm-kernels"
-# Note: Not using workspace = true so this crate can be built from standalone
-# workspaces (like lib/bindings/kvbm) that don't inherit main workspace metadata
-# using the top-level workspace for now.
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -56,4 +53,3 @@ rand = { workspace = true }
 cudarc = { workspace = true, features = ["f16"] }
 
 [build-dependencies]
-cc = "1.0"

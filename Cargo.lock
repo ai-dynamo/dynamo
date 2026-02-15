@@ -4171,7 +4171,6 @@ dependencies = [
 name = "kvbm-kernels"
 version = "0.9.0"
 dependencies = [
- "cc",
  "clap 4.5.58",
  "cudarc",
  "half 2.7.1",

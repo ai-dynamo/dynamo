@@ -282,8 +282,13 @@ fn parse_cuda_version() -> Option<(u32, u32)> {
 }
 
 /// Return the maximum supported compute capability for a given CUDA toolkit version.
+///
+/// Panics if the CUDA version is below 12.0.
 fn max_supported_compute(cuda_version: (u32, u32)) -> u32 {
     match cuda_version {
+        (major, _) if major < 12 => {
+            panic!("CUDA {major}.x is not supported; CUDA 12.0 or newer is required")
+        }
         (12, minor) if minor >= 8 => 120,
         (major, _) if major >= 13 => 120,
         _ => 90,
