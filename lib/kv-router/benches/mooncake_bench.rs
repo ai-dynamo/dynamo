@@ -7,6 +7,7 @@ use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded,
 };
 use dynamo_kv_router::protocols::RouterEvent;
+use dynamo_kv_router::protocols::XXH3_SEED;
 use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
 use dynamo_tokens::compute_hash_v2;
 use rand::prelude::*;
@@ -255,15 +256,13 @@ fn tokens_from_request(request: &MooncakeRequest, block_size: u32) -> Vec<u32> {
         .collect()
 }
 
-const SALT_HASH: u64 = 1337;
-
 /// Compute the LocalBlockHash for a block-level hash_id the same way the mock
 /// engine does: expand to `block_size` repeated u32 tokens, then XXH3 hash.
 fn local_block_hash_from_id(hash_id: u64, block_size: u32) -> LocalBlockHash {
     let tokens: Vec<u32> = (0..block_size).map(|_| hash_id as u32).collect();
     let bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(tokens.as_ptr() as *const u8, tokens.len() * 4) };
-    LocalBlockHash(compute_hash_v2(bytes, SALT_HASH))
+    LocalBlockHash(compute_hash_v2(bytes, XXH3_SEED))
 }
 
 /// Create a styled progress bar, optionally with a known total length.
