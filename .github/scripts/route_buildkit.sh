@@ -147,7 +147,7 @@ if ! command -v nslookup &> /dev/null; then
 fi
 
 # --- RETRY CONFIGURATION ---
-MAX_RETRIES=${MAX_RETRIES:-8}
+MAX_RETRIES=${MAX_RETRIES:-2}
 RETRY_DELAY=${RETRY_DELAY:-30}
 # ---------------------------
 
