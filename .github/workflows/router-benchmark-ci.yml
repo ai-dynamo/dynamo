@@ -64,9 +64,10 @@ jobs:
         with:
           image_tag: ${{ env.IMAGE_TAG }}
           pytest_marks: "vllm and e2e and router_benchmark and nightly and gpu_4"
+          pytest_path: tests/router/test_router_benchmark_vllm.py
           framework: vllm
           test_type: e2e-router-benchmark
           platform_arch: ${{ steps.image-tag.outputs.platform_arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
-          # Run tests from checkout so this workflow works on branches (image may not include this test file)
+          # Run tests from checkout; restrict path to avoid collection errors from components/ (different env)
           mount_workspace: true

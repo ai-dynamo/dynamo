@@ -50,6 +50,10 @@ inputs:
     description: 'Mount repo checkout at /workspace so tests run from current branch (default: use code baked in image)'
     required: false
     default: 'false'
+  pytest_path:
+    description: 'Optional path or file to run (e.g. tests/router/test_router_benchmark_vllm.py). When set with mount_workspace, limits collection and avoids import errors from other trees.'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -122,11 +126,12 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
+        PYTEST_PATH="${{ inputs.pytest_path }}"
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PYTEST_PATH} -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
           MYPY_FLAG=""
@@ -134,7 +139,7 @@ runs:
             echo "🔍 Mypy type checking enabled"
             MYPY_FLAG="--mypy"
           fi
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PYTEST_PATH} --continue-on-collection-errors -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -200,11 +205,12 @@ runs:
         # --ipc=host is critical for parallel pytest workers to communicate fast
         DOCKER_OPTS="--ipc=host --ulimit memlock=-1 --ulimit stack=67108864"
 
+        PYTEST_PATH="${{ inputs.pytest_path }}"
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PYTEST_PATH} -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
           MYPY_FLAG=""
@@ -241,7 +247,7 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PYTEST_PATH} ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
