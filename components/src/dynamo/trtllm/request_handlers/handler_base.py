@@ -156,10 +156,9 @@ class HandlerBase(BaseGenerativeHandler):
                 selected_logprob = token_logprobs_dict[actual_token_id]
                 log_probs.append(float(selected_logprob.logprob))
             else:
-                # Fallback: use the first logprob if selected token not found
-                first_logprob = next(iter(token_logprobs_dict.values()), None)
-                if first_logprob:
-                    log_probs.append(float(first_logprob.logprob))
+                # Senior MLE practice: Use sentinel for missing tokens
+                # instead of picking a random neighbor.
+                log_probs.append(-9999.0)
 
             # Build top_logprobs list for this token position
             # NOTE: TRTLLM LogProb API doesn't have decoded_token, will default to None
