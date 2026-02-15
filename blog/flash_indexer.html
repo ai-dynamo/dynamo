@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Flash Indexer</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    html { -webkit-text-size-adjust: 100%; }
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {  background-color: #f8f8f8; }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ef2929; } /* Alert */
+    code span.an { color: #8f5902; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #204a87; } /* Attribute */
+    code span.bn { color: #0000cf; } /* BaseN */
+    code span.cf { color: #204a87; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4e9a06; } /* Char */
+    code span.cn { color: #8f5902; } /* Constant */
+    code span.co { color: #8f5902; font-style: italic; } /* Comment */
+    code span.cv { color: #8f5902; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #8f5902; font-weight: bold; font-style: italic; } /* Documentation */
+    code span.dt { color: #204a87; } /* DataType */
+    code span.dv { color: #0000cf; } /* DecVal */
+    code span.er { color: #a40000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #0000cf; } /* Float */
+    code span.fu { color: #204a87; font-weight: bold; } /* Function */
+    code span.im { } /* Import */
+    code span.in { color: #8f5902; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #204a87; font-weight: bold; } /* Keyword */
+    code span.op { color: #ce5c00; font-weight: bold; } /* Operator */
+    code span.ot { color: #8f5902; } /* Other */
+    code span.pp { color: #8f5902; font-style: italic; } /* Preprocessor */
+    code span.sc { color: #ce5c00; font-weight: bold; } /* SpecialChar */
+    code span.ss { color: #4e9a06; } /* SpecialString */
+    code span.st { color: #4e9a06; } /* String */
+    code span.va { color: #000000; } /* Variable */
+    code span.vs { color: #4e9a06; } /* VerbatimString */
+    code span.wa { color: #8f5902; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+  <script type="module">
+    // Fix pandoc's <pre class="mermaid"><code>...</code></pre> structure:
+    // Mermaid expects raw text directly inside <pre class="mermaid">, no <code> wrapper.
+    document.querySelectorAll('pre.mermaid').forEach(pre => {
+      const code = pre.querySelector('code');
+      if (code) {
+        pre.textContent = code.textContent;
+      }
+    });
+
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'default' });
+  </script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.min.css">
+  <style>
+    body { max-width: 900px; }
+    pre.mermaid { border: none; background: none; text-align: center; }
+    h1 { border-bottom: 2px solid #e94560; padding-bottom: 0.3em; }
+  </style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Flash Indexer</h1>
+</header>
+<nav id="TOC" role="doc-toc">
+<ul>
+<li><a href="#flash-indexer-a-story-of-inter-galactic-kv-routing"
+id="toc-flash-indexer-a-story-of-inter-galactic-kv-routing">Flash
+Indexer: A Story of Inter-Galactic KV Routing</a>
+<ul>
+<li><a href="#background" id="toc-background">Background</a>
+<ul>
+<li><a href="#the-anatomy-of-a-kv-block"
+id="toc-the-anatomy-of-a-kv-block">The Anatomy of a KV Block</a></li>
+<li><a href="#the-workload" id="toc-the-workload">The Workload</a></li>
+</ul></li>
+<li><a href="#your-leetcode-dsa" id="toc-your-leetcode-dsa">1. Your
+Leetcode DSA</a></li>
+<li><a href="#into-rust-land" id="toc-into-rust-land">2. Into Rust
+Land</a>
+<ul>
+<li><a href="#the-actor-pattern" id="toc-the-actor-pattern">The Actor
+Pattern</a></li>
+</ul></li>
+<li><a href="#the-inversion" id="toc-the-inversion">3. The
+Inversion</a></li>
+<li><a href="#branching-out" id="toc-branching-out">4. Branching Out</a>
+<ul>
+<li><a href="#the-radix-tree" id="toc-the-radix-tree">The Radix
+Tree</a></li>
+<li><a href="#rc-and-refcell" id="toc-rc-and-refcell">Rc and
+RefCell</a></li>
+</ul></li>
+<li><a href="#breaking-the-bottleneck"
+id="toc-breaking-the-bottleneck">5. Breaking the Bottleneck</a>
+<ul>
+<li><a href="#from-rc-to-arc-from-refcell-to-rwlock"
+id="toc-from-rc-to-arc-from-refcell-to-rwlock">From Rc to Arc, from
+RefCell to RwLock</a></li>
+<li><a href="#sticky-routing" id="toc-sticky-routing">Sticky
+Routing</a></li>
+<li><a href="#the-read-write-tension"
+id="toc-the-read-write-tension">The Read-Write Tension</a></li>
+</ul></li>
+<li><a href="#the-leap" id="toc-the-leap">6. The Leap</a>
+<ul>
+<li><a href="#position-as-a-first-class-dimension"
+id="toc-position-as-a-first-class-dimension">Position as a First-Class
+Dimension</a></li>
+<li><a href="#jump-search" id="toc-jump-search">Jump Search</a></li>
+<li><a href="#lazy-hash-computation" id="toc-lazy-hash-computation">Lazy
+Hash Computation</a></li>
+</ul></li>
+<li><a href="#benchmarking" id="toc-benchmarking">Benchmarking</a>
+<ul>
+<li><a href="#setup" id="toc-setup">Setup</a></li>
+<li><a href="#what-we-measure" id="toc-what-we-measure">What We
+Measure</a></li>
+</ul></li>
+<li><a href="#future-optimizations" id="toc-future-optimizations">Future
+Optimizations</a></li>
+<li><a href="#conclusion" id="toc-conclusion">Conclusion</a></li>
+</ul></li>
+</ul>
+</nav>
+<h1 id="flash-indexer-a-story-of-inter-galactic-kv-routing">Flash
+Indexer: A Story of Inter-Galactic KV Routing</h1>
+<p>Modern LLM inference doesn’t happen on a single GPU anymore. A
+production deployment might have dozens—sometimes hundreds—of inference
+workers, each holding a pool of cached key-value (KV) tensors in GPU
+memory. When a new request arrives whose prompt shares a prefix with a
+previously seen request, re-using that cached KV data can skip an
+enormous amount of redundant computation. This is <em>KV cache
+reuse</em>, and at scale it is the single largest lever for inference
+throughput.</p>
+<p>But here’s the problem: which worker has the blocks you need?</p>
+<p>Each worker knows about its own cache. Nobody has the global picture.
+To route a request to the worker with the best prefix overlap, or to
+orchestrate block transfers between workers, or to schedule distributed
+prefills—you need a <strong>global index</strong> of every cached block
+across every worker. And you need it to be <em>fast</em>: every
+microsecond spent in the index is a microsecond not spent generating
+tokens.</p>
+<p>This is the story of how we built that index—the <strong>Flash
+Indexer</strong>—evolving through six iterations from a Python
+dictionary to a concurrent, jump-optimized spatial index clocking in at
+over 10 million operations per second with p99 latency under 1
+microsecond.</p>
+<hr />
+<h2 id="background">Background</h2>
+<h3 id="the-anatomy-of-a-kv-block">The Anatomy of a KV Block</h3>
+<p>Every block in the system carries a few pieces of identity:</p>
+<ul>
+<li><p><strong>Local block hash</strong> (<code>u64</code>): A hash of
+the tokens <em>within</em> a single block (e.g., 64 tokens).
+Content-addressable—two blocks with the same tokens have the same local
+hash, regardless of where they appear in a sequence. Crucially, this is
+also what the frontend computes on the query side: the Dynamo frontend
+controls the local hashing algorithm directly, so both the event write
+path and the query read path produce the same local hashes for the same
+tokens.</p></li>
+<li><p><strong>External sequence block hash</strong> (<code>u64</code>):
+A cumulative rolling hash of the entire sequence up to and including
+this block. This is what makes a block’s identity <em>positional</em>:
+two blocks with identical tokens but different prefixes produce
+different sequence hashes. Unlike local hashes, sequence hashes are
+typically produced by the inference engine itself, and we generally
+cannot control the engine’s hashing algorithm—unless a contract is
+enforced (more on this shortly).</p>
+<pre><code>seq_hash[0] = local_hash[0]
+seq_hash[i] = hash(seq_hash[i-1] || local_hash[i])</code></pre></li>
+<li><p><strong>Locale info</strong>: Where the block physically lives.
+This includes the worker instance, data-parallel rank, LoRA adapter,
+storage medium, and more. For simplicity, we’ll just consider <em>worker
+identity</em> throughout this post.</p></li>
+</ul>
+<h4 id="why-chunk-hashes">Why Chunk Hashes?</h4>
+<p>There is a deliberate asymmetry here. Local hashes are <em>chunk
+hashes</em>—they depend only on the tokens inside a single block, with
+no rolling context from the prefix. This is a conscious design choice
+driven by the read path.</p>
+<p>When a <code>find_matches</code> request arrives, the router frontend
+needs to hash the query’s tokens to produce the local hashes it will
+probe the index with. There are <em>many</em> frontends serving a high
+volume of requests, and each request may span hundreds or thousands of
+blocks. If local hashes required rolling context (knowing the full
+prefix to compute each block’s hash), the frontend would need to compute
+a sequential rolling hash for every position. With chunk hashes, each
+block’s hash is independent: the frontend can hash them cheaply and in
+parallel.</p>
+<p>The engine-side publisher, by contrast, only needs to compute the
+rolling sequence hash for its own KV events, and there’s one publisher
+per engine processing events sequentially. The asymmetry in
+workload—many frontends doing reads vs. one publisher per engine doing
+writes—is what makes chunk hashes the right default for local
+hashes.</p>
+<p>But this comes at a cost. Chunk hashes do not uniquely identify a
+block’s position in a sequence. This isn’t a hash collision in the
+classical sense—it’s a fundamental property. Consider the sequence:
+<em>“Predict the next token. Learn from the error. Predict the next
+token.”</em> Blocks 0 and 2 contain identical tokens, so they produce
+the same chunk hash. Yet they occupy entirely different positions in the
+sequence with entirely different histories. A rolling sequence hash
+would distinguish them; a chunk hash cannot. The same phenomenon arises
+constantly in practice: shared system prompts, common preambles, and
+repeated phrases all produce identical chunk hashes at different
+positions across different sequences. This collision problem will shape
+every data structure decision that follows.</p>
+<blockquote>
+<p><strong>A note on the contract.</strong> If the inference engine
+follows the hashing contract we expect—using the same rolling hash
+algorithm as the indexer—then the external sequence hash is simply the
+deterministic composition of local hashes. We can recompute it on the
+indexer side and never need the engine to send it explicitly. In
+practice, engines may use their own internal hashing, so the system
+handles both cases.</p>
+</blockquote>
+<h3 id="the-workload">The Workload</h3>
+<p>The indexer handles two kinds of traffic: <strong>events</strong>
+(writes) and <strong>requests</strong> (reads).</p>
+<p><strong>KV Events</strong> are produced by the
+<strong>publisher</strong>—a wrapper around each inference engine that
+acts as the bridge between the engine’s internal world and the
+indexer’s. In the Dynamo design, the publisher subscribes to raw KV
+events from the engine (containing the engine’s external sequence hashes
+and the token IDs of each block), computes the local block hash from the
+token content (using the same hashing algorithm as the frontend router,
+so the two sides always agree), and tags each event with metadata: the
+<code>worker_id</code> (extracted from Dynamo’s discovery mechanism), a
+monotonically increasing <code>event_id</code> (for gap detection and
+ordering), and extra identifiers we can extract from the engine like
+<code>dp_rank</code>. It then publishes these enriched events over
+pub/sub to every KV indexer instance. There are two event types that
+matter:</p>
+<ul>
+<li><strong>Store</strong>: A worker has computed and cached a new
+block. The event carries <code>(worker_id, local_hash, seq_hash)</code>.
+This happens when a request triggers a prefill or decode that extends
+the KV cache with new blocks. The indexer must record that this worker
+now holds this block.</li>
+<li><strong>Remove</strong>: A worker has evicted a block from its cache
+(to make room for new ones). The event carries
+<code>(worker_id, seq_hash)</code>. The indexer must delete the
+corresponding entry.</li>
+</ul>
+<p>Why can’t we just infer the cache state from the request-response
+cycle? Because engines cache KV blocks beyond the lifetime of a single
+request, and we have no way of knowing when a block gets evicted unless
+we can perfectly simulate the engine’s eviction policy. The engine’s
+internal cache management—LRU sweeps, memory pressure, preemption—is
+opaque to the outside world. KV events are the engine’s way of telling
+us what actually happened, and the pub/sub pattern naturally fits
+horizontal scaling: adding more indexer instances just means more
+subscribers, no protocol changes.</p>
+<p>That said, there are strategies to reduce or eliminate reliance on KV
+events. We can use a TTL-based heuristic that expires blocks after a
+period of inactivity, approximating eviction without explicit remove
+events. Or we can run a mock engine that mirrors the real engine’s
+scheduling and eviction logic to predict cache state. But both are
+approximations with different tradeoff profiles, and are out of scope
+for this post.</p>
+<p>In practice, the event stream is bursty: a single prefill can produce
+dozens of store events at once (one per new block), and eviction sweeps
+can produce a burst of removes. The indexer must absorb these at the
+rate the engines produce them—falling behind means the index goes stale
+and routing decisions degrade.</p>
+<pre class="mermaid"><code>flowchart LR
+    E1[Engine 1] --&gt;|KV events| P1[Publisher 1]
+    E2[Engine 2] --&gt;|KV events| P2[Publisher 2]
+    E3[Engine N] --&gt;|KV events| PN[Publisher N]
+    P1 --&gt;|&quot;(worker_id, local_hash, seq_hash)&quot;| IDX[Indexer]
+    P2 --&gt;|&quot;(worker_id, local_hash, seq_hash)&quot;| IDX
+    PN --&gt;|&quot;(worker_id, local_hash, seq_hash)&quot;| IDX
+    IDX --&gt;|overlap scores| R[Router]</code></pre>
+<p><strong>Requests</strong> are prefix match queries issued by the
+router frontend on every incoming inference request. The frontend
+tokenizes the prompt, chunks the tokens into blocks, computes the chunk
+hashes, and hands the indexer a sequence of local hashes:
+<code>[local_hash_0, local_hash_1, ..., local_hash_D]</code>. The
+indexer’s job: walk the sequence and, for each worker, determine how
+deep the prefix overlap goes. The result is a set of
+<code>(worker_id, match_depth)</code> scores that the router uses to
+pick the best worker—the one with the deepest cached prefix, minimizing
+redundant computation.</p>
+<p>Both events and requests are on the hot path, and the design goal is
+to make them fast <em>without contending with each other</em>. If events
+are slow, the index goes stale and routing decisions are based on
+outdated cache state. If requests are slow, user-facing latency suffers.
+And if the two compete for the same locks or threads, improving one
+degrades the other. The challenge is to keep both fast and
+non-interfering—quick routing decisions on up-to-date data.</p>
+<h4 id="serving-at-planetary-scale">Serving at planetary scale</h4>
+<p>So far, the indexer has been a core component of our KV router,
+battle-tested by many teams in production and shown to deliver
+significant latency and throughput improvements. As we see prefix-aware
+routing becoming the new default standard for LLM serving, we take great
+care in making sure the indexer itself is never the bottleneck—even at
+planetary scale. And in fact, as we walk through this story, it won’t
+be. Far from it. By the end, network latency, tokenization, and hashing
+will be the real bottlenecks, not indexing. This is why we plan to make
+the indexer a standalone microservice: a handful of indexer instances
+(more for high availability and network locality than for performance)
+serving thousands of stateless frontends that handle preprocessing,
+tokenization, and hashing, and millions of backend workers at planetary
+scale.</p>
+<hr />
+<h2 id="your-leetcode-dsa">1. Your Leetcode DSA</h2>
+<p>The simplest possible index is a nested dictionary. For each worker,
+store a mapping from local block hash to the set of external sequence
+hashes that share that chunk hash. Since local hashes are chunk
+hashes—the same tokens can appear at different positions in different
+sequences—a single local hash can map to multiple sequence hashes on the
+same worker. To find matches, iterate every worker and walk through the
+query sequence, checking for hits.</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> KvIndex:</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="co"># worker_id -&gt; { local_hash -&gt; set of seq_hashes }</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    index: <span class="bu">dict</span>[<span class="bu">int</span>, <span class="bu">dict</span>[<span class="bu">int</span>, <span class="bu">set</span>[<span class="bu">int</span>]]] <span class="op">=</span> {}</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> store(<span class="va">self</span>, worker_id: <span class="bu">int</span>, blocks: <span class="bu">list</span>[<span class="bu">tuple</span>[<span class="bu">int</span>, <span class="bu">int</span>]]):</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> worker_id <span class="kw">not</span> <span class="kw">in</span> <span class="va">self</span>.index:</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.index[worker_id] <span class="op">=</span> {}</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> local_hash, seq_hash <span class="kw">in</span> blocks:</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> local_hash <span class="kw">not</span> <span class="kw">in</span> <span class="va">self</span>.index[worker_id]:</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>                <span class="va">self</span>.index[worker_id][local_hash] <span class="op">=</span> <span class="bu">set</span>()</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.index[worker_id][local_hash].add(seq_hash)</span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> remove(<span class="va">self</span>, worker_id: <span class="bu">int</span>, seq_hashes: <span class="bu">list</span>[<span class="bu">int</span>]):</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> worker_id <span class="kw">not</span> <span class="kw">in</span> <span class="va">self</span>.index:</span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span></span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> seq_hash <span class="kw">in</span> seq_hashes:</span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> local_hash, hashes <span class="kw">in</span> <span class="va">self</span>.index[worker_id].items():</span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>                hashes.discard(seq_hash)</span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> find_matches(<span class="va">self</span>, query: <span class="bu">list</span>[<span class="bu">int</span>]) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">int</span>, <span class="bu">int</span>]:</span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>        <span class="co">&quot;&quot;&quot;Returns { worker_id: match_depth }&quot;&quot;&quot;</span></span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>        scores <span class="op">=</span> {}</span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> worker_id, blocks <span class="kw">in</span> <span class="va">self</span>.index.items():</span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a>            depth <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> local_hash <span class="kw">in</span> query:</span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>                <span class="cf">if</span> local_hash <span class="kw">in</span> blocks <span class="kw">and</span> blocks[local_hash]:</span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a>                    depth <span class="op">+=</span> <span class="dv">1</span></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a>                <span class="cf">else</span>:</span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>                    <span class="cf">break</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> depth <span class="op">&gt;</span> <span class="dv">0</span>:</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>                scores[worker_id] <span class="op">=</span> depth</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> scores</span></code></pre></div>
+<p>This works. It’s also <code>O(W × D)</code> for every
+<code>find_matches</code> call, where <code>W</code> is the number of
+workers and <code>D</code> is the query depth. With hundreds of workers
+and sequences thousands of blocks long, this is a non-starter for a
+hot-path that runs on every incoming request.</p>
+<p>There’s also a correctness issue already present. The
+<code>find_matches</code> check <code>local_hash in blocks</code> tells
+us the worker has <em>some</em> block with those tokens, but it can’t
+tell us <em>which</em> one—different sequences with the same chunk at
+the same position are conflated. If there’s an overlap, we’d need some
+secondary resolution (potentially an RPC call back to the engine to
+verify), which is expensive and defeats the purpose of a fast local
+index. We’ll accept this for now and deal with it properly soon.</p>
+<p>But first, let’s bring this to a language that takes performance
+seriously.</p>
+<hr />
+<h2 id="into-rust-land">2. Into Rust Land</h2>
+<p>Rust gives us zero-cost abstractions, fine-grained control over
+memory layout, and—crucially—a type system that makes data races a
+compile-time error rather than a 3 AM production incident. No garbage
+collector, no stop-the-world pauses, no reference counting overhead on
+the hot path unless we explicitly opt in. For a data structure that
+needs to handle millions of operations per second, this matters.</p>
+<p>The Python dict translates directly to Rust’s
+<code>HashMap</code>:</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> KvIndex <span class="op">{</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">// worker -&gt; (local_hash -&gt; set of seq_hashes)</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>    index<span class="op">:</span> HashMap<span class="op">&lt;</span>WorkerId<span class="op">,</span> HashMap<span class="op">&lt;</span>LocalHash<span class="op">,</span> HashSet<span class="op">&lt;</span>ExternalHash<span class="op">&gt;&gt;&gt;,</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>But there’s an immediate problem. This indexer doesn’t live in
+isolation—it sits inside a router that is receiving KV events from many
+workers <em>while simultaneously</em> serving <code>find_matches</code>
+requests from incoming inference traffic. Multiple threads need to read
+and write this structure concurrently. Rust’s ownership model won’t let
+you hand out <code>&amp;mut self</code> to multiple threads, and it
+shouldn’t—that would be a data race waiting to happen.</p>
+<h3 id="the-actor-pattern">The Actor Pattern</h3>
+<p>The straightforward solution is to not share the data structure at
+all. Instead, put it behind a <strong>single-threaded actor</strong>:
+one dedicated OS thread that owns the index exclusively, communicating
+with the outside world through message channels.</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co">// Channels for communication</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> (event_tx<span class="op">,</span> event_rx) <span class="op">=</span> <span class="pp">mpsc::channel::</span><span class="op">&lt;</span>RouterEvent<span class="op">&gt;</span>(<span class="dv">2048</span>)<span class="op">;</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> (match_tx<span class="op">,</span> match_rx) <span class="op">=</span> <span class="pp">mpsc::channel::</span><span class="op">&lt;</span>MatchRequest<span class="op">&gt;</span>(<span class="dv">128</span>)<span class="op">;</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="pp">std::thread::</span>spawn(<span class="kw">move</span> <span class="op">||</span> <span class="op">{</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> runtime <span class="op">=</span> <span class="pp">tokio::runtime::Builder::</span>new_current_thread()</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>enable_all()</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>build()</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>unwrap()<span class="op">;</span></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a>    runtime<span class="op">.</span>block_on(<span class="kw">async</span> <span class="kw">move</span> <span class="op">{</span></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> <span class="kw">mut</span> index <span class="op">=</span> <span class="pp">KvIndex::</span>new()<span class="op">;</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a>        <span class="cf">loop</span> <span class="op">{</span></span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a>            <span class="pp">tokio::select!</span> <span class="op">{</span></span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a>                <span class="cn">Some</span>(event) <span class="op">=</span> event_rx<span class="op">.</span>recv() <span class="op">=&gt;</span> <span class="op">{</span></span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a>                    index<span class="op">.</span>apply_event(event)<span class="op">;</span></span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a>                <span class="op">}</span></span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a>                <span class="cn">Some</span>(req) <span class="op">=</span> match_rx<span class="op">.</span>recv() <span class="op">=&gt;</span> <span class="op">{</span></span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a>                    <span class="kw">let</span> scores <span class="op">=</span> index<span class="op">.</span>find_matches(<span class="op">&amp;</span>req<span class="op">.</span>sequence)<span class="op">;</span></span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a>                    <span class="kw">let</span> _ <span class="op">=</span> req<span class="op">.</span>reply<span class="op">.</span>send(scores)<span class="op">;</span></span>
+<span id="cb5-22"><a href="#cb5-22" aria-hidden="true" tabindex="-1"></a>                <span class="op">}</span></span>
+<span id="cb5-23"><a href="#cb5-23" aria-hidden="true" tabindex="-1"></a>            <span class="op">}</span></span>
+<span id="cb5-24"><a href="#cb5-24" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb5-25"><a href="#cb5-25" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span>)<span class="op">;</span></span>
+<span id="cb5-26"><a href="#cb5-26" aria-hidden="true" tabindex="-1"></a><span class="op">}</span>)<span class="op">;</span></span></code></pre></div>
+<p>The actor serializes all access—both reads and writes—through a
+single thread. No locks, no contention, no data races by construction.
+The index can remain a plain, non-thread-safe <code>HashMap</code>
+because only one thread ever touches it.</p>
+<p>This is clean, correct, and simple. But it has an inherent throughput
+ceiling: every <code>find_matches</code> call must queue behind every
+pending write, and vice versa. The single thread is the bottleneck.
+We’ll revisit this.</p>
+<hr />
+<h2 id="the-inversion">3. The Inversion</h2>
+<p>The nested dictionary <code>worker -&gt; { hash -&gt; ... }</code>
+forces <code>find_matches</code> to iterate over every worker. If you
+have 100 workers, you’re doing 100 traversals of the query sequence. But
+think about what we’re actually asking: “which workers have this block?”
+That’s a question about a <em>block</em>, not a worker.</p>
+<p>Invert the index. Instead of iterating workers and checking blocks,
+build a forward index keyed by <code>LocalHash</code> that maps to the
+sequence hashes and their worker sets. Since multiple sequence hashes
+can share the same chunk hash, we nest them:
+<code>local_hash -&gt; { seq_hash -&gt; set of workers }</code>.</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> KvIndex <span class="op">{</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Forward index: local_hash -&gt; (seq_hash -&gt; set of workers)</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>    index<span class="op">:</span> HashMap<span class="op">&lt;</span>LocalHash<span class="op">,</span> HashMap<span class="op">&lt;</span>ExternalHash<span class="op">,</span> HashSet<span class="op">&lt;</span>WorkerId<span class="op">&gt;&gt;&gt;,</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>On a store event, insert the worker into
+<code>index[local_hash][seq_hash]</code>. On removal, we need to find
+and remove the worker’s entry—but without a reverse lookup, we’d have to
+scan the entire index to find which <code>(local_hash, seq_hash)</code>
+pair corresponds to the removed block. Not great, but let’s set that
+aside for now.</p>
+<p>Now <code>find_matches</code> traverses the query sequence once. At
+each position, we look up <code>index[local_hash]</code>—which returns
+all seq hashes (and their worker sets) that share this chunk hash. For
+the purpose of traversal, we take the <strong>union</strong> of all
+worker sets across seq hashes at that position. Workers can only
+<em>drop out</em> as you go deeper (if a worker doesn’t have a block at
+position <code>i</code>, it certainly doesn’t have the continuation at
+position <code>i+1</code>). The total set-intersection work across all
+levels is bounded by <code>W</code>—each worker is “drained” from the
+active set at most once—giving us <code>O(D + W)</code> instead of
+<code>O(W × D)</code>.</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">fn</span> find_matches(<span class="op">&amp;</span><span class="kw">self</span><span class="op">,</span> query<span class="op">:</span> <span class="op">&amp;</span>[LocalHash]) <span class="op">-&gt;</span> HashMap<span class="op">&lt;</span>WorkerId<span class="op">,</span> <span class="dt">u32</span><span class="op">&gt;</span> <span class="op">{</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> scores <span class="op">=</span> <span class="pp">HashMap::</span>new()<span class="op">;</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="cn">Some</span>(entry) <span class="op">=</span> <span class="kw">self</span><span class="op">.</span>index<span class="op">.</span>get(<span class="op">&amp;</span>query[<span class="dv">0</span>]) <span class="cf">else</span> <span class="op">{</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> scores<span class="op">;</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    <span class="op">};</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Union all workers across seq hashes at this local hash</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> <span class="kw">mut</span> active<span class="op">:</span> HashSet<span class="op">&lt;</span>WorkerId<span class="op">&gt;</span> <span class="op">=</span> entry<span class="op">.</span>values()<span class="op">.</span>flatten()<span class="op">.</span>copied()<span class="op">.</span>collect()<span class="op">;</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (depth<span class="op">,</span> local_hash) <span class="kw">in</span> query<span class="op">.</span>iter()<span class="op">.</span>enumerate() <span class="op">{</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> workers_here<span class="op">:</span> HashSet<span class="op">&lt;</span>WorkerId<span class="op">&gt;</span> <span class="op">=</span> <span class="kw">self</span><span class="op">.</span>index</span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>            <span class="op">.</span>get(local_hash)</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>            <span class="op">.</span>map(<span class="op">|</span>e<span class="op">|</span> e<span class="op">.</span>values()<span class="op">.</span>flatten()<span class="op">.</span>copied()<span class="op">.</span>collect())</span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>            <span class="op">.</span>unwrap_or_default()<span class="op">;</span></span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> drained<span class="op">:</span> <span class="dt">Vec</span><span class="op">&lt;</span>_<span class="op">&gt;</span> <span class="op">=</span> active<span class="op">.</span>iter()</span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>            <span class="op">.</span>filter(<span class="op">|</span>w<span class="op">|</span> <span class="op">!</span>workers_here<span class="op">.</span>contains(w))</span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>            <span class="op">.</span>copied()</span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a>            <span class="op">.</span>collect()<span class="op">;</span></span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> w <span class="kw">in</span> drained <span class="op">{</span></span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true" tabindex="-1"></a>            active<span class="op">.</span>remove(<span class="op">&amp;</span>w)<span class="op">;</span></span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true" tabindex="-1"></a>            scores<span class="op">.</span>insert(w<span class="op">,</span> depth <span class="kw">as</span> <span class="dt">u32</span>)<span class="op">;</span></span>
+<span id="cb7-22"><a href="#cb7-22" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb7-23"><a href="#cb7-23" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> active<span class="op">.</span>is_empty() <span class="op">{</span> <span class="cf">break</span><span class="op">;</span> <span class="op">}</span></span>
+<span id="cb7-24"><a href="#cb7-24" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb7-25"><a href="#cb7-25" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> w <span class="kw">in</span> active <span class="op">{</span></span>
+<span id="cb7-26"><a href="#cb7-26" aria-hidden="true" tabindex="-1"></a>        scores<span class="op">.</span>insert(w<span class="op">,</span> query<span class="op">.</span>len() <span class="kw">as</span> <span class="dt">u32</span>)<span class="op">;</span></span>
+<span id="cb7-27"><a href="#cb7-27" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb7-28"><a href="#cb7-28" aria-hidden="true" tabindex="-1"></a>    scores</span>
+<span id="cb7-29"><a href="#cb7-29" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>This is a big win for read performance. But two problems remain.</p>
+<p>First, the collision issue from Section 1 is still here—just in a
+different shape. When we union worker sets across all seq hashes at a
+given local hash, we’re conflating workers that cached <em>different
+sequences</em> that happen to share the same chunk. A worker whose block
+0 came from “Summarize this document” will appear as a match for any
+query starting with those same tokens, even if the full sequences
+diverge. The seq hash data is <em>in</em> the index, but
+<code>find_matches</code> can’t use it without knowing the query’s own
+seq hashes—which brings us back to rolling hash computation on the read
+path, exactly what chunk hashes were meant to avoid.</p>
+<p>Second, removes are expensive. Without a per-worker reverse lookup,
+removing a block by seq hash requires scanning the entire index. We
+could add a reverse lookup table, but that’s more bookkeeping on the
+write path.</p>
+<p>We need a data structure that resolves both: collision safety during
+traversal <em>and</em> efficient per-worker event processing. That’s
+where the tree comes in.</p>
+<hr />
+<h2 id="branching-out">4. Branching Out</h2>
+<p>Section 3 left us with two frustrations: chunk hash collisions
+produce false positives during traversal, and removes require scanning
+the entire index without a reverse lookup. We also have a scaling
+problem—the flat <code>HashMap</code> grows into a massive table where
+every <code>find_matches</code> call does <code>D</code> independent
+lookups into one giant map. At millions of entries, these are not the
+theoretical O(1) we learned in school: cache line misses dominate, and
+probe sequences get longer as the load factor climbs.</p>
+<p>What if we could solve all three problems at once—collision safety,
+efficient event processing, <em>and</em> cache-friendly traversal—by
+walking a path through a tree?</p>
+<h3 id="the-radix-tree">The Radix Tree</h3>
+<p>A radix tree (prefix tree) encodes parent-child relationships
+explicitly. Each node has a small <code>HashMap</code> of children keyed
+by <code>LocalHash</code>, plus a set of workers that have this block
+cached. To process a <code>find_matches</code> query, you start at the
+root and follow child pointers—each lookup is into a tiny per-node
+children map, not one global table.</p>
+<p>Crucially, the tree structure <em>scopes</em> the collision risk. Two
+blocks with the same <code>LocalHash</code> (chunk hash collision) can
+only collide if they are children of the <em>same parent</em>. Different
+prefixes lead to different parents, so they’re naturally separated in
+the tree. And each node carries an <code>ExternalHash</code>—the rolling
+hash of the entire prefix—so even in the rare case of a true collision
+under the same parent, the per-worker lookup table can disambiguate.</p>
+<p>This requires one new piece of information in KV events: the
+<strong>parent hash</strong>. Without it, we can’t link child to parent.
+With it, the tree builds itself naturally as events arrive.</p>
+<pre class="mermaid"><code>flowchart TD
+    Root[&quot;root&quot;]
+    Root --&gt;|&quot;local=0xA1&quot;| B0[&quot;block 0: W0, W1, W2&quot;]
+    Root --&gt;|&quot;local=0xB2&quot;| B0p[&quot;block 0&#39;: W3&quot;]
+    B0 --&gt;|&quot;local=0xC3&quot;| B1[&quot;block 1: W0, W1, W2&quot;]
+    B1 --&gt;|&quot;local=0xD4&quot;| B2[&quot;block 2: W0, W1&quot;]
+    B1 --&gt;|&quot;local=0xE5&quot;| B2p[&quot;block 2&#39;: W2&quot;]
+    B2 --&gt;|&quot;local=0xF6&quot;| B3[&quot;block 3: W0&quot;]</code></pre>
+<p>Each node stores an <code>ExternalHash</code> alongside the worker
+set. The per-worker <strong>lookup
+table</strong>—<code>HashMap&lt;Worker, HashMap&lt;SeqHash, SharedBlock&gt;&gt;</code>—provides
+collision-free O(1) access for event processing. When a
+<code>Stored</code> event arrives, we find the parent node via
+<code>lookup[worker][parent_seq_hash]</code> and attach the new child.
+When a <code>Removed</code> event arrives, we find the node by
+<code>lookup[worker][seq_hash]</code> and remove the worker from it.</p>
+<p>Even if two nodes share the same <code>LocalHash</code> (chunk hash
+collision), the <code>ExternalHash</code> in the lookup table
+disambiguates them. Two complementary keys for two access patterns: tree
+traversal by local hash for reads, lookup table by sequence hash for
+writes.</p>
+<h3 id="rc-and-refcell">Rc and RefCell</h3>
+<p>Both the tree and the lookup table need to point to the same node. In
+Rust, you can’t just hand out multiple mutable references to the same
+allocation—the borrow checker won’t let you. For a single-threaded
+context (we’re still inside the actor), the standard solution is
+<code>Rc&lt;RefCell&lt;T&gt;&gt;</code>:</p>
+<ul>
+<li><code>Rc</code> (reference-counted pointer): multiple owners of the
+same allocation, with a runtime reference count. Cheap—no atomic
+operations needed because it’s single-threaded.</li>
+<li><code>RefCell</code> (interior mutability): lets you borrow the
+contents mutably at runtime, with a panic if you violate the borrowing
+rules. The borrow check moves from compile time to runtime.</li>
+</ul>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> SharedRadixBlock <span class="op">=</span> Rc<span class="op">&lt;</span>RefCell<span class="op">&lt;</span>RadixBlock<span class="op">&gt;&gt;;</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> RadixBlock <span class="op">{</span></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>    children<span class="op">:</span> HashMap<span class="op">&lt;</span>LocalHash<span class="op">,</span> SharedRadixBlock<span class="op">&gt;,</span></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>    workers<span class="op">:</span> HashSet<span class="op">&lt;</span>WorkerWithDpRank<span class="op">&gt;,</span></span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>    block_hash<span class="op">:</span> <span class="dt">Option</span><span class="op">&lt;</span>ExternalHash<span class="op">&gt;,</span></span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> RadixTree <span class="op">{</span></span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>    root<span class="op">:</span> SharedRadixBlock<span class="op">,</span></span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Per-worker lookup: worker -&gt; (seq_hash -&gt; node)</span></span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a>    lookup<span class="op">:</span> HashMap<span class="op">&lt;</span>WorkerWithDpRank<span class="op">,</span> HashMap<span class="op">&lt;</span>ExternalHash<span class="op">,</span> SharedRadixBlock<span class="op">&gt;&gt;,</span></span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>The tree now lives happily behind the actor.
+<code>find_matches</code> walks the tree from root to leaf, intersecting
+worker sets at each level. Event processing uses the lookup table for
+O(1) parent/block access. The children maps at each node are
+small—bounded by the branching factor at that position, not the total
+number of blocks in the system.</p>
+<hr />
+<h2 id="breaking-the-bottleneck">5. Breaking the Bottleneck</h2>
+<p>The actor pattern gave us correctness, but at a cost: every
+operation—reads <em>and</em> writes—is serialized through a single
+thread. <code>find_matches</code> is the hot path (called on every
+incoming request), and it’s now stuck behind a channel
+<code>recv()</code> in a queue with all the KV events. Under heavy load,
+this is the bottleneck.</p>
+<p>The insight: reads don’t conflict with each other. If we can make the
+tree thread-safe for concurrent reads, we can execute
+<code>find_matches</code> <em>inline</em> on the caller’s thread and
+skip the channel entirely.</p>
+<h3 id="from-rc-to-arc-from-refcell-to-rwlock">From Rc to Arc, from
+RefCell to RwLock</h3>
+<p>The upgrade is mechanical:</p>
+<ul>
+<li><code>Rc&lt;RefCell&lt;T&gt;&gt;</code> →
+<code>Arc&lt;RwLock&lt;T&gt;&gt;</code>: atomic reference counting +
+reader-writer lock. Multiple threads can hold read locks simultaneously;
+writes take an exclusive lock.</li>
+<li><code>HashMap</code> lookup → <code>DashMap</code>: a sharded
+concurrent hash map. Each shard has its own lock, distributing
+contention.</li>
+</ul>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="kw">type</span> SharedBlock <span class="op">=</span> Arc<span class="op">&lt;</span>RwLock<span class="op">&lt;</span>Block<span class="op">&gt;&gt;;</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> ConcurrentRadixTree <span class="op">{</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    root<span class="op">:</span> SharedBlock<span class="op">,</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>    lookup<span class="op">:</span> DashMap<span class="op">&lt;</span>WorkerWithDpRank<span class="op">,</span> RwLock<span class="op">&lt;</span>HashMap<span class="op">&lt;</span>ExternalHash<span class="op">,</span> SharedBlock<span class="op">&gt;&gt;&gt;,</span></span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>Now <code>find_matches</code> acquires only read locks as it walks
+the tree. Multiple requests can traverse concurrently without blocking
+each other.</p>
+<p>But writes are trickier. KV events for a given worker must be applied
+<em>sequentially</em>—a <code>Stored</code> event that references a
+parent block must see that parent already in the tree. We can’t just
+throw events at the tree from arbitrary threads.</p>
+<h3 id="sticky-routing">Sticky Routing</h3>
+<p>Enter the <code>ThreadPoolIndexer</code>: a pool of OS threads, each
+running a blocking receive loop. The key trick is <strong>sticky
+routing</strong>—each <code>WorkerId</code> is deterministically
+assigned to one thread via a <code>DashMap&lt;WorkerId, usize&gt;</code>
+mapping. Events for the same worker always land on the same thread.</p>
+<pre class="mermaid"><code>flowchart LR
+    subgraph writes [&quot;Write Path — sticky-routed&quot;]
+        EV[KV Events] --&gt; D{sticky router}
+        D --&gt;|W0, W3| T0[&quot;Thread 0&quot;]
+        D --&gt;|W1, W4| T1[&quot;Thread 1&quot;]
+        D --&gt;|W2, W5| T2[&quot;Thread 2&quot;]
+    end
+
+    T0 --&gt;|write locks| TREE[&quot;Arc ConcurrentRadixTree&quot;]
+    T1 --&gt;|write locks| TREE
+    T2 --&gt;|write locks| TREE
+    FM[&quot;find_matches()&quot;] --&gt;|read locks| TREE</code></pre>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="kw">async</span> <span class="kw">fn</span> apply_event(<span class="op">&amp;</span><span class="kw">self</span><span class="op">,</span> event<span class="op">:</span> RouterEvent) <span class="op">{</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> worker_id <span class="op">=</span> event<span class="op">.</span>worker_id<span class="op">;</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Sticky assignment: same worker always goes to same thread</span></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> thread_idx <span class="op">=</span> <span class="op">*</span><span class="kw">self</span><span class="op">.</span>worker_assignments</span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>entry(worker_id)</span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>or_insert_with(<span class="op">||</span> <span class="op">{</span></span>
+<span id="cb12-8"><a href="#cb12-8" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> idx <span class="op">=</span> <span class="kw">self</span><span class="op">.</span>counter<span class="op">.</span>fetch_add(<span class="dv">1</span><span class="op">,</span> <span class="pp">Ordering::</span>Relaxed)<span class="op">;</span></span>
+<span id="cb12-9"><a href="#cb12-9" aria-hidden="true" tabindex="-1"></a>            idx <span class="op">%</span> <span class="kw">self</span><span class="op">.</span>num_workers</span>
+<span id="cb12-10"><a href="#cb12-10" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span>)<span class="op">;</span></span>
+<span id="cb12-11"><a href="#cb12-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-12"><a href="#cb12-12" aria-hidden="true" tabindex="-1"></a>    <span class="kw">self</span><span class="op">.</span>channels[thread_idx]<span class="op">.</span>send(<span class="cn">Some</span>(event))<span class="op">;</span></span>
+<span id="cb12-13"><a href="#cb12-13" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>Since events for a given worker are serialized on one thread, there
+is no write-write contention on that worker’s subtree. This means the
+inner <code>RwLock&lt;HashMap&lt;...&gt;&gt;</code> per worker in the
+lookup table almost never contends on writes—we chose
+<code>RwLock</code> over <code>Mutex</code> precisely because the access
+pattern, by construction, has no write contention. Reads (from
+<code>find_matches</code>) can proceed in parallel with writes to
+different workers.</p>
+<p>The actor pattern is gone for reads. <code>find_matches</code>
+touches the shared <code>Arc&lt;ConcurrentRadixTree&gt;</code> directly,
+on the caller’s thread, with zero channel overhead.</p>
+<h3 id="the-read-write-tension">The Read-Write Tension</h3>
+<p>There is a fundamental tension here worth calling out. Events and
+requests are competing for the same data structure, and optimizing for
+one can hurt the other. A data structure that is maximally efficient for
+reads (flat, cache-friendly, minimal indirection) may be expensive to
+update; one that is easy to mutate (tree-structured, with localized
+writes) may be slow to traverse.</p>
+<p>The <code>RwLock</code> itself embodies this tension. A reader-biased
+<code>RwLock</code> (like Rust’s standard
+<code>std::sync::RwLock</code>) can starve writers under heavy read
+load—<code>find_matches</code> calls pile up and event processing falls
+behind, making the index go stale. A writer-biased lock risks the
+opposite: events get priority but request latency spikes. A fair lock
+avoids starvation but adds overhead to every acquisition. The right
+choice depends on the workload mix, and in practice we lean toward
+reader-biased semantics because request latency is user-facing while
+events can tolerate a small amount of queuing—but only up to a point,
+beyond which staleness degrades routing quality. This balancing act is
+something we revisit with each new indexer design.</p>
+<hr />
+<h2 id="the-leap">6. The Leap</h2>
+<p>The concurrent radix tree eliminated the actor bottleneck. But
+<code>find_matches</code> still walks the tree node by node, following
+pointers from parent to child. Each step is a pointer dereference into a
+different heap allocation—cache-hostile, and fundamentally sequential.
+You can’t skip ahead to position 128 without first visiting positions 0
+through 127.</p>
+<p>Unless you rethink the data structure entirely.</p>
+<h3 id="position-as-a-first-class-dimension">Position as a First-Class
+Dimension</h3>
+<p>What if, instead of encoding parent-child relationships in a tree, we
+used a flat map with a compound key:
+<code>(position, local_hash)</code>, where <code>position</code> is the
+block’s depth from the root—i.e., its index in the sequence (0 for the
+first block, 1 for the second, and so on)?</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> PositionalIndexer <span class="op">{</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">// (position, local_hash) -&gt; SeqEntry</span></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>    index<span class="op">:</span> DashMap<span class="op">&lt;</span>(<span class="dt">usize</span><span class="op">,</span> LocalHash)<span class="op">,</span> SeqEntry<span class="op">&gt;,</span></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Per-worker reverse lookup for event processing</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>    worker_blocks<span class="op">:</span> DashMap<span class="op">&lt;</span>WorkerWithDpRank<span class="op">,</span> RwLock<span class="op">&lt;</span>HashMap<span class="op">&lt;</span>SeqHash<span class="op">,</span> (<span class="dt">usize</span><span class="op">,</span> LocalHash)<span class="op">&gt;&gt;&gt;,</span></span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>    jump_size<span class="op">:</span> <span class="dt">usize</span><span class="op">,</span></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>With position in the key, you can look up <em>any</em> position in
+O(1)—no traversal required. Position 0, position 64, position 128: all
+equally cheap. This is <strong>spatial indexing</strong>: treating the
+block sequence as a coordinate space rather than a linked structure.</p>
+<p>The <code>SeqEntry</code> enum handles the collision story from
+earlier. In the common case, a given <code>(position, local_hash)</code>
+pair has exactly one sequence hash—so we store it inline without
+allocating a <code>HashMap</code>. Only when multiple prefixes produce
+the same chunk hash at the same position do we upgrade to a multi-entry
+map.</p>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="kw">enum</span> SeqEntry <span class="op">{</span></span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Common case: one seq_hash, no HashMap allocation</span></span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>    Single(ExternalHash<span class="op">,</span> HashSet<span class="op">&lt;</span>WorkerWithDpRank<span class="op">&gt;</span>)<span class="op">,</span></span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Rare case: multiple prefixes share the same chunk hash at this position</span></span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>    Multi(HashMap<span class="op">&lt;</span>ExternalHash<span class="op">,</span> HashSet<span class="op">&lt;</span>WorkerWithDpRank<span class="op">&gt;&gt;</span>)<span class="op">,</span></span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<h3 id="jump-search">Jump Search</h3>
+<p>Random-position access unlocks the signature optimization:
+<strong>jump search</strong>. Instead of checking every position
+sequentially, jump ahead by <code>jump_size</code> positions (e.g., 32)
+and check if all active workers still match at the destination.</p>
+<pre class="mermaid"><code>flowchart LR
+    subgraph query [&quot;Query sequence — 256 blocks&quot;]
+        P0[&quot;pos 0&quot;] ~~~ P32[&quot;pos 32&quot;] ~~~ P64[&quot;pos 64&quot;] ~~~ P96[&quot;pos 96&quot;] ~~~ P128[&quot;pos 128&quot;]
+    end
+
+    P0 --&gt;|&quot;jump: all 5 match&quot;| P32
+    P32 --&gt;|&quot;jump: all 5 match&quot;| P64
+    P64 --&gt;|&quot;jump: only 3 match!&quot;| P96
+
+    subgraph scan [&quot;Linear scan 65..96&quot;]
+        S65[&quot;pos 65&quot;] ~~~ S66[&quot;...&quot;] ~~~ S78[&quot;pos 78: W2 drains&quot;] ~~~ S79[&quot;...&quot;] ~~~ S91[&quot;pos 91: W4 drains&quot;]
+    end
+
+    P64 --&gt;|&quot;scan back&quot;| scan
+    scan --&gt;|&quot;continue jumping&quot;| P96
+    P96 --&gt;|&quot;jump: all 3 match&quot;| P128</code></pre>
+<p>The algorithm:</p>
+<ol type="1">
+<li>Initialize the active worker set from position 0.</li>
+<li>Jump ahead by <code>jump_size</code> positions.</li>
+<li>At the jump destination, count how many active workers still match
+(cardinality check—no need to clone the set).</li>
+<li>If all workers match: keep jumping. Skip all intermediate
+positions.</li>
+<li>If some workers dropped: linear scan the skipped range to find the
+exact drain points.</li>
+<li>Repeat until the sequence is exhausted.</li>
+</ol>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="cf">while</span> current_pos <span class="op">&lt;</span> len <span class="op">-</span> <span class="dv">1</span> <span class="op">&amp;&amp;</span> <span class="op">!</span>active<span class="op">.</span>is_empty() <span class="op">{</span></span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> next_pos <span class="op">=</span> (current_pos <span class="op">+</span> <span class="kw">self</span><span class="op">.</span>jump_size)<span class="op">.</span>min(len <span class="op">-</span> <span class="dv">1</span>)<span class="op">;</span></span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> num_workers_at_next <span class="op">=</span> <span class="kw">self</span></span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>count_workers_at(next_pos<span class="op">,</span> local_hashes[next_pos]<span class="op">,</span> <span class="op">&amp;</span><span class="kw">mut</span> seq_hashes<span class="op">,</span> local_hashes)</span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>        <span class="op">.</span>unwrap_or(<span class="dv">0</span>)<span class="op">;</span></span>
+<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> num_workers_at_next <span class="op">==</span> active<span class="op">.</span>len() <span class="op">{</span></span>
+<span id="cb16-9"><a href="#cb16-9" aria-hidden="true" tabindex="-1"></a>        <span class="co">// All active workers match at the jump destination -- skip ahead</span></span>
+<span id="cb16-10"><a href="#cb16-10" aria-hidden="true" tabindex="-1"></a>        current_pos <span class="op">=</span> next_pos<span class="op">;</span></span>
+<span id="cb16-11"><a href="#cb16-11" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span> <span class="cf">else</span> <span class="op">{</span></span>
+<span id="cb16-12"><a href="#cb16-12" aria-hidden="true" tabindex="-1"></a>        <span class="co">// Some workers dropped -- scan the range to find exact drain points</span></span>
+<span id="cb16-13"><a href="#cb16-13" aria-hidden="true" tabindex="-1"></a>        <span class="kw">self</span><span class="op">.</span>linear_scan_drain(</span>
+<span id="cb16-14"><a href="#cb16-14" aria-hidden="true" tabindex="-1"></a>            local_hashes<span class="op">,</span> <span class="op">&amp;</span><span class="kw">mut</span> seq_hashes<span class="op">,</span> <span class="op">&amp;</span><span class="kw">mut</span> active<span class="op">,</span> <span class="op">&amp;</span><span class="kw">mut</span> scores<span class="op">,</span></span>
+<span id="cb16-15"><a href="#cb16-15" aria-hidden="true" tabindex="-1"></a>            current_pos <span class="op">+</span> <span class="dv">1</span><span class="op">,</span> next_pos <span class="op">+</span> <span class="dv">1</span><span class="op">,</span> <span class="cn">false</span><span class="op">,</span></span>
+<span id="cb16-16"><a href="#cb16-16" aria-hidden="true" tabindex="-1"></a>        )<span class="op">;</span></span>
+<span id="cb16-17"><a href="#cb16-17" aria-hidden="true" tabindex="-1"></a>        current_pos <span class="op">=</span> next_pos<span class="op">;</span></span>
+<span id="cb16-18"><a href="#cb16-18" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb16-19"><a href="#cb16-19" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>In the best case (all workers share the full prefix),
+<code>find_matches</code> does <code>D / J</code> lookups instead of
+<code>D</code>. In the worst case (workers drop at every jump), it
+degrades to a linear scan with extra overhead from overshooting—slightly
+worse than the tree, since each failed jump wastes a probe before
+scanning back.</p>
+<h3 id="lazy-hash-computation">Lazy Hash Computation</h3>
+<p>One more trick. Most <code>(position, local_hash)</code> entries are
+<code>SeqEntry::Single</code>—only one sequence hash at that slot. When
+we look up a position and find a <code>Single</code> entry, we
+<em>know</em> it’s the right one (or it’s a miss). We can skip computing
+the query’s sequence hash for that position entirely. The sequence hash
+only needs to be computed—lazily, on demand—when we encounter a
+<code>Multi</code> entry and need to disambiguate.</p>
+<p>Since <code>Multi</code> entries are rare (they require chunk hash
+collisions at the same position with different prefixes), this saves
+hash computation on nearly every position check.</p>
+<p>The complexity drops from <code>O(D × W)</code> to
+<code>O(D/J + W)</code>, where <code>J</code> is the jump size and
+<code>W</code> accounts for the drain bookkeeping. For typical workloads
+with high prefix sharing, the jump optimization skips the vast majority
+of positions.</p>
+<hr />
+<h2 id="benchmarking">Benchmarking</h2>
+<p>Claims are cheap; numbers aren’t. We maintain a benchmark harness
+(<code>mooncake_bench</code>) that replays real production trace data
+against each indexer backend, so every design change is validated under
+realistic conditions. The trace data comes from Mooncake and is publicly
+available, so you can reproduce these results yourself.</p>
+<h3 id="setup">Setup</h3>
+<p>The benchmark works in two phases:</p>
+<ol type="1">
+<li><p><strong>Event generation.</strong> The trace is a JSONL file of
+timestamped requests, each carrying a sequence of block-level hash IDs.
+We randomly partition these requests across <code>N</code> simulated
+workers, then replay each worker’s partition through a mock engine (with
+configurable GPU block count, block size, and prefix caching enabled).
+The mock engine processes requests in real-time and emits the same KV
+cache events (store, remove, clear) that a real engine would
+produce—complete with eviction pressure and prefix reuse patterns. These
+events are collected and timestamped.</p></li>
+<li><p><strong>Benchmark replay.</strong> Each worker’s request trace
+and event trace are merged into a single time-ordered sequence and
+rescaled to fit the benchmark duration. Workers are spawned as
+concurrent tasks, each replaying its merged trace at the original
+inter-entry timing. Every <code>find_matches</code> call is timed (via
+<code>minstant</code> for nanosecond-precision monotonic timestamps),
+and every KV event is applied to the indexer under test. After all
+workers finish, the event queue is flushed and we verify that the
+indexer kept up (if more than 5% of events remain in the queue at the
+end, the run is invalid).</p></li>
+</ol>
+<p>The harness supports all indexer backends (<code>RadixTree</code>,
+<code>RadixTreeSharded</code>, <code>ConcurrentRadixTree</code>,
+<code>NestedMap</code>) and allows tuning worker count, duplication
+factor, jump size, and event worker threads from the CLI.</p>
+<h3 id="what-we-measure">What We Measure</h3>
+<p>The metric we care about most is the <strong>throughput-latency
+curve</strong>: as we scale up the combined rate of KV events and
+<code>find_matches</code> requests, at what point does the p99 latency
+jump? That inflection point—the <strong>phase transition</strong> where
+queueing kicks in—defines the <strong>threshold throughput</strong>: the
+maximum sustained load the indexer can reliably handle without latency
+degradation.</p>
+<p>Below the threshold, the indexer is invisible: sub-microsecond p99
+latency, and the real bottlenecks are network, tokenization, and
+hashing. Above it, events start backing up in the channel, latencies
+spike, and the indexer becomes the constraint. Every optimization in
+this post was motivated by pushing that threshold higher.</p>
+<hr />
+<h2 id="future-optimizations">Future Optimizations</h2>
+<p>The Flash Indexer is already far from being the bottleneck—even a
+single instance comfortably handles the event and request rates of large
+deployments. But we’re always looking ahead to a future where thousands
+of frontends serve billions of workers, and these optimizations would
+start to matter:</p>
+<ol type="1">
+<li><p><strong>Binary search within jumps.</strong> The positional
+indexer’s flat structure supports random access by position, which means
+we can replace the linear scan-back after a failed jump with a binary
+search over the skipped range. This would tighten the worst case from
+<code>O(J)</code> per failed jump to <code>O(log J)</code>.</p></li>
+<li><p><strong>Hierarchical routing.</strong> A sparse indexer at the
+top level that tracks coarse-grained prefix coverage across groups of
+deployments, with full indexers at the bottom each serving a subset.
+Queries hit the sparse layer first to narrow down which group to probe,
+avoiding a broadcast to every indexer.</p></li>
+<li><p><strong>Stack-allocated position arrays.</strong> The
+<code>DashMap&lt;(usize, LocalHash), SeqEntry&gt;</code> uses
+heap-allocated hash map entries. If we know the maximum sequence depth
+up front—which we can derive from the block size and the model’s maximum
+sequence length—we can replace the hash map with a fixed-size array on
+the stack, eliminating hashing and allocation overhead entirely for the
+position dimension.</p></li>
+</ol>
+<p>For now, network latency, tokenization, and hashing dominate the
+end-to-end cost. But when deployments grow large enough that those stop
+being the bottleneck, these are the levers we’ll pull.</p>
+<hr />
+<h2 id="conclusion">Conclusion</h2>
+<p>The journey from a Python dictionary to the Flash Indexer spans six
+iterations, each motivated by a concrete bottleneck in the previous
+design:</p>
+<ol type="1">
+<li><strong>Naive nested dict</strong> — simple but O(W × D) per
+query.</li>
+<li><strong>Rust + actor pattern</strong> — fast language, correct
+concurrency, but single-threaded bottleneck.</li>
+<li><strong>Inverted index</strong> — O(D + W) per query by flipping the
+key structure; secondary seq_hash layer for chunk-hash collision
+safety.</li>
+<li><strong>Radix tree</strong> — tree structure replaces giant flat
+map; per-node children maps stay small; dual-key design (local hash for
+traversal, seq hash for event processing);
+<code>Rc&lt;RefCell&lt;&gt;&gt;</code> for single-threaded shared
+ownership.</li>
+<li><strong>Concurrent radix tree</strong> —
+<code>Arc&lt;RwLock&lt;&gt;&gt;</code> + <code>DashMap</code>; reads
+bypass the actor entirely; sticky routing serializes writes per worker
+with zero contention.</li>
+<li><strong>Positional indexer with jump search</strong> — spatial
+indexing with <code>(position, local_hash)</code> compound keys; O(1)
+random-position access enables jump optimization; lazy hash computation
+skips work in the common case.</li>
+</ol>
+<p>The result: a combined throughput of over <strong>10 million events +
+requests per second</strong> with <strong>p99 latency under 1
+microsecond</strong>.</p>
+<p>And this is just the indexer. Block transfer orchestration,
+distributed scheduling, and cross-worker cache coordination are next.
+Stay tuned.</p>
+</body>
+</html>

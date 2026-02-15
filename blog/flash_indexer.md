@@ -59,11 +59,10 @@ flowchart LR
     E1[Engine 1] -->|KV events| P1[Publisher 1]
     E2[Engine 2] -->|KV events| P2[Publisher 2]
     E3[Engine N] -->|KV events| PN[Publisher N]
-    P1 -->|"(worker_id, local_hash, seq_hash)"| IDX[Flash Indexer]
+    P1 -->|"(worker_id, local_hash, seq_hash)"| IDX[Indexer]
     P2 -->|"(worker_id, local_hash, seq_hash)"| IDX
     PN -->|"(worker_id, local_hash, seq_hash)"| IDX
     IDX -->|overlap scores| R[Router]
-    R -->|routed request| E1
 ```
 
 **Requests** are prefix match queries issued by the router frontend on every incoming inference request. The frontend tokenizes the prompt, chunks the tokens into blocks, computes the chunk hashes, and hands the indexer a sequence of local hashes: `[local_hash_0, local_hash_1, ..., local_hash_D]`. The indexer's job: walk the sequence and, for each worker, determine how deep the prefix overlap goes. The result is a set of `(worker_id, match_depth)` scores that the router uses to pick the best worker---the one with the deepest cached prefix, minimizing redundant computation.
@@ -253,12 +252,12 @@ This requires one new piece of information in KV events: the **parent hash**. Wi
 ```mermaid
 flowchart TD
     Root["root"]
-    Root -->|"local=0xA1"| B0["block 0 — W0, W1, W2"]
-    Root -->|"local=0xB2"| B0p["block 0' — W3"]
-    B0 -->|"local=0xC3"| B1["block 1 — W0, W1, W2"]
-    B1 -->|"local=0xD4"| B2["block 2 — W0, W1"]
-    B1 -->|"local=0xE5"| B2p["block 2' — W2"]
-    B2 -->|"local=0xF6"| B3["block 3 — W0"]
+    Root -->|"local=0xA1"| B0["block 0: W0, W1, W2"]
+    Root -->|"local=0xB2"| B0p["block 0': W3"]
+    B0 -->|"local=0xC3"| B1["block 1: W0, W1, W2"]
+    B1 -->|"local=0xD4"| B2["block 2: W0, W1"]
+    B1 -->|"local=0xE5"| B2p["block 2': W2"]
+    B2 -->|"local=0xF6"| B3["block 3: W0"]
 ```
 
 Each node stores an `ExternalHash` alongside the worker set. The per-worker **lookup table**---`HashMap<Worker, HashMap<SeqHash, SharedBlock>>`---provides collision-free O(1) access for event processing. When a `Stored` event arrives, we find the parent node via `lookup[worker][parent_seq_hash]` and attach the new child. When a `Removed` event arrives, we find the node by `lookup[worker][seq_hash]` and remove the worker from it.
@@ -324,19 +323,17 @@ Enter the `ThreadPoolIndexer`: a pool of OS threads, each running a blocking rec
 
 ```mermaid
 flowchart LR
-    subgraph reads ["Read Path — inline on caller thread"]
-        FM["find_matches()"] -->|read locks| TREE["Arc ConcurrentRadixTree"]
-    end
-
     subgraph writes ["Write Path — sticky-routed"]
         EV[KV Events] --> D{sticky router}
         D -->|W0, W3| T0["Thread 0"]
         D -->|W1, W4| T1["Thread 1"]
         D -->|W2, W5| T2["Thread 2"]
-        T0 -->|write locks| TREE
-        T1 -->|write locks| TREE
-        T2 -->|write locks| TREE
     end
+
+    T0 -->|write locks| TREE["Arc ConcurrentRadixTree"]
+    T1 -->|write locks| TREE
+    T2 -->|write locks| TREE
+    FM["find_matches()"] -->|read locks| TREE
 ```
 
 ```rust
