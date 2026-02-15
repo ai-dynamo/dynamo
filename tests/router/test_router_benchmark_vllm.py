@@ -7,8 +7,19 @@ These tests follow the flow in benchmarks/router/README.md: etcd/NATS, workers,
 router, and the same benchmark script (prefix_ratio_benchmark.py) with reduced
 parameters. etcd and NATS are started by the runtime_services_dynamic_ports
 fixture (no separate CI step).
+
+This module does not import tests.router.common so it can run in environments
+where dynamo.llm KvRouter bindings are not available (e.g. minimal CI wheels).
+
+Local run with a smaller model (single GPU, no 120B):
+  ROUTER_BENCHMARK_MODEL=facebook/opt-125m ROUTER_BENCHMARK_TP=1 \\
+  python -m pytest tests/router/test_router_benchmark_vllm.py -v --timeout=600 \\
+  -p no:mypy -o 'addopts=-v --timeout=600'
+
+Requires: nats-server, etcd, and vLLM (run_engines.sh) on PATH.
 """
 
+import asyncio
 import logging
 import os
 import signal
@@ -17,15 +28,131 @@ import sys
 import time
 from pathlib import Path
 
+import aiohttp
 import pytest
 
-from tests.router.common import KVRouterProcess, wait_for_frontend_ready
 from tests.utils.constants import DefaultPort
+from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
+
+
+class KVRouterProcess(ManagedProcess):
+    """Manages the KV router process using dynamo.frontend (benchmark-only, no KvRouter import)."""
+
+    def __init__(
+        self,
+        request,
+        block_size: int,
+        frontend_port: int,
+        namespace: str,
+        store_backend: str = "etcd",
+        request_plane: str = "nats",
+        **kwargs,
+    ):
+        command = [
+            "python3",
+            "-m",
+            "dynamo.frontend",
+            "--kv-cache-block-size",
+            str(block_size),
+            "--router-mode",
+            "kv",
+            "--http-port",
+            str(frontend_port),
+            "--store-kv",
+            store_backend,
+            "--namespace",
+            namespace,
+        ]
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request_plane
+        super().__init__(
+            command=command,
+            env=env,
+            timeout=60,
+            display_output=True,
+            health_check_ports=[frontend_port],
+            health_check_urls=[
+                (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
+            ],
+            log_dir=request.node.name,
+            terminate_all_matching_process_names=False,
+            **kwargs,
+        )
+        self.port = frontend_port
+
+    def _check_ready(self, response):
+        return response.status_code == 200
+
+
+async def wait_for_frontend_ready(
+    frontend_url: str, expected_num_workers: int = 2, timeout: int = 120
+):
+    """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API)."""
+    models_url = f"{frontend_url}/v1/models"
+    chat_url = f"{frontend_url}/v1/chat/completions"
+    start_time = asyncio.get_event_loop().time()
+    logger_local = logging.getLogger(__name__)
+    logger_local.info(
+        "Waiting for %s workers on HTTP frontend (timeout=%ss)...",
+        expected_num_workers,
+        timeout,
+    )
+    model_name = None
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if elapsed > timeout:
+            raise TimeoutError(
+                f"Timeout waiting for vLLM workers. Waited {elapsed:.1f}s, no workers registered."
+            )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(models_url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        models = data.get("data", [])
+                        if len(models) > 0:
+                            model_name = models[0].get("id")
+                            logger_local.info(
+                                "Workers registered. Found %s model(s): %s",
+                                len(models),
+                                [m.get("id") for m in models],
+                            )
+                            break
+        except Exception as e:
+            logger_local.debug("Error checking models endpoint: %s", e)
+        await asyncio.sleep(1)
+    logger_local.info("Waiting for chat completions pipeline...")
+    test_payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": "test"}],
+        "max_tokens": 1,
+        "stream": False,
+    }
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if elapsed > timeout:
+            raise TimeoutError(
+                "Timeout waiting for chat completions pipeline. Waited {:.1f}s.".format(
+                    elapsed
+                )
+            )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(chat_url, json=test_payload) as response:
+                    if response.status == 200:
+                        logger_local.info("Chat completions pipeline ready!")
+                        return
+        except Exception as e:
+            logger_local.debug("Error testing chat completions: %s", e)
+        await asyncio.sleep(1)
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "openai/gpt-oss-120b"
+# Production default; override with ROUTER_BENCHMARK_MODEL (and optionally ROUTER_BENCHMARK_TP) for local/small-model runs.
+MODEL_NAME = os.environ.get("ROUTER_BENCHMARK_MODEL", "openai/gpt-oss-120b")
+# Tensor parallel size: use env for local small-model runs (e.g. 1), else default 2 for production.
+TENSOR_PARALLEL_SIZE = int(os.environ.get("ROUTER_BENCHMARK_TP", "2"))
 BLOCK_SIZE = 64
 # Default namespace used by dynamo.vllm when DYN_NAMESPACE is not set (see runtime_args.py).
 DEFAULT_NAMESPACE = "dynamo"
@@ -84,16 +211,17 @@ def test_gpt_oss_tp2(
     env = os.environ.copy()
     env.setdefault("DYNAMO_HOME", str(repo_root))
 
+    num_workers = 2 if TENSOR_PARALLEL_SIZE >= 2 else 1
     proc = subprocess.Popen(
         [
             "bash",
             str(run_engines),
             "--num-workers",
-            "2",
+            str(num_workers),
             "--model-path",
             MODEL_NAME,
             "--tensor-parallel-size",
-            "2",
+            str(TENSOR_PARALLEL_SIZE),
         ],
         cwd=str(repo_root),
         env=env,
@@ -103,10 +231,10 @@ def test_gpt_oss_tp2(
     )
     request.addfinalizer(lambda: _kill_process_group(proc))
 
-    # Allow time for workers to load the large model (GPT-OSS-120B).
-    model_load_wait = 600
+    # Allow time for workers to load the model (longer for large models).
+    model_load_wait = 600 if "gpt-oss-120b" in MODEL_NAME else 180
     logger.info(f"Waiting up to {model_load_wait}s for workers to load {MODEL_NAME}...")
-    time.sleep(min(120, model_load_wait))  # Minimum wait before starting router
+    time.sleep(min(30, model_load_wait))  # Brief wait before starting router
 
     with KVRouterProcess(
         request,
@@ -124,8 +252,8 @@ def test_gpt_oss_tp2(
         asyncio.run(
             wait_for_frontend_ready(
                 frontend_url=frontend_url,
-                expected_num_workers=2,
-                timeout=model_load_wait - 120,
+                expected_num_workers=num_workers,
+                timeout=model_load_wait - 30,
             )
         )
 
