@@ -34,6 +34,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: false  # Runner may not have git-lfs; benchmark does not need LFS
+      - name: Make workspace writable
+        run: chmod -R u+w .
       - name: Set image tag by runner architecture
         id: image-tag
         run: |
