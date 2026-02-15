@@ -84,3 +84,11 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           # Run tests from checkout; restrict path to avoid collection errors from components/ (different env)
           mount_workspace: true
+
+      - name: Upload router benchmark results
+        if: always() && hashFiles('test-results/router_benchmark_results.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: router-benchmark-results-${{ steps.image-tag.outputs.platform_arch }}-${{ github.run_id }}
+          path: test-results/router_benchmark_results.json
+          retention-days: 7

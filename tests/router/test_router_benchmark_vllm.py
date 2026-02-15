@@ -22,6 +22,7 @@ Requires: nats-server, etcd, and vLLM (run_engines.sh) on PATH.
 import asyncio
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -305,6 +306,14 @@ def test_gpt_oss_tp2(
             pytest.skip(
                 f"prefix_ratio_benchmark.py deps not available (e.g. aiperf): {e}"
             )
+        # Copy benchmark results to test-results/ so CI can store them as artifacts
+        results_json = benchmark_out / "results_summary.json"
+        if results_json.exists():
+            test_results_dir = repo_root / "test-results"
+            test_results_dir.mkdir(parents=True, exist_ok=True)
+            dest = test_results_dir / "router_benchmark_results.json"
+            shutil.copy2(results_json, dest)
+            logger.info("Benchmark results copied to %s for CI artifact", dest)
         logger.info("Router benchmark (test_gpt_oss_tp2) completed successfully")
 
 
