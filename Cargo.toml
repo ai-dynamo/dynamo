@@ -25,6 +25,7 @@ members = [
     "lib/kvbm-physical",
     "lib/kvbm-config",
     "lib/kvbm-kernels",
+    "lib/velo-event",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -86,6 +87,9 @@ dynamo-nova = { path = "lib/nova", version = "0.9.0" }
 dynamo-nova-backend = { path = "lib/nova-backend", version = "0.9.0" }
 dynamo-nova-common = { path = "lib/nova-common", version = "0.9.0" }
 dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.9.0" }
+
+# velo
+velo-events = { path = "lib/velo-events", version = "0.9.0" }
 
 # nixl
 nixl-sys = { version = "0.9.0" }
