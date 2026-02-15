@@ -40,10 +40,9 @@ name = "kvbench"
 required-features = ["kvbench"]
 
 [dependencies]
-# Note: Not using workspace = true so this crate can be built from standalone
-# workspaces (like lib/bindings/kvbm) that don't inherit main workspace deps
 cudarc = { workspace = true }
-once_cell = "1.19"
+
+# kvbench
 clap = { version = "4", features = ["derive"], optional = true }
 
 [dev-dependencies]

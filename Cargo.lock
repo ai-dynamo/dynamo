@@ -4175,7 +4175,6 @@ dependencies = [
  "cudarc",
  "half 2.7.1",
  "ndarray 0.17.2",
- "once_cell",
  "rand 0.9.2",
 ]
 
