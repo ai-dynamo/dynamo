@@ -245,15 +245,12 @@ where
 
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let instance_id = self
-            .client
-            .least_loaded_instance()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                )
-            })?;
+        let instance_id = self.client.least_loaded_instance().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no instances found for endpoint {}",
+                self.client.endpoint.id()
+            )
+        })?;
         tracing::trace!(
             "least loaded router selected {instance_id} (connections: {})",
             self.client.connection_count(instance_id)
@@ -261,7 +258,10 @@ where
 
         self.client.increment_connections(instance_id);
 
-        match self.generate_with_fault_detection(instance_id, request).await {
+        match self
+            .generate_with_fault_detection(instance_id, request)
+            .await
+        {
             Ok(stream) => {
                 let engine_ctx = stream.context();
                 let counted = ConnectionCountedStream {
