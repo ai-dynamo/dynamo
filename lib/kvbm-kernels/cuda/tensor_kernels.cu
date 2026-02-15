@@ -689,7 +689,12 @@ kvbm_kernels_launch_operational_copy(
 #endif
   };
 
-  // Check if data is 8-byte aligned for vectorized kernel
+  // Check if data is 8-byte aligned for vectorized kernel.
+  // NOTE: This only checks size divisibility. The vectorized kernel also requires that
+  // all pointers in block_ptrs_device and operational_ptrs_device are 8-byte aligned
+  // (for the int64_t reinterpret_cast). CUDA allocators guarantee >=256-byte alignment,
+  // but callers using sub-buffer offsets must validate pointer alignment on the host
+  // side before device upload (see check_pointer_alignment in tensor_kernels.rs).
   size_t total_bytes = inner * elem_size;
   bool is_8byte_aligned = (total_bytes % 8 == 0) && block_ptrs_device;
 

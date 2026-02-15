@@ -264,10 +264,7 @@ fn discover_cuda_files() -> Vec<PathBuf> {
 /// Parse CUDA toolkit version from `nvcc --version` output.
 /// Returns (major, minor) tuple, e.g. (12, 8) for CUDA 12.8.
 fn parse_cuda_version() -> Option<(u32, u32)> {
-    let output = Command::new("nvcc")
-        .arg("--version")
-        .output()
-        .ok()?;
+    let output = Command::new("nvcc").arg("--version").output().ok()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // nvcc output contains a line like: "Cuda compilation tools, release 12.8, V12.8.89"
@@ -287,8 +284,8 @@ fn parse_cuda_version() -> Option<(u32, u32)> {
 /// Return the maximum supported compute capability for a given CUDA toolkit version.
 fn max_supported_compute(cuda_version: (u32, u32)) -> u32 {
     match cuda_version {
+        (12, minor) if minor >= 8 => 120,
         (major, _) if major >= 13 => 120,
-        (12, minor) if minor >= 8 => 100,
         _ => 90,
     }
 }
@@ -297,18 +294,21 @@ fn get_cuda_arch_flags() -> Vec<String> {
     let mut flags = Vec::new();
 
     let cuda_version = parse_cuda_version();
-    let max_compute = cuda_version.map(|v| max_supported_compute(v));
+    let max_compute = cuda_version.map(max_supported_compute);
 
     if let Some((major, minor)) = cuda_version {
-        println!("cargo:warning=Detected CUDA {}.{}, max supported compute: sm_{}", major, minor, max_compute.unwrap());
+        println!(
+            "cargo:warning=Detected CUDA {}.{}, max supported compute: sm_{}",
+            major,
+            minor,
+            max_compute.unwrap()
+        );
     } else {
         println!("cargo:warning=Could not detect CUDA version, including all architectures");
     }
 
     let explicit_archs = env::var("CUDA_ARCHS").ok();
-    let arch_list = explicit_archs
-        .as_deref()
-        .unwrap_or("80,86,89,90,100,120");
+    let arch_list = explicit_archs.as_deref().unwrap_or("80,86,89,90,100,120");
 
     for arch in arch_list.split(',') {
         let arch = arch.trim();
@@ -322,14 +322,14 @@ fn get_cuda_arch_flags() -> Vec<String> {
                 continue;
             }
         };
-        if let Some(max) = max_compute {
-            if arch_num > max {
-                println!(
-                    "cargo:warning=Skipping sm_{} (unsupported by detected CUDA toolkit, max: sm_{})",
-                    arch_num, max
-                );
-                continue;
-            }
+        if let Some(max) = max_compute
+            && arch_num > max
+        {
+            println!(
+                "cargo:warning=Skipping sm_{} (unsupported by detected CUDA toolkit, max: sm_{})",
+                arch_num, max
+            );
+            continue;
         }
         flags.push(format!("-gencode=arch=compute_{},code=sm_{}", arch, arch));
     }
@@ -347,10 +347,10 @@ fn get_cuda_arch_flags() -> Vec<String> {
     };
 
     for &ptx_arch in &ptx_candidates {
-        if let Some(max) = max_compute {
-            if ptx_arch > max {
-                continue;
-            }
+        if let Some(max) = max_compute
+            && ptx_arch > max
+        {
+            continue;
         }
         flags.push(format!(
             "-gencode=arch=compute_{},code=compute_{}",

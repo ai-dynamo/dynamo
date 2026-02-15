@@ -17,10 +17,7 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr, DriverError};
 use cudarc::runtime::sys as cuda_runtime;
-use kvbm_kernels::{
-    MemcpyBatchMode, is_memcpy_batch_available, is_using_stubs, memcpy_batch,
-
-};
+use kvbm_kernels::{MemcpyBatchMode, is_memcpy_batch_available, is_using_stubs, memcpy_batch};
 
 // Direct FFI for cudaMallocHost / cudaFreeHost.
 // We bypass cudarc's runtime::sys because cudarc eagerly resolves ALL runtime
@@ -437,4 +434,3 @@ fn memcpy_batch_many_pairs() -> Result<(), DriverError> {
 // ---------------------------------------------------------------------------
 // Diagnostic: mirrors NVIDIA benchmark calling pattern exactly
 // ---------------------------------------------------------------------------
-

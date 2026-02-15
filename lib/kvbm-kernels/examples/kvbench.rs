@@ -50,7 +50,11 @@ const OUTER_DIM: usize = 2; // K and V
 #[command(name = "kvbench", about = "KV cache transfer bandwidth benchmark")]
 struct Cli {
     /// Comma-separated number of blocks to benchmark.
-    #[arg(long, default_value = "1,2,4,8,16,32,64,128,256", value_delimiter = ',')]
+    #[arg(
+        long,
+        default_value = "1,2,4,8,16,32,64,128,256",
+        value_delimiter = ','
+    )]
     num_blocks: Vec<usize>,
 
     /// Comma-separated tokens per block values.
@@ -58,7 +62,11 @@ struct Cli {
     tokens_per_block: Vec<usize>,
 
     /// Comma-separated backends: vectorized, batched, memcpy_async.
-    #[arg(long, default_value = "vectorized,batched,memcpy_async", value_delimiter = ',')]
+    #[arg(
+        long,
+        default_value = "vectorized,batched,memcpy_async",
+        value_delimiter = ','
+    )]
     backend: Vec<String>,
 
     /// Comma-separated directions: h2d, d2h, d2d.
@@ -88,10 +96,8 @@ unsafe extern "C" {
     fn cudaFree(ptr: *mut c_void) -> u32;
     fn cudaEventCreate(event: *mut cuda_runtime::cudaEvent_t) -> u32;
     fn cudaEventDestroy(event: cuda_runtime::cudaEvent_t) -> u32;
-    fn cudaEventRecord(
-        event: cuda_runtime::cudaEvent_t,
-        stream: cuda_runtime::cudaStream_t,
-    ) -> u32;
+    fn cudaEventRecord(event: cuda_runtime::cudaEvent_t, stream: cuda_runtime::cudaStream_t)
+    -> u32;
     fn cudaEventSynchronize(event: cuda_runtime::cudaEvent_t) -> u32;
     fn cudaEventElapsedTime(
         ms: *mut f32,
@@ -574,8 +580,13 @@ fn run_benchmark(
 fn parse_directions(raw: &[String]) -> Vec<Direction> {
     raw.iter()
         .map(|s| {
-            Direction::from_str(s)
-                .unwrap_or_else(|| panic!("unknown direction '{}', expected: {}", s, Direction::all_labels()))
+            Direction::from_str(s).unwrap_or_else(|| {
+                panic!(
+                    "unknown direction '{}', expected: {}",
+                    s,
+                    Direction::all_labels()
+                )
+            })
         })
         .collect()
 }
@@ -583,8 +594,13 @@ fn parse_directions(raw: &[String]) -> Vec<Direction> {
 fn parse_patterns(raw: &[String]) -> Vec<Pattern> {
     raw.iter()
         .map(|s| {
-            Pattern::from_str(s)
-                .unwrap_or_else(|| panic!("unknown pattern '{}', expected: {}", s, Pattern::all_labels()))
+            Pattern::from_str(s).unwrap_or_else(|| {
+                panic!(
+                    "unknown pattern '{}', expected: {}",
+                    s,
+                    Pattern::all_labels()
+                )
+            })
         })
         .collect()
 }
@@ -592,8 +608,13 @@ fn parse_patterns(raw: &[String]) -> Vec<Pattern> {
 fn parse_backends(raw: &[String]) -> Vec<Backend> {
     raw.iter()
         .map(|s| {
-            Backend::from_str(s)
-                .unwrap_or_else(|| panic!("unknown backend '{}', expected: {}", s, Backend::all_labels()))
+            Backend::from_str(s).unwrap_or_else(|| {
+                panic!(
+                    "unknown backend '{}', expected: {}",
+                    s,
+                    Backend::all_labels()
+                )
+            })
         })
         .collect()
 }
@@ -637,25 +658,31 @@ fn main() {
         "  Batch API available: {}",
         kvbm_kernels::is_memcpy_batch_available()
     );
-    eprintln!(
-        "  tokens_per_block: {:?}",
-        tpb_options
-    );
-    eprintln!(
-        "  num_blocks: {:?}",
-        num_blocks_options
-    );
+    eprintln!("  tokens_per_block: {:?}", tpb_options);
+    eprintln!("  num_blocks: {:?}", num_blocks_options);
     eprintln!(
         "  directions: [{}]",
-        directions.iter().map(|d| d.label()).collect::<Vec<_>>().join(", ")
+        directions
+            .iter()
+            .map(|d| d.label())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     eprintln!(
         "  patterns: [{}]",
-        patterns.iter().map(|p| p.label()).collect::<Vec<_>>().join(", ")
+        patterns
+            .iter()
+            .map(|p| p.label())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     eprintln!(
         "  backends: [{}]",
-        backends.iter().map(|b| b.label()).collect::<Vec<_>>().join(", ")
+        backends
+            .iter()
+            .map(|b| b.label())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     eprintln!("  Total tests: {total_tests}");
     eprintln!();

@@ -323,6 +323,26 @@ pub unsafe fn vectorized_copy(
     }
 }
 
+/// Check that every pointer in `ptrs` is aligned to `alignment` bytes.
+///
+/// The vectorized operational copy kernel requires 8-byte aligned pointers.
+/// CUDA allocators (`cudaMalloc`, `cudaMallocHost`) guarantee this, but callers
+/// passing sub-buffer offsets should validate alignment before calling
+/// [`operational_copy`] with `VectorizedKernel` or `Auto` backend.
+///
+/// Intended for use as a debug assertion:
+/// ```ignore
+/// debug_assert!(check_pointer_alignment(ptrs, 8), "pointers must be 8-byte aligned");
+/// ```
+pub fn check_pointer_alignment(ptrs: &[*const c_void], alignment: usize) -> bool {
+    debug_assert!(
+        alignment.is_power_of_two(),
+        "alignment must be a power of 2"
+    );
+    let mask = alignment - 1;
+    ptrs.iter().all(|&ptr| (ptr as usize) & mask == 0)
+}
+
 /// Copy between block stacks and operational buffers for `num_blocks`.
 ///
 /// In `Auto` mode, the priority order is:
