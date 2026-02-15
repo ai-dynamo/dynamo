@@ -202,6 +202,8 @@ The main KV-aware routing arguments:
 
 To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 
+For details on per-request agent hints (`latency_sensitivity`, `osl`, `speculative_prefill`), see the [Agent Hints Guide](agent-hints.md).
+
 ## Basic Routing
 
 Dynamo supports several routing strategies when sending requests from one component to another component's endpoint.

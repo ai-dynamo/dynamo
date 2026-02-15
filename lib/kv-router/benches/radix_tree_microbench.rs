@@ -14,9 +14,10 @@
 //! Run with: cargo bench --package dynamo-kv-router --bench radix_tree_microbench --features bench -- --help
 
 use clap::{Parser, ValueEnum};
+use dynamo_bench::common::LatencyStats;
 use dynamo_kv_router::{
     ConcurrentRadixTree, OverlapScores, PositionalIndexer, RadixTree, RouterEvent, SyncIndexer,
-    bench_utils::{LatencyStats, SequenceData, generate_sequences},
+    bench_utils::{SequenceData, generate_sequences},
     compute_block_hash_for_seq,
     protocols::LocalBlockHash,
 };
@@ -313,7 +314,7 @@ fn bench_hash(args: &Args) {
         }
     }
 
-    let stats = LatencyStats::from_durations(durations).unwrap();
+    let stats = LatencyStats::from_durations(&durations).unwrap();
     stats.print("COMPUTE_BLOCK_HASH", args.depth);
 }
 
@@ -374,7 +375,7 @@ fn bench_store_remove_cycle(args: &Args, time_store: bool) {
         }
     }
 
-    let stats = LatencyStats::from_durations(durations).unwrap();
+    let stats = LatencyStats::from_durations(&durations).unwrap();
     stats.print(op_name, args.depth);
 }
 
@@ -426,7 +427,7 @@ fn bench_find_matches(args: &Args) {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
-    LatencyStats::from_durations(hit_durations)
+    LatencyStats::from_durations(&hit_durations)
         .unwrap()
         .print("FIND_MATCHES (HIT)", args.depth);
 
@@ -442,7 +443,7 @@ fn bench_find_matches(args: &Args) {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
-    LatencyStats::from_durations(miss_durations)
+    LatencyStats::from_durations(&miss_durations)
         .unwrap()
         .print("FIND_MATCHES (MISS)", args.depth);
 
@@ -459,7 +460,7 @@ fn bench_find_matches(args: &Args) {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
-    LatencyStats::from_durations(partial_durations)
+    LatencyStats::from_durations(&partial_durations)
         .unwrap()
         .print("FIND_MATCHES (PARTIAL)", args.depth);
 
@@ -473,7 +474,7 @@ fn bench_find_matches(args: &Args) {
             early_exit_durations.push(elapsed);
         }
     }
-    LatencyStats::from_durations(early_exit_durations)
+    LatencyStats::from_durations(&early_exit_durations)
         .unwrap()
         .print("FIND_MATCHES (EARLY_EXIT)", args.depth);
 }
