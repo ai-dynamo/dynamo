@@ -675,4 +675,47 @@ mod tests {
         assert!(err.to_string().contains("belongs to system"));
         Ok(())
     }
+
+    #[tokio::test]
+    async fn cross_type_local_on_distributed_rejected() -> Result<()> {
+        let local = create_system();
+        let factory = DistributedEventFactory::new(0x10.try_into().unwrap());
+        let distributed = factory.event_manager();
+
+        let event = local.new_event()?;
+        let handle = event.handle();
+
+        let err = distributed.trigger(handle).unwrap_err();
+        assert!(err.to_string().contains("belongs to system"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cross_type_distributed_on_local_rejected() -> Result<()> {
+        let local = create_system();
+        let factory = DistributedEventFactory::new(0x20.try_into().unwrap());
+        let distributed = factory.event_manager();
+
+        let event = distributed.new_event()?;
+        let handle = event.handle();
+
+        let err = local.trigger(handle).unwrap_err();
+        assert!(err.to_string().contains("belongs to system"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cross_distributed_systems_rejected() -> Result<()> {
+        let factory_a = DistributedEventFactory::new(0x30.try_into().unwrap());
+        let factory_b = DistributedEventFactory::new(0x40.try_into().unwrap());
+        let mgr_a = factory_a.event_manager();
+        let mgr_b = factory_b.event_manager();
+
+        let event = mgr_a.new_event()?;
+        let handle = event.handle();
+
+        let err = mgr_b.trigger(handle).unwrap_err();
+        assert!(err.to_string().contains("belongs to system"));
+        Ok(())
+    }
 }
