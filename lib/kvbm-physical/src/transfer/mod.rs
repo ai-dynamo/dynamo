@@ -37,32 +37,29 @@
 //! future.await?;
 //! ```
 
-pub mod capabilities;
-pub mod checksum;
+pub(crate) mod capabilities;
+pub(crate) mod checksum;
 pub mod context;
-pub mod executor;
-pub mod fill;
-pub mod notifications;
-pub mod options;
-pub mod preferences;
-pub mod strategy;
-pub mod validation;
+pub(crate) mod executor;
+pub(crate) mod fill;
+pub(crate) mod notifications;
+pub(crate) mod options;
+pub(crate) mod preferences;
+pub(crate) mod strategy;
+pub(crate) mod validation;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export StorageKind
-pub use dynamo_memory::{StorageKind, pool as cuda_pool};
+pub use dynamo_memory::StorageKind;
 
 pub use capabilities::TransferCapabilities;
 pub use checksum::{BlockChecksum, compute_block_checksums, compute_layer_checksums};
 pub use context::{TransferCompleteNotification, TransferConfig};
-pub use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig};
+pub use dynamo_memory::nixl::NixlAgent;
 pub use fill::{FillPattern, fill_blocks, fill_layers};
 pub use options::{TransferOptions, TransferOptionsBuilder};
-pub use preferences::{NativeVsNixlPolicy, TransferPreferences};
-pub use strategy::{TransferPlan, TransferStrategy};
-pub use validation::BlockValidationError;
 
 // TransferContext - managed by TransferManager
 #[doc(hidden)]
@@ -89,7 +86,7 @@ pub use crate::manager::{LayoutHandle, SerializedLayout, TransferManager, Worker
 // }
 
 #[derive(Clone)]
-pub enum BounceBufferLayout {
+pub(crate) enum BounceBufferLayout {
     Layout(PhysicalLayout),
     Handle(LayoutHandle),
 }
@@ -134,7 +131,7 @@ use std::ops::Range;
 ///
 /// Returns an error if layouts require transformation, which is not yet supported.
 /// This should be called early in transfer execution to fail fast.
-pub fn validate_layout_compatibility(
+pub(crate) fn validate_layout_compatibility(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
 ) -> anyhow::Result<()> {
@@ -163,7 +160,7 @@ pub fn validate_layout_compatibility(
 ///
 /// Note: Caller must have already validated layout compatibility via
 /// [`validate_layout_compatibility`].
-pub fn can_use_whole_block_transfer(
+pub(crate) fn can_use_whole_block_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     layer_range: Option<&Range<usize>>,

@@ -127,12 +127,12 @@ impl PhysicalLayout {
     }
 
     /// Get the storage location.
-    pub fn location(&self) -> StorageKind {
+    pub(crate) fn location(&self) -> StorageKind {
         self.location
     }
 
     /// Get the NIXL metadata.
-    pub fn nixl_metadata(&self) -> &NixlMetadata {
+    pub(crate) fn nixl_metadata(&self) -> &NixlMetadata {
         &self.nixl_metadata
     }
 
@@ -160,7 +160,7 @@ impl PhysicalLayout {
     ///
     /// # Returns
     /// A serializable representation of this layout
-    pub fn to_descriptor(&self) -> Result<LayoutDescriptor> {
+    pub(crate) fn to_descriptor(&self) -> Result<LayoutDescriptor> {
         // Extract memory descriptors
         let memory_descriptors = self
             .layout
@@ -200,7 +200,7 @@ impl PhysicalLayout {
     /// # Note
     /// The memory regions in the reconstructed layout are not valid for local access;
     /// they represent remote memory addresses and are used to build NIXL transfer descriptors.
-    pub fn from_descriptor(serialized: LayoutDescriptor) -> Result<Self> {
+    pub(crate) fn from_descriptor(serialized: LayoutDescriptor) -> Result<Self> {
         // Validate version
         if serialized.version > LayoutDescriptor::CURRENT_VERSION {
             return Err(anyhow!(

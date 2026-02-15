@@ -154,7 +154,7 @@ impl KvBlockLayout {
     /// Try to create a KvBlockLayout from an InnerShape.
     ///
     /// This provides compatibility with the existing InnerShape enum.
-    pub fn from_inner_shape(inner_shape: super::InnerShape) -> Self {
+    pub(crate) fn from_inner_shape(inner_shape: super::InnerShape) -> Self {
         match inner_shape {
             super::InnerShape::NHD => Self::OperationalNHD,
             super::InnerShape::HND => Self::OperationalHND,
@@ -165,7 +165,7 @@ impl KvBlockLayout {
     /// Convert to InnerShape if this is an operational layout.
     ///
     /// Returns `None` for universal or custom layouts.
-    pub fn to_inner_shape(&self) -> Option<super::InnerShape> {
+    pub(crate) fn to_inner_shape(&self) -> Option<super::InnerShape> {
         match self {
             Self::OperationalNHD => Some(super::InnerShape::NHD),
             Self::OperationalHND => Some(super::InnerShape::HND),

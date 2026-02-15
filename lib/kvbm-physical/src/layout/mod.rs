@@ -25,16 +25,16 @@ pub(super) mod tests;
 // #[cfg(test)]
 // mod integration_tests;
 
-pub use builder::{LayoutKind, PhysicalLayoutBuilder};
+pub use builder::PhysicalLayoutBuilder;
 pub use config::{BlockDimension, LayoutConfig};
-pub use fully_contiguous::FullyContiguousLayout;
-pub use kv_block_layout::{BlockDim, KvBlockLayout, KvBlocks};
-pub use layer_separate::LayerSeparateLayout;
-pub use physical::{NixlMetadata, PhysicalLayout};
+pub(crate) use fully_contiguous::FullyContiguousLayout;
+pub use kv_block_layout::{BlockDim, KvBlockLayout};
+pub(crate) use layer_separate::LayerSeparateLayout;
+pub use physical::PhysicalLayout;
 pub use serialize::{
-    BlockFormat, FullyContiguousDetails, LayerSeparateDetails, LayoutDescriptor, LayoutTypeDetails,
+    BlockFormat, FullyContiguousDetails, LayerSeparateDetails, LayoutTypeDetails,
 };
-pub use validation::{TensorFormat, validate_tensor_shapes, validate_tensor_strides};
+pub(crate) use serialize::LayoutDescriptor;
 
 // mod registration;
 // pub use registration::{RegisteredLayout, RegisteredStorageMetadata, RegistrationManager};
@@ -42,7 +42,8 @@ pub use validation::{TensorFormat, validate_tensor_shapes, validate_tensor_strid
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub use dynamo_memory::{Buffer, MemoryDescriptor, MemoryRegion, OffsetBuffer};
+pub use dynamo_memory::{Buffer, MemoryRegion};
+pub(crate) use dynamo_memory::MemoryDescriptor;
 
 /// Core layout trait for mapping block IDs to memory regions.
 ///
@@ -132,7 +133,7 @@ pub trait Layout: Send + Sync + std::fmt::Debug {
 
 /// Inner shape format for tensor layout
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InnerShape {
+pub(crate) enum InnerShape {
     /// Unknown shape - fallback when we can't determine the format
     Unknown,
     /// NHD format: [block_size, num_heads, head_dim]
@@ -154,7 +155,7 @@ pub enum InnerShape {
 /// - Access raw block memory for transformation kernels
 /// - Reinterpret block memory under different [`KvBlockLayout`] formats
 /// - Perform whole-block operations without layer decomposition
-pub trait ContiguousBlockLayout: Send + Sync + std::fmt::Debug {
+pub(crate) trait ContiguousBlockLayout: Send + Sync + std::fmt::Debug {
     /// Get the total number of blocks in this layout.
     fn num_blocks(&self) -> usize;
 

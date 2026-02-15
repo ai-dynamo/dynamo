@@ -9,7 +9,8 @@ mod nixl;
 
 use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
-use super::{PhysicalLayout, TransferContext, TransferPlan, TransferStrategy};
+use super::strategy::{TransferPlan, TransferStrategy};
+use super::{PhysicalLayout, TransferContext};
 use crate::BlockId;
 use crate::transfer::BounceBufferInternal;
 use crate::layout::KvBlockLayout;

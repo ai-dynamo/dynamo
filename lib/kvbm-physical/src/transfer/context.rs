@@ -23,7 +23,7 @@ use crate::manager::TransferManager;
 use super::TransferCapabilities;
 use notifications::RegisterPollingNotification;
 
-pub use super::notifications;
+pub(crate) use super::notifications;
 pub use super::notifications::TransferCompleteNotification;
 
 #[derive(Clone, Builder)]
