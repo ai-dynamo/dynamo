@@ -16,6 +16,7 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/config",
+    "lib/velo-events",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -30,6 +31,7 @@ default-members = [
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
+    "lib/velo-events",
 ]
 resolver = "3"
 
@@ -55,6 +57,9 @@ dynamo-kv-router = { path = "lib/kv-router", version = "0.9.0", features = ["met
 dynamo-async-openai = { path = "lib/async-openai", version = "0.9.0", features = ["byot"] }
 dynamo-parsers = { path = "lib/parsers", version = "0.9.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "0.9.0" }
+
+# velo
+velo-events = { path = "lib/velo-events", version = "0.9.0" }
 
 # External dependencies
 anyhow = { version = "1" }
