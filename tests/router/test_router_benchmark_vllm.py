@@ -47,6 +47,7 @@ class KVRouterProcess(ManagedProcess):
         namespace: str,
         store_backend: str = "etcd",
         request_plane: str = "nats",
+        durable_kv_events: bool = False,
         **kwargs,
     ):
         command = [
@@ -64,6 +65,8 @@ class KVRouterProcess(ManagedProcess):
             "--namespace",
             namespace,
         ]
+        if durable_kv_events:
+            command.extend(["--durable-kv-events"])
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
         super().__init__(
@@ -179,11 +182,13 @@ pytestmark = [
 @pytest.mark.timeout(900)
 @pytest.mark.parametrize("store_kv", ["etcd"], indirect=True)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("durable_kv_events", [True], indirect=True)
 def test_gpt_oss_tp2(
     request,
     runtime_services_dynamic_ports,
     request_plane,
     store_kv,
+    durable_kv_events,
     tmp_path,
 ):
     """
@@ -191,8 +196,8 @@ def test_gpt_oss_tp2(
 
     Follows benchmarks/router/README.md: launch 2 vLLM workers (TP=2, 4 GPUs),
     start Dynamo router, run the same prefix_ratio_benchmark.py with reduced
-    parameters. etcd and NATS are started by runtime_services_dynamic_ports
-    (no separate step).
+    parameters. etcd and NATS (with JetStream) are started by
+    runtime_services_dynamic_ports (no separate step).
     """
     nats_process, etcd_process = runtime_services_dynamic_ports
     assert etcd_process is not None and nats_process is not None
@@ -211,6 +216,8 @@ def test_gpt_oss_tp2(
 
     env = os.environ.copy()
     env.setdefault("DYNAMO_HOME", str(repo_root))
+    if durable_kv_events:
+        env["DYN_DURABLE_KV_EVENTS"] = "true"
 
     num_workers = 2 if TENSOR_PARALLEL_SIZE >= 2 else 1
     proc = subprocess.Popen(
@@ -244,6 +251,7 @@ def test_gpt_oss_tp2(
         namespace=DEFAULT_NAMESPACE,
         store_backend=store_kv,
         request_plane=request_plane,
+        durable_kv_events=durable_kv_events,
     ):
         logger.info(f"Starting KV router on port {frontend_port}")
         frontend_url = f"http://localhost:{frontend_port}"
