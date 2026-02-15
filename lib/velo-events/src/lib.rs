@@ -134,16 +134,21 @@
 //! ## Distributed events
 //!
 //! For distributed deployments, [`DistributedEventFactory`] creates an event system
-//! whose handles embed a non-zero `worker_id` for global uniqueness. The local
-//! event machinery stays the same — coordination across workers is handled by an
+//! whose handles embed a non-zero `system_id` for global uniqueness. The local
+//! event machinery stays the same — coordination across systems is handled by an
 //! active-messaging layer built on top.
+//!
+//! [`LocalEventSystem`] enforces that handles belong to the system that created
+//! them. Passing a handle from one system to another will return an error.
+//! A distributed event system must implement [`EventManager`] with routing
+//! logic to forward operations on remote handles to the correct owning system.
 //!
 //! ```rust,no_run
 //! use velo_event::DistributedEventFactory;
 //!
-//! let factory = DistributedEventFactory::new(0x42);
+//! let factory = DistributedEventFactory::new(0x42.try_into().unwrap());
 //! let system = factory.event_manager();
-//! // handles produced by this system carry worker_id = 0x42
+//! // handles produced by this system carry system_id = 0x42
 //! ```
 
 // Public trait API
@@ -401,17 +406,17 @@ mod tests {
     // ── DistributedEventFactory (factory.rs) ─────────────────────────
 
     #[tokio::test]
-    async fn distributed_factory_stamps_worker_id() -> Result<()> {
+    async fn distributed_factory_stamps_system_id() -> Result<()> {
         use crate::factory::DistributedEventFactory;
 
         let factory = DistributedEventFactory::new(0x42.try_into().unwrap());
-        assert_eq!(factory.worker_id(), 0x42);
+        assert_eq!(factory.system_id(), 0x42);
 
         let mgr = factory.event_manager();
         let event = mgr.new_event()?;
         let handle = event.handle();
-        assert_eq!(handle.worker_id(), 0x42);
-        assert!(!handle.is_local_only());
+        assert_eq!(handle.system_id(), 0x42);
+        assert!(handle.is_distributed());
 
         // system() returns the same underlying system
         assert!(Arc::ptr_eq(factory.system(), &mgr));
@@ -435,12 +440,12 @@ mod tests {
     }
 
     #[test]
-    fn handle_worker_id_local() {
+    fn handle_system_id_local() {
         let system = create_system();
         let event = system.new_event().unwrap();
         let handle = event.handle();
-        assert_eq!(handle.worker_id(), 0);
-        assert!(handle.is_local_only());
+        assert_ne!(handle.system_id(), 0);
+        assert!(handle.is_local());
     }
 
     #[test]
@@ -452,7 +457,7 @@ mod tests {
         let new_handle = handle.with_generation(99);
         assert_eq!(new_handle.generation(), 99);
         assert_eq!(new_handle.local_index(), handle.local_index());
-        assert_eq!(new_handle.worker_id(), handle.worker_id());
+        assert_eq!(new_handle.system_id(), handle.system_id());
     }
 
     #[test]
@@ -462,8 +467,10 @@ mod tests {
         let handle = event.handle();
         let display = format!("{}", handle);
         assert!(display.contains("EventHandle"));
+        assert!(display.contains("system="));
         assert!(display.contains("index="));
         assert!(display.contains("generation="));
+        assert!(display.contains("local"));
     }
 
     // ── EventGuard poison / awaiter (guard.rs) ───────────────────────
@@ -575,6 +582,97 @@ mod tests {
         let reason = system.poison_reason(handle);
         assert!(reason.is_some());
         assert_eq!(&*reason.unwrap(), "oops");
+        Ok(())
+    }
+
+    // ── Local vs distributed flag ────────────────────────────────────
+
+    #[test]
+    fn is_local_vs_distributed() {
+        // Local system produces local handles
+        let local = create_system();
+        let event = local.new_event().unwrap();
+        let handle = event.handle();
+        assert!(handle.is_local());
+        assert!(!handle.is_distributed());
+        assert_ne!(handle.system_id(), 0);
+
+        // Distributed factory produces distributed handles
+        let factory = DistributedEventFactory::new(0x99.try_into().unwrap());
+        let mgr = factory.event_manager();
+        let event = mgr.new_event().unwrap();
+        let handle = event.handle();
+        assert!(handle.is_distributed());
+        assert!(!handle.is_local());
+        assert_eq!(handle.system_id(), 0x99);
+    }
+
+    // ── Cross-system validation tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn cross_system_awaiter_rejected() -> Result<()> {
+        let system_a = create_system();
+        let system_b = create_system();
+
+        let event = system_a.new_event()?;
+        let handle = event.handle();
+
+        match system_b.awaiter(handle) {
+            Ok(_) => panic!("expected error for cross-system awaiter"),
+            Err(err) => assert!(err.to_string().contains("belongs to system")),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cross_system_trigger_rejected() -> Result<()> {
+        let system_a = create_system();
+        let system_b = create_system();
+
+        let event = system_a.new_event()?;
+        let handle = event.handle();
+
+        let err = system_b.trigger(handle).unwrap_err();
+        assert!(err.to_string().contains("belongs to system"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cross_system_poison_rejected() -> Result<()> {
+        let system_a = create_system();
+        let system_b = create_system();
+
+        let event = system_a.new_event()?;
+        let handle = event.handle();
+
+        let err = system_b.poison(handle, "bad").unwrap_err();
+        assert!(err.to_string().contains("belongs to system"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cross_system_poll_rejected() -> Result<()> {
+        let system_a = create_system();
+        let system_b = create_system();
+
+        let event = system_a.new_event()?;
+        let handle = event.handle();
+
+        let err = system_b.poll(handle).unwrap_err();
+        assert!(err.to_string().contains("belongs to system"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cross_system_merge_rejected() -> Result<()> {
+        let system_a = create_system();
+        let system_b = create_system();
+
+        let event = system_a.new_event()?;
+        let handle = event.handle();
+
+        let err = system_b.merge_events(vec![handle]).unwrap_err();
+        assert!(err.to_string().contains("belongs to system"));
         Ok(())
     }
 }

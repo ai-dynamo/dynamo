@@ -35,7 +35,7 @@ cargo check -p velo-event
 
 ### Handle encoding (`handle.rs`)
 
-`EventHandle` packs identity into a single `u128`: `[worker_id: 64][local_index: 32][generation: 32]`. Local-only handles have `worker_id == 0`. Distributed handles embed a non-zero worker id for global uniqueness.
+`EventHandle` packs identity into a single `u128`: `[system_id: 64][local_index: 32][generation: 32]`. Bit 31 of `local_index` distinguishes local (bit set) from distributed (bit clear) handles. Both local and distributed systems have unique non-zero `system_id` values. `LocalEventSystem` validates that handles belong to the system that created them.
 
 ### Slot machinery (`slot/` — frozen, do not modify)
 
@@ -47,7 +47,7 @@ Internal synchronization primitives for the generational slot system:
 
 ### Factory (`factory.rs`)
 
-`DistributedEventFactory` creates a `LocalEventSystem` pre-configured with a `worker_id` for distributed (Nova-managed) deployments.
+`DistributedEventFactory` creates a `LocalEventSystem` pre-configured with a `system_id` for distributed (Nova-managed) deployments.
 
 ## Key Design Decisions
 

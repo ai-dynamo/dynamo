@@ -12,18 +12,25 @@ use tracing::{error, trace};
 
 use super::event::LocalEvent;
 use crate::event::Event;
-use crate::handle::EventHandle;
+use crate::handle::{EventHandle, LOCAL_FLAG};
 use crate::manager::EventManager;
 use crate::slot::{
     CompletionKind, EventAwaiter, EventEntry, EventKey, PoisonArc, WaitRegistration,
 };
 use crate::status::{EventPoison, EventStatus};
 
-const MAX_LOCAL_INDEX: u32 = u32::MAX;
+/// Maximum counter value for local indices (31-bit counter space, ~2B entries).
+const MAX_LOCAL_INDEX: u32 = (1u32 << 31) - 1;
 
-/// Local-only event system with reusable event entries.
+/// Local event system with reusable event entries.
+///
+/// Events created by a `LocalEventSystem` are bound to that system. Passing
+/// a handle from one local system to another will return an error. For
+/// cross-system event coordination, use a distributed event system that
+/// implements [`EventManager`] with routing logic for remote handles.
 pub struct LocalEventSystem {
-    worker_id: u64,
+    system_id: u64,
+    is_local: bool,
     events: DashMap<EventKey, Arc<EventEntry>>,
     free_lists: ParkingMutex<VecDeque<Arc<EventEntry>>>,
     next_local_index: AtomicU32,
@@ -32,15 +39,28 @@ pub struct LocalEventSystem {
 }
 
 impl LocalEventSystem {
-    /// Create a new local-only event system (worker_id = 0).
+    /// Create a new local event system with a random system_id.
+    ///
+    /// The system_id is derived from `xxh3_64(Uuid::new_v4())` to ensure
+    /// each local system is uniquely identifiable. Handles produced by this
+    /// system have bit 31 set in their `local_index` to mark them as local.
+    ///
+    /// Events created by this system can only be triggered, awaited, poisoned,
+    /// or polled through this same system instance.
     pub fn new() -> Arc<Self> {
-        Self::with_worker_id(0)
+        let system_id = xxhash_rust::xxh3::xxh3_64(uuid::Uuid::new_v4().as_bytes());
+        Self::create(system_id, true)
     }
 
-    /// Create a system pre-configured with a worker_id for distributed use.
-    pub(crate) fn with_worker_id(worker_id: u64) -> Arc<Self> {
+    /// Create a system pre-configured with a system_id for distributed use.
+    pub(crate) fn with_system_id(system_id: u64) -> Arc<Self> {
+        Self::create(system_id, false)
+    }
+
+    fn create(system_id: u64, is_local: bool) -> Arc<Self> {
         Arc::new(Self {
-            worker_id,
+            system_id,
+            is_local,
             events: DashMap::new(),
             free_lists: ParkingMutex::new(VecDeque::new()),
             next_local_index: AtomicU32::new(0),
@@ -49,12 +69,26 @@ impl LocalEventSystem {
         })
     }
 
-    pub fn worker_id(&self) -> u64 {
-        self.worker_id
+    pub fn system_id(&self) -> u64 {
+        self.system_id
     }
 
     pub fn task_tracker(&self) -> &TaskTracker {
         &self.tasks
+    }
+
+    // ── Ownership validation ─────────────────────────────────────────
+
+    fn validate_handle(&self, handle: EventHandle) -> Result<()> {
+        if handle.system_id() != self.system_id {
+            bail!(
+                "Handle {} belongs to system {:#x}, not this system {:#x}",
+                handle,
+                handle.system_id(),
+                self.system_id,
+            );
+        }
+        Ok(())
     }
 
     // ── Internal helpers ──────────────────────────────────────────────
@@ -68,7 +102,7 @@ impl LocalEventSystem {
             match entry.begin_generation() {
                 Ok(generation) => {
                     if self.is_shutdown() {
-                        let handle = entry.key().handle(self.worker_id, generation);
+                        let handle = entry.key().handle(self.system_id, generation);
                         let poison = Arc::new(EventPoison::new(
                             handle,
                             "Event system shutdown in progress",
@@ -76,7 +110,7 @@ impl LocalEventSystem {
                         let _ = self.poison_local_entry(entry, handle, poison);
                         bail!("Event system shutdown in progress");
                     }
-                    let handle = entry.key().handle(self.worker_id, generation);
+                    let handle = entry.key().handle(self.system_id, generation);
                     return Ok(LocalEvent::new(self.clone(), entry, handle));
                 }
                 Err(crate::slot::entry::EventEntryError::GenerationOverflow { key }) => {
@@ -96,14 +130,17 @@ impl LocalEventSystem {
     }
 
     pub(crate) fn awaiter_inner(&self, handle: EventHandle) -> Result<EventAwaiter> {
+        self.validate_handle(handle)?;
         self.wait_local(handle)
     }
 
     fn poll_inner(&self, handle: EventHandle) -> Result<EventStatus> {
+        self.validate_handle(handle)?;
         self.poll_local(handle)
     }
 
     fn trigger_inner(&self, handle: EventHandle) -> Result<()> {
+        self.validate_handle(handle)?;
         let entry = self
             .events
             .get(&EventKey::from_handle(handle))
@@ -114,6 +151,7 @@ impl LocalEventSystem {
     }
 
     fn poison_inner(&self, handle: EventHandle, reason: impl Into<Arc<str>>) -> Result<()> {
+        self.validate_handle(handle)?;
         let reason: Arc<str> = reason.into();
 
         let entry = self
@@ -137,6 +175,10 @@ impl LocalEventSystem {
     fn merge_events_inner(self: &Arc<Self>, inputs: Vec<EventHandle>) -> Result<EventHandle> {
         if inputs.is_empty() {
             bail!("Cannot merge empty event list");
+        }
+
+        for input in &inputs {
+            self.validate_handle(*input)?;
         }
 
         let merged = self.new_event_inner()?;
@@ -211,7 +253,7 @@ impl LocalEventSystem {
 
         let mut pending = Vec::new();
         for entry in self.events.iter() {
-            if let Some(handle) = entry.value().active_handle(self.worker_id) {
+            if let Some(handle) = entry.value().active_handle(self.system_id) {
                 pending.push((entry.value().clone(), handle));
             }
         }
@@ -298,7 +340,7 @@ impl LocalEventSystem {
             return Ok(entry);
         }
 
-        let local_index = self
+        let counter = self
             .next_local_index
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < MAX_LOCAL_INDEX).then_some(current + 1)
@@ -309,6 +351,13 @@ impl LocalEventSystem {
                     (MAX_LOCAL_INDEX as u64) + 1
                 )
             })?;
+
+        let local_index = if self.is_local {
+            counter | LOCAL_FLAG
+        } else {
+            counter
+        };
+
         let key = EventKey::new(local_index);
         let entry = Arc::new(EventEntry::new(key));
         self.events.insert(key, entry.clone());

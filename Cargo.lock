@@ -8965,6 +8965,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
+ "xxhash-rust",
 ]
 
 [[package]]

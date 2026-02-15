@@ -30,8 +30,8 @@ impl EventKey {
         }
     }
 
-    pub(crate) fn handle(&self, worker_id: u64, generation: Generation) -> EventHandle {
-        EventHandle::new(worker_id, self.index, generation)
+    pub(crate) fn handle(&self, system_id: u64, generation: Generation) -> EventHandle {
+        EventHandle::new(system_id, self.index, generation)
     }
 }
 
@@ -259,7 +259,7 @@ impl EventEntry {
         state.retired
     }
 
-    pub(crate) fn active_handle(&self, worker_id: u64) -> Option<EventHandle> {
+    pub(crate) fn active_handle(&self, system_id: u64) -> Option<EventHandle> {
         let generation = {
             let state = self.state.lock();
             if state.retired {
@@ -267,7 +267,7 @@ impl EventEntry {
             }
             state.active_generation
         }?;
-        Some(self.key.handle(worker_id, generation))
+        Some(self.key.handle(system_id, generation))
     }
 
     #[allow(dead_code)]

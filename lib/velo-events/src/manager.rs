@@ -16,6 +16,17 @@ use crate::status::EventStatus;
 ///
 /// Implementations are expected to be `Send + Sync` so they can be shared
 /// across async tasks.
+///
+/// # Local vs distributed
+///
+/// The local implementation ([`LocalEventSystem`](crate::LocalEventSystem))
+/// enforces that every handle passed to it was created by that same system
+/// instance. Handles from a different system will be rejected with an error.
+///
+/// A distributed event system must implement this trait with additional
+/// routing logic to forward operations on remote handles to the correct
+/// owning system. The local event machinery handles the per-system
+/// coordination; the distributed layer handles cross-system messaging.
 pub trait EventManager: Send + Sync {
     /// The concrete event type produced by this manager.
     type Event: Event;
