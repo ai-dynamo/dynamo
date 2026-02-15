@@ -109,6 +109,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        return_routed_experts = self.config.server_args.enable_return_routed_experts
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -138,6 +139,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                return_routed_experts=return_routed_experts,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -179,6 +181,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 image_data=image_data,
                 sampling_params=sampling_params,
                 stream=True,
+                return_routed_experts=return_routed_experts,
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
@@ -240,6 +243,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
+                routed_experts = res["meta_info"].get("routed_experts")
+                if routed_experts is not None:
+                    # Convert tensor to list for JSON serialization over RPC.
+                    if hasattr(routed_experts, "tolist"):
+                        routed_experts = routed_experts.tolist()
+                    # Internal transport field consumed by frontend nvext mapping.
+                    out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
                     completion_tokens = res["meta_info"]["completion_tokens"]
@@ -314,6 +324,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "model": self.config.server_args.served_model_name,
                     "object": "chat.completion.chunk",
                 }
+                routed_experts = res["meta_info"].get("routed_experts")
+                if routed_experts is not None:
+                    # Convert tensor to list for JSON serialization over RPC.
+                    if hasattr(routed_experts, "tolist"):
+                        routed_experts = routed_experts.tolist()
+                    response["nvext"] = {"routed_experts": routed_experts}
                 if not context.is_stopped():
                     yield response
                 count = next_count
