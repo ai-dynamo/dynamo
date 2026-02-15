@@ -65,10 +65,10 @@ class KVRouterProcess(ManagedProcess):
             "--namespace",
             namespace,
         ]
-        if durable_kv_events:
-            command.extend(["--durable-kv-events"])
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
+        if durable_kv_events:
+            env["DYN_DURABLE_KV_EVENTS"] = "true"
         super().__init__(
             command=command,
             env=env,
