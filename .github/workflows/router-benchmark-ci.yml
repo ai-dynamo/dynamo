@@ -68,3 +68,5 @@ jobs:
           test_type: e2e-router-benchmark
           platform_arch: ${{ steps.image-tag.outputs.platform_arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          # Run tests from checkout so this workflow works on branches (image may not include this test file)
+          mount_workspace: true

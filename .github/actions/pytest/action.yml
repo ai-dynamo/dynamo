@@ -46,6 +46,10 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
+  mount_workspace:
+    description: 'Mount repo checkout at /workspace so tests run from current branch (default: use code baked in image)'
+    required: false
+    default: 'false'
 
 runs:
   using: "composite"
@@ -147,12 +151,20 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
+        # When mount_workspace is true, run tests from checkout so branch has the test file(s)
+        if [[ "${{ inputs.mount_workspace }}" == "true" ]]; then
+          echo "📂 Mounting workspace at /workspace (run tests from checkout)"
+          VOLUME_MOUNT="-v $(pwd):/workspace"
+        else
+          VOLUME_MOUNT="-v ${TEST_RESULTS_DIR}:/workspace/test-results"
+        fi
+
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
-          -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+          ${VOLUME_MOUNT} \
           ${{ inputs.image_tag }} \
           bash -c "${PYTEST_CMD}"
 
@@ -238,11 +250,18 @@ runs:
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
         echo "▶️ Executing: $PYTEST_CMD"
 
+        if [[ "${{ inputs.mount_workspace }}" == "true" ]]; then
+          echo "📂 Mounting workspace at /workspace (run tests from checkout)"
+          VOLUME_MOUNT="-v $(pwd):/workspace"
+        else
+          VOLUME_MOUNT="-v ${TEST_RESULTS_DIR}:/workspace/test-results"
+        fi
+
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
-          -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+          ${VOLUME_MOUNT} \
           ${{ inputs.image_tag }} \
           bash -c "${PYTEST_CMD}"
 
