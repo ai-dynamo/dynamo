@@ -38,6 +38,17 @@ from typing import Any
 
 COMMENT_MARKER = "<!-- ci-error-classifier -->"
 
+# Jobs where logs already explain exactly what to fix — skip LLM classification
+SKIP_CLASSIFICATION = {
+    "pre-commit",
+    "copyright",
+    "dco",
+    "lychee",
+    "label",
+    "lint",
+    "codespell",
+}
+
 
 # ---------------------------------------------------------------------------
 # GitHub helpers (all via gh CLI)
@@ -55,7 +66,11 @@ def gh_api(path: str) -> Any:
     if r.returncode != 0:
         print(f"gh api {path}: {r.stderr[:200]}", file=sys.stderr)
         return None
-    return json.loads(r.stdout) if r.stdout.strip() else None
+    try:
+        return json.loads(r.stdout) if r.stdout.strip() else None
+    except json.JSONDecodeError:
+        print(f"gh api {path}: invalid JSON response", file=sys.stderr)
+        return None
 
 
 def get_failed_jobs(repo: str, sha: str) -> list[dict]:
@@ -117,6 +132,11 @@ def classify_all(repo: str, sha: str) -> list[dict]:
 
     results = []
     for job in jobs:
+        job_lower = job["job_name"].lower()
+        if any(skip in job_lower for skip in SKIP_CLASSIFICATION):
+            # Self-explanatory checks — logs already tell you what to fix
+            results.append({**job, "classification": None})
+            continue
         log = get_job_log(repo, job["job_id"])
         if not log:
             # Skip classification when log is empty (network error, etc.)
@@ -142,6 +162,8 @@ def _build_comment(results: list[dict]) -> str:
         url = r.get("url", "")
         cat = c.get("category", "unknown").replace("_", " ").title()
         conf = c.get("confidence", 0)
+        if isinstance(conf, (int, float)) and conf > 1:
+            conf = conf / 100.0  # Normalize 0-100 to 0-1
         pct = f"{conf:.0%}" if isinstance(conf, (int, float)) else str(conf)
 
         lines.append(f"<details><summary><b>{name}</b> — {cat} ({pct})</summary>")
@@ -165,8 +187,11 @@ def _build_comment(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _post_or_update_comment(repo: str, pr_number: str, body: str) -> None:
-    """Find existing classifier comment and update, or create new."""
+def _post_or_update_comment(repo: str, pr_number: str, body: str) -> bool:
+    """Find existing classifier comment and update, or create new.
+
+    Returns True if the comment was successfully posted/updated.
+    """
     comments = gh_api(f"/repos/{repo}/issues/{pr_number}/comments?per_page=100")
     existing_id = None
     if comments and isinstance(comments, list):
@@ -197,6 +222,7 @@ def _post_or_update_comment(repo: str, pr_number: str, body: str) -> None:
             )
             if r.returncode != 0:
                 print(f"Comment update failed: {r.stderr[:200]}", file=sys.stderr)
+                return False
         else:
             r = subprocess.run(
                 [
@@ -214,8 +240,10 @@ def _post_or_update_comment(repo: str, pr_number: str, body: str) -> None:
             )
             if r.returncode != 0:
                 print(f"Comment post failed: {r.stderr[:200]}", file=sys.stderr)
+                return False
     finally:
         os.unlink(tmp)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -258,11 +286,14 @@ def main() -> None:
 
     if pr_number:
         body = _build_comment(results)
-        _post_or_update_comment(repo, pr_number, body)
-        print(
-            f"Posted classification for {len(results)} failures.",
-            file=sys.stderr,
-        )
+        posted = _post_or_update_comment(repo, pr_number, body)
+        if posted:
+            print(
+                f"Posted classification for {len(results)} failures.",
+                file=sys.stderr,
+            )
+        else:
+            print("Failed to post classification comment.", file=sys.stderr)
     else:
         for r in results:
             c = r.get("classification") or {}

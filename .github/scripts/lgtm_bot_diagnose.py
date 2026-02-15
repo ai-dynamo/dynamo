@@ -146,7 +146,7 @@ def run_classifier(repo: str, sha: str) -> list[dict]:
         )
         if r.returncode == 0 and r.stdout.strip():
             return json.loads(r.stdout)
-    except (subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
         print(f"Classifier failed: {exc}", file=sys.stderr)
     return []
 
@@ -201,6 +201,8 @@ def build_comment(
             url = d.get("url", "")
             cat = c.get("category", "unknown").replace("_", " ").title()
             conf = c.get("confidence", 0)
+            if isinstance(conf, (int, float)) and conf > 1:
+                conf = conf / 100.0  # Normalize 0-100 to 0-1
             pct = f"{conf:.0%}" if isinstance(conf, (int, float)) else str(conf)
             lines.append(
                 f"<details><summary><b>{name}</b>" f" — {cat} ({pct})</summary>"
@@ -218,6 +220,9 @@ def build_comment(
             lines.append("")
     elif not has_api_key:
         lines.append("*AI analysis unavailable — no LLM API key configured.*")
+        lines.append("")
+    elif checks["failed"] and not diagnoses:
+        lines.append("*AI analysis returned no results for the failed checks.*")
         lines.append("")
     elif not checks["failed"]:
         lines.append("*No failed checks to analyze.*")

@@ -191,8 +191,7 @@ jobs:
               revLine = 'Awaiting Approval';
             }
             if (requestedTeams.length > 0) {
-              const prefix = approved >= 1 ? ' · ' : ' · ';
-              revLine += `${prefix}CODEOWNERS: ${requestedTeams.join(', ')}`;
+              revLine += ` · CODEOWNERS: ${requestedTeams.join(', ')}`;
             }
 
             // --- Mergeable ---
@@ -343,7 +342,7 @@ jobs:
             }
 
             // Post reviewers comment for external contributors
-            const isExternal =
+            const isExternal = pr.head.repo &&
               pr.head.repo.full_name !== pr.base.repo.full_name;
             if (isExternal) {
               const rows = teamSlugs
