@@ -23,7 +23,7 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     task::Poll,
@@ -75,6 +75,9 @@ where
     /// where transient failures are expected.
     fault_detection_enabled: bool,
 
+    /// Lock for least-loaded routing, ensures atomic selection + increment of connection count.
+    least_loaded_lock: Arc<Mutex<()>>,
+
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
     /// compiler to specialize us at compile time.
@@ -88,8 +91,6 @@ pub enum RouterMode {
     Random,
     KV,
     Direct,
-    /// Route to the instance with the fewest active connections.
-    /// Prevents imbalanced backends by tracking per-instance inflight counts in the router.
     LeastLoaded,
 }
 
@@ -145,6 +146,7 @@ where
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             busy_threshold: None,
             fault_detection_enabled: false,
+            least_loaded_lock: Arc::new(Mutex::new(())),
             _phantom: PhantomData,
         })
     }
@@ -170,6 +172,7 @@ where
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             busy_threshold,
             fault_detection_enabled: true,
+            least_loaded_lock: Arc::new(Mutex::new(())),
             _phantom: PhantomData,
         };
 
@@ -245,18 +248,21 @@ where
 
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let instance_id = self.client.least_loaded_instance().ok_or_else(|| {
-            anyhow::anyhow!(
-                "no instances found for endpoint {}",
-                self.client.endpoint.id()
-            )
-        })?;
+        let instance_id = {
+            let _guard = self.least_loaded_lock.lock().unwrap();
+            let id = self.client.least_loaded_instance().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
+                )
+            })?;
+            self.client.increment_connections(id);
+            id
+        };
         tracing::trace!(
             "least loaded router selected {instance_id} (connections: {})",
             self.client.connection_count(instance_id)
         );
-
-        self.client.increment_connections(instance_id);
 
         match self
             .generate_with_fault_detection(instance_id, request)
