@@ -159,40 +159,95 @@ jobs:
               } catch (e) { /* already removed */ }
             }
 
-            // --- Build checklist ---
-            const ci = allPassed
-              ? '- [x] CI checks'
-              : anyFailed
-                ? '- [ ] CI checks *(failing)*'
-                : anyPending
-                  ? '- [ ] CI checks *(pending)*'
-                  : '- [ ] CI checks *(not started)*';
-            const rev = approved >= 1
-              ? `- [x] Approved (${approved})`
-              : '- [ ] Approved review *(none yet)*';
-            const cr = changesReq > 0
-              ? `- [ ] Changes requested (${changesReq})`
-              : '';
+            // --- CI counts ---
+            const passed = ciChecks.filter(
+              c => c.conclusion === 'success'
+            ).length;
+            const failed = ciChecks.filter(
+              c => c.conclusion === 'failure'
+            ).length;
+            const pending = ciChecks.filter(
+              c => c.status !== 'completed'
+            ).length;
+            const skipped = ciChecks.filter(
+              c => ['skipped', 'neutral'].includes(c.conclusion)
+            ).length;
+
+            const ciParts = [];
+            if (failed) ciParts.push(`${failed} failing`);
+            if (passed) ciParts.push(`${passed} passed`);
+            if (pending) ciParts.push(`${pending} pending`);
+            if (skipped) ciParts.push(`${skipped} skipped`);
+            const ciSummary = ciParts.join(', ') || 'no checks';
+
+            // --- Review status (CODEOWNERS focus) ---
+            const requestedTeams = (pr.requested_teams || [])
+              .map(t => `@ai-dynamo/${t.slug}`);
+
+            let revLine;
+            if (approved >= 1) {
+              revLine = `${approved} approval${approved > 1 ? 's' : ''}`;
+            } else {
+              revLine = 'Awaiting Approval';
+            }
+            if (requestedTeams.length > 0) {
+              const prefix = approved >= 1 ? ' · ' : ' · ';
+              revLine += `${prefix}CODEOWNERS: ${requestedTeams.join(', ')}`;
+            }
+
+            // --- Mergeable ---
             const ms = pr.mergeable_state || 'unknown';
-            const merge = ms === 'clean'
-              ? '- [x] Mergeable'
-              : `- [ ] Mergeable *(${ms})*`;
+            const mergeReasons = [];
+            if (ms === 'dirty') mergeReasons.push('Merge Conflicts');
+            if (ms === 'blocked') mergeReasons.push('Blocked (pending review)');
+            if (ms === 'unstable') mergeReasons.push('Checks Failing');
+
+            // Check unresolved conversations via GraphQL
+            let unresolvedCount = 0;
+            try {
+              const gql = await github.graphql(`
+                query($owner: String!, $repo: String!, $pr: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 100) {
+                        nodes { isResolved }
+                      }
+                    }
+                  }
+                }
+              `, { owner, repo, pr: prNumber });
+              unresolvedCount = gql.repository.pullRequest.reviewThreads
+                .nodes.filter(t => !t.isResolved).length;
+            } catch (e) {
+              console.log(`GraphQL failed: ${e.message}`);
+            }
+            if (unresolvedCount > 0) {
+              mergeReasons.push(
+                `${unresolvedCount} unresolved conversation${unresolvedCount > 1 ? 's' : ''}`
+              );
+            }
+            if (changesReq > 0) mergeReasons.push('Changes Requested');
+
+            const mergeOk = ms === 'clean' && unresolvedCount === 0
+              && changesReq === 0;
+
+            // --- Build checklist ---
+            const ciCheck = allPassed ? '[x]' : '[ ]';
+            const revCheck = approved >= 1 ? '[x]' : '[ ]';
+            const mergeCheck = mergeOk ? '[x]' : '[ ]';
 
             const marker = '<!-- lgtm-bot-checklist -->';
             const parts = [
               marker,
-              '## Merge Checklist',
-              ci,
-              rev,
-            ];
-            if (cr) parts.push(cr);
-            parts.push(
-              merge,
+              '## 🤖 LGTM Bot',
+              '### Merge Checklist',
+              `- ${ciCheck} **CI Checks:** ${ciSummary}`,
+              `- ${revCheck} **Review Status:** ${revLine}`,
+              `- ${mergeCheck} **Mergeable:** ${mergeOk ? 'Ready to Merge' : mergeReasons.join(', ')}`,
               '',
-              '> `/diagnose` for AI-powered failure analysis.',
-              '',
+              'Type `/diagnose` for AI-powered CI failure analysis.',
               '*Updates automatically on CI completion and review changes.*',
-            );
+            ];
             const body = parts.join('\n');
 
             // --- Post / update checklist comment ---

@@ -18,13 +18,21 @@ name: LGTM Bot Diagnose
 on:
   issue_comment:
     types: [created]
+  # Manual trigger for testing (issue_comment only works from default branch)
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to diagnose"
+        required: true
+        type: string
 
 jobs:
   diagnose:
     if: >-
-      github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/diagnose') &&
-      github.event.comment.author_association != 'NONE'
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.issue.pull_request &&
+       contains(github.event.comment.body, '/diagnose') &&
+       github.event.comment.author_association != 'NONE')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -41,7 +49,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.inputs.pr_number || github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id || '' }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         run: python3 .github/scripts/lgtm_bot_diagnose.py
