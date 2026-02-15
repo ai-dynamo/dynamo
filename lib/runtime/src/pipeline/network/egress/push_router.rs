@@ -17,7 +17,7 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
 use crate::{
     component::{Client, Endpoint},
     dynamo_nvtx_range,
-    engine::{AsyncEngine, Data},
+    engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::STAGE_DURATION_SECONDS,
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
@@ -28,15 +28,17 @@ use crate::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
+use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
-    future::Future,
     marker::PhantomData,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    task::Poll,
     time::Instant,
 };
 use tokio_stream::StreamExt;
@@ -118,6 +120,9 @@ pub enum RouterMode {
     PowerOfTwoChoices,
     KV,
     Direct,
+    /// Route to the instance with the fewest active connections.
+    /// Prevents imbalanced backends by tracking per-instance inflight counts in the router.
+    LeastLoaded,
 }
 
 impl RouterMode {
@@ -339,6 +344,41 @@ where
             .await
     }
 
+    /// Issue a request to the instance with the fewest active connections.
+    pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let instance_id = self
+            .client
+            .least_loaded_instance()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
+                )
+            })?;
+        tracing::trace!(
+            "least loaded router selected {instance_id} (connections: {})",
+            self.client.connection_count(instance_id)
+        );
+
+        self.client.increment_connections(instance_id);
+
+        match self.generate_with_fault_detection(instance_id, request).await {
+            Ok(stream) => {
+                let engine_ctx = stream.context();
+                let counted = ConnectionCountedStream {
+                    inner: stream,
+                    client: self.client.clone(),
+                    instance_id,
+                };
+                Ok(ResponseStream::new(Box::pin(counted), engine_ctx))
+            }
+            Err(e) => {
+                self.client.decrement_connections(instance_id);
+                Err(e)
+            }
+        }
+    }
+
     /// Select the next worker according to the routing mode.
     /// Increments round-robin counter if applicable.
     /// Returns None for Direct mode - requires explicit worker IDs via routing hints
@@ -555,9 +595,51 @@ where
                     "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
                 );
             }
+            RouterMode::LeastLoaded => self.least_loaded(request).await,
         }
     }
 }
+
+/// A stream wrapper that decrements the per-instance connection counter when
+/// the stream completes or is dropped. Used by least-loaded routing.
+struct ConnectionCountedStream<U: Data> {
+    inner: ManyOut<U>,
+    client: Client,
+    instance_id: u64,
+}
+
+impl<U: Data> Drop for ConnectionCountedStream<U> {
+    fn drop(&mut self) {
+        self.client.decrement_connections(self.instance_id);
+    }
+}
+
+impl<U: Data> std::fmt::Debug for ConnectionCountedStream<U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionCountedStream")
+            .field("instance_id", &self.instance_id)
+            .finish()
+    }
+}
+
+impl<U: Data> Stream for ConnectionCountedStream<U> {
+    type Item = U;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl<U: Data> AsyncEngineContextProvider for ConnectionCountedStream<U> {
+    fn context(&self) -> Arc<dyn AsyncEngineContext> {
+        self.inner.context()
+    }
+}
+
+impl<U: Data> crate::engine::AsyncEngineStream<U> for ConnectionCountedStream<U> {}
 
 #[cfg(test)]
 mod tests {
