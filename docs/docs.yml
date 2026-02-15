@@ -29,6 +29,10 @@ products:
       - display-name: dev
         path: ./versions/dev.yml
 
+redirects:
+  - source: "/dynamo/index.html"
+    destination: "/dynamo/"
+
 # GitHub repository link in navbar
 navbar-links:
   - type: github
