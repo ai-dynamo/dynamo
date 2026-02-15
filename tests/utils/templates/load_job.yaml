@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Template for aiperf load testing Job
+# Fields marked with TEMPLATE_ are replaced at runtime by ManagedLoad
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: TEMPLATE_JOB_NAME
+  namespace: TEMPLATE_NAMESPACE
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600  # Auto-cleanup after 1 hour
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: aiperf
+          image: python:3.12-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "=== Installing dependencies ==="
+              apt-get update && apt-get install -y --no-install-recommends curl jq procps && apt-get clean
+              pip install --quiet aiperf
+
+              echo "=== Creating output directories ==="
+              mkdir -p /tmp/aiperf/status
+
+              echo "=== Waiting for model '${MODEL_NAME}' to be available ==="
+              MAX_RETRIES=120
+              RETRY_COUNT=0
+              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+                # Check if the specific model is listed in /v1/models response
+                if curl -s --max-time 5 "${ENDPOINT_URL}/v1/models" | \
+                   jq -e --arg model "${MODEL_NAME}" '.data[]? | select(.id == $model)' > /dev/null 2>&1; then
+                  echo "✅ Model '${MODEL_NAME}' is available"
+                  break
+                fi
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                echo "[$(date '+%H:%M:%S')] Waiting for model '${MODEL_NAME}'... ($RETRY_COUNT/$MAX_RETRIES)"
+                sleep 5
+              done
+
+              if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+                echo "ERROR: Model '${MODEL_NAME}' not available after $MAX_RETRIES attempts"
+                echo "Checking endpoint response:"
+                curl -s "${ENDPOINT_URL}/v1/models" | head -100
+                exit 1
+              fi
+
+              echo "=== Starting aiperf load test ==="
+              touch /tmp/aiperf/status/started
+
+              # Define signal handler to keep container alive when aiperf is terminated
+              # (matches ManagedAIPerfDeployment pattern for graceful shutdown)
+              cleanup_handler() {
+                  echo "Container received signal, keeping alive for artifact extraction..."
+                  if [ -n "$AIPERF_PID" ]; then
+                      echo "Waiting for aiperf process $AIPERF_PID to finish..."
+                      wait $AIPERF_PID
+                      AIPERF_EXIT_CODE=$?
+                      echo "aiperf process finished with exit code: $AIPERF_EXIT_CODE"
+                      echo "$AIPERF_EXIT_CODE" > /tmp/aiperf/status/exit_code
+                  fi
+              }
+              trap cleanup_handler SIGTERM SIGINT
+
+              # Run aiperf with tee to BOTH stdout AND log file (like ManagedDeployment)
+              # This keeps output visible for debugging while also saving to PVC
+              set +e
+              AIPERF_CMD > >(tee -a /tmp/aiperf/aiperf.log) 2>&1 &
+              AIPERF_PID=$!
+              echo "aiperf started with PID: $AIPERF_PID"
+
+              # Wait for aiperf to complete (or be terminated by signal)
+              wait $AIPERF_PID
+              AIPERF_EXIT_CODE=$?
+              set -e
+
+              # Brief delay to ensure all file writes complete (matches ManagedAIPerfDeployment)
+              sleep 2
+
+              echo "$AIPERF_EXIT_CODE" > /tmp/aiperf/status/exit_code
+              touch /tmp/aiperf/status/completed
+
+              echo "=== aiperf completed with exit code: $AIPERF_EXIT_CODE ==="
+
+              # List generated files for debugging
+              echo "=== Generated files ==="
+              ls -la /tmp/aiperf/
+
+              # Results are on PVC - download job will extract them
+              # No need to keep container alive
+              echo "=== Container exiting, results available on PVC ==="
+          env:
+            - name: ENDPOINT_URL
+              value: "TEMPLATE_ENDPOINT_URL"
+            - name: MODEL_NAME
+              value: "TEMPLATE_MODEL_NAME"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          volumeMounts:
+            - name: results-volume
+              mountPath: /tmp/aiperf
+              subPath: aiperf  # Write to aiperf/ subdirectory on PVC, not root
+      volumes:
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: TEMPLATE_PVC_NAME
