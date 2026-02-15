@@ -1,0 +1,304 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# LGTM Bot — merge readiness tracking
+#
+# Unique value (not in GitHub UI):
+#   1. `lgtm` label — single machine-readable signal that ALL gates pass
+#   2. Merge checklist — consolidated glanceable view of 5+ gates
+#   3. CODEOWNERS comment — required reviewers visible to external contributors
+
+name: LGTM Bot
+
+on:
+  # Re-evaluate when key CI workflows complete
+  workflow_run:
+    workflows:
+      - "Pre Merge"
+      - "PR"
+      - "Copyright Checks"
+      - "NVIDIA Test Lab Validation"
+    types: [completed]
+  # Re-evaluate when reviews change
+  pull_request_review:
+    types: [submitted, dismissed]
+  # Remove lgtm on new pushes; request reviewers on open
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+concurrency:
+  group: >-
+    lgtm-bot-${{
+      github.event.pull_request.number ||
+      github.event.workflow_run.pull_requests[0].number ||
+      github.run_id
+    }}
+  cancel-in-progress: true
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Job 1: Evaluate merge readiness and manage lgtm label + checklist
+  # -----------------------------------------------------------------------
+  evaluate-lgtm:
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.pull_requests[0]) ||
+      github.event_name == 'pull_request_review' ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.action == 'synchronize')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: read
+      statuses: read
+    steps:
+      - name: Evaluate merge readiness
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // --- Resolve PR number ---
+            let prNumber;
+            if (context.eventName === 'workflow_run') {
+              const prs = context.payload.workflow_run.pull_requests;
+              if (prs && prs.length > 0) {
+                prNumber = prs[0].number;
+              } else {
+                // Fallback for fork PRs where pull_requests is empty
+                const sha = context.payload.workflow_run.head_sha;
+                const { data: associated } = await github.rest.repos
+                  .listPullRequestsAssociatedWithCommit({
+                    owner, repo, commit_sha: sha,
+                  });
+                if (associated.length > 0) prNumber = associated[0].number;
+              }
+            } else {
+              prNumber = context.payload.pull_request.number;
+            }
+            if (!prNumber) {
+              console.log('No PR number found, skipping.');
+              return;
+            }
+
+            // --- Fetch PR ---
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: prNumber,
+            });
+            const headSha = pr.head.sha;
+
+            // --- Check runs (paginated) ---
+            const allChecks = await github.paginate(
+              github.rest.checks.listForRef,
+              { owner, repo, ref: headSha, per_page: 100 }
+            );
+            const ciChecks = allChecks.filter(c => c.name !== 'LGTM Bot');
+            const allPassed = ciChecks.length > 0 &&
+              ciChecks.every(c => c.conclusion === 'success');
+            const anyFailed = ciChecks.some(
+              c => c.conclusion === 'failure'
+            );
+            const anyPending = ciChecks.some(
+              c => c.status !== 'completed'
+            );
+
+            // --- Reviews (paginated) ---
+            const allReviews = await github.paginate(
+              github.rest.pulls.listReviews,
+              { owner, repo, pull_number: prNumber, per_page: 100 }
+            );
+            const latestReviews = {};
+            for (const r of allReviews) {
+              if (['APPROVED', 'CHANGES_REQUESTED'].includes(r.state)) {
+                latestReviews[r.user.login] = r.state;
+              }
+            }
+            const approved = Object.values(latestReviews)
+              .filter(s => s === 'APPROVED').length;
+            const changesReq = Object.values(latestReviews)
+              .filter(s => s === 'CHANGES_REQUESTED').length;
+
+            // --- Determine LGTM ---
+            const isLgtm = allPassed && approved >= 1 && changesReq === 0;
+
+            // --- Manage label ---
+            const { data: labels } = await github.rest.issues
+              .listLabelsOnIssue({ owner, repo, issue_number: prNumber });
+            const hasLabel = labels.some(l => l.name === 'lgtm');
+
+            if (isLgtm && !hasLabel) {
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: prNumber, labels: ['lgtm'],
+              });
+            } else if (!isLgtm && hasLabel) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner, repo, issue_number: prNumber, name: 'lgtm',
+                });
+              } catch (e) { /* already removed */ }
+            }
+
+            // --- Build checklist ---
+            const ci = allPassed
+              ? '- [x] CI checks'
+              : anyFailed
+                ? '- [ ] CI checks *(failing)*'
+                : anyPending
+                  ? '- [ ] CI checks *(pending)*'
+                  : '- [ ] CI checks *(not started)*';
+            const rev = approved >= 1
+              ? `- [x] Approved (${approved})`
+              : '- [ ] Approved review *(none yet)*';
+            const cr = changesReq > 0
+              ? `- [ ] Changes requested (${changesReq})`
+              : '';
+            const ms = pr.mergeable_state || 'unknown';
+            const merge = ms === 'clean'
+              ? '- [x] Mergeable'
+              : `- [ ] Mergeable *(${ms})*`;
+
+            const marker = '<!-- lgtm-bot-checklist -->';
+            const parts = [
+              marker,
+              '## Merge Checklist',
+              ci,
+              rev,
+            ];
+            if (cr) parts.push(cr);
+            parts.push(
+              merge,
+              '',
+              '> `/diagnose` for AI-powered failure analysis.',
+              '',
+              '*Updates automatically on CI completion and review changes.*',
+            );
+            const body = parts.join('\n');
+
+            // --- Post / update checklist comment ---
+            const allComments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+            const existing = allComments.find(
+              c => c.body && c.body.includes(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber, body,
+              });
+            }
+
+            console.log(
+              `LGTM=${isLgtm} | CI=${allPassed ? 'pass' : anyFailed ? 'fail' : 'pending'}`
+              + ` | Reviews=${approved}approved/${changesReq}changes`
+            );
+
+  # -----------------------------------------------------------------------
+  # Job 2: Request CODEOWNERS reviews + notify external contributors
+  # -----------------------------------------------------------------------
+  request-reviews:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      (github.event.action == 'opened' ||
+       github.event.action == 'reopened')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Request CODEOWNERS reviews
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request;
+            const prNumber = pr.number;
+
+            // Fetch changed files
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              { owner, repo, pull_number: prNumber, per_page: 100 }
+            );
+
+            // Simple CODEOWNERS matching
+            const teams = new Set();
+            for (const f of files) {
+              const p = f.filename;
+              if (p.endsWith('.rs') || p.includes('Cargo.toml')) {
+                teams.add('dynamo-rust-codeowners');
+              }
+              if (p.endsWith('.py')) {
+                teams.add('python-codeowners');
+                teams.add('Devops');
+              }
+              if (p.startsWith('.github/')) teams.add('Devops');
+              if (p.startsWith('deploy/')) {
+                teams.add('dynamo-deploy-codeowners');
+              }
+              if (
+                p.startsWith('container/') ||
+                p.startsWith('examples/') ||
+                p.startsWith('recipes/')
+              ) {
+                teams.add('Devops');
+                teams.add('dynamo-rust-codeowners');
+                teams.add('python-codeowners');
+                teams.add('dynamo-deploy-codeowners');
+              }
+            }
+
+            if (teams.size === 0) return;
+            const teamSlugs = [...teams];
+
+            // Request team reviews
+            try {
+              await github.rest.pulls.requestReviewers({
+                owner, repo, pull_number: prNumber,
+                team_reviewers: teamSlugs,
+              });
+            } catch (e) {
+              console.log(`Could not request reviews: ${e.message}`);
+            }
+
+            // Post reviewers comment for external contributors
+            const isExternal =
+              pr.head.repo.full_name !== pr.base.repo.full_name;
+            if (isExternal) {
+              const rows = teamSlugs
+                .map(t => `| @ai-dynamo/${t} | CODEOWNERS match |`)
+                .join('\n');
+              const marker = '<!-- lgtm-bot-reviewers -->';
+              const body = [
+                marker,
+                '## Required Reviewers',
+                '',
+                '| Team | Reason |',
+                '|------|--------|',
+                rows,
+                '',
+                '*Based on [CODEOWNERS](../blob/main/CODEOWNERS) and changed files.*',
+              ].join('\n');
+
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber, body,
+              });
+            }
