@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiohttp
 import nats
 
-from dynamo._core import DistributedRuntime, KvRouter, KvRouterConfig
+from dynamo.llm import KvRouter, KvRouterConfig
+from dynamo.runtime import DistributedRuntime
 from tests.utils.managed_process import ManagedProcess
 
 if TYPE_CHECKING:
