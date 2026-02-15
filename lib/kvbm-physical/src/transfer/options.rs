@@ -4,7 +4,7 @@
 //! Transfer options for configuring block and layer transfers.
 
 use super::BounceBuffer;
-use crate::v2::physical::layout::KvBlockLayout;
+use crate::layout::KvBlockLayout;
 use cudarc::driver::CudaStream;
 use derive_builder::Builder;
 use derive_getters::Dissolve;

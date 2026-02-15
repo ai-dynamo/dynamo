@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typed builder for constructing [`PhysicalLayout`](crate::v2::layout::PhysicalLayout)
+//! Typed builder for constructing [`PhysicalLayout`](crate::layout::PhysicalLayout)
 //! instances with strongly-typed configuration, layout selection, and memory provisioning.
 //!
 //! The builder enforces the three steps required to materialize a physical layout:
@@ -12,7 +12,7 @@
 //! NIXL registration is always enabled. Callers must provide a [`nixl_sys::Agent`], and any memory
 //! supplied to the builder must implement [`NixlCompatible`].
 
-use crate::physical::layout::physical::PhysicalLayout;
+use crate::layout::physical::PhysicalLayout;
 
 use super::{
     BlockDimension, FullyContiguousLayout, LayerSeparateLayout, Layout, LayoutConfig,

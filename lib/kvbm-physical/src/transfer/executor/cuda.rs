@@ -6,8 +6,8 @@
 use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
 use crate::BlockId;
-use crate::v2::physical::transfer::context::TransferCompleteNotification;
-use crate::v2::physical::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
+use crate::transfer::context::TransferCompleteNotification;
+use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
 use anyhow::{Result, anyhow};
 use cudarc::driver::{CudaStream, result as cuda_result};
 use cudarc::runtime::sys::cudaStream_t;

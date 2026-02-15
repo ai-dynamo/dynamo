@@ -3264,6 +3264,7 @@ dependencies = [
  "dynamo-kvbm-config",
  "dynamo-kvbm-kernels",
  "dynamo-kvbm-logical",
+ "dynamo-kvbm-physical",
  "dynamo-memory",
  "dynamo-nova",
  "dynamo-nova-backend",
@@ -3362,6 +3363,36 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-kvbm-physical"
+version = "0.9.0"
+dependencies = [
+ "aligned-vec",
+ "anyhow",
+ "bincode 2.0.1",
+ "blake3",
+ "bytes",
+ "cudarc 0.19.2",
+ "derive-getters",
+ "derive_builder",
+ "dynamo-kvbm-kernels",
+ "dynamo-kvbm-logical",
+ "dynamo-memory",
+ "dynamo-nova",
+ "dynamo-tokens",
+ "futures",
+ "nixl-sys",
+ "parking_lot",
+ "rstest 0.26.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "uuid 1.18.1",
+ "validator",
 ]
 
 [[package]]

@@ -4,8 +4,8 @@
 //! Serialization types for exporting/importing layout metadata with NIXL integration.
 
 use super::handle::LayoutHandle;
-use crate::v2::logical::LogicalLayoutHandle;
-use crate::v2::physical::layout::LayoutDescriptor;
+use dynamo_kvbm_logical::LogicalLayoutHandle;
+use crate::layout::LayoutDescriptor;
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use bytes::Bytes;
@@ -168,12 +168,9 @@ impl std::fmt::Debug for SerializedLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        physical::layout::KvBlockLayout,
-        v2::physical::layout::{
-            BlockFormat, FullyContiguousDetails, LayoutConfig, LayoutDescriptor, LayoutTypeDetails,
-            NixlMetadata,
-        },
+    use crate::layout::{
+        BlockFormat, FullyContiguousDetails, KvBlockLayout, LayoutConfig, LayoutDescriptor,
+        LayoutTypeDetails, NixlMetadata,
     };
     use dynamo_memory::{MemoryRegion, StorageKind, nixl};
 
@@ -213,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_serialized_layout_with_handle() {
-        use crate::v2::logical::LogicalLayoutHandle;
+        use dynamo_kvbm_logical::LogicalLayoutHandle;
 
         let handle = LayoutHandle::new(1, 2);
         let layout = make_test_serialized_layout();
@@ -225,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_metadata_pack_unpack() {
-        use crate::v2::logical::LogicalLayoutHandle;
+        use dynamo_kvbm_logical::LogicalLayoutHandle;
 
         let worker_address = WorkerAddress::new(100, "worker_100".to_string());
         let nixl_metadata = vec![1, 2, 3, 4, 5];
@@ -253,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_metadata_multiple_layouts() {
-        use crate::v2::logical::LogicalLayoutHandle;
+        use dynamo_kvbm_logical::LogicalLayoutHandle;
 
         let worker_address = WorkerAddress::new(200, "worker_200".to_string());
         let nixl_metadata = vec![10, 20, 30];

@@ -15,13 +15,13 @@ pub(crate) use local::LocalLayout;
 pub(crate) use metadata::LocalLayoutDescriptor;
 pub(crate) use remote::RemoteLayout;
 
-use crate::physical::transfer::BounceBufferInternal;
-use crate::v2::logical::LogicalLayoutHandle;
-use crate::v2::physical::layout::PhysicalLayout;
-use crate::v2::physical::transfer::TransferContext;
-use crate::v2::physical::transfer::context::TransferCompleteNotification;
-use crate::v2::physical::transfer::executor::TransferOptionsInternal;
-use crate::v2::physical::transfer::options::TransferOptions;
+use crate::transfer::BounceBufferInternal;
+use dynamo_kvbm_logical::LogicalLayoutHandle;
+use crate::layout::PhysicalLayout;
+use crate::transfer::TransferContext;
+use crate::transfer::context::TransferCompleteNotification;
+use crate::transfer::executor::TransferOptionsInternal;
+use crate::transfer::options::TransferOptions;
 use crate::{BlockId, SequenceHash};
 use anyhow::{Result, anyhow, bail};
 use dynamo_memory::StorageKind;
@@ -64,7 +64,7 @@ impl TransferManager {
     ///     .nixl_agent_name("custom-agent")
     ///     .build()?;
     /// ```
-    pub fn builder() -> crate::v2::physical::transfer::context::TransferConfigBuilder {
+    pub fn builder() -> crate::transfer::context::TransferConfigBuilder {
         TransferContext::builder()
     }
 
@@ -194,7 +194,7 @@ impl TransferManager {
     pub fn get_layout_config(
         &self,
         handle: LayoutHandle,
-    ) -> Result<crate::v2::physical::layout::LayoutConfig> {
+    ) -> Result<crate::layout::LayoutConfig> {
         let registry = self.registry.read().unwrap();
         let physical_layout = registry
             .get_layout(handle)
@@ -385,8 +385,9 @@ impl TransferManager {
 
     // ===== Internal Methods for Testing =====
 
-    /// Get the internal transfer context (for testing only).
-    pub(crate) fn context(&self) -> &TransferContext {
+    /// Get the internal transfer context.
+    #[doc(hidden)]
+    pub fn context(&self) -> &TransferContext {
         &self.context
     }
 
@@ -394,7 +395,8 @@ impl TransferManager {
     ///
     /// This is primarily for testing utilities that need direct layout access
     /// (e.g., fill patterns, checksum computation).
-    pub(crate) fn registry(&self) -> &RwLock<LayoutRegistry> {
+    #[doc(hidden)]
+    pub fn registry(&self) -> &RwLock<LayoutRegistry> {
         &self.registry
     }
 
@@ -442,7 +444,8 @@ impl TransferManager {
 /// - Importing remote layout metadata and reconstructing layouts
 /// - Managing NIXL metadata for RDMA operations
 #[derive(Debug)]
-pub(crate) struct LayoutRegistry {
+#[doc(hidden)]
+pub struct LayoutRegistry {
     /// NIXL agent for memory registration
     nixl_agent: NixlAgent,
     /// Worker ID for this manager
@@ -677,7 +680,7 @@ impl LayoutRegistry {
     ///
     /// # Returns
     /// Returns a reference to the PhysicalLayout if found
-    pub(crate) fn get_layout(&self, handle: LayoutHandle) -> Option<&PhysicalLayout> {
+    pub fn get_layout(&self, handle: LayoutHandle) -> Option<&PhysicalLayout> {
         self.local_layouts
             .get(&handle)
             .map(|l| l.layout())
@@ -723,7 +726,7 @@ impl LayoutRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::physical::layout::LayoutConfig;
+    use crate::layout::LayoutConfig;
     use dynamo_memory::nixl::NixlAgent;
 
     fn make_test_agent(name: &str) -> NixlAgent {

@@ -64,15 +64,16 @@ pub use preferences::{NativeVsNixlPolicy, TransferPreferences};
 pub use strategy::{TransferPlan, TransferStrategy};
 pub use validation::BlockValidationError;
 
-// Internal - TransferContext is now managed by TransferManager
-pub(crate) use context::TransferContext;
+// TransferContext - managed by TransferManager
+#[doc(hidden)]
+pub use context::TransferContext;
 
 use crate::BlockId;
 
-pub use super::layout::PhysicalLayout;
+pub use crate::layout::PhysicalLayout;
 
 // Re-export manager types - TransferManager is the primary public API
-pub use super::manager::{LayoutHandle, SerializedLayout, TransferManager, WorkerAddress};
+pub use crate::manager::{LayoutHandle, SerializedLayout, TransferManager, WorkerAddress};
 
 // #[cfg(test)]
 // pub use testing::{RoundTripTest, RoundTripTestResult};
@@ -110,7 +111,8 @@ impl BounceBuffer {
         Self { layout, block_ids }
     }
 
-    pub(crate) fn into_parts(self) -> (LayoutHandle, Vec<BlockId>) {
+    #[doc(hidden)]
+    pub fn into_parts(self) -> (LayoutHandle, Vec<BlockId>) {
         (self.layout, self.block_ids)
     }
 }

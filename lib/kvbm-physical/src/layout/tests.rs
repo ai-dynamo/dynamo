@@ -7,8 +7,8 @@
 //! ensuring that layouts can be transmitted to remote nodes and reconstructed
 //! with all necessary metadata intact.
 
-use crate::physical::layout::physical::PhysicalLayout;
-use crate::v2::physical::layout::{BlockDimension, LayoutConfig, LayoutDescriptor};
+use crate::layout::physical::PhysicalLayout;
+use crate::layout::{BlockDimension, LayoutConfig, LayoutDescriptor};
 use dynamo_memory::nixl::{MemType, NixlAgent, NixlDescriptor};
 use dynamo_memory::{Buffer, MemoryDescriptor, MemoryRegion, StorageKind};
 use std::any::Any;
@@ -322,16 +322,16 @@ fn test_version_check_on_deserialization() {
         version: 999, // Future version
         layout_config: config.clone(),
         location: StorageKind::System,
-        nixl_metadata: crate::v2::physical::layout::physical::NixlMetadata::new(
+        nixl_metadata: crate::layout::physical::NixlMetadata::new(
             "test".to_string(),
             MemType::Dram,
             0,
         ),
         memory_descriptors: vec![],
-        layout_type_details: crate::v2::physical::layout::LayoutTypeDetails::FullyContiguous(
-            crate::v2::physical::layout::FullyContiguousDetails {
-                block_format: crate::v2::physical::layout::BlockFormat::Operational,
-                kv_block_layout: crate::v2::physical::layout::KvBlockLayout::OperationalNHD,
+        layout_type_details: crate::layout::LayoutTypeDetails::FullyContiguous(
+            crate::layout::FullyContiguousDetails {
+                block_format: crate::layout::BlockFormat::Operational,
+                kv_block_layout: crate::layout::KvBlockLayout::OperationalNHD,
             },
         ),
     };
@@ -365,6 +365,6 @@ fn test_version_check_on_deserialization() {
     let layout = result.unwrap();
     assert_eq!(
         layout.layout().block_layout(),
-        crate::physical::layout::KvBlockLayout::OperationalNHD
+        crate::layout::KvBlockLayout::OperationalNHD
     );
 }

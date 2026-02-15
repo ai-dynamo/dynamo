@@ -60,7 +60,7 @@ use super::{
 };
 use crate::{
     BlockId,
-    v2::physical::layout::{
+    layout::{
         BlockDimension, LayoutConfig,
         builder::{HasConfig, NoLayout, NoMemory, PhysicalLayoutBuilder},
     },
@@ -218,8 +218,8 @@ pub fn create_layout(agent: NixlAgent, spec: LayoutSpec, num_blocks: usize) -> P
 pub fn create_transfer_context(
     agent: NixlAgent,
     capabilities: Option<TransferCapabilities>,
-) -> Result<crate::v2::physical::manager::TransferManager> {
-    crate::v2::physical::manager::TransferManager::builder()
+) -> Result<crate::manager::TransferManager> {
+    crate::manager::TransferManager::builder()
         .capabilities(capabilities.unwrap_or_default())
         .nixl_agent(agent)
         .cuda_device_id(0)

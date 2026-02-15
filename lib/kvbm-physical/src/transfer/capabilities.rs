@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-use crate::physical::{
+use crate::{
     layout::LayoutConfig,
     transfer::{
         PhysicalLayout, TransferManager,
@@ -40,7 +40,7 @@ use dynamo_memory::nixl::NixlAgent;
 /// # Example
 ///
 /// ```
-/// # use dynamo_kvbm::v2::physical::transfer::TransferCapabilities;
+/// # use dynamo_kvbm_physical::transfer::TransferCapabilities;
 /// // Default conservative policy
 /// let caps = TransferCapabilities::default();
 /// assert!(!caps.allow_gds);

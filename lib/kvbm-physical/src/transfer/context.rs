@@ -16,7 +16,7 @@ use dynamo_memory::CudaMemPool;
 use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
 use dynamo_nova::events::LocalEventSystem;
 
-use crate::v2::physical::manager::TransferManager;
+use crate::manager::TransferManager;
 
 // Notifications module is declared in ../mod.rs
 // Re-export for convenience
@@ -62,24 +62,19 @@ pub struct TransferConfig {
 }
 
 impl TransferConfigBuilder {
-    /// Initialize builder with components from KvbmRuntime.
+    /// Initialize builder with event system and tokio handle.
     ///
-    /// This extracts the event_system and tokio runtime handle from the runtime,
-    /// ensuring consistency with Nova's event system. Use this when the runtime
-    /// has already been constructed and you want components to share the same
-    /// event notification infrastructure.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let runtime = KvbmRuntime::from_env_leader().await?;
-    /// let transfer_mgr = TransferConfigBuilder::default()
-    ///     .from_runtime(&runtime)
-    ///     .cuda_device_id(0)
-    ///     .build()?;
-    /// ```
-    pub fn from_runtime(self, runtime: &crate::v2::KvbmRuntime) -> Self {
-        self.event_system(runtime.event_system())
-            .tokio_runtime(TokioRuntime::Handle(runtime.handle()))
+    /// This sets the event_system and tokio runtime handle, ensuring consistency
+    /// with Nova's event system. Use this when the runtime has already been
+    /// constructed and you want components to share the same event notification
+    /// infrastructure.
+    pub fn from_event_system_and_handle(
+        self,
+        event_system: Arc<LocalEventSystem>,
+        handle: tokio::runtime::Handle,
+    ) -> Self {
+        self.event_system(event_system)
+            .tokio_runtime(TokioRuntime::Handle(handle))
     }
 
     /// Directly provide a pre-configured wrapped NIXL agent (mainly for testing).
@@ -197,7 +192,8 @@ fn get_tokio_runtime() -> TokioRuntime {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum TokioRuntime {
+#[doc(hidden)]
+pub enum TokioRuntime {
     Handle(tokio::runtime::Handle),
     Shared(Arc<tokio::runtime::Runtime>),
 }
@@ -212,7 +208,8 @@ impl TokioRuntime {
 }
 
 #[derive(Clone)]
-pub(crate) struct TransferContext {
+#[doc(hidden)]
+pub struct TransferContext {
     worker_id: u64,
     nixl_agent: NixlAgent,
     #[allow(dead_code)]
@@ -376,7 +373,8 @@ impl TransferContext {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn tokio(&self) -> &tokio::runtime::Handle {
+    #[doc(hidden)]
+    pub fn tokio(&self) -> &tokio::runtime::Handle {
         self.tokio_runtime.handle()
     }
 
@@ -384,7 +382,8 @@ impl TransferContext {
         &self.capabilities
     }
 
-    pub(crate) fn event_system(&self) -> &Arc<LocalEventSystem> {
+    #[doc(hidden)]
+    pub fn event_system(&self) -> &Arc<LocalEventSystem> {
         &self.event_system
     }
 

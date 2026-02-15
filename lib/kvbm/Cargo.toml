@@ -16,6 +16,7 @@ dynamo-config = { workspace = true }
 dynamo-kvbm-config = { workspace = true }
 dynamo-kvbm-kernels = { workspace = true, features = ["static-kernels"] }
 dynamo-kvbm-logical = { workspace = true, features = ["testing"] }
+dynamo-kvbm-physical = { workspace = true }
 dynamo-memory = { workspace = true }
 
 anyhow = { workspace = true }

@@ -15,7 +15,7 @@
 
 pub mod distributed;
 pub mod logical;
-pub mod physical;
+pub use dynamo_kvbm_physical as physical;
 pub mod runtime;
 pub mod utils;
 

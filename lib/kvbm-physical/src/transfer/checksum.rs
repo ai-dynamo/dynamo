@@ -158,7 +158,7 @@ fn compute_single_block_checksum(
 mod tests {
     use super::super::tests::*;
     use super::*;
-    use crate::v2::physical::transfer::{FillPattern, fill_blocks};
+    use crate::transfer::{FillPattern, fill_blocks};
 
     #[test]
     fn test_checksum_constant_pattern() {

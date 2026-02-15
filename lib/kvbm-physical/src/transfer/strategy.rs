@@ -5,7 +5,7 @@
 
 use dynamo_memory::StorageKind;
 
-use crate::physical::{layout::PhysicalLayout, transfer::TransferContext};
+use crate::{layout::PhysicalLayout, transfer::TransferContext};
 
 use super::TransferCapabilities;
 

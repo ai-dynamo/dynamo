@@ -4,7 +4,7 @@
 //! Remote layout wrapper reconstructed from imported metadata.
 
 use super::handle::LayoutHandle;
-use crate::v2::physical::layout::PhysicalLayout;
+use crate::layout::PhysicalLayout;
 
 /// A remote physical layout reconstructed from imported metadata.
 ///
@@ -59,10 +59,10 @@ impl RemoteLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::physical::layout::{LayoutConfig, LayoutDescriptor, PhysicalLayout};
+    use crate::layout::{LayoutConfig, LayoutDescriptor, PhysicalLayout};
 
     fn make_serialized_layout() -> LayoutDescriptor {
-        use crate::v2::physical::layout::{
+        use crate::layout::{
             BlockFormat, FullyContiguousDetails, LayoutTypeDetails, NixlMetadata,
         };
         use dynamo_memory::{MemoryRegion, StorageKind, nixl};
@@ -95,7 +95,7 @@ mod tests {
             }],
             layout_type_details: LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
                 block_format: BlockFormat::Operational,
-                kv_block_layout: crate::v2::physical::layout::KvBlockLayout::OperationalNHD,
+                kv_block_layout: crate::layout::KvBlockLayout::OperationalNHD,
             }),
         }
     }
@@ -112,7 +112,7 @@ mod tests {
         assert_eq!(remote.layout_id(), 42);
         assert_eq!(
             remote.layout().layout().block_layout(),
-            crate::physical::layout::KvBlockLayout::OperationalNHD
+            crate::layout::KvBlockLayout::OperationalNHD
         );
     }
 

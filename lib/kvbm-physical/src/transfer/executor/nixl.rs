@@ -8,8 +8,8 @@
 
 use super::{PhysicalLayout, TransferContext, TransferStrategy};
 use crate::BlockId;
-use crate::v2::physical::transfer::context::TransferCompleteNotification;
-use crate::v2::physical::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
+use crate::transfer::context::TransferCompleteNotification;
+use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
 use anyhow::{Result, anyhow};
 use dynamo_memory::nixl::{XferDescList, XferOp};
 use std::marker::PhantomData;

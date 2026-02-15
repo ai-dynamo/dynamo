@@ -10,10 +10,10 @@
 
 use super::skip_if_stubs_and_device;
 use super::*;
-use crate::physical::transfer::TransferCapabilities;
-use crate::physical::transfer::executor::TransferOptionsInternal;
-use crate::physical::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
-use crate::v2::physical::transfer::executor::execute_transfer;
+use crate::transfer::TransferCapabilities;
+use crate::transfer::executor::TransferOptionsInternal;
+use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
+use crate::transfer::executor::execute_transfer;
 use anyhow::Result;
 use rstest::rstest;
 
@@ -60,31 +60,39 @@ fn is_unsupported_transfer(src_kind: StorageKind, dst_kind: StorageKind) -> bool
 }
 
 fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result<NixlAgent> {
-    use crate::v2::testing::physical::TestAgentBuilder;
-
-    let mut builder = TestAgentBuilder::new("agent");
+    let mut agent = NixlAgent::new("agent")?;
+    let mut added_backends = Vec::new();
 
     // Determine required backends for both source and destination
     for kind in [src_kind, dst_kind] {
         match kind {
             StorageKind::System | StorageKind::Pinned => {
-                builder = builder.try_backend("POSIX"); // Lightweight for DRAM
+                if !added_backends.contains(&"POSIX") {
+                    let _ = agent.add_backend("POSIX"); // Optional for DRAM
+                    added_backends.push("POSIX");
+                }
             }
             StorageKind::Device(_) => {
-                builder = builder.require_backend("UCX"); // Required for VRAM
+                if !added_backends.contains(&"UCX") {
+                    agent.add_backend("UCX")?; // Required for VRAM
+                    added_backends.push("UCX");
+                }
             }
             StorageKind::Disk(_) => {
-                builder = builder.try_backend("POSIX"); // Required for disk I/O
+                if !added_backends.contains(&"POSIX") {
+                    let _ = agent.add_backend("POSIX"); // Optional for disk I/O
+                    added_backends.push("POSIX");
+                }
             }
         }
     }
 
     // GDS_MT is optional for Device <-> Disk (will be checked separately)
-    if requires_gds(src_kind, dst_kind) {
-        builder = builder.try_backend("GDS_MT");
+    if requires_gds(src_kind, dst_kind) && !added_backends.contains(&"GDS_MT") {
+        let _ = agent.add_backend("GDS_MT");
     }
 
-    Ok(builder.build()?.into_nixl_agent())
+    Ok(agent)
 }
 
 #[rstest]
@@ -124,7 +132,7 @@ async fn test_p2p(
         return Ok(());
     }
 
-    use crate::physical::transfer::{BounceBufferInternal, executor::TransferOptionsInternal};
+    use crate::transfer::{BounceBufferInternal, executor::TransferOptionsInternal};
 
     let agent = build_agent_for_kinds(src_kind, dst_kind)?;
 
@@ -180,7 +188,7 @@ async fn test_roundtrip(
         return Ok(());
     }
 
-    use crate::physical::transfer::executor::TransferOptionsInternal;
+    use crate::transfer::executor::TransferOptionsInternal;
 
     let agent = build_agent_for_kinds(src_kind, dst_kind)?;
 

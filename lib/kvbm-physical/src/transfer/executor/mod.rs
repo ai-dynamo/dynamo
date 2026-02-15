@@ -11,9 +11,9 @@ use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
 use super::{PhysicalLayout, TransferContext, TransferPlan, TransferStrategy};
 use crate::BlockId;
-use crate::physical::transfer::BounceBufferInternal;
-use crate::v2::physical::layout::KvBlockLayout;
-use crate::v2::physical::transfer::{StorageKind, context::TransferCompleteNotification};
+use crate::transfer::BounceBufferInternal;
+use crate::layout::KvBlockLayout;
+use crate::transfer::{StorageKind, context::TransferCompleteNotification};
 use anyhow::Result;
 use cudarc::driver::CudaStream;
 use std::ops::Range;
@@ -678,10 +678,10 @@ mod tests {
     fn test_select_transform_kernel_custom_unsupported() {
         // Custom layouts are unsupported (for now)
         let custom = KvBlockLayout::Custom([
-            crate::v2::physical::layout::BlockDim::Head,
-            crate::v2::physical::layout::BlockDim::Layer,
-            crate::v2::physical::layout::BlockDim::Outer,
-            crate::v2::physical::layout::BlockDim::Page,
+            crate::layout::BlockDim::Head,
+            crate::layout::BlockDim::Layer,
+            crate::layout::BlockDim::Outer,
+            crate::layout::BlockDim::Page,
         ]);
         assert_eq!(
             select_transform_kernel(custom, KvBlockLayout::OperationalNHD),

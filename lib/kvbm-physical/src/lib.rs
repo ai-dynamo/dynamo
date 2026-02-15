@@ -5,7 +5,8 @@ pub mod layout;
 pub mod manager;
 pub mod transfer;
 
-pub use {
-    manager::TransferManager,
-    transfer::{TransferConfig, TransferOptions},
-};
+pub use manager::TransferManager;
+pub use transfer::{TransferConfig, TransferOptions};
+
+pub type BlockId = usize;
+pub type SequenceHash = dynamo_tokens::PositionalLineageHash;

@@ -35,8 +35,8 @@ impl CompletionChecker for CudaEventChecker {
 
 #[cfg(test)]
 mod tests {
-    use crate::v2::physical::manager::TransferManager;
-    use crate::v2::physical::transfer::tests::CudaSleep;
+    use crate::manager::TransferManager;
+    use crate::transfer::tests::CudaSleep;
     use dynamo_memory::nixl::NixlAgent;
     use std::time::{Duration, Instant};
 

@@ -4,10 +4,10 @@
 //! Memcpy executor for host-to-host transfers.
 
 use crate::BlockId;
-use crate::v2::physical::transfer::PhysicalLayout;
-use crate::v2::physical::transfer::TransferContext;
-use crate::v2::physical::transfer::context::TransferCompleteNotification;
-use crate::v2::physical::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
+use crate::transfer::PhysicalLayout;
+use crate::transfer::TransferContext;
+use crate::transfer::context::TransferCompleteNotification;
+use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
 use anyhow::Result;
 use std::ops::Range;
 

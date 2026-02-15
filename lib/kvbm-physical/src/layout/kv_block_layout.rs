@@ -204,7 +204,7 @@ impl std::fmt::Display for BlockDim {
 // ============================================================================
 
 use crate::BlockId;
-use crate::v2::physical::layout::PhysicalLayout;
+use crate::layout::PhysicalLayout;
 use std::sync::Arc;
 
 /// A collection of blocks with a shared layout configuration and block layout type.

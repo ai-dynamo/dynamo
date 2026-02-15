@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-kvbm-physical"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dynamo-memory = { workspace = true }
+dynamo-nova = { workspace = true }
+dynamo-kvbm-kernels = { workspace = true, features = ["static-kernels"] }
+dynamo-kvbm-logical = { workspace = true }
+dynamo-tokens = { workspace = true }
+
+aligned-vec = "0.6.4"
+anyhow = { workspace = true }
+bincode = { version = "2.0.1", features = ["serde", "derive"] }
+blake3 = { version = "1" }
+bytes = { version = "1" }
+cudarc = { workspace = true }
+derive_builder = { workspace = true }
+futures = { workspace = true }
+derive-getters = { version = "0.5" }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+validator = { workspace = true }
+
+nixl-sys = { workspace = true, optional = true }
+
+[features]
+default = []
+collectives = ["dep:nixl-sys"]
+
+[dev-dependencies]
+dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
+rstest = "0.26"

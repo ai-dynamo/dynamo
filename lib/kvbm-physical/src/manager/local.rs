@@ -6,7 +6,7 @@
 use std::ops::Deref;
 
 use super::handle::LayoutHandle;
-use crate::v2::physical::layout::PhysicalLayout;
+use crate::layout::PhysicalLayout;
 
 /// A local physical layout with an assigned handle.
 ///
@@ -69,7 +69,7 @@ impl Deref for LocalLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::physical::layout::{LayoutConfig, PhysicalLayout};
+    use crate::layout::{LayoutConfig, PhysicalLayout};
     use dynamo_memory::nixl::NixlAgent;
 
     fn create_test_agent(name: &str) -> NixlAgent {
