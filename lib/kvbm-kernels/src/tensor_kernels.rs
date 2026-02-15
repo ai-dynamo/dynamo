@@ -144,12 +144,6 @@ unsafe extern "C" {
 
     fn kvbm_kernels_has_memcpy_batch_async() -> bool;
     fn kvbm_kernels_is_stub_build() -> bool;
-    fn kvbm_kernels_memcpy_batch_diagnostic(
-        stream: cudaStream_t,
-        out_err_code: *mut i32,
-        dev_ptrs_from_caller: *const *mut c_void,
-        caller_dev_count: usize,
-    ) -> cudaError_t;
 }
 
 /// Check if cudaMemcpyBatchAsync is available.
@@ -211,33 +205,6 @@ pub unsafe fn memcpy_batch(
             num_copies,
             mode as i32,
             stream,
-        )
-    }
-}
-
-/// Diagnostic: tests cudaMemcpyBatchAsync with multiple stream/memory combos
-/// to isolate whether issues are caused by the stream type or memory allocator.
-///
-/// If `dev_ptrs_from_caller` is non-null, also tests with caller-provided device memory.
-///
-/// # Safety
-/// - `stream` must be a valid CUDA stream handle.
-/// - If provided, `dev_ptrs_from_caller` must point to at least 4 valid device buffers of 256+ bytes.
-pub unsafe fn memcpy_batch_diagnostic(
-    stream: cudaStream_t,
-    out_err_code: &mut i32,
-    dev_ptrs_from_caller: Option<&[*mut c_void]>,
-) -> cudaError_t {
-    let (ptr, count) = match dev_ptrs_from_caller {
-        Some(ptrs) => (ptrs.as_ptr(), ptrs.len()),
-        None => (std::ptr::null(), 0),
-    };
-    unsafe {
-        kvbm_kernels_memcpy_batch_diagnostic(
-            stream,
-            out_err_code as *mut i32,
-            ptr as *const *mut c_void,
-            count,
         )
     }
 }

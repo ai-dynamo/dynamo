@@ -19,7 +19,7 @@ use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr, DriverError}
 use cudarc::runtime::sys as cuda_runtime;
 use kvbm_kernels::{
     MemcpyBatchMode, is_memcpy_batch_available, is_using_stubs, memcpy_batch,
-    memcpy_batch_diagnostic,
+
 };
 
 // Direct FFI for cudaMallocHost / cudaFreeHost.
@@ -438,42 +438,3 @@ fn memcpy_batch_many_pairs() -> Result<(), DriverError> {
 // Diagnostic: mirrors NVIDIA benchmark calling pattern exactly
 // ---------------------------------------------------------------------------
 
-/// Tests cudaMemcpyBatchAsync with 4 combinations of stream/memory origin:
-///   A) own runtime stream + own memory (benchmark pattern — known working)
-///   B) caller (cudarc) stream + own memory (isolates stream)
-///   C) own runtime stream + caller (cudarc) device memory (isolates memory)
-///   D) caller stream + caller device memory (both cudarc)
-///
-/// This tells us whether the issue is stream type, memory allocator, or both.
-#[test]
-fn memcpy_batch_diagnostic_benchmark_pattern() -> Result<(), DriverError> {
-    let (stream, raw) = match cuda_setup() {
-        Some(s) => s,
-        None => return Ok(()),
-    };
-    if !is_memcpy_batch_available() {
-        eprintln!("Skipping: cudaMemcpyBatchAsync not available (CUDA < 12.9)");
-        return Ok(());
-    }
-
-    // Allocate 4 device buffers via cudarc (driver API) for tests C & D
-    let copy_size = 256;
-    let mut dev_slices = Vec::new();
-    let mut dev_ptrs: Vec<*mut c_void> = Vec::new();
-    for _ in 0..4 {
-        let (slice, addr) = alloc_device_zeroed(&stream, copy_size)?;
-        dev_ptrs.push(addr as *mut c_void);
-        dev_slices.push(slice);
-    }
-
-    let mut err_code: i32 = -1;
-    let status = unsafe { memcpy_batch_diagnostic(raw, &mut err_code, Some(&dev_ptrs)) };
-    eprintln!("DIAGNOSTIC overall: status={status:?}, err_code={err_code}");
-    // Test A (own stream + own memory) should always pass
-    assert_eq!(
-        status,
-        cuda_runtime::cudaError::cudaSuccess,
-        "Diagnostic test A (benchmark pattern) failed with error {err_code}"
-    );
-    Ok(())
-}

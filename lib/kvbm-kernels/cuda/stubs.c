@@ -129,18 +129,6 @@ kvbm_kernels_memcpy_batch(
   return 1;  // Unreachable
 }
 
-cudaError_t
-kvbm_kernels_memcpy_batch_diagnostic(
-    cudaStream_t stream, int* out_err_code, void** dev_ptrs_from_caller, size_t caller_dev_count)
-{
-  (void)stream;
-  (void)dev_ptrs_from_caller;
-  (void)caller_dev_count;
-  *out_err_code = 1;
-  STUB_ABORT("kvbm_kernels_memcpy_batch_diagnostic");
-  return 1;
-}
-
 // Returns true if this is the stub library (no real CUDA kernels).
 // Downstream crates can use this to skip CUDA tests at runtime.
 bool

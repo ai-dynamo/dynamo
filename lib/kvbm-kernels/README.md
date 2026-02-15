@@ -146,6 +146,64 @@ pytest tests/
 
 **Environment variables**: `CUDA_ARCHS` (comma-separated SM versions, default `80,86,89,90,100,120`), `CUDA_PATH`/`CUDA_HOME` (toolkit root), `KVBM_REQUIRE_CUDA` (fail build if nvcc missing).
 
+### Benchmarking
+
+```
+root@9eb240f7ded8:/workspace/lib/kvbm-kernels# cargo run --release --example kvbench --features testing-cuda,kvbench -- --num-blocks=1,128 --tokens-per-block=16,64 --
+backend vectorized,batched --direction h2d
+...
+     Running `/workspace/target/release/examples/kvbench --num-blocks=1,128 --tokens-per-block=16,64 --backend vectorized,batched --direction h2d`
+KV Cache Transfer Benchmark
+  Model: Llama 3.1 70B (bf16)
+  Layers: 80, KV heads: 8, Head dim: 128, Outer dim: 2
+  Warmup: 10, Timed: 100
+  Batch API available: true
+  tokens_per_block: [16, 64]
+  num_blocks: [1, 128]
+  directions: [h2d]
+  patterns: [fc_to_fc, lw_to_fc]
+  backends: [vectorized, batched]
+  Total tests: 16
+
+tokens_per_block,num_blocks,pattern,direction,backend,total_bytes,inner_bytes,copy_size,num_copies,median_ms,bandwidth_gbps
+--- tokens_per_block=16, inner=32768 bytes (32 KB), block=5242880 bytes (5.0 MB) ---
+  [1/16] tpb=16 N=  1 fc_to_fc h2d    vectorized   ... 16,1,fc_to_fc,h2d,vectorized,5242880,32768,5242880,1,1.8686,2.81
+2.81 GB/s (1.8686 ms)
+  [2/16] tpb=16 N=  1 fc_to_fc h2d    batched      ... 16,1,fc_to_fc,h2d,batched,5242880,32768,5242880,1,0.2105,24.91
+24.91 GB/s (0.2105 ms)
+  [3/16] tpb=16 N=  1 lw_to_fc h2d    vectorized   ... 16,1,lw_to_fc,h2d,vectorized,5242880,32768,32768,160,0.2171,24.15
+24.15 GB/s (0.2171 ms)
+  [4/16] tpb=16 N=  1 lw_to_fc h2d    batched      ... 16,1,lw_to_fc,h2d,batched,5242880,32768,32768,160,0.2775,18.89
+18.89 GB/s (0.2775 ms)
+  [5/16] tpb=16 N=128 fc_to_fc h2d    vectorized   ... 16,128,fc_to_fc,h2d,vectorized,671088640,32768,5242880,128,26.6097,25.22
+25.22 GB/s (26.6097 ms)
+  [6/16] tpb=16 N=128 fc_to_fc h2d    batched      ... 16,128,fc_to_fc,h2d,batched,671088640,32768,5242880,128,26.6180,25.21
+25.21 GB/s (26.6180 ms)
+  [7/16] tpb=16 N=128 lw_to_fc h2d    vectorized   ... 16,128,lw_to_fc,h2d,vectorized,671088640,32768,32768,20480,26.6034,25.23
+25.23 GB/s (26.6034 ms)
+  [8/16] tpb=16 N=128 lw_to_fc h2d    batched      ... 16,128,lw_to_fc,h2d,batched,671088640,32768,32768,20480,30.3346,22.12
+22.12 GB/s (30.3346 ms)
+--- tokens_per_block=64, inner=131072 bytes (128 KB), block=20971520 bytes (20.0 MB) ---
+  [9/16] tpb=64 N=  1 fc_to_fc h2d    vectorized   ... 64,1,fc_to_fc,h2d,vectorized,20971520,131072,20971520,1,7.5837,2.77
+2.77 GB/s (7.5837 ms)
+  [10/16] tpb=64 N=  1 fc_to_fc h2d    batched      ... 64,1,fc_to_fc,h2d,batched,20971520,131072,20971520,1,0.8334,25.16
+25.16 GB/s (0.8334 ms)
+  [11/16] tpb=64 N=  1 lw_to_fc h2d    vectorized   ... 64,1,lw_to_fc,h2d,vectorized,20971520,131072,131072,160,0.8407,24.95
+24.95 GB/s (0.8407 ms)
+  [12/16] tpb=64 N=  1 lw_to_fc h2d    batched      ... 64,1,lw_to_fc,h2d,batched,20971520,131072,131072,160,0.9020,23.25
+23.25 GB/s (0.9020 ms)
+  [13/16] tpb=64 N=128 fc_to_fc h2d    vectorized   ... 64,128,fc_to_fc,h2d,vectorized,2684354560,131072,20971520,128,106.3677,25.24
+25.24 GB/s (106.3677 ms)
+  [14/16] tpb=64 N=128 fc_to_fc h2d    batched      ... 64,128,fc_to_fc,h2d,batched,2684354560,131072,20971520,128,106.3199,25.25
+25.25 GB/s (106.3199 ms)
+  [15/16] tpb=64 N=128 lw_to_fc h2d    vectorized   ... 64,128,lw_to_fc,h2d,vectorized,2684354560,131072,131072,20480,106.3158,25.25
+25.25 GB/s (106.3158 ms)
+  [16/16] tpb=64 N=128 lw_to_fc h2d    batched      ... 64,128,lw_to_fc,h2d,batched,2684354560,131072,131072,20480,110.0665,24.39
+24.39 GB/s (110.0665 ms)
+
+Done.
+```
+
 ### Troubleshooting
 
 | Symptom                               | Likely Cause / Fix                                                 |
