@@ -33,7 +33,6 @@ VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     component: str
-    endpoint: str
     is_prefill_worker: bool
     is_decode_worker: bool
     custom_jinja_template: Optional[str] = None
