@@ -173,6 +173,13 @@ pub struct AgentHints {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub osl: Option<u32>,
+
+    /// When true, after the assistant turn completes, the system will speculatively
+    /// prefill the predicted next-turn prefix (conversation history with thinking
+    /// content stripped) on a worker to warm the KV cache for the next request.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculative_prefill: Option<bool>,
 }
 
 impl Default for NvExt {

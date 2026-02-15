@@ -1360,6 +1360,10 @@ class KvRouter:
         router_config_override: Optional[JsonLike] = None,
         worker_id: Optional[int] = None,
         dp_rank: Optional[int] = None,
+        extra_args: Optional[JsonLike] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        multi_modal_data: Optional[JsonLike] = None,
+        mm_routing_info: Optional[JsonLike] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -1378,6 +1382,16 @@ class KvRouter:
                     the request will be routed to the specific (worker_id, dp_rank) pair.
                     If only dp_rank is set, the router will select the best worker but
                     force routing to the specified dp_rank.
+            extra_args: Optional extra request arguments to include in the
+                       PreprocessedRequest.
+            block_mm_infos: Optional block-level multimodal metadata aligned to
+                           request blocks. Backward-compatible shortcut; this is
+                           converted to mm_routing_info with routing_token_ids=token_ids.
+            multi_modal_data: Optional multimodal payload map to preserve image/video
+                             data for downstream model execution.
+            mm_routing_info: Optional structured routing-only multimodal payload
+                            (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
+                            used by router selection without changing execution token_ids.
 
         Returns:
             An async iterator yielding generation responses
@@ -1396,6 +1410,7 @@ class KvRouter:
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -1406,6 +1421,9 @@ class KvRouter:
             request_id: Optional request ID. If provided, router states will be updated
                        to track this request (active blocks, lifecycle events). If not
                        provided, this is a query-only operation that doesn't affect state.
+            block_mm_infos: Optional block-level multimodal metadata aligned to request
+                           blocks. When provided, this is used in block hash computation
+                           to enable MM-aware worker selection.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
