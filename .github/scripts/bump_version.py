@@ -84,7 +84,9 @@ IMAGE_TAG_RE = re.compile(
 
 # Wheel filenames and pip install specs:
 #   ai_dynamo_runtime-0.7.0-cp310-..., ai-dynamo==0.8.1, ai-dynamo[vllm]==0.8.1.post1
-WHEEL_FILE_RE = re.compile(r"(ai[_-]dynamo(?:[_-]runtime)?)" rf"(==|-)({_VER})")
+WHEEL_FILE_RE = re.compile(
+    r"(ai[_-]dynamo(?:[_-]runtime)?(?:\[[^\]]*\])?)" rf"(==|-)({_VER})"
+)
 
 # dynamoVersion: "0.6.0" or "0.9.0.post1" in operator samples
 DYNAMO_VERSION_FIELD_RE = re.compile(rf'(dynamoVersion:\s*")({_VER})(")')
@@ -137,22 +139,24 @@ EXCLUDE_PATTERNS = [
 
 # Files that get targeted edits (not catch-all replacement).
 # The catch-all scanner skips these; dedicated functions handle them.
-TARGETED_EDIT_FILES = [
-    "docs/pages/reference/release-artifacts.md",
-    "docs/pages/reference/support-matrix.md",
-    "docs/pages/reference/feature-matrix.md",
-    "pyproject.toml",
-    "Cargo.toml",
-    "lib/bindings/python/Cargo.toml",
-    "lib/gpu_memory_service/setup.py",
-    "deploy/helm/charts/crds/Chart.yaml",
-    "deploy/helm/charts/platform/Chart.yaml",
-    "deploy/helm/charts/platform/components/operator/Chart.yaml",
-    # Operator Go source and samples are handled by update_operator_source()
-    "deploy/operator/api/v1alpha1/dynamographdeploymentrequest_types.go",
-    "deploy/operator/config/samples/nvidia.com_v1alpha1_dynamographdeploymentrequest.yaml",
-    "deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml",
-]
+TARGETED_EDIT_FILES = frozenset(
+    {
+        "docs/pages/reference/release-artifacts.md",
+        "docs/pages/reference/support-matrix.md",
+        "docs/pages/reference/feature-matrix.md",
+        "pyproject.toml",
+        "Cargo.toml",
+        "lib/bindings/python/Cargo.toml",
+        "lib/gpu_memory_service/setup.py",
+        "deploy/helm/charts/crds/Chart.yaml",
+        "deploy/helm/charts/platform/Chart.yaml",
+        "deploy/helm/charts/platform/components/operator/Chart.yaml",
+        # Operator Go source and samples are handled by update_operator_source()
+        "deploy/operator/api/v1alpha1/dynamographdeploymentrequest_types.go",
+        "deploy/operator/config/samples/nvidia.com_v1alpha1_dynamographdeploymentrequest.yaml",
+        "deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml",
+    }
+)
 
 
 def _matches_exclude(rel_path: str) -> bool:
@@ -453,9 +457,6 @@ def update_release_artifacts(
     repo: Path,
     new_ver: str,
     release_date: Optional[str],
-    vllm_ver: Optional[str],
-    sglang_ver: Optional[str],
-    trtllm_ver: Optional[str],
     dry_run: bool,
 ) -> list[str]:
     """Update the Current Release section and add history rows in release-artifacts.md."""
@@ -663,6 +664,20 @@ def check_stale_versions(repo: Path, expected_ver: str) -> list[str]:
                             f"STALE: {rel_path}:{lineno} -- {m.group(0)} (expected {expected_ver})"
                         )
 
+                for m in DYNAMO_VERSION_FIELD_RE.finditer(line):
+                    ver = m.group(2)
+                    if ver != expected_ver and not ver.startswith(expected_ver + "."):
+                        stale.append(
+                            f"STALE: {rel_path}:{lineno} -- {m.group(0)} (expected {expected_ver})"
+                        )
+
+                for m in GIT_CHECKOUT_RE.finditer(line):
+                    ver = m.group(2)
+                    if ver != expected_ver and not ver.startswith(expected_ver + "."):
+                        stale.append(
+                            f"STALE: {rel_path}:{lineno} -- {m.group(0)} (expected {expected_ver})"
+                        )
+
     return stale
 
 
@@ -824,9 +839,13 @@ def main():
         print("\n=== Category 2: Helm charts [SKIPPED] ===")
 
     # Category 2b: Operator Go source and samples
-    # Always run -- these are part of the CRD regen chain and are version-agnostic
-    print("\n=== Category 2b: Operator Go source and samples ===")
-    all_changes.extend(update_operator_source(repo, new_ver, args.dry_run))
+    # Part of the CRD regen chain -- update image tags and dynamoVersion fields
+    # in Go doc comments and sample YAMLs before CRD regeneration.
+    if not args.skip_containers:
+        print("\n=== Category 2b: Operator Go source and samples ===")
+        all_changes.extend(update_operator_source(repo, new_ver, args.dry_run))
+    else:
+        print("\n=== Category 2b: Operator Go source and samples [SKIPPED] ===")
 
     # Category 3: Reference documentation
     if not args.skip_docs:
@@ -834,15 +853,7 @@ def main():
         all_changes.extend(update_feature_matrix(repo, new_ver, args.dry_run))
         all_changes.extend(update_support_matrix(repo, new_ver, args.dry_run))
         all_changes.extend(
-            update_release_artifacts(
-                repo,
-                new_ver,
-                args.release_date,
-                args.vllm_version,
-                args.sglang_version,
-                args.trtllm_version,
-                args.dry_run,
-            )
+            update_release_artifacts(repo, new_ver, args.release_date, args.dry_run)
         )
     else:
         print("\n=== Category 3: Reference documentation [SKIPPED] ===")

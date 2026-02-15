@@ -155,8 +155,9 @@ jobs:
           set -euo pipefail
           CTX="release-ref/container/context.yaml"
 
-          # Install yq
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          # Install yq (pinned version for reproducibility)
+          YQ_VERSION="4.52.2"
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
           sudo chmod +x /usr/local/bin/yq
 
           # vLLM version: strip 'v' prefix
@@ -231,6 +232,13 @@ jobs:
         with:
           go-version-file: main-checkout/deploy/operator/go.mod
 
+      - name: Set up Rust
+        if: env.SKIP_REST != 'true'
+        working-directory: main-checkout
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+
       # yq already installed in "Extract backend metadata" step above
 
       - name: Install controller-gen
@@ -292,6 +300,11 @@ jobs:
           fi
 
           echo "skip_flags=$SKIP_FLAGS" >> $GITHUB_OUTPUT
+
+          # Expose individual flags for conditional regen steps
+          echo "skip_core=$( [[ "$SKIP_FLAGS" == *--skip-core* ]] && echo true || echo false )" >> $GITHUB_OUTPUT
+          echo "skip_containers=$( [[ "$SKIP_FLAGS" == *--skip-containers* ]] && echo true || echo false )" >> $GITHUB_OUTPUT
+          echo "skip_helm=$( [[ "$SKIP_FLAGS" == *--skip-helm* ]] && echo true || echo false )" >> $GITHUB_OUTPUT
           echo "Skip flags: ${SKIP_FLAGS:-none}"
 
       - name: Run version bump script
@@ -322,24 +335,32 @@ jobs:
             --release-date "$BUMP_RELEASE_DATE" \
             $BUMP_SKIP_FLAGS
 
-      # Step 6: Regenerate CRDs
+      # Step 6: Regenerate Cargo.lock (only if core version files were updated)
+      - name: Regenerate Cargo.lock
+        if: env.SKIP_REST != 'true' && steps.flags.outputs.skip_core != 'true'
+        working-directory: main-checkout
+        run: |
+          set -euo pipefail
+          cargo update --workspace
+
+      # Step 7: Regenerate CRDs (only if operator source was updated, i.e. containers not skipped)
       - name: Regenerate CRDs
-        if: env.SKIP_REST != 'true'
+        if: env.SKIP_REST != 'true' && steps.flags.outputs.skip_containers != 'true'
         working-directory: main-checkout/deploy/operator
         run: |
           set -euo pipefail
           make generate
           make manifests
 
-      # Step 7: Regenerate Helm docs
+      # Step 8: Regenerate Helm docs (only if Helm charts were updated)
       - name: Regenerate Helm docs
-        if: env.SKIP_REST != 'true'
+        if: env.SKIP_REST != 'true' && steps.flags.outputs.skip_helm != 'true'
         working-directory: main-checkout/deploy/helm/charts/platform
         run: |
           set -euo pipefail
           helm-docs
 
-      # Step 8: Commit and create PR
+      # Step 9: Commit and create PR
       - name: Commit changes
         if: env.SKIP_REST != 'true'
         working-directory: main-checkout
