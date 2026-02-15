@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::event::Event;
 use crate::handle::EventHandle;
-use crate::slot::EventAwaiter;
+use crate::slot_v2::EventAwaiter;
 
 /// RAII wrapper around an [`Event`] that automatically poisons the event if
 /// dropped without being triggered.

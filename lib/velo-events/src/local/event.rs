@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::system::LocalEventSystem;
 use crate::event::Event;
 use crate::handle::EventHandle;
-use crate::slot::{EventAwaiter, EventEntry};
+use crate::slot_v2::{EventAwaiter, EventEntry};
 use crate::status::EventPoison;
 
 /// Local event handle with ability to trigger exactly once.

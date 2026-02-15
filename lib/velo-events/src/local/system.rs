@@ -14,7 +14,7 @@ use super::event::LocalEvent;
 use crate::event::Event;
 use crate::handle::{EventHandle, LOCAL_FLAG};
 use crate::manager::EventManager;
-use crate::slot::{
+use crate::slot_v2::{
     CompletionKind, EventAwaiter, EventEntry, EventKey, PoisonArc, WaitRegistration,
 };
 use crate::status::{EventPoison, EventStatus};
@@ -113,7 +113,7 @@ impl LocalEventSystem {
                     let handle = entry.key().handle(self.system_id, generation);
                     return Ok(LocalEvent::new(self.clone(), entry, handle));
                 }
-                Err(crate::slot::entry::EventEntryError::GenerationOverflow { key }) => {
+                Err(crate::slot_v2::entry::EventEntryError::GenerationOverflow { key }) => {
                     trace!(
                         ?key,
                         "retiring event entry after exhausting generation space"
@@ -321,7 +321,9 @@ impl LocalEventSystem {
             WaitRegistration::Poisoned(poison) => Ok(EventAwaiter::immediate(Arc::new(
                 CompletionKind::Poisoned(poison),
             ))),
-            WaitRegistration::Pending(waiter) => Ok(waiter),
+            WaitRegistration::Pending => {
+                Ok(EventAwaiter::pending(entry, handle.generation()))
+            }
         }
     }
 

@@ -167,6 +167,9 @@ pub mod local;
 // Internal synchronization (frozen — do not modify)
 pub(crate) mod slot;
 
+// Single-lock replacement for slot (see docs/slot-state-machine.md)
+pub(crate) mod slot_v2;
+
 // ── Re-exports ───────────────────────────────────────────────────────
 
 pub use event::Event;
@@ -175,7 +178,7 @@ pub use guard::EventGuard;
 pub use handle::EventHandle;
 pub use local::{LocalEvent, LocalEventSystem};
 pub use manager::EventManager;
-pub use slot::EventAwaiter;
+pub use slot_v2::EventAwaiter;
 pub use status::{EventPoison, EventStatus, Generation};
 
 #[cfg(test)]
@@ -716,6 +719,95 @@ mod tests {
 
         let err = mgr_b.trigger(handle).unwrap_err();
         assert!(err.to_string().contains("belongs to system"));
+        Ok(())
+    }
+
+    // ── slot_v2 regression tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn race1_no_stale_completion_leakage() -> Result<()> {
+        // Regression test for Race 1: stale completion visible to new-generation waiters.
+        //
+        // Scenario: waiter from gen N is still alive when gen N+1 starts.
+        // In the old slot module, begin_generation would skip clearing completion
+        // when waiter_count > 0, causing gen N+1 waiters to see gen N's result.
+        // The slot_v2 design eliminates this structurally.
+        let system = create_system();
+
+        // Gen 1: create event and a waiter (keeps waiter alive across generation boundary)
+        let event1 = system.new_event()?;
+        let handle1 = event1.handle();
+        let _waiter1 = system.awaiter(handle1)?;
+
+        // Complete gen 1
+        event1.trigger()?;
+
+        // Gen 2: same entry reused from free list
+        let event2 = system.new_event()?;
+        let handle2 = event2.handle();
+        assert_eq!(handle2.local_index(), handle1.local_index());
+        assert_eq!(handle2.generation(), handle1.generation() + 1);
+
+        // Create waiter for gen 2 — must be Pending, not stale Ready from gen 1
+        let waiter2 = system.awaiter(handle2)?;
+
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut waiter2 = waiter2;
+        let poll = std::pin::Pin::new(&mut waiter2).poll(&mut cx);
+        assert!(
+            poll.is_pending(),
+            "Gen N+1 waiter should be Pending, not resolved with stale completion"
+        );
+
+        // Complete gen 2 and verify it resolves
+        event2.trigger()?;
+        waiter2.await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_waiter_resolves_after_generation_transition() -> Result<()> {
+        // Test that a waiter from gen N resolves correctly even after gen N+1 starts.
+        let system = create_system();
+
+        let event1 = system.new_event()?;
+        let handle1 = event1.handle();
+
+        // Create a waiter for gen 1
+        let waiter1 = system.awaiter(handle1)?;
+
+        // Complete gen 1
+        event1.trigger()?;
+
+        // Start gen 2 (same entry reused)
+        let event2 = system.new_event()?;
+        assert_eq!(event2.handle().local_index(), handle1.local_index());
+
+        // Waiter from gen 1 should still resolve correctly
+        waiter1.await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_waiter_with_poison_resolves_after_generation_transition() -> Result<()> {
+        // Poisoned gen N waiter resolves correctly after gen N+1 begins.
+        let system = create_system();
+
+        let event1 = system.new_event()?;
+        let handle1 = event1.handle();
+        let waiter1 = system.awaiter(handle1)?;
+
+        // Poison gen 1
+        system.poison(handle1, "gen1 failed")?;
+
+        // Start gen 2
+        let _event2 = system.new_event()?;
+
+        // Waiter from gen 1 should see the poison
+        let err = waiter1.await.unwrap_err();
+        let poison = err.downcast::<EventPoison>()?;
+        assert_eq!(poison.reason(), "gen1 failed");
         Ok(())
     }
 }
