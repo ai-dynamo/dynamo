@@ -179,6 +179,15 @@ class HandlerBase(BaseGenerativeHandler):
                         "logprob": float(logprob_info.logprob),
                     }
                 )
+            # If ranks were missing (0), we calculate them by sorting by logprob descending
+            # This handles cases where engine backend omits rank information
+            if token_top_logprobs and any(
+                item["rank"] == 0 for item in token_top_logprobs
+            ):
+                token_top_logprobs.sort(key=lambda x: x["logprob"], reverse=True)
+                for rank, item in enumerate(token_top_logprobs, 1):
+                    item["rank"] = rank
+
             top_logprobs.append(token_top_logprobs)
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
@@ -739,9 +748,9 @@ class HandlerBase(BaseGenerativeHandler):
                     log_probs, top_logprobs = self._extract_logprobs(
                         output, num_output_tokens_so_far
                     )
-                    if log_probs:
+                    if log_probs is not None:
                         out["log_probs"] = log_probs
-                    if top_logprobs:
+                    if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
                     if output.finish_reason:
