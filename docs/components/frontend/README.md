@@ -85,7 +85,7 @@ spec:
 |-----------|---------|-------------|
 | `--http-port` | 8000 | HTTP server port |
 | `--kserve-grpc-server` | false | Enable KServe gRPC server |
-| `--router-mode` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct` |
+| `--router-mode` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct`, `least-loaded` |
 
 See the [Frontend Guide](frontend-guide.md) for full configuration options.
 
