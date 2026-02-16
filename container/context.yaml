@@ -51,6 +51,7 @@ vllm:
 sglang:
   base_image: nvcr.io/nvidia/cuda-dl-base
   runtime_image: lmsysorg/sglang
+  sglang_repo: https://github.com/sgl-project/sglang.git
   cuda12.9:
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
     runtime_image_tag: v0.5.7-runtime
