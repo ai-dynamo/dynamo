@@ -104,7 +104,7 @@ pub struct AssistantObject {
     pub model: String,
     /// The system instructions that the assistant uses. The maximum length is 256,000 characters.
     pub instructions: Option<String>,
-    /// A list of tool enabled on the assistant. There can be a maximum of 128 tools per assistant. Tools can be of types `code_interpreter`, `file_search`, or `function`.
+    /// A list of tool enabled on the assistant. There can be a maximum of 1536 tools per assistant. Tools can be of types `code_interpreter`, `file_search`, or `function`.
     #[serde(default)]
     pub tools: Vec<AssistantTools>,
     /// A set of resources that are used by the assistant's tools. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
@@ -211,7 +211,7 @@ pub struct CreateAssistantRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 
-    /// A list of tool enabled on the assistant. There can be a maximum of 128 tools per assistant. Tools can be of types `code_interpreter`, `file_search`, or `function`.
+    /// A list of tool enabled on the assistant. There can be a maximum of 1536 tools per assistant. Tools can be of types `code_interpreter`, `file_search`, or `function`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AssistantTools>>,
 
@@ -260,7 +260,7 @@ pub struct ModifyAssistantRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 
-    /// A list of tool enabled on the assistant. There can be a maximum of 128 tools per assistant. Tools can be of types `code_interpreter`, `file_search`, or `function`.
+    /// A list of tool enabled on the assistant. There can be a maximum of 1536 tools per assistant. Tools can be of types `code_interpreter`, `file_search`, or `function`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AssistantTools>>,
 

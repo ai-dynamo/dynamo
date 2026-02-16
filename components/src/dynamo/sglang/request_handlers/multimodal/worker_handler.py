@@ -4,13 +4,14 @@
 import asyncio
 import json
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import sglang as sgl
 import torch
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component, Context
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -114,28 +115,27 @@ class EmbeddingsProcessor:
     def create_multimodal_item(
         embeddings: torch.Tensor, request: SglangMultimodalRequest
     ) -> dict:
-        """
-        Create multimodal item for SGLang generation.
+        """Create mm_item dict for SGLang's engine.async_generate(image_data=[...]).
 
-        Uses format="precomputed_embedding" since Dynamo's Encoder has already
-        run the vision encoder. SGLang expects 2D embeddings (num_patches, hidden_dim).
+        Uses format="processor_output" with precomputed_embeddings so SGLang
+        bypasses get_image_feature() entirely (model-agnostic path).
         """
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
 
-        # SGLang expects 2D tensor for precomputed_embedding format
-        # Encoder outputs 3D (1, num_patches, hidden_dim) for internal consistency
-        # Squeeze batch dimension at SGLang boundary
-        if precomputed.dim() == 3 and precomputed.shape[0] == 1:
-            precomputed = precomputed.squeeze(0)
+        # Convert list fields back to tensors (JSON roundtrip loses tensor type)
+        processor_output = request.processor_output or {}
+        for key, value in processor_output.items():
+            if isinstance(value, list):
+                processor_output[key] = torch.tensor(value)
 
-        grid_thw_tensor = torch.tensor(request.image_grid_thw)
-
-        mm_item = {
-            "format": "precomputed_embedding",
-            "feature": precomputed,
-            "image_grid_thw": grid_thw_tensor,
-            "modality": "IMAGE",
-        }
+        mm_item = dict(processor_output)
+        mm_item.update(
+            {
+                "format": "processor_output",
+                "precomputed_embeddings": precomputed,
+                "modality": "IMAGE",
+            }
+        )
 
         return mm_item
 
@@ -165,7 +165,9 @@ class StreamProcessor:
                     if finish_reason:
                         output.update(
                             {
-                                "finish_reason": finish_reason.get("type", "stop"),
+                                "finish_reason": normalize_finish_reason(
+                                    finish_reason.get("type", "stop")
+                                ),
                                 "finished": True,
                             }
                         )
@@ -248,8 +250,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         prefill_client: Client = None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ):
-        super().__init__(component, engine, config, None)
+        super().__init__(component, engine, config, None, None, shutdown_event)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
@@ -423,8 +426,14 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
     Processes multimodal inputs and coordinates with decode worker.
     """
 
-    def __init__(self, component: Component, engine: sgl.Engine, config: Config):
-        super().__init__(component, engine, config)
+    def __init__(
+        self,
+        component: Component,
+        engine: sgl.Engine,
+        config: Config,
+        shutdown_event: Optional[asyncio.Event] = None,
+    ):
+        super().__init__(component, engine, config, None, None, shutdown_event)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()

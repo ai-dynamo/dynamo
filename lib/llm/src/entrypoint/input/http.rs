@@ -7,7 +7,7 @@ use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{EngineConfig, EngineFactoryCallback, RouterConfig, input::common},
+    entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
     namespace::is_global_namespace,
     types::openai::{
@@ -54,10 +54,11 @@ pub async fn run(
     let http_service = match engine_config {
         EngineConfig::Dynamic {
             ref model,
-            ref engine_factory,
+            ref chat_engine_factory,
         } => {
-            // This allows the /health endpoint to query store for active instances
-            http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
+            // Pass the discovery client so the /health endpoint can query active instances
+            http_service_builder =
+                http_service_builder.discovery(Some(distributed_runtime.discovery()));
             let http_service = http_service_builder.build()?;
 
             let router_config = model.router_config();
@@ -79,7 +80,7 @@ pub async fn run(
                 target_namespace,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
-                engine_factory.clone(),
+                chat_engine_factory.clone(),
             )
             .await?;
             http_service
@@ -157,14 +158,14 @@ async fn run_watcher(
     target_namespace: Option<String>,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
-    engine_factory: Option<EngineFactoryCallback>,
+    chat_engine_factory: Option<ChatEngineFactoryCallback>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,
         router_config,
         migration_limit,
-        engine_factory,
+        chat_engine_factory,
         metrics.clone(),
     );
     tracing::debug!("Waiting for remote model");
