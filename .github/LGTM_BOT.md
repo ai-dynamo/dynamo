@@ -39,7 +39,7 @@ Automated merge readiness tracking and AI-powered CI diagnostics.
 | File | Trigger | Purpose |
 |------|---------|---------|
 | `lgtm-bot.yml` | CI completion, reviews, PR sync | Label + checklist + reviewer request |
-| `lgtm-bot-diagnose.yml` | `/diagnose` comment, `workflow_dispatch` | AI diagnostics (GitHub Actions + GitLab) |
+| `lgtm-bot-diagnose.yml` | `/diagnose` comment | AI diagnostics (GitHub Actions + GitLab) |
 
 ## Secrets
 
