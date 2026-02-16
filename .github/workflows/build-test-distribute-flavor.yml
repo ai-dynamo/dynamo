@@ -365,7 +365,6 @@ jobs:
       - name: Run GPU tests (sequential)
         if: ${{ inputs.run_gpu_tests && inputs.platform == 'amd64' }}
         timeout-minutes: ${{ inputs.test_gpu_timeout_minutes }}
-        if: ${{ inputs.platform == 'amd64' }} # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
