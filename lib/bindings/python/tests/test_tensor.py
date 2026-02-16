@@ -8,7 +8,7 @@ import os
 import pytest
 import uvloop
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
 
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
@@ -34,8 +34,8 @@ async def test_register(runtime: DistributedRuntime):
 
     assert model_config == runtime_config.get_tensor_model_config()
 
-    # Use register_llm for tensor-based backends (skips HuggingFace downloads)
-    await register_llm(
+    # Use register_model for tensor-based backends (skips HuggingFace downloads)
+    await register_model(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
