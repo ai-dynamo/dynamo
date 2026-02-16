@@ -125,4 +125,15 @@ runs:
       shell: bash
       run: |
         echo "Bootstrapping buildkit..."
-        docker buildx inspect ${{ inputs.builder_name }}  --bootstrap
+        for i in 1 2 3; do
+          if docker buildx inspect ${{ inputs.builder_name }} --bootstrap; then
+            echo "Bootstrap succeeded on attempt $i"
+            break
+          fi
+          if [ "$i" -eq 3 ]; then
+            echo "::error::Bootstrap failed after 3 attempts"
+            exit 1
+          fi
+          echo "::warning::Bootstrap attempt $i failed, retrying in 10s..."
+          sleep 10
+        done
