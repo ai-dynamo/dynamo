@@ -1,14 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Logical block lifecycle management for KVBM.
-//!
-//! This crate provides the core block lifecycle system:
-//! - Type-safe state transitions (Reset -> Complete -> Registered)
-//! - Block registry with deduplication and attachments
-//! - Active/inactive/reset pool management
-//! - Event pipeline for distributed coordination
-//! - Block manager orchestration
+#![doc = include_str!("../README.md")]
 
 pub mod blocks;
 pub mod events;
