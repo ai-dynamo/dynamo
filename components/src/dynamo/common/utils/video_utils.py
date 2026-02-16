@@ -23,7 +23,7 @@ DEFAULT_VIDEO_FPS = 16
 DEFAULT_VIDEO_NUM_FRAMES = 97
 
 
-def parse_video_size(
+def parse_size(
     size: str | None,
     default_w: int = DEFAULT_VIDEO_WIDTH,
     default_h: int = DEFAULT_VIDEO_HEIGHT,
