@@ -10,9 +10,9 @@ system can be built on top via active messaging.
 
 | Operation | What it does |
 |-----------|-------------|
-| **Create** | `system.new_event()` allocates a pending event and returns an `Event` — an RAII guard you can trigger or await. |
-| **Await** | `system.awaiter(handle)?.await` suspends the current task until the event completes (or is poisoned). |
-| **Merge** | `system.merge_events(vec![a, b, c])` creates a new event that completes only after **all** inputs complete — this is how you build precondition graphs. |
+| **Create** | `manager.new_event()` allocates a pending event and returns an `Event` — an RAII guard you can trigger or await. |
+| **Await** | `manager.awaiter(handle)?.await` suspends the current task until the event completes (or is poisoned). |
+| **Merge** | `manager.merge_events(vec![a, b, c])` creates a new event that completes only after **all** inputs complete — this is how you build precondition graphs. |
 | **Poison** | Events can fail with a reason string. Dropping an `Event` without triggering it auto-poisons so events are never silently lost. |
 
 ## Usage
@@ -20,20 +20,19 @@ system can be built on top via active messaging.
 ### Create, trigger, await
 
 ```rust,no_run
-use std::sync::Arc;
-use velo_events::{EventManager, LocalEventSystem, Event};
+use velo_events::EventManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let system = LocalEventSystem::new();
+    let manager = EventManager::local();
 
-    let event = system.new_event()?;
+    let event = manager.new_event()?;
     let handle = event.handle();
 
     // Spawn a task that waits for the event
-    let sys: std::sync::Arc<LocalEventSystem> = Arc::clone(&system);
+    let mgr = manager.clone();
     let waiter = tokio::spawn(async move {
-        sys.awaiter(handle)?.await
+        mgr.awaiter(handle)?.await
     });
 
     // Complete the event — consumes self, disarms the drop guard
@@ -54,12 +53,12 @@ To opt out of auto-poisoning (e.g. when handing ownership to a manager-level
 operation), call `into_handle()`:
 
 ```rust,no_run
-use velo_events::{EventManager, LocalEventSystem, Event};
+use velo_events::EventManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let system = LocalEventSystem::new();
-    let event = system.new_event()?;
+    let manager = EventManager::local();
+    let event = manager.new_event()?;
     let handle = event.handle();
 
     // If this function returns early or panics, the event
@@ -78,17 +77,17 @@ fn do_work() -> anyhow::Result<()> { Ok(()) }
 `merge_events` lets you express "wait for all of these before proceeding":
 
 ```rust,no_run
-use velo_events::{EventManager, LocalEventSystem, Event};
+use velo_events::EventManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let system = LocalEventSystem::new();
+    let manager = EventManager::local();
 
-    let load_weights = system.new_event()?;
-    let load_tokenizer = system.new_event()?;
+    let load_weights = manager.new_event()?;
+    let load_tokenizer = manager.new_event()?;
 
     // merged event completes only after both inputs complete
-    let ready = system.merge_events(vec![
+    let ready = manager.merge_events(vec![
         load_weights.handle(),
         load_tokenizer.handle(),
     ])?;
@@ -96,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     load_weights.trigger()?;
     load_tokenizer.trigger()?;
 
-    system.awaiter(ready)?.await?;
+    manager.awaiter(ready)?.await?;
     Ok(())
 }
 ```
@@ -110,20 +109,20 @@ When an event is poisoned, all awaiters receive an error containing the
 reason. Merged events accumulate poison reasons from their inputs:
 
 ```rust,no_run
-use velo_events::{Event, EventManager, LocalEventSystem, EventPoison};
+use velo_events::{EventManager, EventPoison};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let system = LocalEventSystem::new();
+    let manager = EventManager::local();
 
-    let a = system.new_event()?;
-    let b = system.new_event()?;
-    let merged = system.merge_events(vec![a.handle(), b.handle()])?;
+    let a = manager.new_event()?;
+    let b = manager.new_event()?;
+    let merged = manager.merge_events(vec![a.handle(), b.handle()])?;
 
-    system.poison(a.handle(), "a failed")?;
-    system.poison(b.handle(), "b failed")?;
+    manager.poison(a.handle(), "a failed")?;
+    manager.poison(b.handle(), "b failed")?;
 
-    let err = system.awaiter(merged)?.await.unwrap_err();
+    let err = manager.awaiter(merged)?.await.unwrap_err();
     let poison = err.downcast::<EventPoison>()?;
     assert!(poison.reason().contains("a failed"));
     assert!(poison.reason().contains("b failed"));
@@ -143,14 +142,14 @@ Instead, create a separate event per outcome arm and use `tokio::select!` to
 race them:
 
 ```rust,no_run
-use velo_events::{EventManager, LocalEventSystem, Event};
+use velo_events::EventManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let system = LocalEventSystem::new();
+    let manager = EventManager::local();
 
-    let success_event = system.new_event()?;
-    let failure_event = system.new_event()?;
+    let success_event = manager.new_event()?;
+    let failure_event = manager.new_event()?;
 
     let success_handle = success_event.handle();
     let failure_handle = failure_event.handle();
@@ -159,8 +158,8 @@ async fn main() -> anyhow::Result<()> {
     // success_event.trigger()? OR failure_event.trigger()?
 
     // Consumer races:
-    let success_awaiter = system.awaiter(success_handle)?;
-    let failure_awaiter = system.awaiter(failure_handle)?;
+    let success_awaiter = manager.awaiter(success_handle)?;
+    let failure_awaiter = manager.awaiter(failure_handle)?;
     tokio::select! {
         ok = success_awaiter => { ok?; /* success path */ }
         err = failure_awaiter => { err?; /* failure path */ }
@@ -171,17 +170,62 @@ async fn main() -> anyhow::Result<()> {
 
 ## Distributed events
 
-For distributed deployments, `DistributedEventFactory` creates an event system
-whose handles embed a non-zero `worker_id` for global uniqueness. The local
-event machinery stays the same — coordination across workers is handled by an
-active-messaging layer built on top.
+For distributed deployments, `EventBackend` and `EventSystemBase` are public
+so you can implement custom routing. Create a base with an explicit system_id,
+implement `EventBackend` to route local vs remote handles, and pass both to
+`EventManager::new`:
+
+```rust,no_run
+use velo_events::{EventSystemBase, EventBackend, EventManager, EventHandle, EventAwaiter};
+use anyhow::Result;
+use std::sync::Arc;
+
+struct MyDistributedBackend {
+    local: Arc<EventSystemBase>,
+    // router: MyRouter,
+}
+
+impl EventBackend for MyDistributedBackend {
+    fn trigger(&self, handle: EventHandle) -> Result<()> {
+        if handle.system_id() == self.local.system_id() {
+            self.local.trigger_inner(handle)   // fast local path
+        } else {
+            todo!("route over network")
+        }
+    }
+
+    fn poison(&self, handle: EventHandle, reason: Arc<str>) -> Result<()> {
+        if handle.system_id() == self.local.system_id() {
+            self.local.poison_inner(handle, reason)
+        } else {
+            todo!("route over network")
+        }
+    }
+
+    fn awaiter(&self, handle: EventHandle) -> Result<EventAwaiter> {
+        if handle.system_id() == self.local.system_id() {
+            self.local.awaiter_inner(handle)
+        } else {
+            todo!("route over network")
+        }
+    }
+}
+
+let base = EventSystemBase::distributed(0x42);
+let backend = Arc::new(MyDistributedBackend { local: base.clone() });
+let manager = EventManager::new(base, backend);
+// handles produced by this manager carry system_id = 0x42
+```
+
+For simpler cases where you just need handles stamped with a system_id (without
+custom routing), `DistributedEventFactory` is a convenience wrapper:
 
 ```rust,no_run
 use velo_events::DistributedEventFactory;
 
 let factory = DistributedEventFactory::new(0x42.try_into().unwrap());
-let system = factory.event_manager();
-// handles produced by this system carry system_id = 0x42
+let manager = factory.event_manager();
+// handles produced by this manager carry system_id = 0x42
 ```
 
 ## Resources

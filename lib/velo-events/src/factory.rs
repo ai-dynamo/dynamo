@@ -5,17 +5,18 @@
 
 use std::{num::NonZero, sync::Arc};
 
-use crate::local::LocalEventSystem;
+use crate::base::EventSystemBase;
+use crate::manager::EventManager;
 
-/// Factory that creates a [`LocalEventSystem`] pre-configured with a system_id.
+/// Factory that creates an [`EventManager`] pre-configured with a system_id.
 ///
 /// Use this when events need globally-unique handles that embed a non-zero
 /// system identifier (e.g. in a Nova-managed distributed system).
 ///
-/// For purely local use, call [`LocalEventSystem::new()`] directly instead.
+/// For purely local use, call [`EventManager::local()`] directly instead.
 pub struct DistributedEventFactory {
     system_id: u64,
-    system: Arc<LocalEventSystem>,
+    base: Arc<EventSystemBase>,
 }
 
 impl DistributedEventFactory {
@@ -23,7 +24,7 @@ impl DistributedEventFactory {
     pub fn new(system_id: NonZero<u64>) -> Self {
         Self {
             system_id: system_id.get(),
-            system: LocalEventSystem::with_system_id(system_id.get()),
+            base: EventSystemBase::distributed(system_id.get()),
         }
     }
 
@@ -32,13 +33,19 @@ impl DistributedEventFactory {
         self.system_id
     }
 
-    /// Borrow the underlying event system.
-    pub fn system(&self) -> &Arc<LocalEventSystem> {
-        &self.system
+    /// Borrow the underlying event system base.
+    pub fn system(&self) -> &Arc<EventSystemBase> {
+        &self.base
     }
 
-    /// Clone the `Arc` to the underlying event system.
-    pub fn event_manager(&self) -> Arc<LocalEventSystem> {
-        Arc::clone(&self.system)
+    /// Create an [`EventManager`] backed by this factory's system.
+    ///
+    /// Currently uses the local backend; a future distributed backend will
+    /// route remote handles over the network.
+    pub fn event_manager(&self) -> EventManager {
+        EventManager::new(
+            self.base.clone(),
+            self.base.clone() as _,
+        )
     }
 }

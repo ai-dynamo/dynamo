@@ -4,7 +4,7 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 
-// Public trait API
+// Core types
 mod event;
 mod manager;
 
@@ -13,18 +13,18 @@ pub mod factory;
 mod handle;
 mod status;
 
-// Local implementation
-pub mod local;
+// Core event storage engine
+mod base;
 
 // Internal synchronization (see docs/slot-state-machine.md)
 pub(crate) mod slot;
 
 // ── Re-exports ───────────────────────────────────────────────────────
 
-pub use event::Event;
+pub use base::EventSystemBase;
+pub use event::{Event, EventBackend};
 pub use factory::DistributedEventFactory;
 pub use handle::EventHandle;
-pub use local::{LocalEvent, LocalEventSystem};
 pub use manager::EventManager;
 pub use slot::EventAwaiter;
 pub use status::{EventPoison, EventStatus, Generation};
@@ -35,11 +35,9 @@ mod tests {
     use anyhow::Result;
     use tokio::task::yield_now;
 
-    fn create_system() -> Arc<LocalEventSystem> {
-        LocalEventSystem::new()
+    fn create_system() -> EventManager {
+        EventManager::local()
     }
-
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn wait_resolves_after_trigger() -> Result<()> {
@@ -48,7 +46,7 @@ mod tests {
         let handle = event.handle();
 
         let waiter = {
-            let system = Arc::clone(&system);
+            let system = system.clone();
             tokio::spawn(async move { system.awaiter(handle)?.await })
         };
 
@@ -108,7 +106,7 @@ mod tests {
 
         let mut waiters = Vec::new();
         for _ in 0..8 {
-            let system_clone = Arc::clone(&system);
+            let system_clone = system.clone();
             waiters.push(tokio::spawn(
                 async move { system_clone.awaiter(handle)?.await },
             ));
@@ -202,9 +200,9 @@ mod tests {
         Ok(())
     }
 
-    // ── Trait-based tests ─────────────────────────────────────────────
+    // ── Concrete manager tests ────────────────────────────────────────
 
-    fn exercise_manager(mgr: &impl EventManager) -> Result<()> {
+    fn exercise_manager(mgr: &EventManager) -> Result<()> {
         let event = mgr.new_event()?;
         let handle = event.into_handle();
 
@@ -269,7 +267,7 @@ mod tests {
         assert!(handle.is_distributed());
 
         // system() returns the same underlying system
-        assert!(Arc::ptr_eq(factory.system(), &mgr));
+        assert!(std::sync::Arc::ptr_eq(factory.system(), mgr.base()));
 
         event.trigger()?;
         mgr.awaiter(handle)?.await?;
@@ -355,7 +353,7 @@ mod tests {
         Ok(())
     }
 
-    // ── LocalEvent::poison (local/event.rs) ──────────────────────────
+    // ── Event::poison (direct) ──────────────────────────────────────
 
     #[tokio::test]
     async fn event_poison_directly() -> Result<()> {
@@ -400,7 +398,7 @@ mod tests {
         Ok(())
     }
 
-    // ── System-level edge cases (local/system.rs) ────────────────────
+    // ── System-level edge cases ──────────────────────────────────────
 
     #[tokio::test]
     async fn poison_reason_helper() -> Result<()> {

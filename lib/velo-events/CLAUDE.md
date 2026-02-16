@@ -22,19 +22,19 @@ cargo check -p velo-events
 
 `velo-events` is a generational event system for coordinating async awaiters with minimal overhead. Events can be triggered (success) or poisoned (error), and entries are recycled across generations.
 
-### Trait layer (`event.rs`, `manager.rs`)
+### Core types (`event.rs`, `manager.rs`)
 
-- **`Event`** — RAII guard for a single event. Dropping without calling `trigger(self)` or `poison(self, ...)` auto-poisons the event. `into_handle(self)` disarms the guard and returns the bare handle. `trigger` and `poison` consume `self`, preventing double-completion at compile time.
-- **`EventManager`** — creates/manages a collection of events: `new_event`, `awaiter`, `poll`, `trigger`, `poison`, `merge_events`, `force_shutdown`.
+- **`Event`** — concrete RAII guard for a single event. Dropping without calling `trigger(self)` or `poison(self, ...)` auto-poisons the event. `into_handle(self)` disarms the guard and returns the bare handle. `trigger` and `poison` consume `self`, preventing double-completion at compile time.
+- **`EventManager`** — concrete struct that manages a collection of events: `new_event`, `awaiter`, `poll`, `trigger`, `poison`, `merge_events`, `force_shutdown`. Create with `EventManager::local()` for local use or `EventManager::new(base, backend)` for distributed setups.
+- **`EventBackend`** — public trait with 3 methods (`trigger`, `poison`, `awaiter`) that serves as the routing customization point. `EventSystemBase` implements this for the local path; distributed backends implement it to add network routing.
 
-### Local implementation (`local/`)
+### Base implementation (`base/`)
 
-- **`LocalEventSystem`** — the concrete `EventManager` implementation. Uses `DashMap` for concurrent event storage with a free-list for entry recycling. `EventManager` is implemented on `Arc<LocalEventSystem>`, not `LocalEventSystem` directly.
-- **`LocalEvent`** — concrete `Event` using `Option<LocalEventInner>` take-pattern. The `Drop` impl poisons with a static `LazyLock<Arc<str>>` reason when the inner is still `Some`.
+- **`EventSystemBase`** — the core event storage, allocation, and recycling engine. Uses `DashMap` for concurrent event storage with a free-list for entry recycling. Implements `EventBackend` for local trigger/poison/awaiter routing. Constructors: `EventSystemBase::local()` (random system_id, local flag set) and `EventSystemBase::distributed(system_id)` (explicit id, no local flag). Public `_inner` methods (`trigger_inner`, `poison_inner`, `awaiter_inner`) allow distributed backends to delegate local operations.
 
 ### Handle encoding (`handle.rs`)
 
-`EventHandle` packs identity into a single `u128`: `[system_id: 64][local_index: 32][generation: 32]`. Bit 31 of `local_index` distinguishes local (bit set) from distributed (bit clear) handles. Both local and distributed systems have unique non-zero `system_id` values. `LocalEventSystem` validates that handles belong to the system that created them.
+`EventHandle` packs identity into a single `u128`: `[system_id: 64][local_index: 32][generation: 32]`. Bit 31 of `local_index` distinguishes local (bit set) from distributed (bit clear) handles. Both local and distributed systems have unique non-zero `system_id` values. `EventSystemBase` validates that handles belong to the system that created them.
 
 ### Slot machinery (`slot/`)
 
@@ -49,12 +49,13 @@ Key types:
 
 ### Factory (`factory.rs`)
 
-`DistributedEventFactory` creates a `LocalEventSystem` pre-configured with a `system_id` for distributed (Nova-managed) deployments.
+`DistributedEventFactory` creates an `EventManager` pre-configured with a `system_id` for distributed (Nova-managed) deployments.
 
 ## Key Design Decisions
 
 - `Event` is an RAII guard by default — dropping without triggering auto-poisons. `into_handle()` is the explicit opt-out for manager-level operations. `Clone` is intentionally not implemented; each event is a unique ownership token.
-- `EventManager` is implemented for `Arc<LocalEventSystem>`, requiring callers to wrap the system in an `Arc`. `LocalEventSystem::new()` returns `Arc<Self>` directly.
+- `EventManager` is a concrete `Clone` struct holding `Arc<EventSystemBase>` (lifecycle) + `Arc<dyn EventBackend>` (routing). `EventManager::local()` creates both from the same `EventSystemBase`. `EventManager::new(base, backend)` accepts a custom backend for distributed routing.
+- `EventBackend` is the public routing trait (3 methods) that enables distributed routing without touching the core event lifecycle. Distributed backends call `EventSystemBase::trigger_inner` / `poison_inner` / `awaiter_inner` for local handles and route remote handles over the network.
 - Slot entries track a `BTreeMap<Generation, PoisonArc>` for poison history, allowing past-generation poison queries.
-- Generation overflow causes entry retirement and a new entry allocation (transparent retry loop in `new_event_inner`).
+- Generation overflow causes entry retirement and a new entry allocation (transparent retry loop in `new_event_with_backend`).
 - `force_shutdown` poisons all pending events and rejects future allocations via an `AtomicBool` flag.

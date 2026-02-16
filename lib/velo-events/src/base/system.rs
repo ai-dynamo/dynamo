@@ -10,10 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio_util::task::TaskTracker;
 use tracing::{error, trace};
 
-use super::event::LocalEvent;
-use crate::event::Event;
+use crate::event::{Event, EventBackend};
 use crate::handle::{EventHandle, LOCAL_FLAG};
-use crate::manager::EventManager;
 use crate::slot::{
     CompletionKind, EventAwaiter, EventEntry, EventKey, PoisonArc, PoisonOutcome, WaitRegistration,
 };
@@ -22,13 +20,18 @@ use crate::status::{EventPoison, EventStatus};
 /// Maximum counter value for local indices (31-bit counter space, ~2B entries).
 const MAX_LOCAL_INDEX: u32 = (1u32 << 31) - 1;
 
-/// Local event system with reusable event entries.
+/// Core event storage, allocation, and recycling engine.
 ///
-/// Events created by a `LocalEventSystem` are bound to that system. Passing
-/// a handle from one local system to another will return an error. For
-/// cross-system event coordination, use a distributed event system that
-/// implements [`EventManager`] with routing logic for remote handles.
-pub struct LocalEventSystem {
+/// Handles event storage, allocation, recycling, and generation tracking.
+/// This is the implementation backing [`EventManager`](crate::EventManager).
+/// Events created by an `EventSystemBase` are bound to that system. Passing
+/// a handle from one system to another will return an error.
+///
+/// `EventSystemBase` also implements [`EventBackend`] for the local path,
+/// so it can be used directly as both the base and the backend for local-only
+/// setups. For distributed setups, implement [`EventBackend`] on your own type
+/// and delegate local operations to the `_inner` methods on `EventSystemBase`.
+pub struct EventSystemBase {
     system_id: u64,
     is_local: bool,
     events: DashMap<EventKey, Arc<EventEntry>>,
@@ -38,7 +41,7 @@ pub struct LocalEventSystem {
     shutdown: AtomicBool,
 }
 
-impl LocalEventSystem {
+impl EventSystemBase {
     /// Create a new local event system with a random system_id.
     ///
     /// The system_id is derived from `xxh3_64(Uuid::new_v4())` to ensure
@@ -47,13 +50,16 @@ impl LocalEventSystem {
     ///
     /// Events created by this system can only be triggered, awaited, poisoned,
     /// or polled through this same system instance.
-    pub fn new() -> Arc<Self> {
+    pub fn local() -> Arc<Self> {
         let system_id = xxhash_rust::xxh3::xxh3_64(uuid::Uuid::new_v4().as_bytes());
         Self::create(system_id, true)
     }
 
     /// Create a system pre-configured with a system_id for distributed use.
-    pub(crate) fn with_system_id(system_id: u64) -> Arc<Self> {
+    ///
+    /// Handles produced by this system do **not** have the local flag set,
+    /// distinguishing them from local handles.
+    pub fn distributed(system_id: u64) -> Arc<Self> {
         Self::create(system_id, false)
     }
 
@@ -69,7 +75,7 @@ impl LocalEventSystem {
         })
     }
 
-    /// Each [`LocalEventSystem`] has a unique system_id.
+    /// The unique system identity stamped into every handle produced by this system.
     pub fn system_id(&self) -> u64 {
         self.system_id
     }
@@ -88,9 +94,14 @@ impl LocalEventSystem {
         Ok(())
     }
 
-    // ── Internal helpers ──────────────────────────────────────────────
+    // ── Backend-aware event creation ─────────────────────────────────
 
-    fn new_event_inner(self: &Arc<Self>) -> Result<LocalEvent> {
+    /// Allocate a new pending event, using `backend` for the RAII guard's
+    /// completion routing.
+    pub(crate) fn new_event_with_backend(
+        self: &Arc<Self>,
+        backend: Arc<dyn EventBackend>,
+    ) -> Result<Event> {
         if self.is_shutdown() {
             bail!("Event system shutdown in progress");
         }
@@ -108,7 +119,7 @@ impl LocalEventSystem {
                         bail!("Event system shutdown in progress");
                     }
                     let handle = entry.key().handle(self.system_id, generation);
-                    return Ok(LocalEvent::new(self.clone(), entry, handle));
+                    return Ok(Event::new(handle, backend));
                 }
                 Err(crate::slot::entry::EventEntryError::GenerationOverflow { key }) => {
                     trace!(
@@ -126,42 +137,12 @@ impl LocalEventSystem {
         }
     }
 
-    pub(crate) fn awaiter_inner(&self, handle: EventHandle) -> Result<EventAwaiter> {
-        self.validate_handle(handle)?;
-        self.wait_local(handle)
-    }
-
-    fn poll_inner(&self, handle: EventHandle) -> Result<EventStatus> {
-        self.validate_handle(handle)?;
-        self.poll_local(handle)
-    }
-
-    fn trigger_inner(&self, handle: EventHandle) -> Result<()> {
-        self.validate_handle(handle)?;
-        let entry = self
-            .events
-            .get(&EventKey::from_handle(handle))
-            .map(|guard| guard.clone())
-            .ok_or_else(|| anyhow!("Unknown event {}", handle))?;
-
-        self.trigger_local_entry(entry, handle)
-    }
-
-    fn poison_inner(&self, handle: EventHandle, reason: impl Into<Arc<str>>) -> Result<()> {
-        self.validate_handle(handle)?;
-        let reason: Arc<str> = reason.into();
-
-        let entry = self
-            .events
-            .get(&EventKey::from_handle(handle))
-            .map(|guard| guard.clone())
-            .ok_or_else(|| anyhow!("Unknown event {}", handle))?;
-
-        let poison = Arc::new(EventPoison::new(handle, reason));
-        self.poison_local_entry(entry, handle, poison)
-    }
-
-    fn merge_events_inner(self: &Arc<Self>, inputs: Vec<EventHandle>) -> Result<EventHandle> {
+    /// Merge events, using `backend` for the spawned task's completion routing.
+    pub(crate) fn merge_events_with(
+        self: &Arc<Self>,
+        inputs: Vec<EventHandle>,
+        backend: Arc<dyn EventBackend>,
+    ) -> Result<EventHandle> {
         if inputs.is_empty() {
             bail!("Cannot merge empty event list");
         }
@@ -170,7 +151,7 @@ impl LocalEventSystem {
             self.validate_handle(*input)?;
         }
 
-        let merged = self.new_event_inner()?;
+        let merged = self.new_event_with_backend(backend.clone())?;
         // Disarm the RAII guard — the spawned task owns completion via handle.
         let handle = merged.into_handle();
 
@@ -179,7 +160,7 @@ impl LocalEventSystem {
             let mut failure_reasons: Option<Vec<Arc<str>>> = None;
 
             for dependency in &inputs {
-                let wait_result = match system.awaiter_inner(*dependency) {
+                let wait_result = match backend.awaiter(*dependency) {
                     Ok(waiter) => waiter.await,
                     Err(err) => Err(err),
                 };
@@ -207,10 +188,10 @@ impl LocalEventSystem {
             }
 
             let result = match failure_reasons {
-                None => system.trigger_inner(handle),
+                None => backend.trigger(handle),
                 Some(reasons) => {
                     if reasons.len() == 1 {
-                        system.poison_inner(handle, reasons[0].clone())
+                        backend.poison(handle, reasons[0].clone())
                     } else {
                         let mut message = String::from("Multiple merge dependencies failed:\n");
                         for (idx, reason) in reasons.iter().enumerate() {
@@ -219,7 +200,7 @@ impl LocalEventSystem {
                             }
                             message.push_str(reason.as_ref());
                         }
-                        system.poison_inner(handle, message)
+                        backend.poison(handle, Arc::from(message))
                     }
                 }
             };
@@ -227,12 +208,61 @@ impl LocalEventSystem {
             if let Err(e) = result {
                 error!("Failed to complete merged event {}: {}", handle, e);
             }
+
+            drop(system); // ensure system lives until the task completes
         });
 
         Ok(handle)
     }
 
-    fn force_shutdown_inner(&self, reason: impl Into<Arc<str>>) {
+    // ── Public inner methods (for distributed backends) ──────────────
+
+    /// Trigger a local event by handle. Validates that the handle belongs to this system.
+    ///
+    /// Distributed backends should call this for handles that belong to the local system.
+    pub fn trigger_inner(&self, handle: EventHandle) -> Result<()> {
+        self.validate_handle(handle)?;
+        let entry = self
+            .events
+            .get(&EventKey::from_handle(handle))
+            .map(|guard| guard.clone())
+            .ok_or_else(|| anyhow!("Unknown event {}", handle))?;
+
+        self.trigger_local_entry(entry, handle)
+    }
+
+    /// Poison a local event by handle. Validates that the handle belongs to this system.
+    ///
+    /// Distributed backends should call this for handles that belong to the local system.
+    pub fn poison_inner(&self, handle: EventHandle, reason: impl Into<Arc<str>>) -> Result<()> {
+        self.validate_handle(handle)?;
+        let reason: Arc<str> = reason.into();
+
+        let entry = self
+            .events
+            .get(&EventKey::from_handle(handle))
+            .map(|guard| guard.clone())
+            .ok_or_else(|| anyhow!("Unknown event {}", handle))?;
+
+        let poison = Arc::new(EventPoison::new(handle, reason));
+        self.poison_local_entry(entry, handle, poison)
+    }
+
+    /// Create a future that resolves when the local event completes.
+    /// Validates that the handle belongs to this system.
+    ///
+    /// Distributed backends should call this for handles that belong to the local system.
+    pub fn awaiter_inner(&self, handle: EventHandle) -> Result<EventAwaiter> {
+        self.validate_handle(handle)?;
+        self.wait_local(handle)
+    }
+
+    pub(crate) fn poll_inner(&self, handle: EventHandle) -> Result<EventStatus> {
+        self.validate_handle(handle)?;
+        self.poll_local(handle)
+    }
+
+    pub(crate) fn force_shutdown_inner(&self, reason: impl Into<Arc<str>>) {
         let was_shutdown = self.shutdown.swap(true, Ordering::SeqCst);
         if was_shutdown {
             return;
@@ -396,34 +426,18 @@ impl LocalEventSystem {
     }
 }
 
-impl EventManager for Arc<LocalEventSystem> {
-    type Event = LocalEvent;
+// ── EventBackend impl ────────────────────────────────────────────────
 
-    fn new_event(&self) -> Result<LocalEvent> {
-        self.new_event_inner()
-    }
-
-    fn awaiter(&self, handle: EventHandle) -> Result<EventAwaiter> {
-        self.awaiter_inner(handle)
-    }
-
-    fn poll(&self, handle: EventHandle) -> Result<EventStatus> {
-        self.poll_inner(handle)
-    }
-
+impl EventBackend for EventSystemBase {
     fn trigger(&self, handle: EventHandle) -> Result<()> {
         self.trigger_inner(handle)
     }
 
-    fn poison(&self, handle: EventHandle, reason: impl Into<Arc<str>>) -> Result<()> {
+    fn poison(&self, handle: EventHandle, reason: Arc<str>) -> Result<()> {
         self.poison_inner(handle, reason)
     }
 
-    fn merge_events(&self, inputs: Vec<EventHandle>) -> Result<EventHandle> {
-        self.merge_events_inner(inputs)
-    }
-
-    fn force_shutdown(&self, reason: impl Into<Arc<str>>) {
-        self.force_shutdown_inner(reason)
+    fn awaiter(&self, handle: EventHandle) -> Result<EventAwaiter> {
+        self.awaiter_inner(handle)
     }
 }
