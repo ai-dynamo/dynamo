@@ -76,6 +76,7 @@ jobs:
       push_image: false
       run_tests: false
       copy_to_acr: false
+      run_multi_gpu_tests: false
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
@@ -94,6 +95,7 @@ jobs:
       run_tests: false
       copy_to_acr: false
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      run_multi_gpu_tests: false
     secrets: inherit
 
   trtllm-debug-pipeline:
@@ -103,11 +105,13 @@ jobs:
       framework: trtllm
       target: runtime
       platforms: '["amd64", "arm64"]'
+      cuda_versions: '["13.1"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       test_gpu_timeout_minutes: 35
       push_image: false
       run_tests: false
       copy_to_acr: false
+      run_multi_gpu_tests: false
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
