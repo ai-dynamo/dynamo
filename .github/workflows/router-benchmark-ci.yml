@@ -3,17 +3,26 @@
 
 # Router benchmark only — for quick feedback while developing.
 # Runs the same e2e router benchmark test as nightly, without the full pipeline.
-# Always pulls the latest main branch image (main-vllm-amd64) from Azure ACR.
+# Pulls the latest main branch image from Azure ACR (CUDA 12 by default; CUDA 13 if requested).
 #
 # Triggers:
 #   - Pull request: runs when PR touches this workflow or the router benchmark test paths.
 #   - Push: runs on push to any branch when those paths change.
-#   - Manual: Actions → "Router Benchmark CI" → Run workflow.
+#   - Manual: Actions → "Router Benchmark CI" → Run workflow (optional: "Use CUDA 13 image").
+#
+# To use CUDA 13 image by default (e.g. cluster has driver 580 / CUDA 13): set repository
+# variable ROUTER_BENCHMARK_USE_CUDA13 to "true".
 
 name: Router Benchmark CI
 
 on:
   workflow_dispatch:
+    inputs:
+      use_cuda13:
+        description: 'Use CUDA 13 image (for clusters with driver 580 / CUDA 13)'
+        required: false
+        type: boolean
+        default: false
   push:
     paths:
       - '.github/workflows/router-benchmark-ci.yml'
@@ -51,16 +60,27 @@ jobs:
         run: chmod -R u+w .
       - name: Set image tag by runner architecture
         id: image-tag
+        env:
+          USE_CUDA13: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.use_cuda13 == 'true' || vars.ROUTER_BENCHMARK_USE_CUDA13 }}
         run: |
           ARCH=$(uname -m)
+          USE_CUDA13="${USE_CUDA13:-false}"
           if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
-            echo "IMAGE_TAG=main-vllm-amd64" >> $GITHUB_ENV
+            if [ "$USE_CUDA13" = "true" ]; then
+              echo "IMAGE_TAG=main-vllm-cuda13-amd64" >> $GITHUB_ENV
+            else
+              echo "IMAGE_TAG=main-vllm-amd64" >> $GITHUB_ENV
+            fi
             echo "platform_arch=amd64" >> $GITHUB_OUTPUT
           else
-            echo "IMAGE_TAG=main-vllm-arm64" >> $GITHUB_ENV
+            if [ "$USE_CUDA13" = "true" ]; then
+              echo "IMAGE_TAG=main-vllm-cuda13-arm64" >> $GITHUB_ENV
+            else
+              echo "IMAGE_TAG=main-vllm-arm64" >> $GITHUB_ENV
+            fi
             echo "platform_arch=arm64" >> $GITHUB_OUTPUT
           fi
-          echo "Using image tag: $IMAGE_TAG (runner arch: $ARCH)"
+          echo "Using image tag: $IMAGE_TAG (runner arch: $ARCH, CUDA 13: $USE_CUDA13)"
       - name: Login to Azure ACR
         uses: ./.github/actions/docker-login
         with:
