@@ -1019,6 +1019,7 @@ mod tests {
         }
     }
 
+    /// Helper to create a ConnectionInfo for testing
     fn create_test_connection_info(
         address: &str,
         subject: &str,
