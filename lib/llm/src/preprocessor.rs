@@ -1052,8 +1052,17 @@ impl
             context.clone(),
         );
 
-        // Try to parse reasoning content only if parser is configured
-        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some();
+        // Try to parse reasoning content only if parser is configured AND reasoning is not
+        // explicitly disabled. When reasoning_effort=none, the prompt template omits the
+        // <think> tag, so the reasoning parser (which may assume it starts inside a thinking
+        // block) must be skipped to avoid misclassifying normal content as reasoning.
+        let reasoning_disabled = match request.extract_reasoning_effort() {
+            Some(dynamo_async_openai::types::ReasoningEffort::None) => true,
+            Some(_) => false,
+            None => false
+        };
+        let should_parse_reasoning =
+            self.runtime_config.reasoning_parser.is_some() && !reasoning_disabled;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
