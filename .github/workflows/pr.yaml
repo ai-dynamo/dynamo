@@ -77,6 +77,7 @@ jobs:
       push_image: false
       run_tests: false
       copy_to_acr: false
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
 
@@ -96,6 +97,7 @@ jobs:
       push_image: false
       run_tests: false
       copy_to_acr: false
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
   trtllm-debug-pipeline:
@@ -114,6 +116,7 @@ jobs:
       push_image: false
       run_tests: false
       copy_to_acr: false
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
 #   backend-status-check:
