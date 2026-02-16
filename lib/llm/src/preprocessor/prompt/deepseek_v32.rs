@@ -155,6 +155,50 @@ fn find_last_user_index(messages: &[JsonValue]) -> Option<usize> {
         .map(|(idx, _)| idx)
 }
 
+/// Extract visible text from OpenAI-style message content.
+///
+/// Matches common chat-template behavior:
+/// - string content: returned as-is
+/// - array content: concatenates `type=text` parts and raw string items
+/// - other JSON types: serialized to JSON string
+fn extract_visible_text(content: &JsonValue) -> String {
+    match content {
+        JsonValue::String(text) => text.clone(),
+        JsonValue::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                if let Some(text) = item.as_str() {
+                    return Some(text.to_string());
+                }
+
+                let item_type = item.get("type").and_then(|v| v.as_str());
+                if item_type == Some("text") {
+                    return item
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(|text| text.to_string());
+                }
+
+                None
+            })
+            .collect::<String>(),
+        _ => to_json(content),
+    }
+}
+
+/// Normalize message `content` fields for text-only DeepSeek V3.2 rendering.
+fn normalize_message_contents(messages: &mut [JsonValue]) {
+    for msg in messages {
+        let Some(content) = msg.get("content") else {
+            continue;
+        };
+        let normalized = extract_visible_text(content);
+        if let Some(obj) = msg.as_object_mut() {
+            obj.insert("content".to_string(), JsonValue::String(normalized));
+        }
+    }
+}
+
 /// Encode arguments to DSML parameter format
 fn encode_arguments_to_dsml(tool_call: &JsonValue) -> Result<String> {
     let arguments_str = tool_call
@@ -450,6 +494,10 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
             .context("Messages is not an array")?
             .clone();
 
+        // DeepSeek V3.2 native formatter expects text content in each message.
+        // Normalize OpenAI content arrays (e.g. [{type: "text", text: "..."}]) to strings.
+        normalize_message_contents(&mut messages_array);
+
         // Inject tools and response_format from request into the first system message
         // DeepSeek V3.2 expects these to be part of the system message for prompt rendering
         let tools_json = req
@@ -530,6 +578,37 @@ mod tests {
         assert!(result.contains("Hello!"));
         assert!(result.contains(tokens::ASSISTANT_START));
         assert!(result.contains(tokens::THINKING_START));
+    }
+
+    #[test]
+    fn test_extract_visible_text_from_content_array() {
+        let content = json!([
+            {"type": "text", "text": "who "},
+            {"type": "text", "text": "are "},
+            {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+            {"type": "text", "text": "you?"}
+        ]);
+
+        let result = extract_visible_text(&content);
+        assert_eq!(result, "who are you?");
+    }
+
+    #[test]
+    fn test_formatter_handles_user_content_array() {
+        use super::super::OAIPromptFormatter;
+
+        let request = MockRequest::new(json!([
+            {"role": "user", "content": [
+                {"type": "text", "text": "who are you?"}
+            ]}
+        ]));
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(result.contains("who are you?"));
+        assert!(result.contains(tokens::USER_START));
+        assert!(result.contains(tokens::ASSISTANT_START));
     }
 
     #[test]
