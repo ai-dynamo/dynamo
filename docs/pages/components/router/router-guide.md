@@ -217,7 +217,7 @@ We can then use the default routing methods exposed by the client class to send 
 - **Random routing**: Default strategy, available via `client.generate()` or `client.random()`
 - **Round-robin routing**: Cycles through available workers via `client.round_robin()`
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
-- **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least_loaded`
+- **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least-loaded`
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 
