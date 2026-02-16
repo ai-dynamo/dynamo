@@ -58,15 +58,8 @@ import (
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
-type State string
 type Reason string
 type Message string
-
-const (
-	DGDStateFailed  State = "failed"
-	DGDStateReady   State = "successful"
-	DGDStatePending State = "pending"
-)
 
 // rbacManager interface for managing RBAC resources
 type rbacManager interface {
@@ -108,7 +101,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	reason := Reason("undefined")
 	message := Message("")
-	state := DGDStatePending
+	state := nvidiacomv1alpha1.DGDStatePending
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
@@ -123,14 +116,14 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 
 		if err != nil {
-			state = DGDStateFailed
+			state = nvidiacomv1alpha1.DGDStateFailed
 			message = Message(err.Error())
 			logger.Error(err, "Reconciliation failed")
 		}
-		dynamoDeployment.SetState(string(state))
+		dynamoDeployment.SetState(state)
 
 		readyStatus := metav1.ConditionFalse
-		if state == DGDStateReady {
+		if state == nvidiacomv1alpha1.DGDStateReady {
 			readyStatus = metav1.ConditionTrue
 		}
 
@@ -172,7 +165,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Error(validationErr, "DynamoGraphDeployment validation failed, refusing to reconcile")
 
 			// Set validation error state and reason (defer will update status)
-			state = DGDStateFailed
+			state = nvidiacomv1alpha1.DGDStateFailed
 			reason = Reason("ValidationFailed")
 			message = Message(fmt.Sprintf("Validation failed: %v", validationErr))
 
@@ -211,7 +204,7 @@ type Resource interface {
 }
 
 type ReconcileResult struct {
-	State         State
+	State         nvidiacomv1alpha1.DGDState
 	Reason        Reason
 	Message       Message
 	ServiceStatus map[string]nvidiacomv1alpha1.ServiceReplicaStatus
@@ -943,14 +936,14 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 
 	if len(notReadyResources) == 0 {
 		return ReconcileResult{
-			State:         DGDStateReady,
+			State:         nvidiacomv1alpha1.DGDStateReady,
 			Reason:        "all_resources_are_ready",
 			Message:       Message("All resources are ready"),
 			ServiceStatus: serviceStatuses,
 		}
 	}
 	return ReconcileResult{
-		State:         DGDStatePending,
+		State:         nvidiacomv1alpha1.DGDStatePending,
 		Reason:        "some_resources_are_not_ready",
 		Message:       Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))),
 		ServiceStatus: serviceStatuses,

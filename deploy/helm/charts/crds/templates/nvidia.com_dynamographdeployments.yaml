@@ -11445,8 +11445,16 @@ spec:
                     The map key is the service name from spec.services.
                   type: object
                 state:
+                  default: initializing
                   description: State is a high-level textual status of the graph deployment lifecycle.
+                  enum:
+                    - initializing
+                    - pending
+                    - successful
+                    - failed
                   type: string
+              required:
+                - state
               type: object
           type: object
       served: true
