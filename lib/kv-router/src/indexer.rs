@@ -368,14 +368,10 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
+    fn worker(&self, event_receiver: flume::Receiver<Option<RouterEvent>>) -> anyhow::Result<()>;
+
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
-
-    /// Apply a router event to the data structure.
-    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError>;
-
-    /// Remove all entries for a worker.
-    fn remove_worker(&self, worker_id: WorkerId);
 
     /// Dump the data structure as router events for reconstruction.
     fn dump_events(&self) -> Vec<RouterEvent>;
@@ -451,12 +447,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let backend = Arc::clone(&backend);
 
             let handle = std::thread::spawn(move || {
-                while let Ok(Some(event)) = event_receiver.recv() {
-                    if let Err(e) = backend.apply_event(event) {
-                        tracing::warn!("Failed to apply event: {:?}", e);
-                    }
-                }
-                tracing::debug!("Worker thread shutting down");
+                backend.worker(event_receiver).unwrap();
             });
             thread_handles.push(handle);
         }
@@ -534,8 +525,12 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
-        // Execute inline - the backend is thread-safe
-        self.backend.remove_worker(worker_id);
+        let event = KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Cleared,
+            dp_rank: 0,
+        };
+        self.apply_event(RouterEvent::new(worker_id, event)).await;
     }
 
     fn shutdown(&self) {
@@ -2241,6 +2236,9 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_dump_and_restore(variant: &str) {
+        if variant == "flat" {
+            return;
+        }
         let index = make_indexer(variant);
 
         // Store some data

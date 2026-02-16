@@ -594,17 +594,20 @@ impl ConcurrentRadixTree {
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTree {
+
+    fn worker(&self, event_receiver: flume::Receiver<Option<RouterEvent>>) -> anyhow::Result<()> {
+        while let Ok(Some(event)) = event_receiver.recv() {
+            if let Err(e) = self.apply_event(event) {
+                tracing::warn!("Failed to apply event: {:?}", e);
+            }
+        }
+        tracing::debug!("ConcurrentRadixTree worker thread shutting down");
+        Ok(())
+    }
+
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         // Delegate to the existing find_matches method
         self.find_matches_impl(sequence, early_exit)
-    }
-
-    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
-        self.apply_event(event)
-    }
-
-    fn remove_worker(&self, worker_id: WorkerId) {
-        self.remove_worker(worker_id);
     }
 
     fn dump_events(&self) -> Vec<RouterEvent> {
@@ -1092,6 +1095,8 @@ mod tests {
             assert_eq!(indexer.backend().get_workers().len(), 2);
 
             indexer.remove_worker(worker_0).await;
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             let workers = indexer.backend().get_workers();
             assert_eq!(workers.len(), 1);
