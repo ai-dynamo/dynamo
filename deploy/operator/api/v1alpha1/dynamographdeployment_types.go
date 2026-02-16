@@ -44,6 +44,16 @@ const (
 	ComponentKindLeaderWorkerSet ComponentKind = "LeaderWorkerSet"
 )
 
+// +kubebuilder:validation:Enum=initializing;pending;successful;failed
+type DGDState string
+
+const (
+	DGDStateInitializing DGDState = "initializing"
+	DGDStatePending      DGDState = "pending"
+	DGDStateSuccessful   DGDState = "successful"
+	DGDStateFailed       DGDState = "failed"
+)
+
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 type DynamoGraphDeploymentSpec struct {
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
@@ -101,7 +111,8 @@ const (
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 type DynamoGraphDeploymentStatus struct {
 	// State is a high-level textual status of the graph deployment lifecycle.
-	State string `json:"state,omitempty"`
+	// +kubebuilder:default=initializing
+	State DGDState `json:"state"`
 	// Conditions contains the latest observed conditions of the graph deployment.
 	// The slice is merged by type on patch updates.
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
@@ -205,16 +216,13 @@ type DynamoGraphDeployment struct {
 	Status DynamoGraphDeploymentStatus `json:"status,omitempty"`
 }
 
-func (s *DynamoGraphDeployment) SetState(state string) {
+func (s *DynamoGraphDeployment) SetState(state DGDState) {
 	s.Status.State = state
 }
 
 // GetState returns the current lifecycle state
 func (d *DynamoGraphDeployment) GetState() string {
-	if d.Status.State == "" {
-		return consts.ResourceStateUnknown
-	}
-	return d.Status.State
+	return string(d.Status.State)
 }
 
 // +kubebuilder:object:root=true
