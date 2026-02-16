@@ -274,9 +274,7 @@ impl
                             for logprob in position_logprobs.iter_mut() {
                                 if logprob.token.is_none() {
                                     // Decode single token_id to get token text
-                                    if let Ok(text) =
-                                        tokenizer.decode(&[logprob.token_id], false)
-                                    {
+                                    if let Ok(text) = tokenizer.decode(&[logprob.token_id], false) {
                                         logprob.token = Some(text);
                                     }
                                 }
