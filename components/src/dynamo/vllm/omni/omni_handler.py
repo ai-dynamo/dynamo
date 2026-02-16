@@ -3,14 +3,21 @@
 import asyncio
 import base64
 import logging
+import os
 import time
+import uuid
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, Union
 
 from pydantic import BaseModel
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
-from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
+from dynamo.common.protocols.image_protocol import (
+    ImageData,
+    NvCreateImageRequest,
+    NvImagesResponse,
+)
 from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
@@ -21,7 +28,7 @@ from dynamo.common.utils.video_utils import (
     compute_num_frames,
     encode_to_mp4,
     frames_to_numpy,
-    parse_video_size,
+    parse_size,
 )
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 
@@ -42,12 +49,49 @@ class EngineInputs:
         request_type: The resolved request type (may differ from the initial parse
             when a chat completion request carries video params).
         fps: Frames per second, only meaningful for video requests.
+        response_format: Desired response format (e.g. "url" or "b64_json" for
+            image requests). None means use the default for the request type.
     """
 
     prompt: OmniTextPrompt
     sampling_params_list: list | None = None
     request_type: RequestType = RequestType.CHAT_COMPLETION
     fps: int = 0
+    response_format: str | None = None
+
+
+def prepare_image_output(images: list, response_format: str | None = None):
+    """Prepare image output for response.
+
+    Args:
+        images: List of PIL Image objects.
+        response_format: Response format.
+
+    Returns:
+        List of image URLs or base64 strings.
+    """
+    ## This is a temporary function to prepare image output for response.
+    ## Right now, there are different utilities across components that uploads image/video outputs to urls or b64_json.
+    ## (ayushag) TODO: follow up, move all the utilities to common
+    outlist = []
+
+    for img in images:
+        if response_format == "url":
+            output_dir = "/tmp/dynamo_images"  # noqa: S108
+            os.makedirs(output_dir, exist_ok=True)
+            img_path = os.path.join(output_dir, f"{uuid.uuid4()}.png")
+            img.save(img_path)
+            outlist.append(img_path)
+        elif response_format == "b64_json" or response_format is None:
+            # convert image to base64
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            data_url = f"data:image/png;base64,{img_base64}"
+            outlist.append(data_url)
+        else:
+            raise ValueError(f"Invalid response format: {response_format}")
+    return outlist
 
 
 class OmniHandler(BaseOmniHandler):
@@ -145,14 +189,12 @@ class OmniHandler(BaseOmniHandler):
                         stage_output.final_output_type == "image"
                         and stage_output.images
                     ):
-                        if inputs.request_type == RequestType.VIDEO_GENERATION:
-                            chunk = await self._format_video_chunk(
-                                stage_output.images, request_id, inputs.fps
-                            )
-                        else:
-                            chunk = self._format_image_chunk(
-                                stage_output.images, request_id
-                            )
+                        chunk = self._format_image_chunk(
+                            stage_output.images,
+                            request_id,
+                            response_format=inputs.response_format,
+                            request_type=inputs.request_type,
+                        )
                         if chunk:
                             yield chunk
 
@@ -179,7 +221,7 @@ class OmniHandler(BaseOmniHandler):
             EngineInputs ready for engine_client.generate().
         """
         if request_type == RequestType.CHAT_COMPLETION:
-            return self._engine_inputs_from_chat(parsed_request)  # type: ignore[arg-type]
+            return self._engine_inputs_from_chat(parsed_request)
 
         if request_type == RequestType.IMAGE_GENERATION:
             return self._engine_inputs_from_image(parsed_request)  # type: ignore[arg-type]
@@ -193,113 +235,58 @@ class OmniHandler(BaseOmniHandler):
         raise ValueError(f"Unknown request type: {request_type}")
 
     def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
-        """Build engine inputs from a chat completions request dict.
+        """Build engine inputs from a chat completions request dict."""
 
-        Chat completions can carry diffusion parameters in extra_body.
-        If num_frames > 1 the request is promoted to VIDEO_GENERATION so the
-        output formatter knows to encode frames as MP4.
-
-        When no diffusion overrides are present, sampling_params_list is left
-        as None so AsyncOmni falls back to the YAML stage defaults.
-        """
+        # Chat completions request does not support extra_body passthrough
+        # So, we can't extract any diffusion related params from the raw_request
+        # It falls back to default sampling params
         text_prompt = self._extract_text_prompt(request)
-        extra_body = self._extract_extra_body(request)
-        negative_prompt = extra_body.get("negative_prompt", "")
 
-        prompt = OmniTextPrompt(prompt=text_prompt, negative_prompt=negative_prompt)
+        prompt = OmniTextPrompt(prompt=text_prompt)
 
-        # Build diffusion sampling params only if the caller provides overrides.
-        sp = OmniDiffusionSamplingParams()
-        has_overrides = False
-        for field in (
-            "height",
-            "width",
-            "num_frames",
-            "num_inference_steps",
-            "guidance_scale",
-            "guidance_scale_2",
-            "true_cfg_scale",
-            "seed",
-            "num_outputs_per_prompt",
-            "fps",
-            "boundary_ratio",
-            "flow_shift",
-        ):
-            if field in extra_body:
-                setattr(sp, field, extra_body[field])
-                has_overrides = True
-
-        sampling_params_list = [sp] if has_overrides else None
-
-        requested_num_frames = extra_body.get("num_frames", 1)
-        is_video = requested_num_frames is not None and requested_num_frames > 1
-        fps = extra_body.get("fps", self.default_fps)
-
-        resolved_type = (
-            RequestType.VIDEO_GENERATION if is_video else RequestType.CHAT_COMPLETION
-        )
+        sampling_params_list = None
 
         return EngineInputs(
             prompt=prompt,
             sampling_params_list=sampling_params_list,
-            request_type=resolved_type,
-            fps=fps,
+            request_type=RequestType.CHAT_COMPLETION,
+            fps=0,
         )
 
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
-        """Build engine inputs from an NvCreateImageRequest.
-
-        Mirrors the parsing logic in vllm-omni api_server.py generate_images().
-        The nvext block carries diffusion-specific parameters while n and size
-        are top-level fields.
-        """
-        nvext = req.nvext or ImageNvExt()
+        """Build engine inputs from an NvCreateImageRequest."""
+        width, height = parse_size(req.size, default_w=1024, default_h=1024)
+        nvext = req.nvext
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt or "",
+            negative_prompt=nvext.negative_prompt or "" if nvext else "",
         )
 
-        sp = OmniDiffusionSamplingParams()
-        has_overrides = False
-
+        sp = OmniDiffusionSamplingParams(
+            height=height,
+            width=width,
+        )
         if req.n is not None:
             sp.num_outputs_per_prompt = req.n
-            has_overrides = True
-
-        if req.size is not None:
-            parts = req.size.split("x")
-            if len(parts) == 2:
-                sp.width = int(parts[0])
-                sp.height = int(parts[1])
-                has_overrides = True
-
-        if nvext.num_inference_steps is not None:
-            sp.num_inference_steps = nvext.num_inference_steps
-            has_overrides = True
-        if nvext.guidance_scale is not None:
-            sp.guidance_scale = nvext.guidance_scale
-            has_overrides = True
-        if nvext.seed is not None:
-            sp.seed = nvext.seed
-            has_overrides = True
-
-        sampling_params_list = [sp] if has_overrides else None
-
-        logger.info(
-            f"Image generation request: prompt='{req.prompt[:50]}...', "
-            f"size={req.size or 'default'}, n={req.n or 1}"
-        )
+        if nvext:
+            if nvext.num_inference_steps is not None:
+                sp.num_inference_steps = nvext.num_inference_steps
+            if nvext.guidance_scale is not None:
+                sp.guidance_scale = nvext.guidance_scale
+            if nvext.seed is not None:
+                sp.seed = nvext.seed
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=sampling_params_list,
+            sampling_params_list=[sp],
             request_type=RequestType.IMAGE_GENERATION,
+            response_format=req.response_format,
         )
 
     def _engine_inputs_from_video(self, req: NvCreateVideoRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateVideoRequest."""
-        width, height = parse_video_size(req.size)
+        width, height = parse_size(req.size)
         num_frames = compute_num_frames(
             num_frames=req.num_frames,
             seconds=req.seconds,
@@ -343,44 +330,54 @@ class OmniHandler(BaseOmniHandler):
         self,
         images: list,
         request_id: str,
+        response_format: str | None = None,
+        request_type: RequestType = RequestType.IMAGE_GENERATION,
     ) -> Dict[str, Any] | None:
         """Format image output as OpenAI chat completion chunk with base64 data URLs."""
-        from io import BytesIO
 
         if not images:
             return self._error_chunk(request_id, "No images generated")
 
-        # Convert images to base64 data URLs
-        data_urls = []
-        for idx, img in enumerate(images):
-            buffer = BytesIO()
-            img.save(buffer, format="PNG")
-            img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            data_url = f"data:image/png;base64,{img_base64}"
-            data_urls.append(data_url)
-            logger.info(f"Generated image {idx} for request {request_id}")
+        data_urls = prepare_image_output(images, response_format)
 
-        chunk = {
-            "id": request_id,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "model": self.config.served_model_name or self.config.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": data_url}}
-                            for data_url in data_urls
-                        ],
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-        }
+        if request_type == RequestType.CHAT_COMPLETION:
+            chunk = {
+                "id": request_id,
+                "created": int(time.time()),
+                "object": "chat.completion.chunk",
+                "model": self.config.served_model_name or self.config.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": data_url}}
+                                for data_url in data_urls
+                            ],
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+            return chunk
+        elif request_type == RequestType.IMAGE_GENERATION:
+            image_data_list = []
+            for data_url in data_urls:
+                if response_format == "url":
+                    image_data_list.append(ImageData(url=data_url))
+                elif response_format == "b64_json":
+                    # strip explicit prefix if present
+                    if data_url.startswith("data:image"):
+                        _, b64_part = data_url.split(",", 1)
+                        image_data_list.append(ImageData(b64_json=b64_part))
+                    else:
+                        image_data_list.append(ImageData(b64_json=data_url))
+                else:
+                    image_data_list.append(ImageData())
 
-        return chunk
+            output = NvImagesResponse(created=int(time.time()), data=image_data_list)
+            return output.model_dump()
 
     async def _format_video_chunk(
         self,
