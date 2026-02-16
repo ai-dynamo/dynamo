@@ -4,7 +4,7 @@
 //! Unified event handle encoded in a single `u128` value.
 
 use serde::{Deserialize, Serialize};
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{Display, Formatter};
 
 use crate::status::Generation;
 
@@ -101,7 +101,11 @@ impl Display for EventHandle {
             self.system_id(),
             self.index_counter(),
             self.generation(),
-            if self.is_local() { "local" } else { "distributed" }
+            if self.is_local() {
+                "local"
+            } else {
+                "distributed"
+            }
         )
     }
 }

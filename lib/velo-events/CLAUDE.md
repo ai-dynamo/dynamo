@@ -22,16 +22,15 @@ cargo check -p velo-events
 
 `velo-events` is a generational event system for coordinating async awaiters with minimal overhead. Events can be triggered (success) or poisoned (error), and entries are recycled across generations.
 
-### Trait layer (`event.rs`, `manager.rs`, `guard.rs`)
+### Trait layer (`event.rs`, `manager.rs`)
 
-- **`Event`** — single event that can be triggered or poisoned exactly once. Cloning produces a second handle to the same event.
+- **`Event`** — RAII guard for a single event. Dropping without calling `trigger(self)` or `poison(self, ...)` auto-poisons the event. `into_handle(self)` disarms the guard and returns the bare handle. `trigger` and `poison` consume `self`, preventing double-completion at compile time.
 - **`EventManager`** — creates/manages a collection of events: `new_event`, `awaiter`, `poll`, `trigger`, `poison`, `merge_events`, `force_shutdown`.
-- **`EventGuard<E: Event>`** — RAII wrapper that automatically poisons the event on drop unless explicitly triggered. Prevents events from being silently lost.
 
 ### Local implementation (`local/`)
 
 - **`LocalEventSystem`** — the concrete `EventManager` implementation. Uses `DashMap` for concurrent event storage with a free-list for entry recycling. `EventManager` is implemented on `Arc<LocalEventSystem>`, not `LocalEventSystem` directly.
-- **`LocalEvent`** — concrete `Event` backed by an `Arc<LocalEventInner>` holding a reference to the system, entry, and handle.
+- **`LocalEvent`** — concrete `Event` using `Option<LocalEventInner>` take-pattern. The `Drop` impl poisons with a static `LazyLock<Arc<str>>` reason when the inner is still `Some`.
 
 ### Handle encoding (`handle.rs`)
 
@@ -54,6 +53,7 @@ Key types:
 
 ## Key Design Decisions
 
+- `Event` is an RAII guard by default — dropping without triggering auto-poisons. `into_handle()` is the explicit opt-out for manager-level operations. `Clone` is intentionally not implemented; each event is a unique ownership token.
 - `EventManager` is implemented for `Arc<LocalEventSystem>`, requiring callers to wrap the system in an `Arc`. `LocalEventSystem::new()` returns `Arc<Self>` directly.
 - Slot entries track a `BTreeMap<Generation, PoisonArc>` for poison history, allowing past-generation poison queries.
 - Generation overflow causes entry retirement and a new entry allocation (transparent retry loop in `new_event_inner`).

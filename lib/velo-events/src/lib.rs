@@ -1,159 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # velo-event
-//!
-//! A generational event system for coordinating async tasks with minimal overhead.
-//!
-//! Events can be created, awaited, merged into precondition graphs, and poisoned
-//! on failure. The local implementation lives in this crate; a distributed event
-//! system can be built on top via active messaging.
-//!
-//! ## Core concepts
-//!
-//! | Operation | What it does |
-//! |-----------|-------------|
-//! | **Create** | `system.new_event()` allocates a pending event and returns an [`Event`] handle you can trigger or await. |
-//! | **Await** | `system.awaiter(handle)?.await` suspends the current task until the event completes (or is poisoned). |
-//! | **Merge** | `system.merge_events(vec![a, b, c])` creates a new event that completes only after **all** inputs complete — this is how you build precondition graphs. |
-//! | **Poison** | Events can fail with a reason string. [`EventGuard`] auto-poisons on drop so events are never silently lost. |
-//!
-//! ## Usage
-//!
-//! ### Create, trigger, await
-//!
-//! ```rust,no_run
-//! use std::sync::Arc;
-//! use velo_event::{EventManager, LocalEventSystem, Event};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let system = LocalEventSystem::new();
-//!
-//!     let event = system.new_event()?;
-//!     let handle = event.handle();
-//!
-//!     // Spawn a task that waits for the event
-//!     let sys = Arc::clone(&system);
-//!     let waiter = tokio::spawn(async move {
-//!         sys.awaiter(handle)?.await
-//!     });
-//!
-//!     // Complete the event
-//!     event.trigger()?;
-//!     waiter.await??;
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ### Merging events (precondition graphs)
-//!
-//! [`EventManager::merge_events`] lets you express "wait for all of these before proceeding":
-//!
-//! ```rust,no_run
-//! use velo_event::{EventManager, LocalEventSystem, Event};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let system = LocalEventSystem::new();
-//!
-//!     let load_weights = system.new_event()?;
-//!     let load_tokenizer = system.new_event()?;
-//!
-//!     // merged event completes only after both inputs complete
-//!     let ready = system.merge_events(vec![
-//!         load_weights.handle(),
-//!         load_tokenizer.handle(),
-//!     ])?;
-//!
-//!     load_weights.trigger()?;
-//!     load_tokenizer.trigger()?;
-//!
-//!     system.awaiter(ready)?.await?;
-//!     Ok(())
-//! }
-//! ```
-//!
-//! Because merged events are themselves events, you can merge merges to build
-//! arbitrary DAGs of preconditions.
-//!
-//! ### EventGuard — automatic cleanup
-//!
-//! [`EventGuard`] is an RAII wrapper that poisons the event on drop unless you
-//! explicitly trigger it. This prevents events from being silently forgotten
-//! when a task panics or returns early:
-//!
-//! ```rust,no_run
-//! use velo_event::{EventManager, LocalEventSystem, Event};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let system = LocalEventSystem::new();
-//!     let event = system.new_event()?;
-//!
-//!     let guard = event.into_guard();
-//!
-//!     // If this function returns early or panics, the guard
-//!     // drops and poisons the event automatically.
-//!     do_work()?;
-//!
-//!     guard.trigger()?; // success — disarms the guard
-//!     Ok(())
-//! }
-//!
-//! fn do_work() -> anyhow::Result<()> { Ok(()) }
-//! ```
-//!
-//! ### Poison propagation
-//!
-//! When an event is poisoned, all awaiters receive an error containing the
-//! reason. Merged events accumulate poison reasons from their inputs:
-//!
-//! ```rust,no_run
-//! use velo_event::{Event, EventManager, LocalEventSystem, EventPoison};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let system = LocalEventSystem::new();
-//!
-//!     let a = system.new_event()?;
-//!     let b = system.new_event()?;
-//!     let merged = system.merge_events(vec![a.handle(), b.handle()])?;
-//!
-//!     system.poison(a.handle(), "a failed")?;
-//!     system.poison(b.handle(), "b failed")?;
-//!
-//!     let err = system.awaiter(merged)?.await.unwrap_err();
-//!     let poison = err.downcast::<EventPoison>()?;
-//!     assert!(poison.reason().contains("a failed"));
-//!     assert!(poison.reason().contains("b failed"));
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## Distributed events
-//!
-//! For distributed deployments, [`DistributedEventFactory`] creates an event system
-//! whose handles embed a non-zero `system_id` for global uniqueness. The local
-//! event machinery stays the same — coordination across systems is handled by an
-//! active-messaging layer built on top.
-//!
-//! [`LocalEventSystem`] enforces that handles belong to the system that created
-//! them. Passing a handle from one system to another will return an error.
-//! A distributed event system must implement [`EventManager`] with routing
-//! logic to forward operations on remote handles to the correct owning system.
-//!
-//! ```rust,no_run
-//! use velo_event::DistributedEventFactory;
-//!
-//! let factory = DistributedEventFactory::new(0x42.try_into().unwrap());
-//! let system = factory.event_manager();
-//! // handles produced by this system carry system_id = 0x42
-//! ```
+#![doc = include_str!("../README.md")]
+#![deny(missing_docs)]
 
 // Public trait API
 mod event;
-mod guard;
 mod manager;
 
 // Public types
@@ -171,7 +23,6 @@ pub(crate) mod slot;
 
 pub use event::Event;
 pub use factory::DistributedEventFactory;
-pub use guard::EventGuard;
 pub use handle::EventHandle;
 pub use local::{LocalEvent, LocalEventSystem};
 pub use manager::EventManager;
@@ -355,7 +206,7 @@ mod tests {
 
     fn exercise_manager(mgr: &impl EventManager) -> Result<()> {
         let event = mgr.new_event()?;
-        let handle = event.handle();
+        let handle = event.into_handle();
 
         assert_eq!(mgr.poll(handle)?, EventStatus::Pending);
         mgr.trigger(handle)?;
@@ -370,14 +221,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trait_exercise_guard_poison_on_drop() -> Result<()> {
+    async fn trait_exercise_drop_poison() -> Result<()> {
         let system = create_system();
         let event = system.new_event()?;
         let handle = event.handle();
 
         {
-            let _guard = event.into_guard();
-            // guard drops here without trigger → poisons the event
+            let _event = event;
+            // event drops here without trigger → poisons the event
         }
 
         let err = system.awaiter(handle)?.await.unwrap_err();
@@ -391,13 +242,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trait_exercise_guard_trigger() -> Result<()> {
+    async fn trait_exercise_trigger() -> Result<()> {
         let system = create_system();
         let event = system.new_event()?;
         let handle = event.handle();
 
-        let guard = event.into_guard();
-        guard.trigger()?;
+        event.trigger()?;
 
         system.awaiter(handle)?.await?;
         Ok(())
@@ -473,16 +323,15 @@ mod tests {
         assert!(display.contains("local"));
     }
 
-    // ── EventGuard poison / awaiter (guard.rs) ───────────────────────
+    // ── Event poison / awaiter ──────────────────────────────────────
 
     #[tokio::test]
-    async fn guard_explicit_poison() -> Result<()> {
+    async fn event_explicit_poison() -> Result<()> {
         let system = create_system();
         let event = system.new_event()?;
         let handle = event.handle();
 
-        let guard = event.into_guard();
-        guard.poison("explicit")?;
+        event.poison("explicit")?;
 
         let err = system.awaiter(handle)?.await.unwrap_err();
         let poison = err.downcast::<EventPoison>().unwrap();
@@ -491,36 +340,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guard_awaiter() -> Result<()> {
+    async fn event_awaiter() -> Result<()> {
         let system = create_system();
         let event = system.new_event()?;
         let handle = event.handle();
 
-        let guard = event.into_guard();
-        let awaiter = guard.awaiter()?;
+        let awaiter = event.awaiter()?;
 
-        // Also verify guard.handle()
-        assert_eq!(guard.handle(), handle);
+        // Verify event.handle() still works before consuming
+        assert_eq!(event.handle(), handle);
 
-        guard.trigger()?;
+        event.trigger()?;
         awaiter.await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn guard_with_custom_reason() -> Result<()> {
-        let system = create_system();
-        let event = system.new_event()?;
-        let handle = event.handle();
-
-        {
-            let _guard = event.into_guard_with_reason("custom drop reason");
-            // guard drops here without trigger
-        }
-
-        let err = system.awaiter(handle)?.await.unwrap_err();
-        let poison = err.downcast::<EventPoison>().unwrap();
-        assert!(poison.reason().contains("custom drop reason"));
         Ok(())
     }
 

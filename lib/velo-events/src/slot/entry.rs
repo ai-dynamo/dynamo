@@ -723,7 +723,10 @@ mod tests {
         }));
 
         if cfg!(debug_assertions) {
-            assert!(result.is_err(), "debug_assert should fire when wakers are registered");
+            assert!(
+                result.is_err(),
+                "debug_assert should fire when wakers are registered"
+            );
         } else {
             result.expect("retire() should not panic in release");
             assert_eq!(wake_state.count.load(Ordering::SeqCst), 1);

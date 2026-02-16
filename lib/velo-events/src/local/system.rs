@@ -69,12 +69,9 @@ impl LocalEventSystem {
         })
     }
 
+    /// Each [`LocalEventSystem`] has a unique system_id.
     pub fn system_id(&self) -> u64 {
         self.system_id
-    }
-
-    pub fn task_tracker(&self) -> &TaskTracker {
-        &self.tasks
     }
 
     // ── Ownership validation ─────────────────────────────────────────
@@ -174,8 +171,8 @@ impl LocalEventSystem {
         }
 
         let merged = self.new_event_inner()?;
-        let handle = merged.handle();
-        let trigger = merged.clone();
+        // Disarm the RAII guard — the spawned task owns completion via handle.
+        let handle = merged.into_handle();
 
         let system = Arc::clone(self);
         self.tasks.spawn(async move {
@@ -210,7 +207,7 @@ impl LocalEventSystem {
             }
 
             let result = match failure_reasons {
-                None => trigger.trigger(),
+                None => system.trigger_inner(handle),
                 Some(reasons) => {
                     if reasons.len() == 1 {
                         system.poison_inner(handle, reasons[0].clone())

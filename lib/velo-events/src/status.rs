@@ -13,6 +13,7 @@ pub type Generation = u32;
 
 /// Status returned from non-blocking event queries.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub enum EventStatus {
     Pending,
     Ready,
@@ -27,6 +28,7 @@ pub struct EventPoison {
 }
 
 impl EventPoison {
+    /// Create a new poisoned event.
     pub fn new(handle: EventHandle, reason: impl Into<Arc<str>>) -> Self {
         Self {
             handle,
@@ -34,14 +36,17 @@ impl EventPoison {
         }
     }
 
+    /// Get the handle of the poisoned event.
     pub fn handle(&self) -> EventHandle {
         self.handle
     }
 
+    /// Get the reason of the poisoned event.
     pub fn reason(&self) -> &str {
         &self.reason
     }
 
+    /// Get the reason of the poisoned event as an `Arc<str>`.
     pub fn reason_arc(&self) -> &Arc<str> {
         &self.reason
     }
