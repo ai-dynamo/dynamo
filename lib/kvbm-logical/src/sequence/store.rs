@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Shared three-collection lifecycle store backing both
-//! [`BlockAssignments`](super::BlockAssignments) and
-//! [`LogicalBlockAssignments`](super::LogicalBlockAssignments).
+//! [`ExternalBlockAssignments`](super::assignments::ExternalBlockAssignments) and
+//! [`LogicalBlockAssignments`](super::assignments::LogicalBlockAssignments).
 
 use indexmap::IndexMap;
 
@@ -14,16 +14,16 @@ use crate::BlockId;
 /// Manages three ordered `IndexMap` collections representing the lifecycle
 /// phases: **unassigned** (`U`) → **staged** (`S`) → **assigned** (`A`).
 ///
-/// Both [`BlockAssignments`](super::BlockAssignments) and
-/// [`LogicalBlockAssignments`](super::LogicalBlockAssignments) compose this
+/// Both [`ExternalBlockAssignments`](super::assignments::ExternalBlockAssignments) and
+/// [`LogicalBlockAssignments`](super::assignments::LogicalBlockAssignments) compose this
 /// type internally and add their own type-specific transition logic on top.
-pub(crate) struct LifecycleStore<U, S, A> {
+pub(crate) struct BlockStore<U, S, A> {
     assigned: IndexMap<BlockId, A>,
     staged: IndexMap<BlockId, S>,
     unassigned: IndexMap<BlockId, U>,
 }
 
-impl<U, S, A> LifecycleStore<U, S, A> {
+impl<U, S, A> BlockStore<U, S, A> {
     /// Creates an empty store.
     pub fn new() -> Self {
         Self {

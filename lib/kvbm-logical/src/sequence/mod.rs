@@ -4,14 +4,12 @@
 #![doc = include_str!("../../docs/sequence.md")]
 
 mod assignments;
-mod lifecycle_store;
-mod logical_assignments;
+mod store;
 
-#[cfg(test)]
-mod tests;
-
-pub use assignments::{zip_assigned, zip_assigned_pending, BlockAssignments};
-pub use logical_assignments::{LogicalBlockAssignmentError, LogicalBlockAssignments};
+pub use assignments::{
+    zip_assigned, zip_assigned_pending, ExternalBlockAssignments,
+    LogicalBlockAssignmentError, LogicalBlockAssignments,
+};
 
 use std::ops::Range;
 
@@ -59,7 +57,7 @@ pub enum BlockSequenceError {
 ///
 /// This is a thin wrapper around `TokenBlockSequence` that provides a convenient API
 /// for the block assignment workflow. It does NOT embed assignments — those are managed
-/// separately by [`BlockAssignments`].
+/// separately by [`ExternalBlockAssignments`].
 #[derive(Debug)]
 pub struct BlockSequence {
     sequence: TokenBlockSequence,

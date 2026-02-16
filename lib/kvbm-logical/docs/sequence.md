@@ -6,7 +6,7 @@ This module provides two assignment trackers that share a three-phase
 lifecycle: **unassigned** (queued), **staged** (paired with token data),
 and **assigned** (committed).
 
-- [`BlockAssignments`] tracks at the **identity level** — mapping
+- [`ExternalBlockAssignments`] tracks at the **identity level** — mapping
   `BlockId` to `SequenceHash`.
 - [`LogicalBlockAssignments`] tracks at the **guard level** — managing
   RAII block guards through `MutableBlock` to `CompleteBlock` to
@@ -15,7 +15,7 @@ and **assigned** (committed).
 Both types are backed by the same ordered-collection machinery and expose
 similar query, iteration, and mutation APIs.
 
-## `BlockAssignments`
+## `ExternalBlockAssignments`
 
 Identity-level tracking of block IDs paired with sequence hashes.
 
@@ -26,7 +26,7 @@ against the completed token blocks:
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-use dynamo_kvbm_logical::{BlockAssignments, BlockSequence};
+use dynamo_kvbm_logical::{ExternalBlockAssignments, BlockSequence};
 
 // Create a sequence with 3 complete blocks (4 tokens each).
 let tokens: Vec<u32> = (0..12).collect();
@@ -34,7 +34,7 @@ let seq = BlockSequence::new(tokens, 4, None);
 assert_eq!(seq.blocks().len(), 3);
 
 // Create assignments starting at offset 0.
-let mut assignments = BlockAssignments::new(0);
+let mut assignments = ExternalBlockAssignments::new(0);
 
 // Register block IDs (e.g., allocated by the scheduler).
 assignments.extend_block_ids(vec![10, 20, 30])?;
@@ -62,12 +62,12 @@ committing):
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-use dynamo_kvbm_logical::{BlockAssignments, BlockSequence};
+use dynamo_kvbm_logical::{ExternalBlockAssignments, BlockSequence};
 
 let tokens: Vec<u32> = (0..8).collect();
 let seq = BlockSequence::new(tokens, 4, None);
 
-let mut assignments = BlockAssignments::new(0);
+let mut assignments = ExternalBlockAssignments::new(0);
 assignments.extend_block_ids(vec![1, 2])?;
 
 // Stage: pairs IDs with hashes but does not commit.
@@ -86,7 +86,7 @@ assert_eq!(assignments.staged_count(), 0);
 ```
 
 
-## `LogicalBlockAssignments`
+## `LogicalExternalBlockAssignments`
 
 Guard-level tracking through the full block lifecycle. Blocks flow
 through `MutableBlock` (unassigned) to `CompleteBlock` (staged) to
@@ -101,7 +101,7 @@ data, register them, and query the result:
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 use dynamo_kvbm_logical::{
     BlockManager, BlockRegistry, BlockSequence,
-    LogicalBlockAssignments,
+    LogicalExternalBlockAssignments,
     manager::FrequencyTrackingCapacity,
 };
 
@@ -125,7 +125,7 @@ let seq = BlockSequence::new(tokens, 4, None);
 let blocks = manager.allocate_blocks(3).unwrap();
 let ids: Vec<usize> = blocks.iter().map(|b| b.block_id()).collect();
 
-let mut la = LogicalBlockAssignments::new();
+let mut la = LogicalExternalBlockAssignments::new();
 
 // Extend: adds mutable blocks to the unassigned queue.
 la.extend_blocks(blocks)?;
