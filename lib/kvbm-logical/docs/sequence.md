@@ -26,7 +26,7 @@ against the completed token blocks:
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-use dynamo_kvbm_logical::{ExternalBlockAssignments, BlockSequence};
+use kvbm_logical::{ExternalBlockAssignments, BlockSequence};
 
 // Create a sequence with 3 complete blocks (4 tokens each).
 let tokens: Vec<u32> = (0..12).collect();
@@ -62,7 +62,7 @@ committing):
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-use dynamo_kvbm_logical::{ExternalBlockAssignments, BlockSequence};
+use kvbm_logical::{ExternalBlockAssignments, BlockSequence};
 
 let tokens: Vec<u32> = (0..8).collect();
 let seq = BlockSequence::new(tokens, 4, None);
@@ -99,9 +99,9 @@ data, register them, and query the result:
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-use dynamo_kvbm_logical::{
+use kvbm_logical::{
     BlockManager, BlockRegistry, BlockSequence,
-    LogicalExternalBlockAssignments,
+    LogicalBlockAssignments,
     manager::FrequencyTrackingCapacity,
 };
 
@@ -125,7 +125,7 @@ let seq = BlockSequence::new(tokens, 4, None);
 let blocks = manager.allocate_blocks(3).unwrap();
 let ids: Vec<usize> = blocks.iter().map(|b| b.block_id()).collect();
 
-let mut la = LogicalExternalBlockAssignments::new();
+let mut la = LogicalBlockAssignments::new();
 
 // Extend: adds mutable blocks to the unassigned queue.
 la.extend_blocks(blocks)?;
