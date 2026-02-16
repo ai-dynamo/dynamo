@@ -15,7 +15,11 @@
 //! Further post-processing can happen in the response stream. One example is the jailing mechanism for partial
 //! hidden stop condition matches, which can be handled in the response stream rather than the backend.
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
@@ -62,9 +66,13 @@ pub struct Backend {
 #[allow(dead_code)]
 struct DecoderUnfoldState {
     stream: ManyOut<ExecutionOutputStream>,
-    decoder: Decoder,
+    decoders: HashMap<u32, Decoder>,
     validate_engine_decode: bool,
-    /// Set to true when a local stop condition is detected, causing the stream to end
+    /// Tracks which choice indices have finished generating
+    finished_choices: HashSet<u32>,
+    /// Number of choices requested (n parameter)
+    n: u32,
+    /// Set to true when all choices are finished, causing the stream to end
     finished: bool,
 }
 
@@ -100,21 +108,29 @@ impl Backend {
         skip_special_tokens: bool,
         include_stop_str_in_output: bool,
         tracker: Option<Arc<RequestTracker>>,
+        n: u32,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
         };
-        let decoder = Decoder::new(
-            tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
-            stop_conditions,
-            include_stop_str_in_output,
-            tracker,
-        );
+
+        let mut decoders = HashMap::new();
+        for i in 0..n {
+            let decoder = Decoder::new(
+                tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
+                stop_conditions.clone(),
+                include_stop_str_in_output,
+                tracker.as_ref().map(|t| Arc::clone(t)),
+            );
+            decoders.insert(i, decoder);
+        }
 
         Ok(DecoderUnfoldState {
             stream,
-            decoder,
+            decoders,
             validate_engine_decode: self.validate_engine_decode,
+            finished_choices: HashSet::new(),
+            n,
             finished: false,
         })
     }
@@ -148,6 +164,8 @@ impl
             .unwrap_or(false);
         let tracker = request.tracker.clone();
 
+        let n = request.sampling_options.n.unwrap_or(1) as u32;
+
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
@@ -158,35 +176,56 @@ impl
             skip_special_tokens,
             include_stop_str_in_output,
             tracker,
+            n,
         )?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
-            // If we've already detected a local stop condition, end the stream
+            // If all choices are finished, end the stream
             if state.finished {
                 return None;
             }
 
             match state.stream.next().await {
                 Some(output) => {
-                    // move to state.process_output
-                    // handle any error conditions / unwraps here
-
                     // events are pass thru
                     if output.is_event() || output.data.is_none() {
-                        return Some((output, state));
-                    }
-
-                    // if we have a data field without an event, then we might need to update the data
-                    if let Some(data) = &output.data
-                        && data.text.is_some()
-                        && !state.validate_engine_decode
-                    {
-                        return Some((output, state));
+                        return Some((Some(output), state));
                     }
 
                     let data = output.data.as_ref().unwrap();
+                    let choice_index = data.index.unwrap_or(0);
 
-                    let result = state.decoder.process_token_ids(&data.token_ids).unwrap();
+                    // Skip already-finished choices
+                    if state.finished_choices.contains(&choice_index) {
+                        return Some((None, state));
+                    }
+
+                    // Engine already decoded text; stop condition detection is handled by the engine, not Rust-side Decoder
+                    if data.text.is_some() && !state.validate_engine_decode {
+                        // Check if engine signaled finish for this choice
+                        if data.finish_reason.is_some() {
+                            state.finished_choices.insert(choice_index);
+                            if state.finished_choices.len() as u32 >= state.n {
+                                state.stream.context().stop_generating();
+                                state.finished = true;
+                            }
+                        }
+                        return Some((Some(output), state));
+                    }
+
+                    // Look up the per-choice decoder
+                    let decoder = match state.decoders.get_mut(&choice_index) {
+                        Some(d) => d,
+                        None => {
+                            tracing::warn!(
+                                "No decoder for choice index {}, passing through",
+                                choice_index
+                            );
+                            return Some((Some(output), state));
+                        }
+                    };
+
+                    let result = decoder.process_token_ids(&data.token_ids).unwrap();
 
                     // NOTE: the `finish_reason` is computed from the generated `token_ids` alone.
                     // The `data` field can have a `finish_reason` set, coming from the underlying
@@ -218,11 +257,24 @@ impl
                         None => (None, None),
                     };
 
-                    // If we detected a local stop condition, mark stream as finished
-                    // so we stop iterating (upstream may keep generating, but we ignore it)
+                    // Track per-choice finish: either from Rust-side stop detection or engine-signaled
+                    let choice_finished = finish_reason.is_some() || data.finish_reason.is_some();
+
+                    // If we detected a local stop condition not already signaled by engine,
+                    // mark this choice as finished
                     if finish_reason.is_some() && data.finish_reason.is_none() {
-                        state.stream.context().stop_generating();
-                        state.finished = true;
+                        // For n=1 we can stop generating immediately
+                        if state.n <= 1 {
+                            state.stream.context().stop_generating();
+                        }
+                    }
+
+                    if choice_finished {
+                        state.finished_choices.insert(choice_index);
+                        if state.finished_choices.len() as u32 >= state.n {
+                            state.stream.context().stop_generating();
+                            state.finished = true;
+                        }
                     }
 
                     let text = result.text;
@@ -265,12 +317,13 @@ impl
 
                     output.data = Some(data);
 
-                    Some((output, state))
+                    Some((Some(output), state))
                 }
 
                 None => None,
             }
         })
+        .filter_map(|x| async { x })
         .fuse();
 
         // convert stream of processed Annotated<LLMEngineOutput> to Annotated<BackendOutput>

@@ -226,6 +226,7 @@ def build_sampling_params_openai(
         "min_p": "min_p",
         "length_penalty": "length_penalty",
         "use_beam_search": "use_beam_search",
+        "n": "n",
     }
 
     for req_key, param_key in openai_mapping.items():
@@ -1070,7 +1071,7 @@ class BaseWorkerHandler(ABC):
         else:
             prompt_tokens = None
 
-        completion_tokens = len(request_output.outputs[0].token_ids)
+        completion_tokens = sum(len(output.token_ids) for output in request_output.outputs)
 
         return {
             "prompt_tokens": prompt_tokens,
@@ -1205,7 +1206,8 @@ class BaseWorkerHandler(ABC):
                 trace_headers=trace_headers,
             )
 
-            num_output_tokens_so_far = 0
+            output_tokens_per_choice: Dict[int, int] = {}
+            finished_choices: set[int] = set()
             async for res in gen:
                 # res is vllm's RequestOutput
 
@@ -1220,41 +1222,51 @@ class BaseWorkerHandler(ABC):
                     yield {
                         "finish_reason": "error: No outputs from vLLM engine",
                         "token_ids": [],
+                        "index": 0,
                     }
                     break
 
-                output = res.outputs[0]
-                next_total_toks = len(output.token_ids)
-                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                for output in res.outputs:
+                    choice_index = output.index
+                    if choice_index in finished_choices:
+                        continue
+                    num_output_tokens_so_far = output_tokens_per_choice.get(choice_index, 0)
+                    next_total_toks = len(output.token_ids)
+                    out: Dict[str, Any] = {
+                        "token_ids": output.token_ids[num_output_tokens_so_far:],
+                        "index": choice_index,
+                    }
 
-                # Extract logprobs for new tokens if available
-                log_probs, top_logprobs = self._extract_logprobs(
-                    output, num_output_tokens_so_far
-                )
-                if log_probs is not None:
-                    out["log_probs"] = log_probs
-                if top_logprobs is not None:
-                    out["top_logprobs"] = top_logprobs
+                    # Extract logprobs for new tokens if available
+                    log_probs, top_logprobs = self._extract_logprobs(
+                        output, num_output_tokens_so_far
+                    )
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if top_logprobs is not None:
+                        out["top_logprobs"] = top_logprobs
 
-                if output.finish_reason:
-                    out["finish_reason"] = normalize_finish_reason(output.finish_reason)
-                    out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
-                        request_output=res,
-                        embedding_sequence_length=embedding_sequence_length,
-                    )
-                    # Log completion with LoRA info (debug level to avoid log spam)
-                    self._log_with_lora_context(
-                        "Completed token generation for request {request_id}{lora_info}: "
-                        "{output_tokens} output tokens, finish_reason={finish_reason}",
-                        request_id,
-                        lora_request,
-                        output_tokens=next_total_toks,
-                        finish_reason=output.finish_reason,
-                    )
-                if output.stop_reason:
-                    out["stop_reason"] = output.stop_reason
-                yield out
-                num_output_tokens_so_far = next_total_toks
+                    if output.finish_reason:
+                        out["finish_reason"] = normalize_finish_reason(output.finish_reason)
+                        out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            embedding_sequence_length=embedding_sequence_length,
+                        )
+                        # Log completion with LoRA info (debug level to avoid log spam)
+                        self._log_with_lora_context(
+                            "Completed token generation for request {request_id}{lora_info}: "
+                            "{output_tokens} output tokens, finish_reason={finish_reason}",
+                            request_id,
+                            lora_request,
+                            output_tokens=next_total_toks,
+                            finish_reason=output.finish_reason,
+                        )
+                    if output.stop_reason:
+                        out["stop_reason"] = output.stop_reason
+                    yield out
+                    output_tokens_per_choice[choice_index] = next_total_toks
+                    if output.finish_reason:
+                        finished_choices.add(choice_index)
 
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
@@ -1408,7 +1420,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         dp_rank = request.get("routing", {}).get("dp_rank")
         openai_request_id = request.get("id") or request.get("request_id", request_id)
-        previous_text = ""
+        previous_text_per_choice: Dict[int, str] = {}
 
         trace_headers = build_trace_headers(context)
 
@@ -1421,6 +1433,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
                 )
+
+                n = getattr(sampling_params, "n", 1) or 1
+                finished_choices: set[int] = set()
 
                 async for res in gen:
                     if not res.outputs:
@@ -1439,29 +1454,45 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         }
                         break
 
-                    output = res.outputs[0]
-                    # Calculate the delta text (new text since last chunk)
-                    delta_text = output.text[len(previous_text) :]
-                    previous_text = output.text
+                    choices = []
+                    for output in res.outputs:
+                        choice_index = output.index
+                        if choice_index in finished_choices:
+                            continue
+                        previous_text = previous_text_per_choice.get(choice_index, "")
+                        # Calculate the delta text (new text since last chunk)
+                        delta_text = output.text[len(previous_text):]
+                        previous_text_per_choice[choice_index] = output.text
 
-                    choice_data = {
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": delta_text,
-                        },
-                        "finish_reason": normalize_finish_reason(output.finish_reason),
-                    }
+                        # Skip if no new text and no finish_reason for this choice
+                        if not delta_text and not output.finish_reason:
+                            continue
+
+                        choice_data = {
+                            "index": choice_index,
+                            "delta": {
+                                "role": "assistant",
+                                "content": delta_text,
+                            },
+                            "finish_reason": normalize_finish_reason(output.finish_reason),
+                        }
+                        choices.append(choice_data)
+
+                        if output.finish_reason:
+                            finished_choices.add(choice_index)
+
+                    if not choices:
+                        continue
 
                     chunk = {
                         "id": openai_request_id,
                         "created": int(time.time()),
                         "object": "chat.completion.chunk",
                         "model": "unknown",
-                        "choices": [choice_data],
+                        "choices": choices,
                     }
 
-                    if output.finish_reason:
+                    if len(finished_choices) == n:
                         chunk["usage"] = BaseWorkerHandler._build_completion_usage(
                             request_output=res,
                         )

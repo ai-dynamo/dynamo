@@ -430,3 +430,52 @@ def test_reasoning(request, start_services: ServicePorts, predownload_models) ->
     assert any(
         char.isdigit() for char in content
     ), "Expected response to contain numerical calculations"
+
+
+@pytest.mark.timeout(240)
+@pytest.mark.post_merge
+def test_multiple_choices_n5(
+    request, start_services: ServicePorts, predownload_models
+) -> None:
+    """Test that n=5 returns 5 distinct choices with correct indices and usage."""
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Say a single random word.",
+            }
+        ],
+        "max_tokens": 20,
+        "n": 5,
+        "temperature": 1.0,
+    }
+
+    base_url = f"http://localhost:{start_services.frontend_port}"
+    response = _send_chat_request(payload, base_url=base_url)
+    response_data = _validate_chat_response(response)
+
+    choices = response_data.get("choices", [])
+    assert len(choices) == 5, f"Expected 5 choices, got {len(choices)}"
+
+    # Verify each choice has a unique index 0-4
+    indices = sorted(c["index"] for c in choices)
+    assert indices == [0, 1, 2, 3, 4], f"Expected indices [0,1,2,3,4], got {indices}"
+
+    # Verify each choice has a finish_reason and non-empty content
+    for choice in choices:
+        assert choice.get("finish_reason") is not None, (
+            f"Choice {choice['index']} missing finish_reason"
+        )
+        message = choice.get("message", {})
+        content = message.get("content", "")
+        assert content, f"Choice {choice['index']} has empty content"
+
+    # Verify usage is present and completion_tokens accounts for all choices
+    usage = response_data.get("usage", {})
+    assert usage.get("prompt_tokens", 0) > 0, "Missing prompt_tokens in usage"
+    assert usage.get("completion_tokens", 0) > 0, "Missing completion_tokens in usage"
+    assert usage.get("total_tokens", 0) == (
+        usage["prompt_tokens"] + usage["completion_tokens"]
+    ), "total_tokens should equal prompt_tokens + completion_tokens"

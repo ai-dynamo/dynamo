@@ -63,11 +63,22 @@ impl
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
+
+        // Disable migration for multi-choice requests (n>1) since migrating
+        // multiple output sequences is not supported
+        let n = preprocessed_request.sampling_options.n.unwrap_or(1);
+        let effective_migration_limit = if n > 1 {
+            tracing::info!("Request migration is not supported with n > 1, disabling migration");
+            0
+        } else {
+            self.migration_limit
+        };
+
         let retry_manager = RetryManager::build(
             engine_ctx,
             preprocessed_request,
             next,
-            self.migration_limit,
+            effective_migration_limit,
             self.model_name.clone(),
             self.metrics.clone(),
         )
