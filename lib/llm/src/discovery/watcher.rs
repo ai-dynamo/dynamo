@@ -25,7 +25,7 @@ use dynamo_runtime::{
 use crate::{
     backend::Backend,
     discovery::WORKER_TYPE_DECODE,
-    entrypoint::{self, EngineFactoryCallback, RouterConfig},
+    entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
@@ -40,6 +40,7 @@ use crate::{
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
+            videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
@@ -61,7 +62,7 @@ pub struct ModelWatcher {
     migration_limit: u32,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
-    engine_factory: Option<EngineFactoryCallback>,
+    chat_engine_factory: Option<ChatEngineFactoryCallback>,
     metrics: Arc<Metrics>,
     registering_models: DashSet<String>,
 }
@@ -70,6 +71,8 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Chat,
     ModelType::Completions,
     ModelType::Embedding,
+    ModelType::Images,
+    ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Prefill,
 ];
@@ -80,7 +83,7 @@ impl ModelWatcher {
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
         migration_limit: u32,
-        engine_factory: Option<EngineFactoryCallback>,
+        chat_engine_factory: Option<ChatEngineFactoryCallback>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
         Self {
@@ -90,7 +93,7 @@ impl ModelWatcher {
             migration_limit,
             notify_on_model: Notify::new(),
             model_update_tx: None,
-            engine_factory,
+            chat_engine_factory,
             metrics,
             registering_models: DashSet::new(),
         }
@@ -283,12 +286,16 @@ impl ModelWatcher {
         let chat_model_remove_err = self.manager.remove_chat_completions_model(&model_name);
         let completions_model_remove_err = self.manager.remove_completions_model(&model_name);
         let embeddings_model_remove_err = self.manager.remove_embeddings_model(&model_name);
+        let images_model_remove_err = self.manager.remove_images_model(&model_name);
+        let videos_model_remove_err = self.manager.remove_videos_model(&model_name);
         let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
         let prefill_model_remove_err = self.manager.remove_prefill_model(&model_name);
 
         let mut chat_model_removed = false;
         let mut completions_model_removed = false;
         let mut embeddings_model_removed = false;
+        let mut images_model_removed = false;
+        let mut videos_model_removed = false;
         let mut tensor_model_removed = false;
         let mut prefill_model_removed = false;
 
@@ -302,6 +309,12 @@ impl ModelWatcher {
         if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().is_empty() {
             embeddings_model_removed = true;
         }
+        if images_model_remove_err.is_ok() && self.manager.list_images_models().is_empty() {
+            images_model_removed = true;
+        }
+        if videos_model_remove_err.is_ok() && self.manager.list_videos_models().is_empty() {
+            videos_model_removed = true;
+        }
         if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
             tensor_model_removed = true;
         }
@@ -312,15 +325,19 @@ impl ModelWatcher {
         if !chat_model_removed
             && !completions_model_removed
             && !embeddings_model_removed
+            && !images_model_removed
+            && !videos_model_removed
             && !tensor_model_removed
             && !prefill_model_removed
         {
             tracing::debug!(
-                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, tensor_model_removed: {}, prefill_model_removed: {}",
+                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, images_model_removed: {}, videos_model_removed: {}, tensor_model_removed: {}, prefill_model_removed: {}",
                 model_name,
                 chat_model_removed,
                 completions_model_removed,
                 embeddings_model_removed,
+                images_model_removed,
+                videos_model_removed,
                 tensor_model_removed,
                 prefill_model_removed
             );
@@ -329,6 +346,8 @@ impl ModelWatcher {
                 if ((chat_model_removed && *model_type == ModelType::Chat)
                     || (completions_model_removed && *model_type == ModelType::Completions)
                     || (embeddings_model_removed && *model_type == ModelType::Embedding)
+                    || (images_model_removed && *model_type == ModelType::Images)
+                    || (videos_model_removed && *model_type == ModelType::Videos)
                     || (tensor_model_removed && *model_type == ModelType::TensorBased)
                     || (prefill_model_removed && *model_type == ModelType::Prefill))
                     && let Some(tx) = &self.model_update_tx
@@ -426,7 +445,15 @@ impl ModelWatcher {
             // handle Chat or Completions requests, so handle whatever the model supports.
 
             let endpoint = component.endpoint(&mcid.endpoint);
-            let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
+            // Create the KV router whenever any local routed pipeline will be built.
+            // The chat factory builds its own router, but completions currently always
+            // uses the local routed pipeline and therefore still needs a chooser.
+            let needs_local_chat_pipeline =
+                card.model_type.supports_chat() && self.chat_engine_factory.is_none();
+            let needs_local_completions_pipeline = card.model_type.supports_completions();
+            let kv_chooser = if self.router_config.router_mode == RouterMode::KV
+                && (needs_local_chat_pipeline || needs_local_completions_pipeline)
+            {
                 Some(
                     self.manager
                         .kv_chooser_for(
@@ -478,11 +505,17 @@ impl ModelWatcher {
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
-                // Work in progress. This will allow creating  a chat_engine from Python.
-                let chat_engine = if let Some(ref factory) = self.engine_factory {
-                    factory(card.clone())
-                        .await
-                        .context("python engine_factory")?
+                let factory_engine = if let Some(ref factory) = self.chat_engine_factory {
+                    match factory(mcid.clone(), card.clone()).await {
+                        Ok(engine) => Some(engine),
+                        Err(err) => return Err(err).context("python chat_engine_factory"),
+                    }
+                } else {
+                    None
+                };
+
+                let chat_engine = if let Some(engine) = factory_engine {
+                    engine
                 } else {
                     entrypoint::build_routed_pipeline::<
                         NvCreateChatCompletionRequest,
@@ -509,7 +542,7 @@ impl ModelWatcher {
                 tracing::info!("Chat completions is ready");
             }
 
-            // Add completions engine only if the model supports completions
+            // Add completions engine only if the model supports completions.
             if card.model_type.supports_completions() {
                 let formatter = PromptFormatter::no_op();
                 let PromptFormatter::OAI(formatter) = formatter;
@@ -614,7 +647,7 @@ impl ModelWatcher {
             self.manager
                 .add_embeddings_model(card.name(), checksum, embedding_engine)?;
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
-            // Case 5: Tensor + Tensor (non-LLM)
+            // Case 6: Tensor + TensorBased (non-LLM)
             // No KV cache concepts - not an LLM model
             let push_router = PushRouter::<
                 NvCreateTensorRequest,
@@ -627,18 +660,44 @@ impl ModelWatcher {
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_images() {
-            // Case: Text + Images (diffusion models)
-            // Takes text prompts as input, generates images
-            let push_router = PushRouter::<
+            // Case: Text + Images (e.g. vLLM-Omni, diffusion models)
+            // Takes text prompts as input, generates images. Images models also support
+            // chat completions (see model_type.rs as_endpoint_types).
+            let images_router = PushRouter::<
                 NvCreateImageRequest,
                 Annotated<NvImagesResponse>,
+            >::from_client_with_threshold(
+                client.clone(), self.router_config.router_mode, None, None
+            )
+            .await?;
+            self.manager
+                .add_images_model(card.name(), checksum, Arc::new(images_router))?;
+
+            let chat_router = PushRouter::<
+                NvCreateChatCompletionRequest,
+                Annotated<NvCreateChatCompletionStreamResponse>,
+            >::from_client_with_threshold(
+                client, self.router_config.router_mode, None, None
+            )
+            .await?;
+            self.manager.add_chat_completions_model(
+                card.name(),
+                checksum,
+                Arc::new(chat_router),
+            )?;
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_videos() {
+            // Case: Text + Videos (video generation models)
+            // Takes text prompts as input, generates videos
+            let push_router = PushRouter::<
+                NvCreateVideoRequest,
+                Annotated<NvVideosResponse>,
             >::from_client_with_threshold(
                 client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
             self.manager
-                .add_images_model(card.name(), checksum, engine)?;
+                .add_videos_model(card.name(), checksum, engine)?;
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens

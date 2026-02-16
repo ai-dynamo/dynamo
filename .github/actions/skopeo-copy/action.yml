@@ -105,7 +105,20 @@ runs:
         echo "  Source: ${SOURCE_REF}"
         echo "  Target: ${TARGET_REF}"
 
-        skopeo copy --all "${SOURCE_REF}" "${TARGET_REF}"
-
-        echo "target_image_ref=${{ inputs.target_registry }}/${TARGET_IMAGE}:${TARGET_TAG}" >> $GITHUB_OUTPUT
-        echo "✅ Image copied successfully"
+        MAX_RETRIES=3
+        RETRY_DELAY=10
+        for attempt in $(seq 1 $MAX_RETRIES); do
+          echo "Attempt ${attempt}/${MAX_RETRIES}..."
+          if skopeo copy --all "${SOURCE_REF}" "${TARGET_REF}"; then
+            echo "target_image_ref=${{ inputs.target_registry }}/${TARGET_IMAGE}:${TARGET_TAG}" >> $GITHUB_OUTPUT
+            echo "✅ Image copied successfully"
+            exit 0
+          fi
+          if [ "$attempt" -lt "$MAX_RETRIES" ]; then
+            echo "⚠️ Attempt ${attempt} failed, retrying in ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+            RETRY_DELAY=$((RETRY_DELAY * 2))
+          fi
+        done
+        echo "❌ All ${MAX_RETRIES} attempts failed"
+        exit 1

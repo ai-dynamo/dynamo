@@ -270,7 +270,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDynamoGraphDeployment.Name
 
-		// Propagate metrics annotation from parent deployment if present
+		// Propagate annotations from parent deployment if present
 		if parentDynamoGraphDeployment.Annotations != nil {
 			if deployment.Spec.Annotations == nil {
 				deployment.Spec.Annotations = make(map[string]string)
@@ -280,6 +280,10 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
 				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
+			}
+			// Propagate operator origin version for version-gated behavior in backends
+			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = val
 			}
 		}
 
@@ -550,7 +554,8 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 	if component.DynamoNamespace == nil {
 		return nil, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", componentName)
 	}
-	componentName = GetDynamoComponentName(dynamoDeployment, componentName)
+	// DNS-safe service resource name: "{dgd-name}-{lowercase(componentName)}"
+	kubeServiceName := GetDynamoComponentName(dynamoDeployment, componentName)
 
 	var servicePort corev1.ServicePort
 	switch component.ComponentType {
@@ -593,14 +598,17 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      componentName,
+			Name:      kubeServiceName,
 			Namespace: dynamoDeployment.Namespace,
 			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,
-				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace,
+				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,    // e.g "worker"
+				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace, // result of ComputeDynamoNamespace(k8sNamespace, dgdName)
+				// The original user provided component name (the service map key, e.g. "VllmDecodeWorker" in the DGD).
+				// Needed to disambiguate amongst distinct components with the same component type within a DGD (e.g prefill/decode workers).
+				commonconsts.KubeLabelDynamoComponent: componentName,
 			},
 			Ports: []corev1.ServicePort{servicePort},
 		},
@@ -1205,6 +1213,14 @@ func GenerateGrovePodCliqueSet(
 				component.Annotations = make(map[string]string)
 			}
 			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = discoveryBackend
+		}
+
+		// Propagate operator origin version for version-gated behavior in backends
+		if val, exists := dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			component.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = val
 		}
 
 		// Get checkpoint info for this service if available

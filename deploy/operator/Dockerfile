@@ -14,7 +14,7 @@ ARG TARGETARCH
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
 # Install common dependencies
-RUN apt-get update && apt-get install -y git && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
@@ -38,7 +38,7 @@ RUN golangci-lint run --timeout=5m
 FROM base AS tester
 
 # Install make if not present
-RUN apt-get update && apt-get install -y make && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends make && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Run tests using Makefile
 RUN make test
