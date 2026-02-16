@@ -8,7 +8,7 @@ use dynamo_kv_router::indexer::{
 };
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
-    RouterEvent, XXH3_SEED
+    RouterEvent, XXH3_SEED,
 };
 use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
 use dynamo_tokens::compute_hash_v2;
