@@ -154,7 +154,7 @@ class BaseConfigModifier:
         Raises:
             ValueError: If neither --served-model-name nor model path arg is found
         """
-        model_name = None
+        model_name = ""
         # Check for --served-model-name first (API model name)
         for i, arg in enumerate(args):
             if arg == cls.WORKER_SERVED_MODEL_NAME_ARG and i + 1 < len(args):
@@ -162,14 +162,14 @@ class BaseConfigModifier:
                 break
 
         # Check for backend-specific path argument
-        model_path = None
+        model_path = ""
         for i, arg in enumerate(args):
             if arg == cls.WORKER_MODEL_PATH_ARG and i + 1 < len(args):
                 model_path = args[i + 1]
                 break
 
         # Require at least one to be specified
-        if model_name is None and model_path is None:
+        if not model_name and not model_path:
             raise ValueError(
                 f"Cannot determine model: neither {cls.WORKER_MODEL_PATH_ARG} nor "
                 f"{cls.WORKER_SERVED_MODEL_NAME_ARG} found in worker configuration. "
@@ -177,9 +177,9 @@ class BaseConfigModifier:
             )
 
         # If only one is specified, use it for both
-        if model_path is None:
+        if not model_path:
             model_path = model_name
-        elif model_name is None:
+        elif not model_name:
             model_name = model_path
 
         return model_name, model_path
