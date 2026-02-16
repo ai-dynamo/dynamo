@@ -132,6 +132,12 @@ struct Args {
     #[clap(short = 'd', long, default_value = "1")]
     inference_worker_duplication_factor: usize,
 
+    /// Factor by which to stretch each request's hash sequence length.
+    /// Each original hash block becomes `factor` consecutive blocks.
+    /// Applied before event generation and before trace duplication.
+    #[clap(long, default_value = "1")]
+    trace_length_factor: usize,
+
     /// How many times to duplicate the trace data with offset hashes at
     /// replay time. Each duplication creates a structurally identical copy
     /// of the prefix tree with disjoint hash values, increasing the number
@@ -252,6 +258,43 @@ fn scale_mooncake_trace(trace: &Vec<MooncakeRequest>, duration: u64) -> Vec<Moon
             ..request.clone()
         })
         .collect::<Vec<MooncakeRequest>>()
+}
+
+/// Stretch each request's hash sequence by the given factor, simulating longer
+/// prefix chains with the same tree structure.
+///
+/// Each hash `h` becomes `factor` consecutive hashes:
+/// `h * factor`, `h * factor + 1`, ..., `h * factor + (factor - 1)`.
+/// Two sequences that shared a k-block prefix now share a k*factor-block prefix.
+fn expand_trace_lengths(
+    traces: Vec<Vec<MooncakeRequest>>,
+    factor: usize,
+) -> Vec<Vec<MooncakeRequest>> {
+    if factor <= 1 {
+        return traces;
+    }
+
+    println!("Expanding trace lengths by {}x", factor);
+
+    traces
+        .into_iter()
+        .map(|worker_trace| {
+            worker_trace
+                .into_iter()
+                .map(|mut request| {
+                    request.hash_ids = request
+                        .hash_ids
+                        .iter()
+                        .flat_map(|&h| {
+                            let base = h * factor as u64;
+                            (0..factor as u64).map(move |offset| base + offset)
+                        })
+                        .collect();
+                    request
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Expand a request's block-level hash_ids into per-token IDs by repeating each
@@ -790,6 +833,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let traces = process_mooncake_trace(&args)?;
+    let traces = expand_trace_lengths(traces, args.trace_length_factor);
 
     let events = generate_events(&traces, &args).await?;
 
