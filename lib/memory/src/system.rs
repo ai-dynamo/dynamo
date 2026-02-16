@@ -236,7 +236,7 @@ mod tests {
     fn test_system_storage_alignment() {
         let storage = SystemStorage::new(1024).unwrap();
         // posix_memalign allocates with 4096-byte alignment
-        assert!(storage.addr() % 4096 == 0);
+        assert!(storage.addr().is_multiple_of(4096));
     }
 
     #[test]

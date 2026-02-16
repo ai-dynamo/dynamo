@@ -179,7 +179,7 @@ fn test_memory_region_zero_size() {
 #[test]
 fn test_memory_region_clone() {
     let region = MemoryRegion::new(0x3000, 2048);
-    let cloned = region.clone();
+    let cloned = region;
     assert_eq!(region.addr(), cloned.addr());
     assert_eq!(region.size(), cloned.size());
 }
