@@ -1,1 +1,43 @@
-[]
+[
+  {
+    "run_id": "22046016636",
+    "timestamp": "2026-02-16T00:40:11Z",
+    "ref": "refs/heads/saperiyasamy/test-router",
+    "branch": "saperiyasamy/test-router",
+    "platform_arch": "arm64",
+    "commit": "212b40c60bd71ea34fa81abdeb6269f8da1da0d1",
+    "run_url": "https://github.com/ai-dynamo/dynamo/actions/runs/22046016636",
+    "results": {
+      "prefix_ratios": [
+        0.5
+      ],
+      "ttft_p25_values": [
+        108.820852
+      ],
+      "ttft_p50_values": [
+        245.916643
+      ],
+      "ttft_p75_values": [
+        323.399968
+      ],
+      "itl_p25_values": [
+        54.548028439999996
+      ],
+      "itl_p50_values": [
+        54.763508405405396
+      ],
+      "itl_p75_values": [
+        56.39239512903226
+      ],
+      "config": {
+        "model": "openai/gpt-oss-120b",
+        "tokenizer": "openai/gpt-oss-120b",
+        "isl": 256,
+        "osl": 32,
+        "requests": 5,
+        "concurrency": 2,
+        "initial_seed": 0
+      }
+    }
+  }
+]
