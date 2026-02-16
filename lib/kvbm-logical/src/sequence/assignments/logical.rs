@@ -841,7 +841,7 @@ mod tests {
         let immutables = register_blocks_directly(&manager, &seq, 3);
 
         // Clone before consuming — ImmutableBlock is Clone
-        let clones: Vec<ImmutableBlock<TestMeta>> = immutables.iter().cloned().collect();
+        let clones: Vec<ImmutableBlock<TestMeta>> = immutables.to_vec();
         let dup_id = clones[0].block_id();
 
         let mut la = LogicalBlockAssignments::new();

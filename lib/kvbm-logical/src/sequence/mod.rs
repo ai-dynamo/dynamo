@@ -7,8 +7,8 @@ mod assignments;
 mod store;
 
 pub use assignments::{
-    zip_assigned, zip_assigned_pending, ExternalBlockAssignments,
-    LogicalBlockAssignmentError, LogicalBlockAssignments,
+    ExternalBlockAssignments, LogicalBlockAssignmentError, LogicalBlockAssignments, zip_assigned,
+    zip_assigned_pending,
 };
 
 use std::ops::Range;
@@ -33,9 +33,7 @@ pub enum BlockSequenceError {
     },
 
     /// The position embedded in a sequence hash didn't match the expected position.
-    #[error(
-        "position mismatch for block_id {block_id}: expected {expected}, actual {actual}"
-    )]
+    #[error("position mismatch for block_id {block_id}: expected {expected}, actual {actual}")]
     PositionMismatch {
         expected: usize,
         actual: u64,
@@ -44,9 +42,7 @@ pub enum BlockSequenceError {
 
     /// A block_id already exists in one of the collections.
     #[error("duplicate block_id {block_id} already present")]
-    DuplicateBlockId {
-        block_id: BlockId,
-    },
+    DuplicateBlockId { block_id: BlockId },
 
     /// Error from underlying token block operations.
     #[error("token extension error: {0}")]
@@ -115,10 +111,7 @@ impl BlockSequence {
     /// Appends a single token to the sequence.
     ///
     /// Returns the index of the completed block if the token completed a block.
-    pub fn append_token(
-        &mut self,
-        token: Token,
-    ) -> Result<Option<usize>, BlockSequenceError> {
+    pub fn append_token(&mut self, token: Token) -> Result<Option<usize>, BlockSequenceError> {
         self.sequence.append(token).map_err(Into::into)
     }
 }
