@@ -342,6 +342,8 @@ impl Default for EventState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Wake, Waker};
 
     fn make_entry(index: u32) -> EventEntry {
         EventEntry::new(EventKey::new(index))
@@ -467,5 +469,87 @@ mod tests {
             .unwrap();
         let reason = entry.poison_reason(generation);
         assert_eq!(&*reason.unwrap(), "oops");
+    }
+
+    #[derive(Default)]
+    struct CountingWake {
+        count: AtomicUsize,
+    }
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker() -> (Arc<CountingWake>, Waker) {
+        let state = Arc::new(CountingWake::default());
+        let waker = Waker::from(Arc::clone(&state));
+        (state, waker)
+    }
+
+    #[test]
+    fn poll_waiter_deduplicates_waker_registrations() {
+        let entry = make_entry(10);
+        let generation = entry.begin_generation().unwrap();
+
+        let (wake_state, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(entry.poll_waiter(generation, &mut cx).is_pending());
+        assert!(entry.poll_waiter(generation, &mut cx).is_pending());
+
+        {
+            let state = entry.state.lock();
+            assert_eq!(state.wakers.len(), 1, "waker should be deduplicated");
+        }
+
+        entry
+            .finalize_completion(generation, CompletionKind::Triggered)
+            .unwrap();
+
+        assert_eq!(wake_state.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn finalize_completion_wakes_all_distinct_waiters() {
+        let entry = make_entry(11);
+        let generation = entry.begin_generation().unwrap();
+
+        let (first_state, first_waker) = counting_waker();
+        let (second_state, second_waker) = counting_waker();
+
+        let mut first_cx = Context::from_waker(&first_waker);
+        let mut second_cx = Context::from_waker(&second_waker);
+
+        assert!(entry.poll_waiter(generation, &mut first_cx).is_pending());
+        assert!(entry.poll_waiter(generation, &mut second_cx).is_pending());
+
+        entry
+            .finalize_completion(generation, CompletionKind::Triggered)
+            .unwrap();
+
+        assert_eq!(first_state.count.load(Ordering::SeqCst), 1);
+        assert_eq!(second_state.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn begin_generation_flushes_stale_wakers() {
+        let entry = make_entry(12);
+        let generation = entry.begin_generation().unwrap();
+
+        entry
+            .finalize_completion(generation, CompletionKind::Triggered)
+            .unwrap();
+
+        let (wake_state, stale_waker) = counting_waker();
+        {
+            let mut state = entry.state.lock();
+            state.wakers.push(stale_waker);
+        }
+
+        let next_generation = entry.begin_generation().unwrap();
+        assert_eq!(next_generation, generation + 1);
+        assert_eq!(wake_state.count.load(Ordering::SeqCst), 1);
     }
 }

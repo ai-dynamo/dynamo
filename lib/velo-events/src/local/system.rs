@@ -321,9 +321,7 @@ impl LocalEventSystem {
             WaitRegistration::Poisoned(poison) => Ok(EventAwaiter::immediate(Arc::new(
                 CompletionKind::Poisoned(poison),
             ))),
-            WaitRegistration::Pending => {
-                Ok(EventAwaiter::pending(entry, handle.generation()))
-            }
+            WaitRegistration::Pending => Ok(EventAwaiter::pending(entry, handle.generation())),
         }
     }
 
