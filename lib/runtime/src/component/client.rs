@@ -164,7 +164,9 @@ impl Client {
     /// Decrement the active connection count for an instance (for least-loaded routing).
     pub fn decrement_connections(&self, instance_id: u64) {
         if let Some(count) = self.instance_connections.get(&instance_id) {
-            count.fetch_sub(1, Ordering::Relaxed);
+            let _ = count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(1))
+            });
         }
     }
 
