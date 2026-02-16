@@ -20,12 +20,14 @@ The type parameter `T: BlockMetadata` is a marker for the storage tier (e.g. GPU
 
 ## Usage
 
-```rust
+```rust,no_run
 use kvbm_logical::{
     BlockManager, BlockRegistry, MutableBlock, CompleteBlock, ImmutableBlock, WeakBlock,
+    SequenceHash,
     manager::FrequencyTrackingCapacity,
 };
 
+# fn main() {
 // Any Clone + Send + Sync + 'static type satisfies BlockMetadata.
 #[derive(Clone)]
 struct G2; // CPU tier marker
@@ -51,8 +53,8 @@ let mut blocks: Vec<MutableBlock<G2>> = manager
     .expect("not enough blocks available");
 
 // Stage a block with a pre-computed sequence hash, producing a CompleteBlock.
-// SequenceHash is derived from token data via the dynamo_tokens crate.
-let seq_hash_0 = /* SequenceHash from token processing */;
+// SequenceHash wraps a positional lineage hash computed from token data.
+let seq_hash_0 = SequenceHash::new(42, None, 0);
 let complete: CompleteBlock<G2> = blocks
     .remove(0)
     .stage(seq_hash_0, manager.block_size())
@@ -82,6 +84,7 @@ if let Some(restored) = weak.upgrade() {
 // Introspect pool state.
 let available = manager.available_blocks();
 let total = manager.total_blocks();
+# }
 ```
 
 ## Prometheus Metrics
