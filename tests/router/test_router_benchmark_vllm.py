@@ -289,6 +289,9 @@ def test_gpt_oss_tp2(
             str(BENCHMARK_PREFIX_RATIO),
             "--output-dir",
             str(benchmark_out),
+            "--collect-gpu-sku",
+            "--tensor-parallel-size",
+            str(TENSOR_PARALLEL_SIZE),
         ]
         logger.info(
             "Running prefix_ratio_benchmark.py (same as benchmarks/router/README.md)"

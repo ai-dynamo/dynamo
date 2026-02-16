@@ -36,6 +36,7 @@ def get_aiperf_cmd(
     artifact_dir,
     url="http://localhost:8888",
     use_expected_osl=False,
+    collect_gpu_sku=False,
 ):
     """Build aiperf command based on prefix ratio"""
     prefix_length = int(isl * prefix_ratio)
@@ -83,7 +84,7 @@ def get_aiperf_cmd(
         "--dataset-sampling-strategy",
         "shuffle",
     ]
-    cmd.extend(get_common_aiperf_flags())
+    cmd.extend(get_common_aiperf_flags(collect_gpu_sku=collect_gpu_sku))
     return cmd
 
 
@@ -104,6 +105,45 @@ def get_aiperf_result(artifact_dir: str) -> dict:
         return json.load(f)
 
 
+def extract_gpu_sku_from_aiperf_artifact(artifact_dir: str) -> Optional[str]:
+    """Extract GPU model name (SKU) from aiperf export when GPU telemetry was enabled.
+
+    Reads profile_export_aiperf.json (telemetry_data.endpoints[*].gpus[*].gpu_name)
+    or the first line of gpu_telemetry_export.jsonl (gpu_model_name). Returns the
+    first GPU name found, or None if not present or on error.
+    """
+    try:
+        for root, _, files in os.walk(artifact_dir):
+            if "profile_export_aiperf.json" in files:
+                json_path = os.path.join(root, "profile_export_aiperf.json")
+                with open(json_path, "r") as f:
+                    data = json.load(f)
+                telemetry = data.get("telemetry_data")
+                if isinstance(telemetry, dict):
+                    endpoints = telemetry.get("endpoints") or {}
+                    for ep_data in endpoints.values():
+                        if not isinstance(ep_data, dict):
+                            continue
+                        gpus = ep_data.get("gpus") or {}
+                        for gpu_summary in gpus.values():
+                            if isinstance(gpu_summary, dict):
+                                name = gpu_summary.get("gpu_name")
+                                if name:
+                                    return name.strip()
+            if "gpu_telemetry_export.jsonl" in files:
+                jsonl_path = os.path.join(root, "gpu_telemetry_export.jsonl")
+                with open(jsonl_path, "r") as f:
+                    first_line = f.readline()
+                if first_line.strip():
+                    record = json.loads(first_line)
+                    name = record.get("gpu_model_name")
+                    if name:
+                        return name.strip()
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        logger.debug("Could not extract GPU SKU from aiperf artifact: %s", e)
+    return None
+
+
 def run_benchmark(
     model,
     tokenizer,
@@ -117,6 +157,7 @@ def run_benchmark(
     output_dir,
     url,
     use_expected_osl=False,
+    collect_gpu_sku=False,
 ) -> Optional[Dict]:
     """Run aiperf benchmark for a specific prefix ratio"""
     logger.info(
@@ -139,6 +180,7 @@ def run_benchmark(
         artifact_dir,
         url,
         use_expected_osl,
+        collect_gpu_sku=collect_gpu_sku,
     )
 
     logger.info(f"Command: {' '.join(aiperf_cmd)}")
@@ -177,6 +219,18 @@ def main():
         default=[0.1, 0.3, 0.5, 0.7, 0.9],
         help="List of prefix ratios to test",
     )
+    parser.add_argument(
+        "--collect-gpu-sku",
+        action="store_true",
+        help="Enable aiperf GPU telemetry (pynvml) and record GPU model name in results config",
+    )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Tensor parallel size used for the run (recorded in results config)",
+    )
 
     args = parser.parse_args()
     resolve_tokenizer(args)
@@ -194,6 +248,7 @@ def main():
     itl_p75_values = []
 
     current_seed = args.seed
+    gpu_sku = None
 
     # Run benchmarks for each prefix ratio
     for prefix_ratio in args.prefix_ratios:
@@ -210,6 +265,7 @@ def main():
             args.output_dir,
             args.url,
             args.use_expected_osl,
+            collect_gpu_sku=args.collect_gpu_sku,
         )
 
         if result is not None:
@@ -223,6 +279,14 @@ def main():
             itl_p25_values.append(itl["p25"])
             itl_p50_values.append(itl["p50"])
             itl_p75_values.append(itl["p75"])
+
+            if args.collect_gpu_sku and gpu_sku is None:
+                artifact_dir = (
+                    f"{args.output_dir}/prefix_ratio_{prefix_ratio}_seed_{current_seed}"
+                )
+                gpu_sku = extract_gpu_sku_from_aiperf_artifact(artifact_dir)
+                if gpu_sku:
+                    logger.info("Collected GPU SKU from aiperf: %s", gpu_sku)
 
             logger.info(
                 f"Prefix ratio {prefix_ratio}: TTFT p50={ttft['p50']:.2f}ms (p25={ttft['p25']:.2f}, p75={ttft['p75']:.2f}), "
@@ -302,6 +366,19 @@ def main():
         logger.info(f"Performance plot saved to {plot_path}")
 
         # Save results to JSON
+        config = {
+            "model": args.model,
+            "tokenizer": args.tokenizer,
+            "isl": args.isl,
+            "osl": args.osl,
+            "requests": args.requests,
+            "concurrency": args.concurrency,
+            "initial_seed": args.seed,
+        }
+        if gpu_sku is not None:
+            config["gpu_sku"] = gpu_sku
+        if args.tensor_parallel_size is not None:
+            config["tp"] = args.tensor_parallel_size
         results_data = {
             "prefix_ratios": prefix_ratios,
             "ttft_p25_values": ttft_p25_values,
@@ -310,15 +387,7 @@ def main():
             "itl_p25_values": itl_p25_values,
             "itl_p50_values": itl_p50_values,
             "itl_p75_values": itl_p75_values,
-            "config": {
-                "model": args.model,
-                "tokenizer": args.tokenizer,
-                "isl": args.isl,
-                "osl": args.osl,
-                "requests": args.requests,
-                "concurrency": args.concurrency,
-                "initial_seed": args.seed,
-            },
+            "config": config,
         }
 
         results_path = f"{args.output_dir}/results_summary.json"
