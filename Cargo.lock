@@ -1052,7 +1052,7 @@ checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
 dependencies = [
  "glob",
  "libc",
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1522,7 +1522,16 @@ version = "0.17.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf99ab37ee7072d64d906aa2dada9a3422f1d975cdf8c8055a573bc84897ed8"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "cudarc"
+version = "0.19.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aed81f178e780f3d5d354d12b4c5c5a484c4a9c329ecd037ac57f2a0e0648397"
+dependencies = [
+ "libloading 0.9.0",
 ]
 
 [[package]]
@@ -1959,6 +1968,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-config"
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-next-memory#581ee33e434f3f99b84f6ea99fcf0a3fda26a685"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "dynamo-kv-router"
 version = "0.9.0"
 dependencies = [
@@ -2017,7 +2034,7 @@ dependencies = [
  "chrono",
  "clap 4.5.58",
  "criterion 0.3.6",
- "cudarc",
+ "cudarc 0.17.8",
  "dashmap 5.5.3",
  "derive-getters",
  "derive_builder",
@@ -2108,16 +2125,16 @@ dependencies = [
 [[package]]
 name = "dynamo-memory"
 version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-next-memory#581ee33e434f3f99b84f6ea99fcf0a3fda26a685"
 dependencies = [
  "anyhow",
- "cudarc",
- "dynamo-config",
+ "cudarc 0.17.8",
+ "dynamo-config 0.9.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-next-memory)",
  "libc",
  "nix 0.30.1",
  "nixl-sys",
  "offset-allocator",
  "serde",
- "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -2189,7 +2206,7 @@ dependencies = [
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
- "dynamo-config",
+ "dynamo-config 0.9.0",
  "educe",
  "either",
  "env_logger",
@@ -4184,6 +4201,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kvbm-common"
+version = "0.9.0"
+dependencies = [
+ "dynamo-tokens",
+ "serde",
+]
+
+[[package]]
+name = "kvbm-kernels"
+version = "0.9.0"
+source = "git+http://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-kernels-encore#40d303d8d1da42711138ef370a38f4ebf52aedbf"
+dependencies = [
+ "cudarc 0.19.2",
+]
+
+[[package]]
 name = "kvbm-logical"
 version = "0.9.0"
 dependencies = [
@@ -4212,6 +4245,34 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xxhash-rust",
+]
+
+[[package]]
+name = "kvbm-physical"
+version = "0.9.0"
+dependencies = [
+ "aligned-vec",
+ "anyhow",
+ "bincode 2.0.1",
+ "blake3",
+ "bytes",
+ "cudarc 0.17.8",
+ "derive-getters",
+ "derive_builder",
+ "dynamo-memory",
+ "futures",
+ "kvbm-common",
+ "kvbm-kernels",
+ "parking_lot",
+ "rstest 0.26.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "validator",
+ "velo-events",
 ]
 
 [[package]]
@@ -4280,6 +4341,16 @@ name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if 1.0.4",
+ "windows-link",
+]
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if 1.0.4",
  "windows-link",

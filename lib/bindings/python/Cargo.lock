@@ -1608,6 +1608,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-config"
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-next-memory#581ee33e434f3f99b84f6ea99fcf0a3fda26a685"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "dynamo-kv-router"
 version = "0.9.0"
 dependencies = [
@@ -1733,10 +1741,11 @@ dependencies = [
 [[package]]
 name = "dynamo-memory"
 version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-next-memory#581ee33e434f3f99b84f6ea99fcf0a3fda26a685"
 dependencies = [
  "anyhow",
  "cudarc",
- "dynamo-config",
+ "dynamo-config 0.9.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-next-memory)",
  "libc",
  "nix 0.30.1",
  "nixl-sys",
@@ -1842,7 +1851,7 @@ dependencies = [
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
- "dynamo-config",
+ "dynamo-config 0.9.0",
  "educe",
  "either",
  "etcd-client",

@@ -44,19 +44,3 @@ impl KvbmSequenceHashProvider for dynamo_tokens::TokenBlock {
         self.positional_lineage_hash()
     }
 }
-
-/// Logical layout handle type encoding the layout ID.
-///
-/// KVBM manages G1, G2 and G3 layouts directly. G4 is managed by an external service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode, Serialize, Deserialize)]
-pub enum LogicalLayoutHandle {
-    /// Representation of GPU / Device Memory
-    G1,
-    /// Representation of CPU / Host Memory
-    G2,
-    /// Representation of Disk Storage
-    G3,
-    /// Representation of Blocks held in an external service
-    /// outside the control of the KVBM system.
-    G4,
-}
