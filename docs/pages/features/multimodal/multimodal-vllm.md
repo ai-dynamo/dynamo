@@ -465,7 +465,7 @@ Dynamo's Rust SDK supports two input types that determine how the HTTP frontend 
 
 ```python
 # Processor - Entry point from HTTP frontend
-await register_llm(
+await register_model(
     ModelInput.Text,        # Frontend sends raw text
     ModelType.Chat,
     generate_endpoint,
@@ -474,7 +474,7 @@ await register_llm(
 )
 
 # Workers - Internal components
-await register_llm(
+await register_model(
     ModelInput.Tokens,      # Expect pre-tokenized input
     ModelType.Chat,         # or ModelType.Prefill for prefill workers
     generate_endpoint,
