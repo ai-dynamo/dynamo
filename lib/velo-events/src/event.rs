@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::guard::EventGuard;
 use crate::handle::EventHandle;
-use crate::slot_v2::EventAwaiter;
+use crate::slot::EventAwaiter;
 
 /// A single event that can be triggered or poisoned exactly once.
 ///

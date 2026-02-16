@@ -1,19 +1,11 @@
-# slot_v2 State Machine Specification
+# Slot State Machine Specification
 
 ## Overview
 
-`slot_v2` replaces the original `slot` module's two-lock design (entry-level
-`ParkingMutex<EventState>` + slot-level `ParkingMutex<SlotStateInner>` with
-atomic guards) with a single entry-level `ParkingMutex<EventState>` that holds
-all per-entry state including waker registration.
-
-This eliminates:
-- **Race 1** (stale completion leakage): old `begin_generation` conditionally
-  cleared completion based on `waiter_count`, leaking stale results to
-  new-generation waiters.
-- **Race 2 fragility** (drop-then-signal): old `finalize_completion` dropped
-  the entry lock before signaling the slot, creating a window where a new
-  generation could start before waiters were notified.
+The slot module uses a single entry-level `ParkingMutex<EventState>` that holds
+all per-entry state including waker registration. This design eliminates
+stale-completion races by construction — there is no separate lock or atomic
+guard whose ordering could allow stale results to leak across generations.
 
 ## State Variables
 

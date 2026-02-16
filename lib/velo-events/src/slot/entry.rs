@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::anyhow;
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
-use super::active::ActiveSlot;
 use super::completion::{CompletionKind, PoisonArc, WaitRegistration};
 use crate::handle::EventHandle;
 use crate::status::{EventStatus, Generation};
@@ -55,10 +56,6 @@ pub(crate) enum EventEntryError {
         requested: Generation,
         active: Option<Generation>,
     },
-    MissingSlot {
-        key: EventKey,
-        generation: Generation,
-    },
 }
 
 impl Display for EventEntryError {
@@ -90,13 +87,6 @@ impl Display for EventEntryError {
                     requested, key
                 ),
             },
-            Self::MissingSlot { key, generation } => {
-                write!(
-                    f,
-                    "Missing slot for event {} generation {}",
-                    key, generation
-                )
-            }
         }
     }
 }
@@ -110,6 +100,9 @@ impl std::error::Error for EventEntryError {
 pub(crate) type EventEntryResult<T> = std::result::Result<T, EventEntryError>;
 
 /// Owner-side event entry reused across generations.
+///
+/// All state mutations are serialized through a single `ParkingMutex<EventState>`,
+/// eliminating the stale-completion race present in the original `slot` module.
 pub(crate) struct EventEntry {
     key: EventKey,
     state: ParkingMutex<EventState>,
@@ -127,25 +120,40 @@ impl EventEntry {
         self.key
     }
 
+    /// Advance to the next generation.
+    ///
+    /// Flushes any stale wakers from the previous generation so they re-poll
+    /// and resolve via the `observed_generation <= last_triggered` check.
     pub(crate) fn begin_generation(&self) -> EventEntryResult<Generation> {
-        let mut state = self.state.lock();
-        if let Some(active) = state.active_generation {
-            return Err(EventEntryError::ActiveGeneration {
-                key: self.key,
-                active,
-            });
+        let stale_wakers;
+        let next;
+        {
+            let mut state = self.state.lock();
+            if let Some(active) = state.active_generation {
+                return Err(EventEntryError::ActiveGeneration {
+                    key: self.key,
+                    active,
+                });
+            }
+            if state.last_triggered == MAX_GENERATION || state.retired {
+                return Err(EventEntryError::GenerationOverflow { key: self.key });
+            }
+            next = state
+                .last_triggered
+                .checked_add(1)
+                .expect("checked for overflow above");
+
+            // Flush stale wakers from the previous generation.
+            stale_wakers = std::mem::take(&mut state.wakers);
+
+            state.active_generation = Some(next);
         }
-        if state.last_triggered == MAX_GENERATION || state.retired {
-            return Err(EventEntryError::GenerationOverflow { key: self.key });
+
+        // Wake stale wakers outside lock to reduce contention.
+        for waker in stale_wakers {
+            waker.wake();
         }
-        let next = state
-            .last_triggered
-            .checked_add(1)
-            .expect("checked for overflow above");
-        let slot = state.active_slot.get_or_insert_with(ActiveSlot::new);
-        let slot_gen = slot.begin_generation();
-        state.slot_generation = slot_gen;
-        state.active_generation = Some(next);
+
         Ok(next)
     }
 
@@ -175,16 +183,7 @@ impl EventEntry {
         }
 
         match state.active_generation {
-            Some(active) if active == generation => {
-                let slot = state
-                    .active_slot
-                    .as_ref()
-                    .ok_or(EventEntryError::MissingSlot {
-                        key: self.key,
-                        generation,
-                    })?;
-                Ok(WaitRegistration::Pending(slot.waiter()))
-            }
+            Some(active) if active == generation => Ok(WaitRegistration::Pending),
             Some(active) => Err(EventEntryError::InvalidGeneration {
                 key: self.key,
                 requested: generation,
@@ -198,60 +197,90 @@ impl EventEntry {
         }
     }
 
+    /// Complete the current generation with the given result.
+    ///
+    /// Stores poison history (if applicable) and wakes all registered waiters.
+    /// Both the state update and waker drain happen under the same lock
+    /// acquisition, preventing the stale-completion race (Race 1) and the
+    /// drop-then-signal fragility (Race 2) present in the original `slot` module.
     pub(crate) fn finalize_completion(
         &self,
         generation: Generation,
         completion: CompletionKind,
     ) -> EventEntryResult<()> {
-        let mut state = self.state.lock();
-        if state.active_generation != Some(generation) {
-            return Err(EventEntryError::InvalidGeneration {
-                key: self.key,
-                requested: generation,
-                active: state.active_generation,
-            });
+        let wakers;
+        {
+            let mut state = self.state.lock();
+            if state.active_generation != Some(generation) {
+                return Err(EventEntryError::InvalidGeneration {
+                    key: self.key,
+                    requested: generation,
+                    active: state.active_generation,
+                });
+            }
+
+            state.last_triggered = generation;
+            state.active_generation = None;
+
+            match &completion {
+                CompletionKind::Poisoned(poison) => {
+                    state.poisoned.insert(generation, poison.clone());
+                }
+                CompletionKind::Triggered => {
+                    state.poisoned.remove(&generation);
+                }
+            }
+
+            wakers = std::mem::take(&mut state.wakers);
         }
 
-        let slot = state
-            .active_slot
-            .as_ref()
-            .ok_or(EventEntryError::MissingSlot {
-                key: self.key,
-                generation,
-            })?
-            .clone();
-        let slot_gen = state.slot_generation;
-
-        state.last_triggered = generation;
-        state.active_generation = None;
-
-        match &completion {
-            CompletionKind::Poisoned(poison) => {
-                state.poisoned.insert(generation, poison.clone());
-            }
-            CompletionKind::Triggered => {
-                state.poisoned.remove(&generation);
-            }
-        }
-
-        drop(state);
-
-        match completion {
-            CompletionKind::Triggered => slot.complete_triggered(slot_gen),
-            poisoned @ CompletionKind::Poisoned(_) => {
-                let completion_arc = Arc::new(poisoned);
-                slot.complete(completion_arc, slot_gen);
-            }
+        // Wake all registered waiters outside the lock.
+        for waker in wakers {
+            waker.wake();
         }
 
         Ok(())
+    }
+
+    /// Poll for waiter resolution, called by [`super::waiter::EventAwaiter::poll`].
+    ///
+    /// Checks the entry state under lock and either returns a result or
+    /// registers the provided waker for future notification.
+    pub(crate) fn poll_waiter(
+        &self,
+        observed_generation: Generation,
+        cx: &mut Context<'_>,
+    ) -> Poll<anyhow::Result<()>> {
+        let mut state = self.state.lock();
+
+        // Check if our generation has completed.
+        if observed_generation <= state.last_triggered {
+            if let Some(poison) = state.poisoned.get(&observed_generation) {
+                return Poll::Ready(Err(anyhow::Error::new((**poison).clone())));
+            }
+            return Poll::Ready(Ok(()));
+        }
+
+        // Generation not yet completed — check if still active.
+        if state.active_generation.is_none() {
+            return Poll::Ready(Err(anyhow!("generation expired without completion")));
+        }
+
+        // Register waker with deduplication (critical for select! loops).
+        let waker = cx.waker();
+        if let Some(existing) = state.wakers.iter_mut().find(|w| w.will_wake(waker)) {
+            existing.clone_from(waker);
+        } else {
+            state.wakers.push(waker.clone());
+        }
+
+        Poll::Pending
     }
 
     pub(crate) fn retire(&self) {
         let mut state = self.state.lock();
         state.retired = true;
         state.active_generation = None;
-        state.active_slot = None;
     }
 
     pub(crate) fn is_retired(&self) -> bool {
@@ -280,9 +309,41 @@ impl EventEntry {
     }
 }
 
+/// Per-entry state protected by a single mutex.
+///
+/// All fields are read and written under the same lock, which structurally
+/// prevents the races present in the original two-lock (`EventState` +
+/// `SlotStateInner`) design.
+struct EventState {
+    /// Highest generation that has completed (triggered or poisoned).
+    last_triggered: Generation,
+    /// Currently pending generation, if any.
+    active_generation: Option<Generation>,
+    /// Registered wakers from pending `EventAwaiter` futures.
+    wakers: Vec<Waker>,
+    /// Poison history keyed by generation.
+    poisoned: BTreeMap<Generation, PoisonArc>,
+    /// Permanently unusable (generation space exhausted).
+    retired: bool,
+}
+
+impl Default for EventState {
+    fn default() -> Self {
+        Self {
+            last_triggered: 0,
+            active_generation: None,
+            wakers: Vec::with_capacity(2),
+            poisoned: BTreeMap::new(),
+            retired: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Wake, Waker};
 
     fn make_entry(index: u32) -> EventEntry {
         EventEntry::new(EventKey::new(index))
@@ -409,14 +470,86 @@ mod tests {
         let reason = entry.poison_reason(generation);
         assert_eq!(&*reason.unwrap(), "oops");
     }
-}
 
-#[derive(Default)]
-struct EventState {
-    last_triggered: Generation,
-    active_generation: Option<Generation>,
-    active_slot: Option<ActiveSlot>,
-    poisoned: BTreeMap<Generation, PoisonArc>,
-    slot_generation: u64,
-    retired: bool,
+    #[derive(Default)]
+    struct CountingWake {
+        count: AtomicUsize,
+    }
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker() -> (Arc<CountingWake>, Waker) {
+        let state = Arc::new(CountingWake::default());
+        let waker = Waker::from(Arc::clone(&state));
+        (state, waker)
+    }
+
+    #[test]
+    fn poll_waiter_deduplicates_waker_registrations() {
+        let entry = make_entry(10);
+        let generation = entry.begin_generation().unwrap();
+
+        let (wake_state, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(entry.poll_waiter(generation, &mut cx).is_pending());
+        assert!(entry.poll_waiter(generation, &mut cx).is_pending());
+
+        {
+            let state = entry.state.lock();
+            assert_eq!(state.wakers.len(), 1, "waker should be deduplicated");
+        }
+
+        entry
+            .finalize_completion(generation, CompletionKind::Triggered)
+            .unwrap();
+
+        assert_eq!(wake_state.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn finalize_completion_wakes_all_distinct_waiters() {
+        let entry = make_entry(11);
+        let generation = entry.begin_generation().unwrap();
+
+        let (first_state, first_waker) = counting_waker();
+        let (second_state, second_waker) = counting_waker();
+
+        let mut first_cx = Context::from_waker(&first_waker);
+        let mut second_cx = Context::from_waker(&second_waker);
+
+        assert!(entry.poll_waiter(generation, &mut first_cx).is_pending());
+        assert!(entry.poll_waiter(generation, &mut second_cx).is_pending());
+
+        entry
+            .finalize_completion(generation, CompletionKind::Triggered)
+            .unwrap();
+
+        assert_eq!(first_state.count.load(Ordering::SeqCst), 1);
+        assert_eq!(second_state.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn begin_generation_flushes_stale_wakers() {
+        let entry = make_entry(12);
+        let generation = entry.begin_generation().unwrap();
+
+        entry
+            .finalize_completion(generation, CompletionKind::Triggered)
+            .unwrap();
+
+        let (wake_state, stale_waker) = counting_waker();
+        {
+            let mut state = entry.state.lock();
+            state.wakers.push(stale_waker);
+        }
+
+        let next_generation = entry.begin_generation().unwrap();
+        assert_eq!(next_generation, generation + 1);
+        assert_eq!(wake_state.count.load(Ordering::SeqCst), 1);
+    }
 }

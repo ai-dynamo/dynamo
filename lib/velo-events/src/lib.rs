@@ -164,11 +164,8 @@ mod status;
 // Local implementation
 pub mod local;
 
-// Internal synchronization (frozen — do not modify)
+// Internal synchronization (see docs/slot-state-machine.md)
 pub(crate) mod slot;
-
-// Single-lock replacement for slot (see docs/slot-state-machine.md)
-pub(crate) mod slot_v2;
 
 // ── Re-exports ───────────────────────────────────────────────────────
 
@@ -178,7 +175,7 @@ pub use guard::EventGuard;
 pub use handle::EventHandle;
 pub use local::{LocalEvent, LocalEventSystem};
 pub use manager::EventManager;
-pub use slot_v2::EventAwaiter;
+pub use slot::EventAwaiter;
 pub use status::{EventPoison, EventStatus, Generation};
 
 #[cfg(test)]
@@ -722,7 +719,7 @@ mod tests {
         Ok(())
     }
 
-    // ── slot_v2 regression tests ─────────────────────────────────────
+    // ── slot regression tests ────────────────────────────────────────
 
     #[tokio::test]
     async fn race1_no_stale_completion_leakage() -> Result<()> {
@@ -731,7 +728,7 @@ mod tests {
         // Scenario: waiter from gen N is still alive when gen N+1 starts.
         // In the old slot module, begin_generation would skip clearing completion
         // when waiter_count > 0, causing gen N+1 waiters to see gen N's result.
-        // The slot_v2 design eliminates this structurally.
+        // The slot design eliminates this structurally.
         let system = create_system();
 
         // Gen 1: create event and a waiter (keeps waiter alive across generation boundary)

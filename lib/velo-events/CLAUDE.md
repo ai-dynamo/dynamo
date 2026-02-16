@@ -37,15 +37,13 @@ cargo check -p velo-event
 
 `EventHandle` packs identity into a single `u128`: `[system_id: 64][local_index: 32][generation: 32]`. Bit 31 of `local_index` distinguishes local (bit set) from distributed (bit clear) handles. Both local and distributed systems have unique non-zero `system_id` values. `LocalEventSystem` validates that handles belong to the system that created them.
 
-### Slot machinery
+### Slot machinery (`slot/`)
 
-- **`slot/`** — Original implementation. Has a known stale-completion race (Race 1).
-  Frozen pending removal.
-- **`slot_v2/`** — Single-lock replacement. See [docs/slot-state-machine.md](docs/slot-state-machine.md)
-  for invariants. Any change to `slot_v2/` must preserve all invariants (I1-I6)
-  and update the document.
+Single-lock synchronization primitives. See [docs/slot-state-machine.md](docs/slot-state-machine.md)
+for invariants. Any change to `slot/` must preserve all invariants (I1-I6)
+and update the document.
 
-Active module is `slot_v2`. Key types:
+Key types:
 - **`EventEntry`** — per-index state machine with a single `ParkingMutex<EventState>` protecting generation tracking, waker registration, and poison history.
 - **`EventAwaiter`** — `Future` impl that resolves to `Result<()>`. Supports both immediate (already-complete) and pending modes. Delegates poll to `EventEntry::poll_waiter`.
 - **`CompletionKind`** — `Triggered` | `Poisoned(Arc<EventPoison>)`.

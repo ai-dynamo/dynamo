@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Internal synchronization primitives for the event system.
+//! Single-lock synchronization primitives for the event system.
 //!
-//! This module contains the racy slot machinery used by event entries.
-//! These types are frozen — do not modify.
+//! All per-entry state — generation tracking, completion status, and waker
+//! registration — is consolidated under a single `parking_lot::Mutex`,
+//! eliminating stale-completion races by construction.
+//!
+//! See `docs/slot-state-machine.md` for the formal state machine specification.
 
-mod active;
 mod completion;
 pub(crate) mod entry;
 mod waiter;

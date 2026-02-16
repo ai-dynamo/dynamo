@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use super::waiter::EventAwaiter;
 use crate::status::EventPoison;
 
 pub(crate) type PoisonArc = Arc<EventPoison>;
@@ -25,6 +24,6 @@ impl CompletionKind {
 
 pub(crate) enum WaitRegistration {
     Ready,
-    Pending(EventAwaiter),
+    Pending,
     Poisoned(PoisonArc),
 }
