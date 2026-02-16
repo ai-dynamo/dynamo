@@ -123,6 +123,11 @@ jobs:
               c => c.status !== 'completed'
             );
 
+            // --- Commit statuses (GitLab, CodeRabbit, etc.) ---
+            const { data: combinedStatus } = await github.rest.repos
+              .getCombinedStatusForRef({ owner, repo, ref: headSha });
+            const commitStatuses = combinedStatus.statuses || [];
+
             // --- Reviews (paginated) ---
             const allReviews = await github.paginate(
               github.rest.pulls.listReviews,
@@ -159,15 +164,21 @@ jobs:
               } catch (e) { /* already removed */ }
             }
 
-            // --- CI counts ---
+            // --- CI counts (check runs + commit statuses) ---
             const passed = ciChecks.filter(
               c => c.conclusion === 'success'
+            ).length + commitStatuses.filter(
+              s => s.state === 'success'
             ).length;
             const failed = ciChecks.filter(
               c => c.conclusion === 'failure'
+            ).length + commitStatuses.filter(
+              s => s.state === 'failure'
             ).length;
             const pending = ciChecks.filter(
               c => c.status !== 'completed'
+            ).length + commitStatuses.filter(
+              s => s.state === 'pending'
             ).length;
             const skipped = ciChecks.filter(
               c => ['skipped', 'neutral'].includes(c.conclusion)
@@ -178,7 +189,7 @@ jobs:
             if (passed) ciParts.push(`${passed} passed`);
             if (pending) ciParts.push(`${pending} pending`);
             if (skipped) ciParts.push(`${skipped} skipped`);
-            const ciSummary = ciParts.join(', ') || 'no checks';
+            const ciSummary = ciParts.join(', ') || 'No Checks';
 
             // --- Review status (CODEOWNERS focus) ---
             const requestedTeams = (pr.requested_teams || [])
@@ -198,7 +209,7 @@ jobs:
             const ms = pr.mergeable_state || 'unknown';
             const mergeReasons = [];
             if (ms === 'dirty') mergeReasons.push('Merge Conflicts');
-            if (ms === 'blocked') mergeReasons.push('Blocked (pending review)');
+            if (ms === 'blocked') mergeReasons.push('Blocked (Pending Review)');
             if (ms === 'unstable') mergeReasons.push('Checks Failing');
 
             // Check unresolved conversations via GraphQL
