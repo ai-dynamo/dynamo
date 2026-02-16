@@ -164,9 +164,9 @@ dependencies = [
 
 [[package]]
 name = "arc-swap"
-version = "1.8.1"
+version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ded5f9a03ac8f24d1b8a25101ee812cd32cdc8c50a4c50237de2c4915850e73"
+checksum = "f9f3647c145568cec02c42054e07bdf9a5a698e15b466fb2341bfc393cd24aa5"
 dependencies = [
  "rustversion",
 ]
@@ -1928,6 +1928,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-bench"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "clap 4.5.58",
+ "futures-util",
+ "indicatif 0.18.4",
+ "rand 0.9.2",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "dynamo-codegen"
 version = "0.1.0"
 dependencies = [
@@ -1952,12 +1967,13 @@ dependencies = [
  "async-trait",
  "clap 4.5.58",
  "dashmap 6.1.0",
+ "dynamo-bench",
  "dynamo-mocker",
  "dynamo-runtime",
  "dynamo-tokens",
  "flume",
  "futures",
- "indicatif 0.18.3",
+ "indicatif 0.18.4",
  "minstant",
  "parking_lot",
  "prometheus",
@@ -2008,6 +2024,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
+ "dynamo-bench",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2027,7 +2044,7 @@ dependencies = [
  "hyper 1.8.1",
  "hyper-util",
  "image",
- "indicatif 0.18.3",
+ "indicatif 0.18.4",
  "insta",
  "itertools 0.14.0",
  "json-five",
@@ -3666,9 +3683,9 @@ dependencies = [
 
 [[package]]
 name = "indicatif"
-version = "0.18.3"
+version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9375e112e4b463ec1b1c6c011953545c65a30164fbab5b581df32b3abf0dcb88"
+checksum = "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb"
 dependencies = [
  "console 0.16.2",
  "portable-atomic",
@@ -5837,9 +5854,9 @@ dependencies = [
 
 [[package]]
 name = "png"
-version = "0.18.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97baced388464909d42d89643fe4361939af9b7ce7a31ee32a168f832a70f2a0"
+checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
 dependencies = [
  "bitflags 2.11.0",
  "crc32fast",
