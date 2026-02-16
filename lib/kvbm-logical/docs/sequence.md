@@ -86,7 +86,7 @@ assert_eq!(assignments.staged_count(), 0);
 ```
 
 
-## `LogicalExternalBlockAssignments`
+## `LogicalBlockAssignments`
 
 Guard-level tracking through the full block lifecycle. Blocks flow
 through `MutableBlock` (unassigned) to `CompleteBlock` (staged) to
