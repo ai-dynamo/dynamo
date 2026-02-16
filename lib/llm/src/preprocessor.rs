@@ -1059,7 +1059,7 @@ impl
         let reasoning_disabled = match request.extract_reasoning_effort() {
             Some(dynamo_async_openai::types::ReasoningEffort::None) => true,
             Some(_) => false,
-            None => false
+            None => false,
         };
         let should_parse_reasoning =
             self.runtime_config.reasoning_parser.is_some() && !reasoning_disabled;

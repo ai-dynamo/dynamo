@@ -451,13 +451,10 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
             .context("Messages is not an array")?;
 
         // Parse thinking mode from the request
-        let thinking_mode = {
-            let reasoning_effort = req.extract_reasoning_effort();
-            match reasoning_effort {
-                Some(ReasoningEffort::None) => ThinkingMode::Chat,
-                Some(_) => ThinkingMode::Thinking,
-                None => self.thinking_mode,
-            }
+        let thinking_mode = match req.extract_reasoning_effort() {
+            Some(ReasoningEffort::None) => ThinkingMode::Chat,
+            Some(_) => ThinkingMode::Thinking,
+            None => self.thinking_mode,
         };
 
         // Encode with native implementation
@@ -526,7 +523,9 @@ mod tests {
     #[test]
     fn test_reasoning_effort_disabling() {
         use super::super::OAIPromptFormatter;
-        use crate::{types::openai::{chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest}};
+        use crate::types::openai::{
+            chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+        };
 
         let json_str = r#"{
             "model": "deepseek-v3.2",
@@ -558,8 +557,10 @@ mod tests {
     #[test]
     fn test_reasoning_effort_enabling() {
         use super::super::OAIPromptFormatter;
-        use crate::{types::openai::{chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest}};
-        
+        use crate::types::openai::{
+            chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+        };
+
         let json_str = r#"{
             "model": "deepseek-v3.2",
             "messages": [
@@ -572,7 +573,7 @@ mod tests {
             "reasoning_effort": "high"
         }"#;
 
-        let formatter = DeepSeekV32Formatter::new_thinking();
+        let formatter = DeepSeekV32Formatter::new_chat();
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let result = formatter.render(&request).unwrap();

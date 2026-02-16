@@ -267,13 +267,14 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         if let Some(reasoning_effort) = self.inner.reasoning_effort.clone() {
             return Some(reasoning_effort);
         }
-        
-        if let Some(enable_thinking) = self.chat_template_args()
+
+        if let Some(enable_thinking) = self
+            .chat_template_args()
             .and_then(|obj| obj.get("enable_thinking"))
             .and_then(|value| value.as_bool())
         {
             return Some(if enable_thinking {
-                ReasoningEffort::Low
+                ReasoningEffort::Medium
             } else {
                 ReasoningEffort::None
             });
@@ -350,21 +351,23 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
     }
 
     fn extract_reasoning_effort(&self) -> Option<ReasoningEffort> {
-        if let Some(reasoning_effort) = self.unsupported_fields
+        if let Some(reasoning_effort) = self
+            .unsupported_fields
             .get("reasoning_effort")
             .and_then(|value| serde_json::from_value(value.clone()).ok())
         {
             return Some(reasoning_effort);
         }
 
-        if let Some(enable_thinking) = self.unsupported_fields
+        if let Some(enable_thinking) = self
+            .unsupported_fields
             .get("chat_template_kwargs")
             .and_then(|kwargs| kwargs.as_object())
             .and_then(|obj| obj.get("enable_thinking"))
             .and_then(|value| value.as_bool())
         {
             return Some(if enable_thinking {
-                ReasoningEffort::Low
+                ReasoningEffort::Medium
             } else {
                 ReasoningEffort::None
             });
@@ -598,22 +601,12 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let reasoning_effort = request.extract_reasoning_effort();
 
-        assert!(
-            match reasoning_effort {
-                Some(ReasoningEffort::High) => true,
-                _ => false,
-            }
-        );
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::High)));
 
         let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
         let reasoning_effort = request.extract_reasoning_effort();
-    
-        assert!(
-            match reasoning_effort {
-                Some(ReasoningEffort::High) => true,
-                _ => false,
-            }
-        );
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::High)));
     }
 
     #[test]
@@ -630,22 +623,12 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let reasoning_effort = request.extract_reasoning_effort();
 
-        assert!(
-            match reasoning_effort {
-                Some(ReasoningEffort::Low) => true,
-                _ => false,
-            }
-        );
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::Medium)));
 
         let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
         let reasoning_effort = request.extract_reasoning_effort();
-    
-        assert!(
-            match reasoning_effort {
-                Some(ReasoningEffort::Low) => true,
-                _ => false,
-            }
-        );
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::Medium)));
     }
 
     #[test]
@@ -662,23 +645,13 @@ mod tests {
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let reasoning_effort = request.extract_reasoning_effort();
-        
-        assert!(
-            match reasoning_effort {
-                Some(ReasoningEffort::High) => true,
-                _ => false,
-            }
-        );
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::High)));
 
         let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
         let reasoning_effort = request.extract_reasoning_effort();
-    
-        assert!(
-            match reasoning_effort {
-                Some(ReasoningEffort::High) => true,
-                _ => false,
-            }
-        );
+
+        assert!(matches!(reasoning_effort, Some(ReasoningEffort::High)));
     }
 
     #[test]
