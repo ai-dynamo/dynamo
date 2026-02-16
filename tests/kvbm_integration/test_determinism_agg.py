@@ -12,12 +12,17 @@ fixed seed and temperature=0.
 
 The expected results should be 100% match between the two cases. Compared to
 disaggregated mode, aggregated mode has less randomness chances.
+
+These tests are slow by default (~368s and ~601s). For faster runs with
+fewer iterations, run the following command (expected to finish in ~58s + ~152s):
+
+    KVBM_MAX_ITERATIONS=2 KVBM_NUM_ITERATIONS=2 KVBM_REQUEST_DELAY=2 \
+        pytest tests/kvbm_integration/test_determinism_agg.py -v --tb=short
 """
 
 import logging
 import os
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -29,11 +34,27 @@ from typing import Any, Dict, List, Optional, TextIO
 import pytest
 import requests
 
+from tests.utils.port_utils import allocate_port, deallocate_port
+
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
 from .common import check_module_available
 
 HAS_VLLM_BENCH = check_module_available("vllm")
+
+# KVBM env vars that drive test duration (used to compute timeouts below).
+_KVBM_MAX_ITERATIONS = int(os.environ.get("KVBM_MAX_ITERATIONS", "100"))
+_KVBM_NUM_ITERATIONS = int(os.environ.get("KVBM_NUM_ITERATIONS", "15"))
+_KVBM_REQUEST_DELAY = int(os.environ.get("KVBM_REQUEST_DELAY", "30"))
+
+# Compute timeouts from the same env vars that control test duration.
+# test_determinism_agg_with_cache_reset: runs warmup + 2 phases of KVBM_MAX_ITERATIONS,
+# each iteration ~4s (request + overhead), plus ~50s setup/teardown.
+_CACHE_RESET_TIMEOUT = 2 * (_KVBM_MAX_ITERATIONS * 4 + 50)
+# test_concurrent_determinism_under_load: dominated by
+# (KVBM_NUM_ITERATIONS - 1) * KVBM_REQUEST_DELAY seconds of sleep,
+# plus ~150s overhead (server startup, benchmark ramp, teardown).
+_CONCURRENT_TIMEOUT = 2 * ((_KVBM_NUM_ITERATIONS - 1) * _KVBM_REQUEST_DELAY + 150)
 
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
@@ -43,16 +64,6 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.nightly,
 ]
-
-
-def _find_free_port() -> int:
-    """Find a free port by binding to port 0 and letting the OS assign one."""
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        s.listen(1)
-        port = s.getsockname()[1]
-    return port
 
 
 class LLMServerManager:
@@ -68,14 +79,19 @@ class LLMServerManager:
         server_type: Optional[str] = ServerType.vllm,
     ):
         self.server_type = server_type
-        # Use provided port, env var, or find a free port to avoid conflicts
+        # Use provided port, env var, or allocate a dynamic port to avoid conflicts
         if port is not None:
             self.port = port
+            self.port_allocated = False  # Port provided by caller, don't deallocate
         elif os.environ.get("KVBM_SERVER_PORT"):
             self.port = int(os.environ["KVBM_SERVER_PORT"])
+            self.port_allocated = False  # Port from env var, don't deallocate
         else:
-            self.port = _find_free_port()
+            self.port = allocate_port(start_port=8000)
+            self.port_allocated = True  # Port allocated by us, must deallocate
         self.base_url = base_url or f"http://localhost:{self.port}"
+        self.metrics_port = allocate_port(start_port=6880)
+        self.metrics_port_allocated = True
         self.process: Optional[subprocess.Popen] = None
         self.cpu_cache_blocks = cpu_cache_blocks
         self.gpu_cache_blocks = gpu_cache_blocks
@@ -103,7 +119,7 @@ class LLMServerManager:
                 "ETCD_ENDPOINTS": "http://localhost:2379",
                 # Enable KVBM metrics for monitoring offload/onboard
                 "DYN_KVBM_METRICS": "true",
-                "DYN_KVBM_METRICS_PORT": "6880",
+                "DYN_KVBM_METRICS_PORT": str(self.metrics_port),
                 # Enable vLLM batch invariant for deterministic batching
                 "VLLM_BATCH_INVARIANT": "1",
                 "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
@@ -247,7 +263,16 @@ class LLMServerManager:
         start_time = time.time()
         while time.time() - start_time < timeout:
             if self.is_server_running():
-                return True
+                # Verify metrics endpoint is reachable (fail fast on wrong port)
+                try:
+                    requests.get(
+                        f"http://localhost:{self.metrics_port}/metrics", timeout=5
+                    )
+                    return True
+                except requests.exceptions.RequestException:
+                    print(
+                        f"Warning: server healthy but metrics port {self.metrics_port} not reachable yet"
+                    )
             if self.process.poll() is not None:
                 # Process exited, wait for tee thread to finish
                 for t in self._tee_threads:
@@ -279,6 +304,14 @@ class LLMServerManager:
             t.join(timeout=2)
         self._tee_threads = []
         self._close_log_files()
+
+        # Deallocate ports if we allocated them
+        if self.port_allocated:
+            deallocate_port(self.port)
+            self.port_allocated = False
+        if self.metrics_port_allocated:
+            deallocate_port(self.metrics_port)
+            self.metrics_port_allocated = False
 
     def _close_log_files(self):
         if self.server_stdout_file:
@@ -426,6 +459,9 @@ class TestDeterminismAgg(BaseTestDeterminism):
         indirect=True,
     )
     @pytest.mark.kvbm
+    @pytest.mark.timeout(
+        _CACHE_RESET_TIMEOUT
+    )  # ~368s actual measured on 32-core machine
     def test_determinism_agg_with_cache_reset(
         self, tester, llm_server, runtime_services
     ):
@@ -449,6 +485,9 @@ class TestDeterminismAgg(BaseTestDeterminism):
     @pytest.mark.skipif(
         not HAS_VLLM_BENCH, reason="requires vllm bench (vllm module not found)"
     )
+    @pytest.mark.timeout(
+        _CONCURRENT_TIMEOUT
+    )  # ~601s actual measured on 32-core machine
     def test_concurrent_determinism_under_load(
         self, tester, llm_server, runtime_services
     ):

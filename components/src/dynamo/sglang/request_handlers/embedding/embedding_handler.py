@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -20,14 +21,15 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ):
-        super().__init__(component, engine, config, publisher)
+        super().__init__(component, engine, config, publisher, None, shutdown_event)
         logging.info("Embedding worker handler initialized")
 
     def cleanup(self):
+        super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
-        super().cleanup()
 
     async def generate(self, request: dict, context: Context):
         """

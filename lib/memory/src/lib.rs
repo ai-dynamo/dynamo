@@ -26,6 +26,7 @@ pub mod pool;
 pub mod prelude;
 
 mod device;
+#[cfg(target_os = "linux")]
 mod disk;
 mod external;
 mod pinned;
@@ -37,6 +38,7 @@ mod tests;
 
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::DeviceStorage;
+#[cfg(target_os = "linux")]
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
 pub use numa::{NumaNode, is_numa_enabled};

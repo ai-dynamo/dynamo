@@ -58,8 +58,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: prod-builder-amd-v1  }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout repository
@@ -68,21 +68,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Install system dependencies from apt
-          sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
-          # Install Rust (cargo + rustc)
-          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
-          # Make cargo available to later steps
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Install cbindgen
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo install cbindgen
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -95,10 +80,10 @@ jobs:
         id: build-image
         uses: ./.github/actions/docker-build
         env:
-          PLATFORMS: linux/${{ matrix.platform.arch }}
+          PLATFORMS: ${{ matrix.platform.arch }}
           TARGETARCH: ${{ matrix.platform.arch }}
         with:
-          framework: none
+          framework: dynamo
           target: frontend
           platform: ${{ env.PLATFORMS }}
           ci_token: ${{ secrets.CI_TOKEN }}

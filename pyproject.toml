@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.8.0"
+version = "0.9.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.8.0",
+    "ai-dynamo-runtime==0.9.0",
     "transformers>=4.56.0",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
@@ -50,19 +50,22 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.2.0rc6.post2",
+    "msgpack==1.1.2",
+    "tensorrt-llm==1.3.0rc1",
 ]
 
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.9.0",
-    "vllm[flashinfer,runai]==0.14.0",
+    "vllm[flashinfer,runai]==0.15.1",
+    "vllm-omni==0.14.0",
 ]
 
 sglang = [
     "uvloop",
-    "sglang==0.5.7",
+    "sglang[diffusion]==0.5.8",
     "nixl[cu12]<=0.9.0",
+    "cupy-cuda12x>=13.0.0",
 ]
 
 [project.entry-points.pytest11]
@@ -136,6 +139,13 @@ balanced_wrapping = true
 indent = "    "
 skip = ["build"]
 known_first_party = ["dynamo"]
+# isort may confuse what is 1st or 3rd library. e.g.
+# when dynamo/vllm/omni/xx.py import vllm, local isort may treat this `vllm` as first
+# party heuristically. This causes local sort differs from GitHub sort and pre-commit
+# failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
+# 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
+# as the last resort.
+known_third_party = ["vllm", "tensorrt_llm", "sglang"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -160,7 +170,6 @@ addopts = [
     "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
     "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
-    "--ignore-glob=components/src/dynamo/vllm/multimodal_handlers/*",
     "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
@@ -185,6 +194,12 @@ filterwarnings = [
     'ignore:Field name "schema" in "ResponseFormat" shadows an attribute in parent:UserWarning',
     # pytest-benchmark automatically disables when xdist is active, ignore the warning
     "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
+
+    ################################################################################################
+    # vLLM
+    ################################################################################################
+    # vLLM tokenizer deprecation warning (AnyTokenizer moved to vllm.tokenizers.TokenizerLike)
+    "ignore:.*vllm\\.transformers_utils\\.tokenizer\\.AnyTokenizer.*has been moved.*:DeprecationWarning",
 
     ################################################################################################
     # TRT-LLM
@@ -230,6 +245,7 @@ markers = [
     "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
+    "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
     "router: marks tests for router component",
     "planner: marks tests for planner component",
     "kvbm: marks tests for KV behavior and model determinism",
@@ -238,6 +254,7 @@ markers = [
     "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
     "k8s: marks tests as requiring Kubernetes",
     "fault_tolerance: marks tests as fault tolerance tests",
+    "deploy: marks tests as deployment tests",
     # Built-in markers
     "skip: skip this test",
     "skipif: skip if condition is true",
@@ -245,7 +262,9 @@ markers = [
     "usefixtures: use fixtures",
     "parametrize: parameterized test",
     "filterwarnings: filter warnings",
-    "asyncio: asyncio test marker"
+    "asyncio: asyncio test marker",
+    # Third-party plugin markers
+    "timeout: test timeout in seconds (pytest-timeout plugin)",
 ]
 
 # Linting/formatting
@@ -257,6 +276,15 @@ indent-width = 4
 [tool.ruff.lint.extend-per-file-ignores]
 "icp/tests/**/test_*.py" = ["F811", "F401"]
 "*_inc.py" = ["F821"]
+
+# This is IDE (e.g. Cursor's default Python language server)
+# Configure it so that developers can use "go-to-definition", "hover types" and other
+# features.
+[tool.basedpyright]
+extraPaths = ["components/src", "lib/bindings/python/src"]
+# This is for external dependencies.
+venvPath = "."
+venv = ".venv"
 
 [tool.mypy]
 

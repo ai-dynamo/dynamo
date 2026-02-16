@@ -17,12 +17,8 @@ echo ""
 cleanup() {
     echo "🧹 Cleaning up running processes..."
 
-    # Kill any remaining dynamo processes
-    pkill -f "dynamo-run" || true
-    pkill -f "components/main.py" || true
-
     # Stop docker services
-    docker compose -f ../../deploy/metrics/docker-compose.yml down 2>/dev/null || true
+    docker compose -f ../../deploy/docker-compose.yml down 2>/dev/null || true
 
     # Wait a moment for cleanup
     sleep 2

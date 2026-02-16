@@ -4,8 +4,6 @@
 use super::*;
 
 use crate::block_manager::BlockManagerBuilder;
-use dynamo_llm::block_manager::connector::protocol::RequestType;
-use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use crate::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
@@ -15,6 +13,8 @@ use crate::block_manager::vllm::connector::leader::{
 use crate::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
 use crate::get_current_tokio_handle;
 use anyhow;
+use dynamo_llm::block_manager::connector::protocol::RequestType;
+use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -190,7 +190,7 @@ impl Leader for KvConnectorLeader {
 
         // TRTLLM could match partial blocks if enable_partial_reuse = True,
         // immediately return 0 to simplify things.
-        if num_computed_tokens % self.block_size != 0 {
+        if !num_computed_tokens.is_multiple_of(self.block_size) {
             return Ok((0, false));
         }
 
@@ -215,7 +215,9 @@ impl Leader for KvConnectorLeader {
         // return the number of external tokens that are ready for onboarding
         // we always return true here as we always asynchronously onboard matched blocks
         if let SlotState::OnboardStaged(num_external_tokens) = slot.state() {
-            debug_assert!((num_computed_tokens + num_external_tokens) % self.block_size == 0);
+            debug_assert!(
+                (num_computed_tokens + num_external_tokens).is_multiple_of(self.block_size)
+            );
             tracing::debug!(
                 request_id = request_id,
                 "scheduling onboarding for {} external tokens",
@@ -378,14 +380,15 @@ impl Leader for KvConnectorLeader {
 
             let scheduled_tokens = *scheduler_output
                 .num_scheduled_tokens
-                .get(request_id)
+                .get(&new_req.request_id)
                 .unwrap_or(&0);
 
             slot.apply_scheduler_output(
-                &new_req.prompt_token_ids,
+                &[],
                 &new_req.block_ids,
                 new_req.num_computed_tokens,
                 scheduled_tokens,
+                new_req.priorities.as_deref(),
             )?;
 
             let pending_ops_opt = slot.take_pending_operations();
@@ -428,7 +431,7 @@ impl Leader for KvConnectorLeader {
 
             let scheduled_tokens = *scheduler_output
                 .num_scheduled_tokens
-                .get(request_id)
+                .get(&cached_req.request_id)
                 .unwrap_or(&0);
 
             slot.apply_scheduler_output(
@@ -436,6 +439,7 @@ impl Leader for KvConnectorLeader {
                 &cached_req.new_block_ids,
                 cached_req.num_computed_tokens,
                 scheduled_tokens,
+                cached_req.priorities.as_deref(),
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {

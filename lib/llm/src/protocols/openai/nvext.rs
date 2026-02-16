@@ -58,9 +58,17 @@ pub struct WorkerIdInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefill_worker_id: Option<u64>,
 
+    /// The prefill worker's data parallel rank
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
+
     /// The decode worker ID that processed this request
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
+
+    /// The decode worker's data parallel rank
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_dp_rank: Option<u32>,
 }
 
 /// NVIDIA LLM response extensions
@@ -144,22 +152,34 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
 
-    /// Controls whether the router should manage local bookkeeping (add_request,
-    /// mark_prefill_completed, free) for this request.
-    ///
-    /// - `None` or `true`: Router handles bookkeeping locally (default behavior)
-    /// - `false`: External caller (e.g., GAIE sidecar) handles bookkeeping via C FFI
-    ///
-    /// Set to `false` for GAIE Stage 2 when the EPP/sidecar manages request lifecycle.
+    /// Agent-provided hints for request handling.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enable_local_updates: Option<bool>,
+    pub agent_hints: Option<AgentHints>,
+}
 
-    /// Expected number of output tokens for this request.
-    /// Used as a hint for routing decisions to estimate resource requirements.
+/// Hints from the agent/caller about request characteristics.
+#[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone, Default, PartialEq)]
+pub struct AgentHints {
+    /// Latency sensitivity in seconds for queue ordering.
+    /// Higher values cause the request to be scheduled sooner when the router queue is enabled.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_output_tokens: Option<u32>,
+    pub latency_sensitivity: Option<f64>,
+
+    /// Expected output sequence length (number of output tokens).
+    /// Used as a hint for routing decisions to estimate resource requirements
+    /// and for output block tracking decay.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osl: Option<u32>,
+
+    /// When true, after the assistant turn completes, the system will speculatively
+    /// prefill the predicted next-turn prefix (conversation history with thinking
+    /// content stripped) on a worker to warm the KV cache for the next request.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculative_prefill: Option<bool>,
 }
 
 impl Default for NvExt {
@@ -208,8 +228,7 @@ mod tests {
         assert_eq!(nv_ext.extra_fields, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
-        assert_eq!(nv_ext.enable_local_updates, None);
-        assert_eq!(nv_ext.expected_output_tokens, None);
+        assert_eq!(nv_ext.agent_hints, None);
     }
 
     // Test valid builder configurations

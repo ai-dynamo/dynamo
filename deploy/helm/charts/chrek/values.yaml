@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# Chrek - Checkpoint/Restore Infrastructure
+# This chart deploys the checkpoint storage (PVC) and CRIU agent (DaemonSet)
+# in a single namespace. Install this chart in each namespace where you want
+# to enable checkpoint/restore functionality for DynamoGraphDeployments.
+
+# Storage configuration for checkpoints
+storage:
+  # Storage type: pvc (default), s3, or oci
+  type: pvc
+
+  # PVC configuration (when type=pvc)
+  pvc:
+    # Create a new PVC (set to false if using existing PVC)
+    create: true
+    # PVC name - must match operator configuration
+    name: chrek-pvc
+    # PVC size
+    size: 100Gi
+    # Storage class (leave empty for default)
+    storageClass: ""
+    # Access mode - ReadWriteMany required for multi-pod access
+    accessMode: ReadWriteMany
+    # Base path for checkpoints (mounted in pods)
+    basePath: /checkpoints
+
+  # S3 configuration (when type=s3)
+  s3:
+    # S3 URI (e.g., s3://my-bucket/checkpoints)
+    uri: ""
+    # Credentials are expected via IRSA or mounted secrets
+
+  # OCI configuration (when type=oci)
+  oci:
+    # OCI URI (e.g., oci://registry.io/repo/checkpoints)
+    uri: ""
+
+# DaemonSet configuration for chrek (checkpoint/restore) agent
+daemonset:
+  # Container image
+  image:
+    repository: nvcr.io/nvidian/dynamo-dev/chrek-agent
+    tag: latest
+    pullPolicy: Always
+
+  # Image pull secrets
+  imagePullSecrets:
+    - name: ngc-secret
+
+  # Resource limits and requests
+  resources:
+    limits:
+      cpu: 2
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+  # Node selector - target GPU nodes
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+
+  # Tolerations for GPU nodes
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    - key: dedicated
+      operator: Exists
+      effect: NoSchedule
+
+  # Runtime class name for GPU access
+  runtimeClassName: nvidia
+
+  # Pod labels
+  podLabels: {}
+
+  # Pod annotations
+  podAnnotations: {}
+
+  # Affinity rules
+  affinity: {}
+
+# Seccomp profile configuration
+seccomp:
+  # Deploy seccomp profile for blocking io_uring (required for CRIU)
+  deploy: true
+
+# Service account configuration
+serviceAccount:
+  # Create service account
+  create: true
+  # Service account name (generated if not set)
+  name: ""
+  # Annotations for service account (e.g., for IRSA)
+  annotations: {}
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+
+  # Namespace-scoped RBAC (recommended, required for PVC storage)
+  # - true (default): Creates Role/RoleBinding, agent watches pods in chart's namespace only
+  # - false: Creates ClusterRole/ClusterRoleBinding, agent watches all pods on assigned nodes
+  # Note: PVC storage requires namespace-scoped mode (true) as PVCs are namespace-scoped
+  namespaceRestricted: true
+
+# Static configuration (loaded from ConfigMap)
+# Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) still come from environment variables
+config:
+  agent:
+    # How checkpoints are triggered: "http" or "watcher"
+    signalSource: "watcher"
+    # HTTP server address for health checks and API
+    listenAddr: ":8080"
+
+  checkpoint:
+    criu:
+      # Ghost file size limit in bytes (512MB recommended for GPU workloads)
+      ghostLimit: 536870912
+      # CRIU timeout in seconds (6 hours for large GPU checkpoints)
+      timeout: 21600
+      # CRIU logging verbosity (0-4)
+      logLevel: 4
+      # CRIU work directory for temporary files
+      workDir: "/var/criu-work"
+
+      # K8s-specific options (recommended defaults for containers)
+      leaveRunning: true      # Keep process running after checkpoint
+      shellJob: true          # Containers are often session leaders
+      tcpClose: true          # Pod IPs change on restore/migration
+      fileLocks: true         # Applications use file locks
+      orphanPtsMaster: true   # Containers with TTYs
+      extUnixSk: true         # External Unix sockets
+      linkRemap: true         # Handle deleted-but-open files
+      extMasters: true        # External bind mount masters
+      manageCgroupsMode: "ignore"  # Let K8s manage cgroups (ignore/soft/full/strict)
+
+      # Advanced options
+      autoDedup: false        # Auto-deduplication of memory pages
+      lazyPages: false        # Lazy page migration (experimental)
+
+      # Config file options (NOT available via RPC - written to criu.conf)
+      libDir: "/usr/local/lib/criu"  # Plugin directory (required for GPU checkpoints)
+      allowUprobes: true             # Required for CUDA
+      skipInFlight: true             # Skip in-flight TCP connections
+
+    rootfsExclusions:
+      # System directories excluded from rootfs diff capture
+      # These are injected by NVIDIA GPU Operator and cause conflicts during restore
+      systemDirs:
+        - "./usr"
+        - "./etc"
+        - "./opt"
+        - "./var"
+        - "./run"
+      # Cache directories to exclude (reduces checkpoint size)
+      cacheDirs:
+        - "./.cache/huggingface"
+      # Additional custom exclusions (application-specific)
+      additionalExclusions: []
+
+  # NOTE: Restore configuration is NOT in this ConfigMap.
+  # Placeholder containers do not mount it. Restore defaults are hardcoded in Go.
+  # CRIU options for restore come from the saved checkpoint manifest (manifest.yaml).

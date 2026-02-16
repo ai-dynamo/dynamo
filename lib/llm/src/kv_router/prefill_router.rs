@@ -21,10 +21,10 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
+    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, protocols::BlockExtraInfo},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
-    protocols::common::timing::{RequestPhase, RequestTracker},
+    protocols::common::timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},
 };
 
 /// Errors that can occur during prefill routing
@@ -50,6 +50,8 @@ enum InnerPrefillRouter {
     /// KV-aware routing using KvPushRouter
     KvRouter(Arc<KvPushRouter>),
     /// Simple routing (RoundRobin, Random, Direct)
+    /// Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
+    /// available in KV routing mode where the router has actual bookkeeping.
     SimpleRouter(Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>),
 }
 
@@ -79,14 +81,6 @@ impl InnerPrefillRouter {
             InnerPrefillRouter::KvRouter(_) => None,
         }
     }
-
-    /// Peek next worker without incrementing state (for non-KV modes only)
-    fn peek_next_worker(&self) -> Option<u64> {
-        match self {
-            InnerPrefillRouter::SimpleRouter(router) => router.peek_next_worker(),
-            InnerPrefillRouter::KvRouter(_) => None,
-        }
-    }
 }
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
@@ -104,9 +98,24 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
+    /// Model name used to look up the worker monitor for prefill client registration
+    model_name: String,
 }
 
 impl PrefillRouter {
+    fn routing_inputs(req: &PreprocessedRequest) -> (&[u32], Option<&[Option<BlockExtraInfo>]>) {
+        if let Some(mm_routing_info) = req.mm_routing_info.as_ref() {
+            let routing_tokens = mm_routing_info.routing_token_ids.as_slice();
+            if !routing_tokens.is_empty() {
+                return (
+                    routing_tokens,
+                    Some(mm_routing_info.block_mm_infos.as_slice()),
+                );
+            }
+        }
+        (&req.token_ids, None)
+    }
+
     /// Create a disabled prefill router that will never activate (passthrough only)
     pub fn disabled(
         model_manager: Arc<ModelManager>,
@@ -120,6 +129,7 @@ impl PrefillRouter {
             cancel_token: CancellationToken::new(),
             router_mode,
             enforce_disagg,
+            model_name: String::new(), // Not used for disabled router
         })
     }
 
@@ -130,6 +140,7 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         enforce_disagg: bool,
+        model_name: String,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -141,6 +152,7 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
+            model_name,
         });
 
         // Spawn background task to wait for activation
@@ -194,13 +206,23 @@ impl PrefillRouter {
             .await?;
 
         let inner_router = if self.router_mode.is_kv_routing() {
-            // Create KV chooser using the endpoint
+            // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = model_manager
-                .kv_chooser_for(&endpoint, kv_cache_block_size, kv_router_config)
+                .kv_chooser_for(
+                    &endpoint,
+                    kv_cache_block_size,
+                    kv_router_config,
+                    WORKER_TYPE_PREFILL,
+                )
                 .await?;
 
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
+
+            // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
+            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+                monitor.set_prefill_client(client.clone());
+            }
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
@@ -217,7 +239,14 @@ impl PrefillRouter {
             // Create client for simple router
             let client = endpoint.client().await?;
 
+            // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
+            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+                monitor.set_prefill_client(client.clone());
+            }
+
             // Create simple push router with the frontend's router mode
+            // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
+            // available in KV routing mode where the router has actual bookkeeping.
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
                 client,
                 self.router_mode,
@@ -249,7 +278,7 @@ impl PrefillRouter {
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
-        let prefill_router = self.prefill_router.get()?;
+        let _prefill_router = self.prefill_router.get()?;
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
@@ -260,30 +289,29 @@ impl PrefillRouter {
                 "Using pre-selected prefill worker for bootstrap"
             );
             (id, dp_rank)
-        } else if self.router_mode.is_kv_routing() {
-            // KV mode: use find_best_match
-            let kv_router = match prefill_router {
-                InnerPrefillRouter::KvRouter(r) => r,
-                _ => return None,
-            };
-            match async {
-                kv_router
-                    .chooser
-                    .find_best_match(None, &req.token_ids, None, false)
-                    .await
-            }
-            .instrument(tracing::info_span!("kv_find_best_match"))
-            .await
+        } else {
+            // Use shared worker selection logic (update_states=false for peek behavior)
+            // Extract LORA name and priority jump from routing hints
+            let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
+            let priority_jump = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.priority_jump)
+                .unwrap_or(0.0);
+            let (routing_token_ids, block_mm_infos) = Self::routing_inputs(req);
+            match self
+                .query_prefill_worker(
+                    routing_token_ids,
+                    block_mm_infos,
+                    false,
+                    lora_name,
+                    priority_jump,
+                )
+                .await
             {
-                Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
+                Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
                 Err(_) => return None,
             }
-        } else {
-            // Non-KV mode: use PushRouter's stateful selection
-            // We use peek_next_worker instead of select_next_worker to avoid double-incrementing the counter
-            // if we fall back to the original path.
-            let worker_id = prefill_router.peek_next_worker()?;
-            (worker_id, 0)
         };
 
         // Get bootstrap info from ModelManager (works for ANY mode)
@@ -322,20 +350,22 @@ impl PrefillRouter {
     ///
     /// If `phase_permit` is provided, it is dropped after the first output is received,
     /// allowing subsequent `set_phase` calls to proceed. This is used in the bootstrap
-    /// optimization path to ensure `record_worker` completes before the phase changes.
+    /// optimization path to ensure `record_worker_full` completes before the phase changes.
+    ///
+    /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     async fn execute_prefill(
         router: Option<InnerPrefillRouter>,
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
             .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
 
-        // Drop phase permit now - routing is complete, record_worker was called in select_worker.
+        // Drop phase permit now - routing is complete, record_worker_full was called in select_worker.
         // This unblocks set_phase(Decode) in the main task without waiting for prefill output.
         drop(phase_permit);
 
@@ -380,20 +410,27 @@ impl PrefillRouter {
             ));
         };
 
-        // Extract prefill worker ID from disaggregated_params
-        let prefill_worker_id = disaggregated_params
-            .get("worker_id")
-            .and_then(|worker_id_json| {
-                worker_id_json
-                    .get("prefill_worker_id")
-                    .and_then(|v| v.as_u64())
-            });
+        // Extract prefill worker ID and dp_rank from disaggregated_params
+        let prefill_worker_info =
+            disaggregated_params
+                .get("worker_id")
+                .and_then(|worker_id_json| {
+                    let worker_id = worker_id_json
+                        .get("prefill_worker_id")
+                        .and_then(|v| v.as_u64())?;
+                    let dp_rank = worker_id_json
+                        .get("prefill_dp_rank")
+                        .and_then(|v| v.as_u64())
+                        .map(|r| r as u32)
+                        .unwrap_or(0);
+                    Some((worker_id, dp_rank))
+                });
         Ok((
             PrefillResult {
                 disaggregated_params,
                 prompt_tokens_details,
             },
-            prefill_worker_id,
+            prefill_worker_info,
         ))
     }
 
@@ -435,17 +472,70 @@ impl PrefillRouter {
         );
     }
 
-    /// Call the prefill router and extract structured prefill result and worker ID.
+    /// Call the prefill router and extract structured prefill result, worker ID, and dp_rank.
     ///
     /// This is the synchronous prefill path - we wait for prefill to complete before proceeding.
     /// No phase permit is needed since `record_worker` completes before we return.
+    ///
+    /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
         // For call_prefill path, routing is handled by the router itself (no direct routing needed)
         // No phase permit needed - we wait for completion before changing phase
         Self::execute_prefill(self.prefill_router.get().cloned(), request, None, None).await
+    }
+
+    /// Query the best prefill worker without executing a request.
+    /// Returns (worker_id, dp_rank).
+    ///
+    /// This is the shared worker selection logic used by both `build_bootstrap_info`
+    /// and `query_route`.
+    pub async fn query_prefill_worker(
+        &self,
+        token_ids: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        update_states: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+    ) -> Result<(u64, u32)> {
+        let prefill_router = self
+            .prefill_router
+            .get()
+            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
+
+        match prefill_router {
+            InnerPrefillRouter::KvRouter(r) => {
+                let (worker, _overlap) = r
+                    .chooser
+                    .find_best_match(
+                        None,
+                        token_ids,
+                        block_mm_infos,
+                        None,
+                        update_states,
+                        lora_name,
+                        priority_jump,
+                    )
+                    .await?;
+                Ok((worker.worker_id, worker.dp_rank))
+            }
+            InnerPrefillRouter::SimpleRouter(r) => {
+                let worker_id = if update_states {
+                    r.select_next_worker()
+                } else {
+                    r.peek_next_worker()
+                }
+                .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+                Ok((worker_id, 0))
+            }
+        }
+    }
+
+    /// Check if disaggregated mode is currently active (prefill router activated)
+    pub fn is_activated(&self) -> bool {
+        self.prefill_router.get().is_some()
     }
 }
 
@@ -493,7 +583,6 @@ impl
         }
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_permit = tracker.set_phase(RequestPhase::Prefill).await;
-        tracker.record_prefill_start();
 
         // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
         let mut prefill_req = req.clone();
@@ -528,7 +617,7 @@ impl
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
-                // Pass phase permit to spawned task - it drops after first output (record_worker complete)
+                // Pass phase permit to spawned task - it drops after first output (record_worker_full complete)
                 // This allows set_phase(Decode) below to proceed only after prefill routing is done
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_permit);
 
@@ -544,12 +633,13 @@ impl
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
-                self.call_prefill(prefill_context)
-                    .await
-                    .map(|(result, worker_id)| (Some(result), worker_id, None))
+                let result = self.call_prefill(prefill_context).await;
+
+                result.map(|(result, worker_info)| {
+                    (Some(result), worker_info.map(|(id, _)| id), None)
+                })
             }
         }
-        .instrument(tracing::info_span!("prefill_routing"))
         .await;
 
         // Abort if cancelled during prefill
@@ -568,7 +658,7 @@ impl
 
                 // Set phase to Decode for the decode request.
                 // In bootstrap path, this blocks until the spawned prefill task drops its permit
-                // (after first output / record_worker completes), ensuring correct phase for routing.
+                // (after first output / record_worker_full completes), ensuring correct phase for routing.
                 if let Some(ref tracker) = req.tracker {
                     let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     // Permit is dropped immediately - decode proceeds, no need to hold it
@@ -589,10 +679,14 @@ impl
                     decode_req.bootstrap_info = Some(info);
                 }
 
-                // Set router_config_override for decode: overlap_score_weight = 0
+                // Set router_config_override for decode:
+                // - overlap_score_weight = 0 (no KV cache overlap scoring for decode)
+                // - assume_kv_reuse = false (generate random hashes since decode workers
+                //   may already have blocks cached from prefill transfer)
                 let existing_override = decode_req.router_config_override.take();
                 decode_req.router_config_override = Some(RouterConfigOverride {
                     overlap_score_weight: Some(0.0),
+                    assume_kv_reuse: Some(false),
                     ..existing_override.unwrap_or_default()
                 });
 

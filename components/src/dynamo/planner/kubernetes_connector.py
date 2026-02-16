@@ -113,6 +113,8 @@ class KubernetesConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
     ):
         """
         Verify that the deployment contains services with subComponentType prefill and decode and the model name exists.
@@ -126,26 +128,32 @@ class KubernetesConnector(PlannerConnector):
 
         errors = []
 
-        try:
-            get_service_from_sub_component_type_or_name(
-                deployment,
-                SubComponentType.PREFILL,
-                component_name=prefill_component_name,
-            )
-        except PlannerError as e:
-            errors.append(str(e))
+        if require_prefill:
+            try:
+                get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
+                )
+            except PlannerError as e:
+                errors.append(str(e))
+
+        if require_decode:
+            try:
+                get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.DECODE,
+                    component_name=decode_component_name,
+                )
+            except PlannerError as e:
+                errors.append(str(e))
 
         try:
-            get_service_from_sub_component_type_or_name(
+            self.get_model_name(
                 deployment,
-                SubComponentType.DECODE,
-                component_name=decode_component_name,
+                require_prefill=require_prefill,
+                require_decode=require_decode,
             )
-        except PlannerError as e:
-            errors.append(str(e))
-
-        try:
-            self.get_model_name(deployment)
         except PlannerError as e:
             errors.append(str(e))
 
@@ -153,7 +161,12 @@ class KubernetesConnector(PlannerConnector):
         if errors:
             raise DeploymentValidationError(errors)
 
-    def get_model_name(self, deployment: Optional[dict] = None) -> str:
+    def get_model_name(
+        self,
+        deployment: Optional[dict] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> str:
         """Get the model name from the deployment"""
         try:
             if deployment is None:
@@ -161,18 +174,22 @@ class KubernetesConnector(PlannerConnector):
                     self.graph_deployment_name
                 )
 
-            # TODO: benchmarks/profiler/utils/config.py already contains DGD config parsing
+            # TODO: dynamo/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
-            prefill_service = get_service_from_sub_component_type_or_name(
-                deployment,
-                SubComponentType.PREFILL,
-            )
-            decode_service = get_service_from_sub_component_type_or_name(
-                deployment,
-                SubComponentType.DECODE,
-            )
-            prefill_model_name = prefill_service.get_model_name()
-            decode_model_name = decode_service.get_model_name()
+            prefill_model_name = None
+            decode_model_name = None
+            if require_prefill:
+                prefill_service = get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.PREFILL,
+                )
+                prefill_model_name = prefill_service.get_model_name()
+            if require_decode:
+                decode_service = get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.DECODE,
+                )
+                decode_model_name = decode_service.get_model_name()
 
             if prefill_model_name is None and decode_model_name is None:
                 raise ModelNameNotFoundError()
@@ -210,11 +227,130 @@ class KubernetesConnector(PlannerConnector):
 
         return model_name
 
+    def get_gpu_counts(
+        self,
+        deployment: Optional[dict] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[int, int]:
+        """Get the GPU counts for prefill and decode services from the deployment.
+
+        Args:
+            deployment: Optional deployment dict, fetched if not provided
+            require_prefill: Whether to require prefill service
+            require_decode: Whether to require decode service
+
+        Returns:
+            Tuple of (prefill_gpu_count, decode_gpu_count)
+
+        Raises:
+            DeploymentValidationError: If GPU counts cannot be determined from DGD
+        """
+        if deployment is None:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+        prefill_gpu_count = 0
+        decode_gpu_count = 0
+        errors = []
+
+        if require_prefill:
+            try:
+                prefill_service = get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.PREFILL,
+                )
+                prefill_gpu_count = prefill_service.get_gpu_count()
+            except (PlannerError, ValueError) as e:
+                errors.append(f"Failed to get prefill GPU count: {e}")
+
+        if require_decode:
+            try:
+                decode_service = get_service_from_sub_component_type_or_name(
+                    deployment,
+                    SubComponentType.DECODE,
+                )
+                decode_gpu_count = decode_service.get_gpu_count()
+            except (PlannerError, ValueError) as e:
+                errors.append(f"Failed to get decode GPU count: {e}")
+
+        if errors:
+            raise DeploymentValidationError(errors)
+
+        return prefill_gpu_count, decode_gpu_count
+
+    def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
+        """Auto-discover the Frontend service's metrics URL from the DGD.
+
+        Iterates spec.services to find the service with componentType "frontend",
+        then constructs the in-cluster URL using the operator's naming convention:
+        http://{dgd_name}-{service_key_lowercase}:{port}/metrics
+
+        Returns:
+            The metrics URL string, or None if no frontend service is found.
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        services = deployment.get("spec", {}).get("services", {})
+
+        for service_key, service_spec in services.items():
+            if service_spec.get("componentType", "") == "frontend":
+                service_name = f"{self.graph_deployment_name}-{service_key.lower()}"
+                url = f"http://{service_name}:{port}/metrics"
+                logger.info(f"Auto-discovered frontend metrics URL: {url}")
+                return url
+
+        return None
+
     async def wait_for_deployment_ready(self):
         """Wait for the deployment to be ready"""
         await self.kube_api.wait_for_graph_deployment_ready(
             self.graph_deployment_name,
         )
+
+    def get_actual_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int, bool]:
+        """
+        Get actual ready worker counts for prefill and decode from DGD status.
+
+        Returns:
+            tuple[int, int, bool]: (prefill_count, decode_count, is_stable)
+            - is_stable: False if any service is in a rollout (scaling should be skipped)
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+        prefill_count = 0
+        decode_count = 0
+        all_stable = True
+
+        if prefill_component_name:
+            service = get_service_from_sub_component_type_or_name(
+                deployment,
+                SubComponentType.PREFILL,
+                component_name=prefill_component_name,
+            )
+            ready_replicas, is_stable = self.kube_api.get_service_replica_status(
+                deployment, service.name
+            )
+            if not is_stable:
+                all_stable = False
+            prefill_count = ready_replicas
+
+        if decode_component_name:
+            service = get_service_from_sub_component_type_or_name(
+                deployment,
+                SubComponentType.DECODE,
+                component_name=decode_component_name,
+            )
+            ready_replicas, is_stable = self.kube_api.get_service_replica_status(
+                deployment, service.name
+            )
+            if not is_stable:
+                all_stable = False
+            decode_count = ready_replicas
+
+        return prefill_count, decode_count, all_stable
 
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True

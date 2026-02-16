@@ -305,7 +305,7 @@ impl Drop for CudaMemPool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-cuda"))]
 mod tests {
     use super::*;
 

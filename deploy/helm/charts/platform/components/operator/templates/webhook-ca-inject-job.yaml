@@ -98,6 +98,14 @@ rules:
   resourceNames: ["{{ include "dynamo-operator.fullname" . }}-validating"]
   {{- end }}
   verbs: ["get", "patch"]
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["mutatingwebhookconfigurations"]
+  {{- if .Values.namespaceRestriction.enabled }}
+  resourceNames: ["{{ include "dynamo-operator.fullname" . }}-mutating-{{ .Release.Namespace }}"]
+  {{- else }}
+  resourceNames: ["{{ include "dynamo-operator.fullname" . }}-mutating"]
+  {{- end }}
+  verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -149,6 +157,14 @@ spec:
     spec:
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
       restartPolicy: OnFailure
+      {{- with .Values.controllerManager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controllerManager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: ca-injector
         image: {{ .Values.webhook.certGenerator.image.repository }}:{{ .Values.webhook.certGenerator.image.tag }}
@@ -168,9 +184,11 @@ spec:
           SECRET_NAME="{{ .Values.webhook.certificateSecret.name }}"
           NAMESPACE="{{ .Release.Namespace }}"
           {{- if .Values.namespaceRestriction.enabled }}
-          WEBHOOK_NAME="{{ include "dynamo-operator.fullname" . }}-validating-{{ .Release.Namespace }}"
+          VALIDATING_WEBHOOK_NAME="{{ include "dynamo-operator.fullname" . }}-validating-{{ .Release.Namespace }}"
+          MUTATING_WEBHOOK_NAME="{{ include "dynamo-operator.fullname" . }}-mutating-{{ .Release.Namespace }}"
           {{- else }}
-          WEBHOOK_NAME="{{ include "dynamo-operator.fullname" . }}-validating"
+          VALIDATING_WEBHOOK_NAME="{{ include "dynamo-operator.fullname" . }}-validating"
+          MUTATING_WEBHOOK_NAME="{{ include "dynamo-operator.fullname" . }}-mutating"
           {{- end }}
 
           echo "⏳ Waiting for certificate secret to be available..."
@@ -199,8 +217,8 @@ spec:
           fi
 
           echo "📝 Patching ValidatingWebhookConfiguration..."
-          # Patch all webhooks (DynamoComponentDeployment, DynamoGraphDeployment, DynamoModel, DynamoGraphDeploymentRequest)
-          kubectl patch validatingwebhookconfiguration ${WEBHOOK_NAME} \
+          # Patch all validating webhooks (DynamoComponentDeployment, DynamoGraphDeployment, DynamoModel, DynamoGraphDeploymentRequest)
+          kubectl patch validatingwebhookconfiguration ${VALIDATING_WEBHOOK_NAME} \
             --type='json' -p="[
               {
                 \"op\": \"add\",
@@ -220,6 +238,17 @@ spec:
               {
                 \"op\": \"add\",
                 \"path\": \"/webhooks/3/clientConfig/caBundle\",
+                \"value\": \"${CA_BUNDLE}\"
+              }
+            ]"
+
+          echo "📝 Patching MutatingWebhookConfiguration..."
+          # Patch mutating webhook (DynamoGraphDeployment defaulting)
+          kubectl patch mutatingwebhookconfiguration ${MUTATING_WEBHOOK_NAME} \
+            --type='json' -p="[
+              {
+                \"op\": \"add\",
+                \"path\": \"/webhooks/0/clientConfig/caBundle\",
                 \"value\": \"${CA_BUNDLE}\"
               }
             ]"

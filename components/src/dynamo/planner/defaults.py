@@ -48,14 +48,6 @@ class BasePlannerDefaults:
     metric_reporting_prometheus_port = int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
 
 
-class LoadPlannerDefaults(BasePlannerDefaults):
-    metric_pulling_interval = 10  # in seconds
-    decode_kv_scale_up_threshold = 0.9
-    decode_kv_scale_down_threshold = 0.5
-    prefill_queue_scale_up_threshold = 5.0
-    prefill_queue_scale_down_threshold = 0.2
-
-
 class SLAPlannerDefaults(BasePlannerDefaults):
     # Prometheus endpoint URL for pulling/querying metrics
     metric_pulling_prometheus_endpoint = os.environ.get(
@@ -79,6 +71,21 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     kalman_min_points = 5
 
     no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
+    mode = "disagg"  # ["disagg", "prefill", "decode"]
+
+    # Scaling mode flags
+    enable_throughput_scaling = True
+    enable_loadbased_scaling = False
+
+    # Load-based scaling settings
+    loadbased_router_metrics_url: Optional[
+        str
+    ] = None  # will be auto-discovered from the DGD in kubernetes mode if not provided
+    loadbased_adjustment_interval = 5  # in seconds, must be < adjustment_interval
+    loadbased_learning_window = 50  # sliding window size for regression
+    loadbased_scaling_down_sensitivity = 80  # 0-100
+    loadbased_metric_samples = 10  # number of samples per interval
+    loadbased_min_observations = 5  # cold start threshold
 
 
 class VllmComponentName:
@@ -181,6 +188,41 @@ class Service(BaseModel):
             return args[args.index("--model") + 1]
 
         return None
+
+    def get_gpu_count(self) -> int:
+        """Get the GPU count from the service's resource specification.
+
+        GPU count is read from spec.services.[ServiceName].resources.limits.gpu,
+        falling back to requests.gpu if limits is not specified.
+
+        Returns:
+            The number of GPUs configured for this service
+
+        Raises:
+            ValueError: If GPU count is not specified or invalid
+        """
+        resources = self.service.get("resources", {})
+        limits = resources.get("limits", {})
+        requests = resources.get("requests", {})
+
+        # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
+        # typically treat requests and limits as equivalent since GPUs are
+        # non-compressible and allocated exclusively (no fractional sharing).
+        gpu_str = limits.get("gpu") or requests.get("gpu")
+
+        if gpu_str is None:
+            raise ValueError(
+                f"No GPU count specified for service '{self.name}'. "
+                f"Please set resources.limits.gpu or resources.requests.gpu in the DGD."
+            )
+
+        try:
+            return int(gpu_str)
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"Invalid GPU count '{gpu_str}' for service '{self.name}'. "
+                f"GPU count must be an integer."
+            )
 
 
 # TODO: still supporting framework component names for backwards compatibility

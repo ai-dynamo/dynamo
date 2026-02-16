@@ -43,6 +43,12 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         help="Backend type",
     )
     parser.add_argument(
+        "--mode",
+        default=SLAPlannerDefaults.mode,
+        choices=["disagg", "prefill", "decode", "agg"],
+        help="Planner mode: disagg (prefill+decode), prefill-only, decode-only, or agg (aggregated)",
+    )
+    parser.add_argument(
         "--no-operation",
         action="store_true",
         default=SLAPlannerDefaults.no_operation,
@@ -61,7 +67,7 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         "--max-gpu-budget",
         type=int,
         default=SLAPlannerDefaults.max_gpu_budget,
-        help="Maximum GPU budget",
+        help="Maximum GPU budget (-1 for no budget enforcement)",
     )
     parser.add_argument(
         "--min-endpoint",
@@ -72,14 +78,16 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--decode-engine-num-gpu",
         type=int,
-        default=SLAPlannerDefaults.decode_engine_num_gpu,
-        help="Number of GPUs for decode engine",
+        default=None,
+        help="Number of GPUs per decode engine. In Kubernetes mode, this is auto-detected "
+        "from DGD resources but can be overridden (e.g., for mockers without GPU resources).",
     )
     parser.add_argument(
         "--prefill-engine-num-gpu",
         type=int,
-        default=SLAPlannerDefaults.prefill_engine_num_gpu,
-        help="Number of GPUs for prefill engine",
+        default=None,
+        help="Number of GPUs per prefill engine. In Kubernetes mode, this is auto-detected "
+        "from DGD resources but can be overridden (e.g., for mockers without GPU resources).",
     )
     parser.add_argument(
         "--profile-results-dir",
@@ -168,4 +176,126 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         type=str,
         help="Model name of deployment (only required for virtual environment)",
     )
+
+    # Scaling mode flags
+    parser.add_argument(
+        "--enable-throughput-scaling",
+        action="store_true",
+        default=SLAPlannerDefaults.enable_throughput_scaling,
+        help="Enable throughput-based scaling (default: True)",
+    )
+    parser.add_argument(
+        "--disable-throughput-scaling",
+        action="store_true",
+        default=False,
+        help="Disable throughput-based scaling",
+    )
+    parser.add_argument(
+        "--enable-loadbased-scaling",
+        action="store_true",
+        default=SLAPlannerDefaults.enable_loadbased_scaling,
+        help="Enable load-based scaling",
+    )
+
+    # Load-based scaling settings
+    parser.add_argument(
+        "--loadbased-router-metrics-url",
+        type=str,
+        default=SLAPlannerDefaults.loadbased_router_metrics_url,
+        help="URL to router's /metrics endpoint for direct load metric queries (default: auto-discovered from the DGD)",
+    )
+    parser.add_argument(
+        "--loadbased-adjustment-interval",
+        type=int,
+        default=SLAPlannerDefaults.loadbased_adjustment_interval,
+        help="Load-based adjustment interval in seconds (must be < --adjustment-interval)",
+    )
+    parser.add_argument(
+        "--loadbased-learning-window",
+        type=int,
+        default=SLAPlannerDefaults.loadbased_learning_window,
+        help="Sliding window size for load-based regression (number of observations)",
+    )
+    parser.add_argument(
+        "--loadbased-scaling-down-sensitivity",
+        type=int,
+        default=SLAPlannerDefaults.loadbased_scaling_down_sensitivity,
+        help="Scale-down sensitivity 0-100 (0=never scale down, 100=aggressive)",
+    )
+    parser.add_argument(
+        "--loadbased-metric-samples",
+        type=int,
+        default=SLAPlannerDefaults.loadbased_metric_samples,
+        help="Number of metric samples to average per load-based adjustment interval",
+    )
+    parser.add_argument(
+        "--loadbased-min-observations",
+        type=int,
+        default=SLAPlannerDefaults.loadbased_min_observations,
+        help="Minimum regression observations before load-based scaling starts (cold start)",
+    )
+
     return parser
+
+
+def validate_sla_planner_args(args: argparse.Namespace) -> None:
+    """Validate and normalize SLA planner arguments.
+
+    Resolves conflicting flags, checks required arguments, and enforces
+    constraints between related arguments. Should be called after parsing
+    and before constructing any planner.
+
+    Raises:
+        ValueError: If argument constraints are violated
+    """
+    # Resolve enable/disable throughput flags
+    if getattr(args, "disable_throughput_scaling", False):
+        args.enable_throughput_scaling = False
+
+    enable_throughput = getattr(args, "enable_throughput_scaling", True)
+    enable_loadbased = getattr(args, "enable_loadbased_scaling", False)
+
+    # At least one scaling mode must be enabled
+    if not enable_throughput and not enable_loadbased:
+        raise ValueError(
+            "At least one scaling mode must be enabled "
+            "(--enable-throughput-scaling or --enable-loadbased-scaling)"
+        )
+
+    if enable_loadbased:
+        # Router metrics URL is required for load-based scaling unless in
+        # kubernetes mode where it can be auto-discovered from the DGD.
+        environment = getattr(args, "environment", "kubernetes")
+        if (
+            not getattr(args, "loadbased_router_metrics_url", None)
+            and environment != "kubernetes"
+        ):
+            raise ValueError(
+                "--loadbased-router-metrics-url is required when "
+                "load-based scaling is enabled outside kubernetes mode"
+            )
+
+        # Load-based interval must be shorter than throughput interval
+        if enable_throughput:
+            if args.loadbased_adjustment_interval >= args.adjustment_interval:
+                raise ValueError(
+                    f"--loadbased-adjustment-interval ({args.loadbased_adjustment_interval}s) "
+                    f"must be shorter than --adjustment-interval ({args.adjustment_interval}s). "
+                    "Load-based scaling is the fast reactive loop; throughput-based is the "
+                    "slow predictive loop."
+                )
+
+        # Auto-disable correction factor: load-based regression already
+        # accounts for actual latency conditions.
+        if not getattr(args, "no_correction", False):
+            import logging
+
+            logger = logging.getLogger(__name__)
+
+            # TODO: enable correction after we can gather engine forward pass metrics
+            logger.warning(
+                "Correction factor is automatically disabled when load-based "
+                "scaling is enabled. Load-based scaling already accounts for "
+                "actual latency conditions."
+            )
+            args.no_correction = True

@@ -28,7 +28,7 @@ use crate::preprocessor::media::MediaDecoder;
 pub mod deepseek_v32;
 mod template;
 
-pub use template::ContextMixins;
+pub use template::{ChatTemplate, ContextMixins};
 
 #[derive(Debug)]
 pub enum TokenInput {
@@ -63,6 +63,9 @@ pub trait OAIChatLikeRequest {
     fn tool_choice(&self) -> Option<Value> {
         None
     }
+    fn response_format(&self) -> Option<Value> {
+        None
+    }
 
     fn should_add_generation_prompt(&self) -> bool;
 
@@ -95,6 +98,7 @@ pub trait OAIPromptFormatter: Send + Sync + 'static {
     fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String>;
 }
 
+#[derive(Clone)]
 pub enum PromptFormatter {
     OAI(Arc<dyn OAIPromptFormatter>),
 }

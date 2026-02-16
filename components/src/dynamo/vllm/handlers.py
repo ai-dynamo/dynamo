@@ -21,19 +21,23 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+import dynamo.nixl_connect as nixl_connect
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelType,
-    ZmqKvEventPublisher,
     lora_name_to_id,
-    register_llm,
-    unregister_llm,
+    register_model,
+    unregister_model,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
+from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.image_loader import ImageLoader
 
 # Multimodal data dictionary keys
@@ -44,6 +48,27 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def _compute_mm_uuids(
+    multi_modal_data: Dict[str, Any] | None
+) -> Dict[str, list[str]] | None:
+    """
+    Compute multi_modal_uuids from multi_modal_data.
+
+    Each image gets a SHA256 hex digest as its UUID, ensuring consistent
+    hashing across the MM Router, vLLM handler, and Rust KV publisher.
+    """
+    if not multi_modal_data or "image" not in multi_modal_data:
+        return None
+    images = multi_modal_data["image"]
+    if not isinstance(images, list):
+        images = [images]
+    if not images:
+        return None
+    uuids = compute_mm_uuids_from_images(images)
+    return {"image": uuids}
+
 
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
 # None = not yet initialized, False = disabled/failed, LoRAManager = initialized
@@ -243,19 +268,25 @@ class BaseWorkerHandler(ABC):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
     ):
         self.runtime = runtime
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.kv_publishers: list[ZmqKvEventPublisher] | None = None
+        self.kv_publishers: list[KvEventPublisher] | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
-        self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
         self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
+        self.enable_frontend_decoding = enable_frontend_decoding
+        # NIXL connector for frontend decoding - lazy initialized
+        self._nixl_connector = None
+        self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
@@ -271,6 +302,9 @@ class BaseWorkerHandler(ABC):
         if use_vllm_tokenizer and hasattr(engine, "tokenizer"):
             tokenizer = engine.tokenizer
         self.input_param_manager = InputParamManager(tokenizer)
+
+        # Store shutdown event for graceful shutdown monitoring
+        self.shutdown_event = shutdown_event
 
     async def sleep(self, body: dict) -> dict:
         """Sleep the engine to release GPU memory and unregister from discovery.
@@ -303,7 +337,7 @@ class BaseWorkerHandler(ABC):
             logger.error(f"Failed to sleep engine: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def wake(self, body: dict) -> dict:
+    async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
 
         Args:
@@ -331,7 +365,7 @@ class BaseWorkerHandler(ABC):
 
             return {"status": "ok", "message": f"Engine woke (tags={tags})"}
         except Exception as e:
-            logger.error(f"Failed to wake engine: {e}")
+            logger.error(f"Failed to wake up engine: {e}")
             return {"status": "error", "message": str(e)}
 
     @abstractmethod
@@ -339,14 +373,44 @@ class BaseWorkerHandler(ABC):
         raise NotImplementedError
 
     async def _monitor_abort(self, context, request_id, is_prefill):
-        """Background task that monitors for context cancellation and aborts the request."""
+        """
+        Background task that monitors for context cancellation and shutdown.
+        Aborts the request if either occurs. Raises GeneratorExit if shutdown was triggered.
+        """
         try:
-            await context.async_killed_or_stopped()
-            # If we reach here, the context was stopped or killed
+            # Build list of futures/tasks to wait for
+            wait_for = [context.async_killed_or_stopped()]
+            shutdown_task = None
+
+            if self.shutdown_event:
+                # Create task for shutdown monitoring and add to wait list
+                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+                wait_for.append(shutdown_task)
+
+            # Wait for whichever happens first
+            done, pending = await asyncio.wait(
+                wait_for,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel the pending task/future
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            # Abort the request
             await self.engine_client.abort(request_id)
             logger.debug(
                 f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
+
+            # Check which event triggered and raise GeneratorExit if shutdown
+            if shutdown_task and shutdown_task in done:
+                raise GeneratorExit("Engine was shut down during generation.")
+
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
@@ -355,18 +419,24 @@ class BaseWorkerHandler(ABC):
 
     @asynccontextmanager
     async def _abort_monitor(self, context, request_id, is_prefill=False):
-        """Context manager that creates and automatically cleans up an abort monitoring task."""
+        """
+        Context manager that creates and automatically cleans up an abort monitoring task.
+        If shutdown event was triggered, raises GeneratorExit on exit.
+        """
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
             yield task
         finally:
-            # Cancel the abort monitoring task when exiting the context
+            # Clean up the abort monitoring task
             if not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+            else:
+                # If the task completed, check if it raised GeneratorExit
+                task.result()
 
     async def clear_kv_blocks(self, request=None):
         try:
@@ -523,7 +593,7 @@ class BaseWorkerHandler(ABC):
                             }
 
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                            await register_llm(
+                            await register_model(
                                 model_input=ModelInput.Tokens,
                                 model_type=ModelType.Chat | ModelType.Completions,
                                 endpoint=self.generate_endpoint,
@@ -643,7 +713,7 @@ class BaseWorkerHandler(ABC):
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
                         try:
-                            await unregister_llm(
+                            await unregister_model(
                                 endpoint=self.generate_endpoint,
                                 lora_name=lora_name,
                             )
@@ -745,7 +815,6 @@ class BaseWorkerHandler(ABC):
         Decode base64-encoded prompt embeddings in PyTorch format.
 
         Format: PyTorch tensor serialized with torch.save() and base64-encoded.
-        This matches NIM-LLM's implementation for compatibility.
 
         Args:
             prompt_embeds_base64: Base64-encoded PyTorch tensor
@@ -825,6 +894,10 @@ class BaseWorkerHandler(ABC):
         """
         Load a batch of images from multimodal data items.
 
+        Supports two paths:
+        1. Url variant: Download and decode image from URL (default)
+        2. Decoded variant: Read pre-decoded image via NIXL RDMA (requires --frontend-decoding)
+
         Args:
             image_mm_items: List of multimodal data items for images
         Returns:
@@ -833,25 +906,41 @@ class BaseWorkerHandler(ABC):
             Exception: If any image fails to load
         """
         image_futures = []
+
         for item in image_mm_items:
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                # URL path: download and decode in Python backend
                 url = item[URL_VARIANT_KEY]
                 image_futures.append(self.image_loader.load_image(url))
                 logger.debug(f"Preparing to load image from URL: {url[:80]}...")
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                logger.warning(
-                    "Decoded multimodal data not yet supported in standard worker"
-                )
+                if self.enable_frontend_decoding:
+                    async with self._nixl_connector_lock:
+                        if self._nixl_connector is None:
+                            self._nixl_connector = nixl_connect.Connector()
+                            await self._nixl_connector.initialize()
 
+                    metadata = item[DECODED_VARIANT_KEY]
+                    image_futures.append(
+                        read_decoded_media_via_nixl(self._nixl_connector, metadata)
+                    )
+                else:
+                    logger.error(
+                        "Received Decoded multimodal data but --frontend-decoding not enabled. "
+                        "Use --frontend-decoding flag to enable NIXL RDMA image transfer."
+                    )
+                    raise ValueError("Could not load decoded media from frontend")
+
+        # Process images in parallel
         results = await asyncio.gather(*image_futures, return_exceptions=True)
         loaded_images = []
         collective_exceptions = ""
-        for i, result in enumerate(results):
+        for media_item, result in zip(image_mm_items, results):
             if isinstance(result, Exception):
-                url = image_mm_items[i].get(URL_VARIANT_KEY, "unknown")
-                logger.error(f"Failed to load image from {url[:80]}...: {result}")
+                source = media_item.get(URL_VARIANT_KEY, "decoded")
+                logger.error(f"Failed to load image from {source[:80]}...: {result}")
                 collective_exceptions += (
-                    f"Failed to load image from {url[:80]}...: {result}\n"
+                    f"Failed to load image from {source[:80]}...: {result}\n"
                 )
                 continue
             loaded_images.append(result)
@@ -943,12 +1032,17 @@ class BaseWorkerHandler(ABC):
                         "token_ids": [],
                     },
                 )
-        else:
-            # Normal path: use token IDs
-            prompt = TokensPrompt(
-                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
-            )
-            return prompt, embedding_sequence_length, None
+        # Normal path: use token IDs
+        mm_uuids = _compute_mm_uuids(multi_modal_data)
+        prompt_kwargs = dict[str, Any](
+            prompt_token_ids=request["token_ids"],
+            multi_modal_data=multi_modal_data,
+        )
+        if mm_uuids is not None:
+            prompt_kwargs["multi_modal_uuids"] = mm_uuids
+
+        prompt = TokensPrompt(**prompt_kwargs)
+        return prompt, embedding_sequence_length, None
 
     @staticmethod
     def _build_completion_usage(
@@ -1112,63 +1206,55 @@ class BaseWorkerHandler(ABC):
             )
 
             num_output_tokens_so_far = 0
-            try:
-                async for res in gen:
-                    # res is vllm's RequestOutput
+            async for res in gen:
+                # res is vllm's RequestOutput
 
-                    if not res.outputs:
-                        self._log_with_lora_context(
-                            "Request {request_id}{lora_info} returned no outputs",
-                            request_id,
-                            lora_request,
-                        )
-                        # Use string format "error: message" for consistency with vLLM's string-based finish_reason
-                        # Rust will parse this into FinishReason::Error(message)
-                        yield {
-                            "finish_reason": "error: No outputs from vLLM engine",
-                            "token_ids": [],
-                        }
-                        break
-
-                    output = res.outputs[0]
-                    next_total_toks = len(output.token_ids)
-                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-
-                    # Extract logprobs for new tokens if available
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        output, num_output_tokens_so_far
+                if not res.outputs:
+                    self._log_with_lora_context(
+                        "Request {request_id}{lora_info} returned no outputs",
+                        request_id,
+                        lora_request,
                     )
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
+                    # Use string format "error: message" for consistency with vLLM's string-based finish_reason
+                    # Rust will parse this into FinishReason::Error(message)
+                    yield {
+                        "finish_reason": "error: No outputs from vLLM engine",
+                        "token_ids": [],
+                    }
+                    break
 
-                    if output.finish_reason:
-                        out["finish_reason"] = output.finish_reason
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            embedding_sequence_length=embedding_sequence_length,
-                        )
-                        # Log completion with LoRA info (debug level to avoid log spam)
-                        self._log_with_lora_context(
-                            "Completed token generation for request {request_id}{lora_info}: "
-                            "{output_tokens} output tokens, finish_reason={finish_reason}",
-                            request_id,
-                            lora_request,
-                            output_tokens=next_total_toks,
-                            finish_reason=output.finish_reason,
-                        )
-                    if output.stop_reason:
-                        out["stop_reason"] = output.stop_reason
-                    yield out
-                    num_output_tokens_so_far = next_total_toks
-            except asyncio.CancelledError:
-                # raise EngineShGeneratorExit when engine exits so that frontend can migrate the request
-                raise GeneratorExit(
-                    "Decode engine was shut down during token generation"
-                ) from None
+                output = res.outputs[0]
+                next_total_toks = len(output.token_ids)
+                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                # Extract logprobs for new tokens if available
+                log_probs, top_logprobs = self._extract_logprobs(
+                    output, num_output_tokens_so_far
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+
+                if output.finish_reason:
+                    out["finish_reason"] = normalize_finish_reason(output.finish_reason)
+                    out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
+                        request_output=res,
+                        embedding_sequence_length=embedding_sequence_length,
+                    )
+                    # Log completion with LoRA info (debug level to avoid log spam)
+                    self._log_with_lora_context(
+                        "Completed token generation for request {request_id}{lora_info}: "
+                        "{output_tokens} output tokens, finish_reason={finish_reason}",
+                        request_id,
+                        lora_request,
+                        output_tokens=next_total_toks,
+                        finish_reason=output.finish_reason,
+                    )
+                if output.stop_reason:
+                    out["stop_reason"] = output.stop_reason
+                yield out
+                num_output_tokens_so_far = next_total_toks
 
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
@@ -1189,6 +1275,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
     ):
         super().__init__(
             runtime,
@@ -1200,6 +1288,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            shutdown_event,
+            enable_frontend_decoding,
         )
 
     async def generate(self, request, context):
@@ -1272,8 +1362,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             logger.debug(
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
-
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
 
         trace_headers = build_trace_headers(context)
 
@@ -1317,7 +1406,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params
         )
 
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1361,7 +1450,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "role": "assistant",
                             "content": delta_text,
                         },
-                        "finish_reason": output.finish_reason,
+                        "finish_reason": normalize_finish_reason(output.finish_reason),
                     }
 
                     chunk = {
@@ -1398,6 +1487,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         config=None,
         use_vllm_tokenizer: bool = False,
+        shutdown_event: asyncio.Event | None = None,
+        enable_frontend_decoding: bool = False,
     ):
         super().__init__(
             runtime,
@@ -1409,6 +1500,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             config,
             use_vllm_tokenizer,
+            shutdown_event,
+            enable_frontend_decoding,
         )
 
     async def generate(self, request, context):
@@ -1481,7 +1574,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
             )
 
-        dp_rank = request.get("dp_rank", None)
+        dp_rank = request.get("routing", {}).get("dp_rank")
 
         trace_headers = build_trace_headers(context)
 
@@ -1501,39 +1594,33 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
-            try:
-                async for res in gen:
-                    logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+            async for res in gen:
+                logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
-                    token_ids = res.outputs[0].token_ids if res.outputs else []
+                token_ids = res.outputs[0].token_ids if res.outputs else []
 
-                    output: Dict[str, Any] = {
-                        "token_ids": list(token_ids),
-                        "disaggregated_params": (
-                            {"kv_transfer_params": res.kv_transfer_params}
-                            if res.kv_transfer_params
-                            else None
-                        ),
-                        "completion_usage": BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            embedding_sequence_length=embedding_sequence_length,
-                        ),
-                    }
+                output: Dict[str, Any] = {
+                    "token_ids": list(token_ids),
+                    "disaggregated_params": (
+                        {"kv_transfer_params": res.kv_transfer_params}
+                        if res.kv_transfer_params
+                        else None
+                    ),
+                    "completion_usage": BaseWorkerHandler._build_completion_usage(
+                        request_output=res,
+                        embedding_sequence_length=embedding_sequence_length,
+                    ),
+                }
 
-                    # Log prefill completion with LoRA info
-                    self._log_with_lora_context(
-                        "Prefill completed for request {request_id}{lora_info}: "
-                        "generated {token_count} token(s), has_kv_params={has_kv_params}",
-                        request_id,
-                        lora_request,
-                        level="info" if lora_request else "debug",
-                        token_count=len(token_ids),
-                        has_kv_params=res.kv_transfer_params is not None,
-                    )
+                # Log prefill completion with LoRA info
+                self._log_with_lora_context(
+                    "Prefill completed for request {request_id}{lora_info}: "
+                    "generated {token_count} token(s), has_kv_params={has_kv_params}",
+                    request_id,
+                    lora_request,
+                    level="info" if lora_request else "debug",
+                    token_count=len(token_ids),
+                    has_kv_params=res.kv_transfer_params is not None,
+                )
 
-                    yield output
-            except asyncio.CancelledError:
-                # raise the error because we cannot migrate prefill requests
-                raise GeneratorExit(
-                    "Prefill engine was shut down during token generation"
-                ) from None
+                yield output

@@ -21,7 +21,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -183,88 +182,6 @@ func TestIsDeploymentReady(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsDeploymentReady(tt.args.deployment); got != tt.want {
 				t.Errorf("IsDeploymentReady() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-type mockEtcdStorage struct {
-	deleteKeysFunc func(ctx context.Context, prefix string) error
-}
-
-func (m *mockEtcdStorage) DeleteKeys(ctx context.Context, prefix string) error {
-	return m.deleteKeysFunc(ctx, prefix)
-}
-
-func TestDynamoComponentDeploymentReconciler_FinalizeResource(t *testing.T) {
-	type fields struct {
-		EtcdStorage etcdStorage
-	}
-	type args struct {
-		ctx                       context.Context
-		dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "delete etcd keys",
-			fields: fields{
-				EtcdStorage: &mockEtcdStorage{
-					deleteKeysFunc: func(ctx context.Context, prefix string) error {
-						if prefix == "/default/components/service1" {
-							return nil
-						}
-						return fmt.Errorf("invalid prefix: %s", prefix)
-					},
-				},
-			},
-			args: args{
-				ctx: context.Background(),
-				dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-					Spec: v1alpha1.DynamoComponentDeploymentSpec{
-						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							DynamoNamespace: &[]string{"default"}[0],
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "delete etcd keys (error)",
-			fields: fields{
-				EtcdStorage: &mockEtcdStorage{
-					deleteKeysFunc: func(ctx context.Context, prefix string) error {
-						return fmt.Errorf("invalid prefix: %s", prefix)
-					},
-				},
-			},
-			args: args{
-				ctx: context.Background(),
-				dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-					Spec: v1alpha1.DynamoComponentDeploymentSpec{
-						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName:     "service1",
-							DynamoNamespace: &[]string{"default"}[0],
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := &DynamoComponentDeploymentReconciler{
-				EtcdStorage: tt.fields.EtcdStorage,
-			}
-			if err := r.FinalizeResource(tt.args.ctx, tt.args.dynamoComponentDeployment); (err != nil) != tt.wantErr {
-				t.Errorf("DynamoComponentDeploymentReconciler.FinalizeResource() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -517,10 +434,9 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 
 func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.T) {
 	type fields struct {
-		Client      client.Client
-		Recorder    record.EventRecorder
-		Config      controller_common.Config
-		EtcdStorage etcdStorage
+		Client   client.Client
+		Recorder record.EventRecorder
+		Config   controller_common.Config
 	}
 	type args struct {
 		ctx context.Context
@@ -631,10 +547,9 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 			r := &DynamoComponentDeploymentReconciler{
-				Client:      tt.fields.Client,
-				Recorder:    tt.fields.Recorder,
-				Config:      tt.fields.Config,
-				EtcdStorage: tt.fields.EtcdStorage,
+				Client:   tt.fields.Client,
+				Recorder: tt.fields.Recorder,
+				Config:   tt.fields.Config,
 			}
 			got, got1, err := r.generateVolcanoPodGroup(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
@@ -665,7 +580,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		Client                client.Client
 		Recorder              record.EventRecorder
 		Config                controller_common.Config
-		EtcdStorage           etcdStorage
 		DockerSecretRetriever *mockDockerSecretRetriever
 	}
 	type args struct {
@@ -857,6 +771,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+											{Name: "NIXL_TELEMETRY_ENABLE", Value: "n"},
+											{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+											{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "19090"},
 											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
 												FieldRef: &corev1.ObjectFieldSelector{
 													FieldPath: "metadata.name",
@@ -878,6 +795,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,
+											},
+											{
+												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: commonconsts.DynamoNixlPort,
 											},
 										},
 										VolumeMounts: []corev1.VolumeMount{
@@ -992,6 +912,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+											{Name: "NIXL_TELEMETRY_ENABLE", Value: "n"},
+											{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+											{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "19090"},
 											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
 												FieldRef: &corev1.ObjectFieldSelector{
 													FieldPath: "metadata.name",
@@ -1013,6 +936,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,
+											},
+											{
+												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: commonconsts.DynamoNixlPort,
 											},
 										},
 										VolumeMounts: []corev1.VolumeMount{
@@ -1169,7 +1095,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				Client:                fakeKubeClient, // Use the fake client
 				Recorder:              tt.fields.Recorder,
 				Config:                tt.fields.Config,
-				EtcdStorage:           tt.fields.EtcdStorage,
 				DockerSecretRetriever: tt.fields.DockerSecretRetriever,
 				// Scheme: s, // Pass scheme if reconciler uses it directly, often client uses it
 			}
@@ -1234,10 +1159,9 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	// Set up reconciler
 	recorder := record.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:      fakeKubeClient,
-		Recorder:    recorder,
-		Config:      controller_common.Config{},
-		EtcdStorage: nil,
+		Client:   fakeKubeClient,
+		Recorder: recorder,
+		Config:   controller_common.Config{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -1342,10 +1266,9 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 
 	recorder := record.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:      fakeKubeClient,
-		Recorder:    recorder,
-		Config:      controller_common.Config{},
-		EtcdStorage: nil,
+		Client:   fakeKubeClient,
+		Recorder: recorder,
+		Config:   controller_common.Config{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -1676,10 +1599,9 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			// Set up reconciler
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:      fakeKubeClient,
-				Recorder:    recorder,
-				Config:      controller_common.Config{},
-				EtcdStorage: nil,
+				Client:   fakeKubeClient,
+				Recorder: recorder,
+				Config:   controller_common.Config{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1845,10 +1767,9 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			// Set up reconciler
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:      fakeKubeClient,
-				Recorder:    recorder,
-				Config:      controller_common.Config{},
-				EtcdStorage: nil,
+				Client:   fakeKubeClient,
+				Recorder: recorder,
+				Config:   controller_common.Config{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1872,9 +1793,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 	tests := []struct {
 		name                     string
 		componentReconcileResult ComponentReconcileResult
-		wantConditionStatus      metav1.ConditionStatus
-		wantConditionReason      string
-		wantConditionMessage     string
+		wantConditions           []metav1.Condition
 		wantServiceReplicaStatus *v1alpha1.ServiceReplicaStatus
 		wantObservedGeneration   int64
 	}{
@@ -1894,9 +1813,20 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 					AvailableReplicas: ptr.To(int32(0)),
 				},
 			},
-			wantConditionStatus:  metav1.ConditionFalse,
-			wantConditionReason:  "DeploymentNotReady",
-			wantConditionMessage: "Deployment is not ready",
+			wantConditions: []metav1.Condition{
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "DeploymentNotReady",
+					Message: "Deployment is not ready",
+				},
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+					Status:  metav1.ConditionFalse,
+					Reason:  "ComponentNotReady",
+					Message: "DynamoComponent is not ready",
+				},
+			},
 			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
@@ -1922,9 +1852,20 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 					AvailableReplicas: ptr.To(int32(2)),
 				},
 			},
-			wantConditionStatus:  metav1.ConditionTrue,
-			wantConditionReason:  "DeploymentReady",
-			wantConditionMessage: "Deployment is ready",
+			wantConditions: []metav1.Condition{
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+					Status:  metav1.ConditionTrue,
+					Reason:  "DeploymentReady",
+					Message: "Deployment is ready",
+				},
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+					Status:  metav1.ConditionTrue,
+					Reason:  "ComponentReady",
+					Message: "DynamoComponent is ready",
+				},
+			},
 			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:     v1alpha1.ComponentKindDeployment,
 				ComponentName:     "test-component",
@@ -1949,9 +1890,20 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 					ReadyReplicas:   ptr.To(int32(2)),
 				},
 			},
-			wantConditionStatus:  metav1.ConditionFalse,
-			wantConditionReason:  "SomeLeaderWorkerSetsNotReady",
-			wantConditionMessage: "Some LeaderWorkerSets are not ready",
+			wantConditions: []metav1.Condition{
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+					Status:  metav1.ConditionFalse,
+					Reason:  "SomeLeaderWorkerSetsNotReady",
+					Message: "Some LeaderWorkerSets are not ready",
+				},
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+					Status:  metav1.ConditionFalse,
+					Reason:  "ComponentNotReady",
+					Message: "DynamoComponent is not ready",
+				},
+			},
 			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
@@ -1975,9 +1927,20 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 					ReadyReplicas:   ptr.To(int32(3)),
 				},
 			},
-			wantConditionStatus:  metav1.ConditionTrue,
-			wantConditionReason:  "AllLeaderWorkerSetsReady",
-			wantConditionMessage: "All LeaderWorkerSets are ready",
+			wantConditions: []metav1.Condition{
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+					Status:  metav1.ConditionTrue,
+					Reason:  "AllLeaderWorkerSetsReady",
+					Message: "All LeaderWorkerSets are ready",
+				},
+				{
+					Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+					Status:  metav1.ConditionTrue,
+					Reason:  "ComponentReady",
+					Message: "DynamoComponent is ready",
+				},
+			},
 			wantServiceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 				ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 				ComponentName:   "test-component-0",
@@ -2045,14 +2008,17 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			err = fakeKubeClient.Get(ctx, req.NamespacedName, updatedDCD)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			// Assert the status condition
-			g.Expect(updatedDCD.Status.Conditions).To(gomega.HaveLen(1))
-			condition := updatedDCD.Status.Conditions[0]
-			g.Expect(condition.Type).To(gomega.Equal(v1alpha1.DynamoGraphDeploymentConditionTypeAvailable))
-			g.Expect(condition.Status).To(gomega.Equal(tt.wantConditionStatus))
-			g.Expect(condition.Reason).To(gomega.Equal(tt.wantConditionReason))
-			g.Expect(condition.Message).To(gomega.Equal(tt.wantConditionMessage))
+			// Assert the status conditions
+			g.Expect(updatedDCD.Status.Conditions).To(gomega.HaveLen(len(tt.wantConditions)))
 
+			// Clear LastTransitionTime from actual conditions for comparison
+			actualConditions := make([]metav1.Condition, len(updatedDCD.Status.Conditions))
+			for i, cond := range updatedDCD.Status.Conditions {
+				cond.LastTransitionTime = metav1.Time{}
+				actualConditions[i] = cond
+			}
+
+			g.Expect(actualConditions).To(gomega.ConsistOf(tt.wantConditions))
 			// Assert the service replica status
 			g.Expect(updatedDCD.Status.Service).To(gomega.Equal(tt.wantServiceReplicaStatus))
 

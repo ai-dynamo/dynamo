@@ -108,6 +108,14 @@ STUB_MODULES = [
     "botocore",
     "botocore.client",
     "botocore.exceptions",
+    "pynvml",
+    "gpu_memory_service",
+    "gpu_memory_service.common",
+    "gpu_memory_service.common.utils",
+    "prometheus_client",
+    "prometheus_client.parser",
+    "sklearn",
+    "sklearn.linear_model",
 ]
 
 # Project paths for local imports

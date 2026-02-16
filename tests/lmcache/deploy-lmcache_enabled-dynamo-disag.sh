@@ -25,12 +25,6 @@ echo "   Model: $MODEL_URL"
 echo "   Port: 8000"
 echo "   Mode: Disaggregated (prefill + decode workers) + LMCache"
 echo "   !! Remember to kill the old dynamo processes otherwise the port will be busy !!"
-
-# Kill any existing dynamo processes
-echo "🧹 Cleaning up any existing dynamo processes..."
-pkill -f "dynamo-run" || true
-sleep 2
-
 echo "🔧 Starting dynamo disaggregated serving with LMCache enabled..."
 
 python -m dynamo.frontend &
