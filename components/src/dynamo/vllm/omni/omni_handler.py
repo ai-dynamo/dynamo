@@ -4,15 +4,19 @@ import asyncio
 import base64
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, Dict, Union
 
+from pydantic import BaseModel
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
+from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
     VideoData,
 )
+from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import (
     compute_num_frames,
     encode_to_mp4,
@@ -28,30 +32,29 @@ DEFAULT_VIDEO_FPS = 16
 DEFAULT_VIDEO_OUTPUT_DIR = "/tmp/dynamo_videos"  # noqa: S108
 
 
+@dataclass
+class EngineInputs:
+    """Parsed engine inputs ready for AsyncOmni.generate().
+
+    Attributes:
+        prompt: OmniTextPrompt dict for the engine.
+        sampling_params_list: Per-stage sampling parameters, or None for defaults.
+        request_type: The resolved request type (may differ from the initial parse
+            when a chat completion request carries video params).
+        fps: Frames per second, only meaningful for video requests.
+    """
+
+    prompt: OmniTextPrompt
+    sampling_params_list: list | None = None
+    request_type: RequestType = RequestType.CHAT_COMPLETION
+    fps: int = 0
+
+
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
-    Handles text-to-text, text-to-image, and text-to-video generation
+    Handles text-to-text, text-to-image, and text-to-video generation.
     """
-
-    DIFFUSION_PARAM_FIELDS: tuple[str, ...] = (
-        # Dimensions
-        "height",
-        "width",
-        "num_frames",
-        # Scheduler / inference
-        "num_inference_steps",
-        "guidance_scale",
-        "guidance_scale_2",
-        "true_cfg_scale",
-        # Control
-        "seed",
-        "num_outputs_per_prompt",
-        "fps",
-        # Advanced (model-specific, but user-configurable)
-        "boundary_ratio",
-        "flow_shift",
-    )
 
     def __init__(
         self,
@@ -88,7 +91,7 @@ class OmniHandler(BaseOmniHandler):
         """Generate outputs via the unified OpenAI mode.
 
         Args:
-            request: Request dictionary (chat completions or NvCreateVideoRequest).
+            request: Raw request dictionary from the Rust frontend.
             context: Dynamo context for request tracking.
 
         Yields:
@@ -105,32 +108,19 @@ class OmniHandler(BaseOmniHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
-        # Need a unified way to parse different request protocols and build engine inputs.
-        # Right now we have image and text via chat completions and video via NvCreateVideoRequest.
-        # So, messages is for text/image and prompt is for video.
-        if "messages" in request:
-            (
-                prompt,
-                sampling_params_list,
-                is_video_request,
-                fps,
-            ) = self._build_inputs_from_chat(request)
-        else:
-            (
-                prompt,
-                sampling_params_list,
-                is_video_request,
-                fps,
-            ) = self._build_inputs_from_video_request(request)
-
-        previous_text = ""
+        parsed_request, request_type = parse_request_type(
+            request, self.config.output_modalities
+        )
+        inputs = self.build_engine_inputs(parsed_request, request_type)
 
         generate_kwargs: Dict[str, Any] = {
-            "prompt": prompt,
+            "prompt": inputs.prompt,
             "request_id": request_id,
         }
-        if sampling_params_list is not None:
-            generate_kwargs["sampling_params_list"] = sampling_params_list
+        if inputs.sampling_params_list is not None:
+            generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
+
+        previous_text = ""
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -155,9 +145,9 @@ class OmniHandler(BaseOmniHandler):
                         stage_output.final_output_type == "image"
                         and stage_output.images
                     ):
-                        if is_video_request:
+                        if inputs.request_type == RequestType.VIDEO_GENERATION:
                             chunk = await self._format_video_chunk(
-                                stage_output.images, request_id, fps
+                                stage_output.images, request_id, inputs.fps
                             )
                         else:
                             chunk = self._format_image_chunk(
@@ -173,13 +163,44 @@ class OmniHandler(BaseOmniHandler):
                 logger.error(f"Error during generation for request {request_id}: {e}")
                 yield self._error_chunk(request_id, str(e))
 
-    def _build_inputs_from_chat(
-        self, request: Dict[str, Any]
-    ) -> tuple[OmniTextPrompt, list | None, bool, int]:
-        """Build engine inputs from a chat completions request.
+    def build_engine_inputs(
+        self,
+        parsed_request: Union[BaseModel, Dict[str, Any]],
+        request_type: RequestType,
+    ) -> EngineInputs:
+        """Convert a parsed request into AsyncOmni engine inputs.
+
+        Args:
+            parsed_request: Output from parse_request_type -- a Pydantic model
+                for image/video requests, or a raw dict for chat completions.
+            request_type: The RequestType determined by parse_request_type.
 
         Returns:
-            (prompt, sampling_params_list, is_video_request, fps)
+            EngineInputs ready for engine_client.generate().
+        """
+        if request_type == RequestType.CHAT_COMPLETION:
+            return self._engine_inputs_from_chat(parsed_request)  # type: ignore[arg-type]
+
+        if request_type == RequestType.IMAGE_GENERATION:
+            return self._engine_inputs_from_image(parsed_request)  # type: ignore[arg-type]
+
+        if request_type == RequestType.VIDEO_GENERATION:
+            return self._engine_inputs_from_video(parsed_request)  # type: ignore[arg-type]
+
+        if request_type == RequestType.AUDIO_GENERATION:
+            raise NotImplementedError("Audio generation is not yet supported")
+
+        raise ValueError(f"Unknown request type: {request_type}")
+
+    def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
+        """Build engine inputs from a chat completions request dict.
+
+        Chat completions can carry diffusion parameters in extra_body.
+        If num_frames > 1 the request is promoted to VIDEO_GENERATION so the
+        output formatter knows to encode frames as MP4.
+
+        When no diffusion overrides are present, sampling_params_list is left
+        as None so AsyncOmni falls back to the YAML stage defaults.
         """
         text_prompt = self._extract_text_prompt(request)
         extra_body = self._extract_extra_body(request)
@@ -187,30 +208,97 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(prompt=text_prompt, negative_prompt=negative_prompt)
 
-        sampling_params_list = None
-        if self._has_diffusion_params(extra_body):
-            sampling_params_list = [self._build_diffusion_sampling_params(extra_body)]
+        # Build diffusion sampling params only if the caller provides overrides.
+        sp = OmniDiffusionSamplingParams()
+        has_overrides = False
+        for field in (
+            "height",
+            "width",
+            "num_frames",
+            "num_inference_steps",
+            "guidance_scale",
+            "guidance_scale_2",
+            "true_cfg_scale",
+            "seed",
+            "num_outputs_per_prompt",
+            "fps",
+            "boundary_ratio",
+            "flow_shift",
+        ):
+            if field in extra_body:
+                setattr(sp, field, extra_body[field])
+                has_overrides = True
+
+        sampling_params_list = [sp] if has_overrides else None
 
         requested_num_frames = extra_body.get("num_frames", 1)
-        is_video_request = requested_num_frames is not None and requested_num_frames > 1
+        is_video = requested_num_frames is not None and requested_num_frames > 1
         fps = extra_body.get("fps", self.default_fps)
 
-        return prompt, sampling_params_list, is_video_request, fps
+        resolved_type = (
+            RequestType.VIDEO_GENERATION if is_video else RequestType.CHAT_COMPLETION
+        )
 
-    def _build_inputs_from_video_request(
-        self, request: Dict[str, Any]
-    ) -> tuple[OmniTextPrompt, list, bool, int]:
-        """Build engine inputs from an NvCreateVideoRequest dict.
+        return EngineInputs(
+            prompt=prompt,
+            sampling_params_list=sampling_params_list,
+            request_type=resolved_type,
+            fps=fps,
+        )
 
-        Flattens the request fields into a plain dict and delegates to
-        ``_build_diffusion_sampling_params`` so that both code-paths share
-        the same parameter mapping logic.
+    def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
+        """Build engine inputs from an NvCreateImageRequest.
 
-        Returns:
-            (prompt, sampling_params_list, is_video_request, fps)
+        Mirrors the parsing logic in vllm-omni api_server.py generate_images().
+        The nvext block carries diffusion-specific parameters while n and size
+        are top-level fields.
         """
-        req = NvCreateVideoRequest(**request)
+        nvext = req.nvext or ImageNvExt()
 
+        prompt = OmniTextPrompt(
+            prompt=req.prompt,
+            negative_prompt=nvext.negative_prompt or "",
+        )
+
+        sp = OmniDiffusionSamplingParams()
+        has_overrides = False
+
+        if req.n is not None:
+            sp.num_outputs_per_prompt = req.n
+            has_overrides = True
+
+        if req.size is not None:
+            parts = req.size.split("x")
+            if len(parts) == 2:
+                sp.width = int(parts[0])
+                sp.height = int(parts[1])
+                has_overrides = True
+
+        if nvext.num_inference_steps is not None:
+            sp.num_inference_steps = nvext.num_inference_steps
+            has_overrides = True
+        if nvext.guidance_scale is not None:
+            sp.guidance_scale = nvext.guidance_scale
+            has_overrides = True
+        if nvext.seed is not None:
+            sp.seed = nvext.seed
+            has_overrides = True
+
+        sampling_params_list = [sp] if has_overrides else None
+
+        logger.info(
+            f"Image generation request: prompt='{req.prompt[:50]}...', "
+            f"size={req.size or 'default'}, n={req.n or 1}"
+        )
+
+        return EngineInputs(
+            prompt=prompt,
+            sampling_params_list=sampling_params_list,
+            request_type=RequestType.IMAGE_GENERATION,
+        )
+
+    def _engine_inputs_from_video(self, req: NvCreateVideoRequest) -> EngineInputs:
+        """Build engine inputs from an NvCreateVideoRequest."""
         width, height = parse_video_size(req.size)
         num_frames = compute_num_frames(
             num_frames=req.num_frames,
@@ -225,52 +313,31 @@ class OmniHandler(BaseOmniHandler):
             negative_prompt=req.negative_prompt or "",
         )
 
-        # Flatten into a params dict for the unified builder
-        diffusion_kwargs: Dict[str, Any] = {
-            "height": height,
-            "width": width,
-            "num_frames": num_frames,
-        }
+        sp = OmniDiffusionSamplingParams(
+            height=height,
+            width=width,
+            num_frames=num_frames,
+        )
         if req.num_inference_steps is not None:
-            diffusion_kwargs["num_inference_steps"] = req.num_inference_steps
+            sp.num_inference_steps = req.num_inference_steps
         if req.guidance_scale is not None:
-            diffusion_kwargs["guidance_scale"] = req.guidance_scale
+            sp.guidance_scale = req.guidance_scale
         if req.seed is not None:
-            diffusion_kwargs["seed"] = req.seed
+            sp.seed = req.seed
         if fps is not None:
-            diffusion_kwargs["fps"] = fps
-
-        diffusion_params = self._build_diffusion_sampling_params(diffusion_kwargs)
+            sp.fps = fps
 
         logger.info(
             f"Video diffusion request: prompt='{req.prompt[:50]}...', "
             f"size={width}x{height}, frames={num_frames}, fps={fps}"
         )
 
-        return prompt, [diffusion_params], True, fps
-
-    @classmethod
-    def _has_diffusion_params(cls, params: Dict[str, Any]) -> bool:
-        """Check if *params* contains any user-facing diffusion parameters."""
-        return bool(set(cls.DIFFUSION_PARAM_FIELDS) & params.keys())
-
-    @classmethod
-    def _build_diffusion_sampling_params(
-        cls,
-        params: Dict[str, Any],
-    ) -> OmniDiffusionSamplingParams:
-        """Build ``OmniDiffusionSamplingParams`` from a flat parameter dict.
-        Args:
-            params: Flat dict of user-facing diffusion parameters.
-
-        Returns:
-            Configured ``OmniDiffusionSamplingParams`` instance.
-        """
-        sp = OmniDiffusionSamplingParams()
-        for key in cls.DIFFUSION_PARAM_FIELDS:
-            if key in params:
-                setattr(sp, key, params[key])
-        return sp
+        return EngineInputs(
+            prompt=prompt,
+            sampling_params_list=[sp],
+            request_type=RequestType.VIDEO_GENERATION,
+            fps=fps,
+        )
 
     def _format_image_chunk(
         self,
