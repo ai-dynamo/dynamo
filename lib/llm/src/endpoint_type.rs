@@ -14,6 +14,8 @@ pub enum EndpointType {
     Embedding,
     /// Images API (Diffusion/DALL-E)
     Images,
+    /// Videos API (Video Generation)
+    Videos,
     /// Responses API
     Responses,
 }
@@ -25,6 +27,7 @@ impl EndpointType {
             Self::Completion => "completion",
             Self::Embedding => "embedding",
             Self::Images => "images",
+            Self::Videos => "videos",
             Self::Responses => "responses",
         }
     }
@@ -35,6 +38,7 @@ impl EndpointType {
             Self::Completion,
             Self::Embedding,
             Self::Images,
+            Self::Videos,
             Self::Responses,
         ]
     }

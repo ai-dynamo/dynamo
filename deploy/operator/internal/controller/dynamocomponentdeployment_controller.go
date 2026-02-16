@@ -76,7 +76,6 @@ type DynamoComponentDeploymentReconciler struct {
 	client.Client
 	Recorder              record.EventRecorder
 	Config                commonController.Config
-	EtcdStorage           etcdStorage
 	DockerSecretRetriever dockerSecretRetriever
 }
 
@@ -757,20 +756,6 @@ func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Conte
 	logger := log.FromContext(ctx)
 	logger.Info("Finalizing the DynamoComponentDeployment", "dynamoComponentDeployment", dynamoComponentDeployment)
 
-	// Only delete etcd keys if using etcd discovery backend
-	// When using Kubernetes discovery (the default), skip etcd cleanup to avoid hangs
-	if r.Config.DiscoveryBackend != "etcd" {
-		return nil
-	}
-
-	if dynamoComponentDeployment.Spec.ServiceName != "" && dynamoComponentDeployment.Spec.DynamoNamespace != nil && *dynamoComponentDeployment.Spec.DynamoNamespace != "" {
-		logger.Info("Deleting the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
-		err := r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *dynamoComponentDeployment.Spec.DynamoNamespace, dynamoComponentDeployment.Spec.ServiceName))
-		if err != nil {
-			logger.Error(err, "Failed to delete the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
-			return err
-		}
-	}
 	return nil
 }
 
@@ -1352,8 +1337,11 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 
 	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace,
+		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,    // e.g. "worker"
+		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // result of ComputeDynamoNamespace(k8sNamespace, dgdName)
+		// The original user provided component name (the service map key, e.g. "VllmDecodeWorker" in the DGD).
+		// Needed to disambiguate amongst distinct components with the same component type within a DGD (e.g prefill/decode workers).
+		commonconsts.KubeLabelDynamoComponent: opt.dynamoComponentDeployment.Spec.ServiceName,
 	}
 	// // If using LeaderWorkerSet, modify selector to only target leaders
 	if opt.dynamoComponentDeployment.IsMultinode() {
@@ -1364,9 +1352,6 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 	if isK8sDiscovery {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
-	}
-	// Discovery is enabled for non frontend components
-	if isK8sDiscovery && !opt.dynamoComponentDeployment.IsFrontendComponent() {
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
