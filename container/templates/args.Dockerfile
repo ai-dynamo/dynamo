@@ -39,6 +39,11 @@ ARG BASE_IMAGE_TAG={{ context[framework].base_image_tag }}
 # Base image configuration
 ARG RUNTIME_IMAGE={{ context[framework].runtime_image }}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][cuda_context_key].runtime_image_tag }}
+# SGLang source-install configuration.
+# If SGLANG_REF is empty, runtime image installs sglang from pip based on RUNTIME_IMAGE_TAG.
+# If SGLANG_REF is set, runtime image clones SGLANG_REPO at SGLANG_REF and installs from source.
+ARG SGLANG_REPO={{ context[framework].sglang_repo }}
+ARG SGLANG_REF=""
 {% elif framework != "dynamo" -%}
 ARG RUNTIME_IMAGE={{ context[framework].runtime_image }}
 ARG RUNTIME_IMAGE_TAG={{ context[framework].runtime_image_tag }}

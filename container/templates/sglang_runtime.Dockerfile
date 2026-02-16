@@ -15,6 +15,8 @@ RUN apt remove -y python3-apt python3-blinker && \
 
 # This ARG is still utilized for SGLANG Version extraction
 ARG RUNTIME_IMAGE_TAG
+ARG SGLANG_REPO
+ARG SGLANG_REF
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -41,6 +43,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # required for verification of GPG keys
         gnupg2 \
+        git \
+        openssh-client \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -68,8 +72,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip install --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-        sglang==${SGLANG_VERSION} && \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -z "$GMS_WHEEL" ]; then \
@@ -90,14 +93,34 @@ RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/re
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         --requirement /tmp/deps/requirements.txt \
-        --requirement /tmp/deps/requirements.test.txt \
-        sglang==${SGLANG_VERSION} && \
+        --requirement /tmp/deps/requirements.test.txt && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
     #TODO: Temporary change until upstream sglang runtime image is updated
     pip install --break-system-packages "urllib3>=2.6.3" && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
+
+# Install SGLang:
+# - default path: pip install based on runtime image tag
+# - optional path: install from git source when SGLANG_REF is set
+# For private SSH repos, build with BuildKit and pass --ssh (for example: --ssh default).
+RUN --mount=type=ssh,required=false \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    if [ -n "${SGLANG_REF}" ]; then \
+        echo "Installing sglang from source: ${SGLANG_REPO} @ ${SGLANG_REF}" && \
+        if printf '%s' "${SGLANG_REPO}" | grep -Eq '^(git@|ssh://)'; then \
+            mkdir -p -m 700 /root/.ssh && \
+            export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"; \
+        fi && \
+        git clone --branch "${SGLANG_REF}" --depth 1 "${SGLANG_REPO}" /tmp/sglang && \
+        pip install --break-system-packages "/tmp/sglang/python[all]" && \
+        rm -rf /tmp/sglang; \
+    else \
+        echo "Installing sglang from pip: ${SGLANG_VERSION}" && \
+        pip install --break-system-packages "sglang==${SGLANG_VERSION}"; \
+    fi
 
 # Force-reinstall NVIDIA packages in a separate layer so requirements.txt changes don't trigger re-download
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \

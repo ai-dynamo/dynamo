@@ -239,6 +239,39 @@ python container/render.py --framework=trtllm --target=runtime --output-short-fi
 docker build -t dynamo:latest-trtllm-runtime -f rendered.Dockerfile .
 ```
 
+#### SGLang runtime: install from git source instead of pip (optional)
+
+By default, SGLang runtime images install `sglang==${SGLANG_VERSION}` from pip, where
+`SGLANG_VERSION` is derived from `RUNTIME_IMAGE_TAG`.
+
+To install SGLang from a git repo, set:
+- `SGLANG_REPO`: repository URL (https or ssh)
+- `SGLANG_REF`: branch/tag/ref to clone
+
+```bash
+python container/render.py --framework=sglang --target=runtime --output-short-filename
+
+# Public repo over HTTPS
+docker build \
+  --build-arg SGLANG_REPO=https://github.com/sgl-project/sglang.git \
+  --build-arg SGLANG_REF=main \
+  -t dynamo:latest-sglang-runtime-src \
+  -f rendered.Dockerfile .
+```
+
+For private SSH-only repositories, use BuildKit and forward your ssh-agent socket:
+
+```bash
+python container/render.py --framework=sglang --target=runtime --output-short-filename
+
+DOCKER_BUILDKIT=1 docker build \
+  --ssh default \
+  --build-arg SGLANG_REPO=git@github.com:your-org/private-sglang.git \
+  --build-arg SGLANG_REF=your-branch \
+  -t dynamo:latest-sglang-runtime-src \
+  -f rendered.Dockerfile .
+```
+
 ### Building the Frontend Image
 
 The frontend image is a specialized container that includes the Dynamo components (Dynamo, NIXL, etc) along with the Endpoint Picker (EPP) for Kubernetes Gateway API Inference Extension integration. This image is primarily used for inference gateway deployments.
