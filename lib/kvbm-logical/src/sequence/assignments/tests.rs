@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{BlockId, KvbmSequenceHashProvider, SequenceHash};
+use crate::sequence::{BlockSequence, BlockSequenceError};
 
-use super::{BlockAssignments, BlockSequence, BlockSequenceError};
+use super::ExternalBlockAssignments;
 
 const TEST_BLOCK_SIZE: u32 = 4;
 
@@ -26,7 +27,7 @@ fn get_expected_hashes(seq: &BlockSequence) -> Vec<SequenceHash> {
 #[test]
 fn test_aligned_0_blocks_0_block_ids() {
     let seq = create_test_sequence(0, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     let range = assignments.assign_pending(seq.blocks()).unwrap();
 
@@ -38,7 +39,7 @@ fn test_aligned_0_blocks_0_block_ids() {
 #[test]
 fn test_aligned_1_block_0_block_ids() {
     let seq = create_test_sequence(1, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     let range = assignments.assign_pending(seq.blocks()).unwrap();
 
@@ -51,7 +52,7 @@ fn test_aligned_1_block_0_block_ids() {
 fn test_aligned_1_block_1_block_id() {
     let seq = create_test_sequence(1, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments.extend_block_ids(vec![100]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
@@ -68,7 +69,7 @@ fn test_aligned_1_block_1_block_id() {
 fn test_aligned_1_block_2_block_ids() {
     let seq = create_test_sequence(1, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments.extend_block_ids(vec![100, 200]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
@@ -86,7 +87,7 @@ fn test_aligned_1_block_2_block_ids() {
 fn test_aligned_3_blocks_3_block_ids() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
@@ -105,7 +106,7 @@ fn test_aligned_3_blocks_3_block_ids() {
 fn test_aligned_3_blocks_1_block_id() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments.extend_block_ids(vec![100]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
@@ -122,7 +123,7 @@ fn test_aligned_3_blocks_1_block_id() {
 fn test_aligned_3_blocks_5_block_ids() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300, 400, 500])
@@ -150,7 +151,7 @@ fn test_aligned_3_blocks_5_block_ids() {
 #[test]
 fn test_partial_0_complete_2_partial_0_block_ids() {
     let seq = create_test_sequence(0, 2);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     let range = assignments.assign_pending(seq.blocks()).unwrap();
 
@@ -164,7 +165,7 @@ fn test_partial_2_complete_1_partial_2_block_ids() {
     let seq = create_test_sequence(2, 1);
     let expected_hashes = get_expected_hashes(&seq);
     assert_eq!(expected_hashes.len(), 2);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments.extend_block_ids(vec![100, 200]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
@@ -183,7 +184,7 @@ fn test_partial_2_complete_3_partial_4_block_ids() {
     let seq = create_test_sequence(2, 3);
     let expected_hashes = get_expected_hashes(&seq);
     assert_eq!(expected_hashes.len(), 2);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300, 400])
@@ -204,7 +205,7 @@ fn test_partial_3_complete_2_partial_1_block_id() {
     let seq = create_test_sequence(3, 2);
     let expected_hashes = get_expected_hashes(&seq);
     assert_eq!(expected_hashes.len(), 3);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments.extend_block_ids(vec![100]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
@@ -224,7 +225,7 @@ fn test_partial_3_complete_2_partial_1_block_id() {
 fn test_incremental_assignment_aligned() {
     let seq = create_test_sequence(4, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // First call: assign first 2 blocks
     assignments.extend_block_ids(vec![100, 200]).unwrap();
@@ -252,7 +253,7 @@ fn test_incremental_assignment_aligned() {
 fn test_incremental_assignment_with_excess() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // First call: assign first 2 blocks
     assignments.extend_block_ids(vec![100, 200]).unwrap();
@@ -279,7 +280,7 @@ fn test_incremental_assignment_partial_then_excess() {
     let seq = create_test_sequence(2, 1);
     let expected_hashes = get_expected_hashes(&seq);
     assert_eq!(expected_hashes.len(), 2);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // First call: assign 1 block
     assignments.extend_block_ids(vec![100]).unwrap();
@@ -303,7 +304,7 @@ fn test_incremental_assignment_partial_then_excess() {
 #[test]
 fn test_all_blocks_already_assigned_extra_goes_to_unassigned() {
     let seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign all blocks
     assignments.extend_block_ids(vec![100, 200]).unwrap();
@@ -330,7 +331,7 @@ fn test_all_blocks_already_assigned_extra_goes_to_unassigned() {
 #[test]
 fn test_empty_slot_receives_block_ids() {
     let seq = create_test_sequence(0, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300])
@@ -348,7 +349,7 @@ fn test_empty_slot_receives_block_ids() {
 #[test]
 fn test_only_partial_tokens_receives_block_ids() {
     let seq = create_test_sequence(0, 3);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments.extend_block_ids(vec![100, 200]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
@@ -365,7 +366,7 @@ fn test_only_partial_tokens_receives_block_ids() {
 fn test_large_sequence_exact_match() {
     let seq = create_test_sequence(10, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
     let block_ids: Vec<BlockId> = (0..10).map(|i| (i + 1) * 100).collect();
 
     assignments.extend_block_ids(block_ids).unwrap();
@@ -385,7 +386,7 @@ fn test_large_sequence_exact_match() {
 fn test_verify_hash_block_id_pairing_order() {
     let seq = create_test_sequence(5, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![999, 888, 777, 666, 555])
@@ -421,7 +422,7 @@ fn test_cartesian_product_combinations() {
 
             // Test with 0 block_ids
             {
-                let mut assignments = BlockAssignments::new(0);
+                let mut assignments = ExternalBlockAssignments::new(0);
                 let range = assignments.assign_pending(seq.blocks()).unwrap();
                 assert_eq!(range, 0..0);
                 assert_eq!(assignments.assigned_count(), 0);
@@ -432,7 +433,7 @@ fn test_cartesian_product_combinations() {
             if available_blocks > 1 {
                 let fewer = available_blocks / 2;
                 let block_ids: Vec<BlockId> = (0..fewer).collect();
-                let mut assignments = BlockAssignments::new(0);
+                let mut assignments = ExternalBlockAssignments::new(0);
                 assignments.extend_block_ids(block_ids).unwrap();
                 let range = assignments.assign_pending(seq.blocks()).unwrap();
 
@@ -450,7 +451,7 @@ fn test_cartesian_product_combinations() {
             // Test with exact number of block_ids
             if available_blocks > 0 {
                 let block_ids: Vec<BlockId> = (0..available_blocks).collect();
-                let mut assignments = BlockAssignments::new(0);
+                let mut assignments = ExternalBlockAssignments::new(0);
                 assignments.extend_block_ids(block_ids).unwrap();
                 let range = assignments.assign_pending(seq.blocks()).unwrap();
 
@@ -464,7 +465,7 @@ fn test_cartesian_product_combinations() {
                 let excess = 3;
                 let total_ids = available_blocks + excess;
                 let block_ids: Vec<BlockId> = (0..total_ids).collect();
-                let mut assignments = BlockAssignments::new(0);
+                let mut assignments = ExternalBlockAssignments::new(0);
                 assignments.extend_block_ids(block_ids).unwrap();
                 let range = assignments.assign_pending(seq.blocks()).unwrap();
 
@@ -489,7 +490,7 @@ fn test_cartesian_product_combinations() {
 #[test]
 fn test_unassigned_blocks_applied_before_new_blocks() {
     let mut seq = create_test_sequence(5, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign 5 blocks + 2 excess
     assignments
@@ -531,7 +532,7 @@ fn test_unassigned_blocks_applied_before_new_blocks() {
 #[test]
 fn test_unassigned_blocks_with_new_blocks_all_assigned() {
     let mut seq = create_test_sequence(3, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign 3 + 1 excess
     assignments
@@ -565,7 +566,7 @@ fn test_unassigned_blocks_with_new_blocks_all_assigned() {
 #[test]
 fn test_unassigned_blocks_no_new_space() {
     let seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign 2 + 2 excess
     assignments
@@ -593,7 +594,7 @@ fn test_unassigned_blocks_no_new_space() {
 #[test]
 fn test_unassigned_blocks_partial_space() {
     let mut seq = create_test_sequence(3, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign 3 + 2 excess
     assignments
@@ -627,7 +628,7 @@ fn test_unassigned_blocks_partial_space() {
 #[test]
 fn test_multiple_rounds_of_unassigned_accumulation() {
     let mut seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Round 1: 2 assigned, 2 unassigned
     assignments
@@ -681,7 +682,7 @@ fn test_multiple_rounds_of_unassigned_accumulation() {
 #[test]
 fn test_unassigned_blocks_ordering_preserved() {
     let mut seq = create_test_sequence(1, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // 10 assigned, rest unassigned in FIFO order
     assignments
@@ -728,7 +729,7 @@ fn test_unassigned_blocks_ordering_preserved() {
 #[test]
 fn test_unassigned_blocks_with_partial_token_block() {
     let mut seq = create_test_sequence(2, 2);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // 2 assigned, 2 unassigned
     assignments
@@ -761,7 +762,7 @@ fn test_unassigned_blocks_with_partial_token_block() {
 #[test]
 fn test_unassigned_blocks_exactly_fill_new_space() {
     let mut seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // 2 assigned, 3 unassigned
     assignments
@@ -792,7 +793,7 @@ fn test_unassigned_blocks_exactly_fill_new_space() {
 #[test]
 fn test_empty_unassigned_with_new_blocks() {
     let mut seq = create_test_sequence(3, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign exactly the right number
     assignments
@@ -823,7 +824,7 @@ fn test_empty_unassigned_with_new_blocks() {
 #[test]
 fn test_ordering_violation_known_after_new() {
     let seq = create_test_sequence(3, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign first block
     assignments.extend_block_ids(vec![100]).unwrap();
@@ -855,7 +856,7 @@ fn test_ordering_violation_known_after_new() {
 #[test]
 fn test_ordering_violation_no_state_change() {
     let seq = create_test_sequence(5, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign first 2
     assignments.extend_block_ids(vec![100, 200]).unwrap();
@@ -879,7 +880,7 @@ fn test_ordering_violation_no_state_change() {
 #[test]
 fn test_all_duplicates_noop() {
     let seq = create_test_sequence(3, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign all 3
     assignments
@@ -897,7 +898,7 @@ fn test_all_duplicates_noop() {
 #[test]
 fn test_duplicates_with_unassigned() {
     let seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // 2 assigned + 2 unassigned
     assignments
@@ -919,7 +920,7 @@ fn test_duplicates_with_unassigned() {
 fn test_shorter_sequence_slice_does_not_shrink_assigned() {
     let seq = create_test_sequence(5, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign 3 blocks using the full sequence
     assignments
@@ -951,7 +952,7 @@ fn test_shorter_sequence_slice_does_not_shrink_assigned() {
 fn test_offset_assignments() {
     let seq = create_test_sequence(10, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(5);
+    let mut assignments = ExternalBlockAssignments::new(5);
 
     assert_eq!(assignments.offset(), 5);
     assert_eq!(assignments.next_position(), 5);
@@ -983,7 +984,7 @@ fn test_offset_assignments() {
 fn test_offset_with_excess() {
     let seq = create_test_sequence(8, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(5);
+    let mut assignments = ExternalBlockAssignments::new(5);
 
     // 3 blocks available at offset 5 (positions 5, 6, 7), 5 block_ids → 2 unassigned
     assignments
@@ -1001,7 +1002,7 @@ fn test_offset_with_excess() {
 }
 
 // =========================================================================
-// New tests: Multi-instance (two BlockAssignments on same blocks)
+// New tests: Multi-instance (two ExternalBlockAssignments on same blocks)
 // =========================================================================
 
 #[test]
@@ -1009,8 +1010,8 @@ fn test_multi_instance_different_offsets() {
     let seq = create_test_sequence(10, 0);
     let expected_hashes = get_expected_hashes(&seq);
 
-    let mut g1 = BlockAssignments::new(0);
-    let mut g2 = BlockAssignments::new(5);
+    let mut g1 = ExternalBlockAssignments::new(0);
+    let mut g2 = ExternalBlockAssignments::new(5);
 
     // G1 assigns positions 0..3
     g1.extend_block_ids(vec![10, 20, 30]).unwrap();
@@ -1044,7 +1045,7 @@ fn test_multi_instance_different_offsets() {
 #[test]
 fn test_token_extension_then_flush() {
     let mut seq = create_test_sequence(2, 2);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // 2 blocks available, 3 block_ids → 1 unassigned
     assignments
@@ -1073,7 +1074,7 @@ fn test_token_extension_then_flush() {
 #[test]
 fn test_extend_tokens_creates_new_blocks() {
     let mut seq = create_test_sequence(1, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign 1 block + 2 excess
     assignments
@@ -1107,7 +1108,7 @@ fn test_extend_tokens_creates_new_blocks() {
 #[test]
 fn test_clear_preserves_offset() {
     let seq = create_test_sequence(5, 0);
-    let mut assignments = BlockAssignments::new(3);
+    let mut assignments = ExternalBlockAssignments::new(3);
 
     assignments
         .extend_block_ids(vec![100, 200, 300])
@@ -1148,7 +1149,7 @@ fn test_position_mismatch_wrong_offset() {
 
     // Since in normal usage positions always match, let's just verify the offset behavior
     // works correctly and the validation passes for valid data.
-    let mut assignments = BlockAssignments::new(1);
+    let mut assignments = ExternalBlockAssignments::new(1);
     assignments.extend_block_ids(vec![100, 200]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
     assert_eq!(range, 0..2);
@@ -1164,7 +1165,7 @@ fn test_position_mismatch_wrong_offset() {
 #[test]
 fn test_contains() {
     let seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300])
@@ -1190,7 +1191,7 @@ fn test_contains() {
 fn test_assigned_iter() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300])
@@ -1265,14 +1266,14 @@ fn test_block_sequence_with_salt() {
 
 #[test]
 fn test_assigned_positions_empty() {
-    let assignments = BlockAssignments::new(0);
+    let assignments = ExternalBlockAssignments::new(0);
     assert_eq!(assignments.assigned_positions(), 0..0);
 }
 
 #[test]
 fn test_assigned_positions_with_offset() {
     let seq = create_test_sequence(10, 0);
-    let mut assignments = BlockAssignments::new(3);
+    let mut assignments = ExternalBlockAssignments::new(3);
     assignments.extend_block_ids(vec![100, 200]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
     assert_eq!(assignments.assigned_positions(), 3..5);
@@ -1280,14 +1281,14 @@ fn test_assigned_positions_with_offset() {
 
 #[test]
 fn test_pending_positions_empty() {
-    let assignments = BlockAssignments::new(0);
+    let assignments = ExternalBlockAssignments::new(0);
     assert_eq!(assignments.pending_positions(), 0..0);
 }
 
 #[test]
 fn test_pending_positions_with_assigned_and_unassigned() {
     let seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
     assignments
         .extend_block_ids(vec![100, 200, 300, 400])
         .unwrap();
@@ -1299,7 +1300,7 @@ fn test_pending_positions_with_assigned_and_unassigned() {
 #[test]
 fn test_pending_positions_with_offset() {
     let seq = create_test_sequence(10, 0);
-    let mut assignments = BlockAssignments::new(5);
+    let mut assignments = ExternalBlockAssignments::new(5);
     assignments
         .extend_block_ids(vec![100, 200, 300, 400])
         .unwrap();
@@ -1314,7 +1315,7 @@ fn test_pending_positions_with_offset() {
 fn test_get_at_position_in_range() {
     let seq = create_test_sequence(5, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(2);
+    let mut assignments = ExternalBlockAssignments::new(2);
     assignments
         .extend_block_ids(vec![100, 200, 300])
         .unwrap();
@@ -1332,7 +1333,7 @@ fn test_get_at_position_in_range() {
 #[test]
 fn test_get_at_position_out_of_range() {
     let seq = create_test_sequence(5, 0);
-    let mut assignments = BlockAssignments::new(2);
+    let mut assignments = ExternalBlockAssignments::new(2);
     assignments.extend_block_ids(vec![100, 200]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
     // Assigned at positions 2, 3
@@ -1345,7 +1346,7 @@ fn test_get_at_position_out_of_range() {
 #[test]
 fn test_get_pending_at_position_in_range() {
     let seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
     assignments
         .extend_block_ids(vec![100, 200, 300, 400, 500])
         .unwrap();
@@ -1359,7 +1360,7 @@ fn test_get_pending_at_position_in_range() {
 #[test]
 fn test_get_pending_at_position_out_of_range() {
     let seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
     assignments
         .extend_block_ids(vec![100, 200, 300, 400])
         .unwrap();
@@ -1375,13 +1376,13 @@ fn test_get_pending_at_position_out_of_range() {
 // zip_assigned tests
 // =========================================================================
 
-use super::assignments::{zip_assigned, zip_assigned_pending};
+use super::{zip_assigned, zip_assigned_pending};
 
 #[test]
 fn test_zip_assigned_full_overlap() {
     let seq = create_test_sequence(5, 0);
-    let mut a = BlockAssignments::new(0);
-    let mut b = BlockAssignments::new(0);
+    let mut a = ExternalBlockAssignments::new(0);
+    let mut b = ExternalBlockAssignments::new(0);
     a.extend_block_ids(vec![10, 20, 30]).unwrap();
     a.assign_pending(seq.blocks()).unwrap();
     b.extend_block_ids(vec![110, 120, 130]).unwrap();
@@ -1397,8 +1398,8 @@ fn test_zip_assigned_full_overlap() {
 #[test]
 fn test_zip_assigned_partial_overlap() {
     let seq = create_test_sequence(10, 0);
-    let mut a = BlockAssignments::new(0);
-    let mut b = BlockAssignments::new(2);
+    let mut a = ExternalBlockAssignments::new(0);
+    let mut b = ExternalBlockAssignments::new(2);
     a.extend_block_ids(vec![10, 20, 30, 40]).unwrap();
     a.assign_pending(seq.blocks()).unwrap();
     b.extend_block_ids(vec![110, 120, 130]).unwrap();
@@ -1411,8 +1412,8 @@ fn test_zip_assigned_partial_overlap() {
 #[test]
 fn test_zip_assigned_no_overlap() {
     let seq = create_test_sequence(10, 0);
-    let mut a = BlockAssignments::new(0);
-    let mut b = BlockAssignments::new(5);
+    let mut a = ExternalBlockAssignments::new(0);
+    let mut b = ExternalBlockAssignments::new(5);
     a.extend_block_ids(vec![10, 20]).unwrap();
     a.assign_pending(seq.blocks()).unwrap();
     b.extend_block_ids(vec![110, 120]).unwrap();
@@ -1425,8 +1426,8 @@ fn test_zip_assigned_no_overlap() {
 #[test]
 fn test_zip_assigned_either_empty() {
     let seq = create_test_sequence(5, 0);
-    let a = BlockAssignments::new(0);
-    let mut b = BlockAssignments::new(0);
+    let a = ExternalBlockAssignments::new(0);
+    let mut b = ExternalBlockAssignments::new(0);
     b.extend_block_ids(vec![110, 120]).unwrap();
     b.assign_pending(seq.blocks()).unwrap();
 
@@ -1436,8 +1437,8 @@ fn test_zip_assigned_either_empty() {
 
 #[test]
 fn test_zip_assigned_both_empty() {
-    let a = BlockAssignments::new(0);
-    let b = BlockAssignments::new(0);
+    let a = ExternalBlockAssignments::new(0);
+    let b = ExternalBlockAssignments::new(0);
     assert!(zip_assigned(&a, &b).is_empty());
 }
 
@@ -1448,8 +1449,8 @@ fn test_zip_assigned_both_empty() {
 #[test]
 fn test_zip_assigned_pending_full_overlap() {
     let seq = create_test_sequence(5, 0);
-    let mut src = BlockAssignments::new(2);
-    let mut dst = BlockAssignments::new(0);
+    let mut src = ExternalBlockAssignments::new(2);
+    let mut dst = ExternalBlockAssignments::new(0);
 
     // src: assigned at positions 2, 3, 4
     src.extend_block_ids(vec![10, 20, 30]).unwrap();
@@ -1472,8 +1473,8 @@ fn test_zip_assigned_pending_full_overlap() {
 #[test]
 fn test_zip_assigned_pending_partial_overlap() {
     let seq = create_test_sequence(10, 0);
-    let mut src = BlockAssignments::new(2);
-    let mut dst = BlockAssignments::new(0);
+    let mut src = ExternalBlockAssignments::new(2);
+    let mut dst = ExternalBlockAssignments::new(0);
 
     // src: assigned at 2, 3, 4, 5
     src.extend_block_ids(vec![10, 20, 30, 40]).unwrap();
@@ -1494,8 +1495,8 @@ fn test_zip_assigned_pending_partial_overlap() {
 #[test]
 fn test_zip_assigned_pending_no_overlap() {
     let seq = create_test_sequence(10, 0);
-    let mut src = BlockAssignments::new(0);
-    let mut dst = BlockAssignments::new(0);
+    let mut src = ExternalBlockAssignments::new(0);
+    let mut dst = ExternalBlockAssignments::new(0);
 
     // src: assigned at 0, 1
     src.extend_block_ids(vec![10, 20]).unwrap();
@@ -1514,8 +1515,8 @@ fn test_zip_assigned_pending_no_overlap() {
 #[test]
 fn test_zip_assigned_pending_either_empty() {
     let seq = create_test_sequence(5, 0);
-    let src = BlockAssignments::new(0); // no assigned
-    let mut dst = BlockAssignments::new(0);
+    let src = ExternalBlockAssignments::new(0); // no assigned
+    let mut dst = ExternalBlockAssignments::new(0);
     dst.extend_block_ids(vec![110, 120, 130]).unwrap();
     dst.assign_pending(seq.blocks()).unwrap();
 
@@ -1523,10 +1524,10 @@ fn test_zip_assigned_pending_either_empty() {
     assert!(zip_assigned_pending(&src, &dst).is_empty());
 
     // dst has no pending blocks
-    let mut src2 = BlockAssignments::new(0);
+    let mut src2 = ExternalBlockAssignments::new(0);
     src2.extend_block_ids(vec![10, 20]).unwrap();
     src2.assign_pending(seq.blocks()).unwrap();
-    let dst2 = BlockAssignments::new(0);
+    let dst2 = ExternalBlockAssignments::new(0);
     assert!(zip_assigned_pending(&src2, &dst2).is_empty());
 }
 
@@ -1540,14 +1541,14 @@ fn test_onboard_scenario_g2_to_g1() {
     let seq = create_test_sequence(5, 0);
 
     // Step 1 — G1 matches positions 0..2
-    let mut g1 = BlockAssignments::new(0);
+    let mut g1 = ExternalBlockAssignments::new(0);
     g1.extend_block_ids(vec![1000, 1001]).unwrap();
     g1.assign_pending(seq.blocks()).unwrap();
     assert_eq!(g1.assigned_positions(), 0..2);
     assert_eq!(g1.assigned_count(), 2);
 
     // Step 2 — G2 matches positions 2..5
-    let mut g2 = BlockAssignments::new(2);
+    let mut g2 = ExternalBlockAssignments::new(2);
     g2.extend_block_ids(vec![2002, 2003, 2004]).unwrap();
     g2.assign_pending(seq.blocks()).unwrap();
     assert_eq!(g2.assigned_positions(), 2..5);
@@ -1589,7 +1590,7 @@ fn test_onboard_scenario_g2_to_g1() {
 fn test_stage_pending_basic() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300])
@@ -1614,7 +1615,7 @@ fn test_stage_pending_basic() {
 fn test_commit_staged_basic() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300])
@@ -1639,7 +1640,7 @@ fn test_commit_staged_basic() {
 #[test]
 fn test_stage_pending_partial() {
     let seq = create_test_sequence(2, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // 5 block_ids but only 2 sequence blocks
     assignments
@@ -1656,7 +1657,7 @@ fn test_stage_pending_partial() {
 fn test_stage_pending_then_commit_then_stage_more() {
     let seq = create_test_sequence(5, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300, 400, 500])
@@ -1696,7 +1697,7 @@ fn test_stage_pending_then_commit_then_stage_more() {
 #[test]
 fn test_stage_pending_empty_unassigned() {
     let seq = create_test_sequence(3, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // No block_ids → nothing to stage
     let range = assignments.stage_pending(seq.blocks()).unwrap();
@@ -1706,7 +1707,7 @@ fn test_stage_pending_empty_unassigned() {
 
 #[test]
 fn test_commit_staged_empty() {
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Nothing staged → empty range
     let range = assignments.commit_staged();
@@ -1719,14 +1720,14 @@ fn test_commit_staged_empty() {
 
 #[test]
 fn test_staged_positions_empty() {
-    let assignments = BlockAssignments::new(0);
+    let assignments = ExternalBlockAssignments::new(0);
     assert_eq!(assignments.staged_positions(), 0..0);
 }
 
 #[test]
 fn test_staged_positions_after_stage() {
     let seq = create_test_sequence(5, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Pre-assign first 2
     assignments.extend_block_ids(vec![100, 200]).unwrap();
@@ -1748,7 +1749,7 @@ fn test_staged_positions_after_stage() {
 #[test]
 fn test_staged_positions_with_offset() {
     let seq = create_test_sequence(10, 0);
-    let mut assignments = BlockAssignments::new(3);
+    let mut assignments = ExternalBlockAssignments::new(3);
 
     assignments.extend_block_ids(vec![100, 200]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
@@ -1772,7 +1773,7 @@ fn test_staged_positions_with_offset() {
 fn test_staged_iter() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300])
@@ -1794,7 +1795,7 @@ fn test_staged_iter() {
 fn test_take_staged() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300])
@@ -1818,7 +1819,7 @@ fn test_take_staged() {
 #[test]
 fn test_next_position_accounts_for_staged() {
     let seq = create_test_sequence(5, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300])
@@ -1843,7 +1844,7 @@ fn test_next_position_accounts_for_staged() {
 #[test]
 fn test_pending_positions_accounts_for_staged() {
     let seq = create_test_sequence(3, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300, 400, 500])
@@ -1866,7 +1867,7 @@ fn test_pending_positions_accounts_for_staged() {
 fn test_extend_assigned_basic() {
     let seq = create_test_sequence(3, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Build (BlockId, SequenceHash) pairs
     let items: Vec<(BlockId, SequenceHash)> = vec![
@@ -1892,7 +1893,7 @@ fn test_extend_assigned_basic() {
 fn test_extend_assigned_then_stage_pending() {
     let seq = create_test_sequence(5, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Direct-assign first 2
     let items: Vec<(BlockId, SequenceHash)> = vec![
@@ -1922,7 +1923,7 @@ fn test_extend_assigned_then_stage_pending() {
 fn test_extend_assigned_duplicate_detection() {
     let seq = create_test_sequence(2, 0);
     let expected_hashes = get_expected_hashes(&seq);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign 1 block
     assignments
@@ -1945,7 +1946,7 @@ fn test_extend_assigned_duplicate_detection() {
 
 #[test]
 fn test_extend_assigned_empty() {
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
     let count = assignments.extend_assigned(Vec::new()).unwrap();
     assert_eq!(count, 0);
     assert_eq!(assignments.assigned_count(), 0);
@@ -1958,7 +1959,7 @@ fn test_extend_assigned_empty() {
 #[test]
 fn test_contains_with_staged() {
     let seq = create_test_sequence(3, 0);
-    let mut assignments = BlockAssignments::new(0);
+    let mut assignments = ExternalBlockAssignments::new(0);
 
     assignments
         .extend_block_ids(vec![100, 200, 300, 400, 500])
@@ -1991,8 +1992,8 @@ fn test_contains_with_staged() {
 
 #[test]
 fn test_debug_impl() {
-    let assignments = BlockAssignments::new(5);
+    let assignments = ExternalBlockAssignments::new(5);
     let debug_str = format!("{assignments:?}");
-    assert!(debug_str.contains("BlockAssignments"));
+    assert!(debug_str.contains("ExternalBlockAssignments"));
     assert!(debug_str.contains("offset"));
 }

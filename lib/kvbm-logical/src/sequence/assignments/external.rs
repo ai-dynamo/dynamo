@@ -6,8 +6,8 @@ use std::ops::Range;
 use crate::{BlockId, KvbmSequenceHashProvider, SequenceHash};
 use dynamo_tokens::TokenBlock;
 
-use super::BlockSequenceError;
-use super::lifecycle_store::LifecycleStore;
+use crate::sequence::BlockSequenceError;
+use super::super::store::BlockStore;
 
 /// Per-tier block_id tracking with an offset into the sequence.
 ///
@@ -21,18 +21,18 @@ use super::lifecycle_store::LifecycleStore;
 /// - **Staged** — block_ids paired with their `SequenceHash` but not yet committed.
 /// - **Assigned** — committed `BlockId → SequenceHash` pairs in positional order.
 ///
-/// Multiple `BlockAssignments` instances can operate on the same `&[TokenBlock]` at
+/// Multiple `ExternalBlockAssignments` instances can operate on the same `&[TokenBlock]` at
 /// different offsets (multi-tier).
-pub struct BlockAssignments {
-    store: LifecycleStore<(), SequenceHash, SequenceHash>,
+pub struct ExternalBlockAssignments {
+    store: BlockStore<(), SequenceHash, SequenceHash>,
 
     /// Starting position in the sequence. Assignments begin at this position.
     offset: usize,
 }
 
-impl std::fmt::Debug for BlockAssignments {
+impl std::fmt::Debug for ExternalBlockAssignments {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlockAssignments")
+        f.debug_struct("ExternalBlockAssignments")
             .field("assigned_count", &self.store.assigned_count())
             .field("staged_count", &self.store.staged_count())
             .field("unassigned_count", &self.store.unassigned_count())
@@ -41,11 +41,11 @@ impl std::fmt::Debug for BlockAssignments {
     }
 }
 
-impl BlockAssignments {
-    /// Creates a new `BlockAssignments` starting at the given offset.
+impl ExternalBlockAssignments {
+    /// Creates a new `ExternalBlockAssignments` starting at the given offset.
     pub fn new(offset: usize) -> Self {
         Self {
-            store: LifecycleStore::new(),
+            store: BlockStore::new(),
             offset,
         }
     }
@@ -343,15 +343,15 @@ impl BlockAssignments {
     }
 }
 
-/// Zip two [`BlockAssignments`] over their overlapping assigned positions.
+/// Zip two [`ExternalBlockAssignments`] over their overlapping assigned positions.
 ///
 /// For each absolute position where **both** `a` and `b` have assigned blocks,
 /// yields `(position, a_block_id, b_block_id)`.
 ///
 /// Iteration order: ascending position.
 pub fn zip_assigned(
-    a: &BlockAssignments,
-    b: &BlockAssignments,
+    a: &ExternalBlockAssignments,
+    b: &ExternalBlockAssignments,
 ) -> Vec<(usize, BlockId, BlockId)> {
     let a_range = a.assigned_positions();
     let b_range = b.assigned_positions();
@@ -376,8 +376,8 @@ pub fn zip_assigned(
 /// This is the onboard/offload planning primitive: the result tells you
 /// which source blocks to transfer into which destination blocks.
 pub fn zip_assigned_pending(
-    src: &BlockAssignments,
-    dst: &BlockAssignments,
+    src: &ExternalBlockAssignments,
+    dst: &ExternalBlockAssignments,
 ) -> Vec<(usize, BlockId, BlockId)> {
     let src_range = src.assigned_positions();
     let dst_range = dst.pending_positions();

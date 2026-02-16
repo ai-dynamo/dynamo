@@ -33,7 +33,7 @@ pub use blocks::{
 pub use manager::BlockManager;
 pub use registry::BlockRegistry;
 pub use sequence::{
-    zip_assigned, zip_assigned_pending, BlockAssignments, BlockSequence, BlockSequenceError,
+    zip_assigned, zip_assigned_pending, ExternalBlockAssignments, BlockSequence, BlockSequenceError,
     LogicalBlockAssignmentError, LogicalBlockAssignments,
 };
 

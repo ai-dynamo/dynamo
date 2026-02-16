@@ -10,7 +10,7 @@ use crate::blocks::{BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, Mu
 use crate::manager::BlockManager;
 use dynamo_tokens::TokenBlock;
 
-use super::lifecycle_store::LifecycleStore;
+use super::super::store::BlockStore;
 
 /// Error type for [`LogicalBlockAssignments`] operations.
 #[derive(Debug, thiserror::Error)]
@@ -39,17 +39,17 @@ pub enum LogicalBlockAssignmentError<T: BlockMetadata> {
 /// `MutableBlock<T>` → `CompleteBlock<T>` → `ImmutableBlock<T>`.
 ///
 /// Provides the same ordered-collection semantics as
-/// [`BlockAssignments`](super::BlockAssignments) but at the guard level rather
+/// [`ExternalBlockAssignments`](super::ExternalBlockAssignments) but at the guard level rather
 /// than the identity level.
 pub struct LogicalBlockAssignments<T: BlockMetadata> {
-    store: LifecycleStore<MutableBlock<T>, CompleteBlock<T>, ImmutableBlock<T>>,
+    store: BlockStore<MutableBlock<T>, CompleteBlock<T>, ImmutableBlock<T>>,
 }
 
 impl<T: BlockMetadata> LogicalBlockAssignments<T> {
     /// Creates an empty `LogicalBlockAssignments`.
     pub fn new() -> Self {
         Self {
-            store: LifecycleStore::new(),
+            store: BlockStore::new(),
         }
     }
 
@@ -200,6 +200,7 @@ impl<T: BlockMetadata> LogicalBlockAssignments<T> {
     ) -> Result<usize, BlockError<MutableBlock<T>>> {
         let to_stage = sequence_blocks.len().min(self.store.unassigned_count());
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..to_stage {
             let (block_id, mutable) = self.store.shift_unassigned().unwrap();
             match mutable.complete(&sequence_blocks[i]) {
