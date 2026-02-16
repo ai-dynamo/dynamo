@@ -14,5 +14,5 @@ pub(crate) mod entry;
 mod waiter;
 
 pub(crate) use completion::{CompletionKind, PoisonArc, WaitRegistration};
-pub(crate) use entry::{EventEntry, EventKey};
+pub(crate) use entry::{EventEntry, EventKey, PoisonOutcome};
 pub use waiter::EventAwaiter;

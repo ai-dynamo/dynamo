@@ -6,21 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Build
-cargo build -p velo-event
+cargo build -p velo-events
 
 # Run all tests
-cargo test -p velo-event
+cargo test -p velo-events
 
 # Run a single test
-cargo test -p velo-event <test_name>
+cargo test -p velo-events <test_name>
 
 # Check (no codegen)
-cargo check -p velo-event
+cargo check -p velo-events
 ```
 
 ## Architecture
 
-`velo-event` is a generational event system for coordinating async awaiters with minimal overhead. Events can be triggered (success) or poisoned (error), and entries are recycled across generations.
+`velo-events` is a generational event system for coordinating async awaiters with minimal overhead. Events can be triggered (success) or poisoned (error), and entries are recycled across generations.
 
 ### Trait layer (`event.rs`, `manager.rs`, `guard.rs`)
 

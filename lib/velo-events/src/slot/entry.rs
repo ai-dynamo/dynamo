@@ -56,6 +56,10 @@ pub(crate) enum EventEntryError {
         requested: Generation,
         active: Option<Generation>,
     },
+    AlreadyCompleted {
+        key: EventKey,
+        generation: Generation,
+    },
 }
 
 impl Display for EventEntryError {
@@ -87,6 +91,13 @@ impl Display for EventEntryError {
                     requested, key
                 ),
             },
+            Self::AlreadyCompleted { key, generation } => {
+                write!(
+                    f,
+                    "Event {} generation {} already completed successfully",
+                    key, generation
+                )
+            }
         }
     }
 }
@@ -98,6 +109,15 @@ impl std::error::Error for EventEntryError {
 }
 
 pub(crate) type EventEntryResult<T> = std::result::Result<T, EventEntryError>;
+
+/// Outcome of an atomic try-to-poison operation.
+#[derive(Debug)]
+pub(crate) enum PoisonOutcome {
+    /// Successfully poisoned. Caller must recycle the entry.
+    Poisoned,
+    /// Already poisoned (idempotent success). No recycling needed.
+    AlreadyPoisoned,
+}
 
 /// Owner-side event entry reused across generations.
 ///
@@ -242,6 +262,53 @@ impl EventEntry {
         Ok(())
     }
 
+    /// Atomically attempt to poison the given generation.
+    ///
+    /// Holds the entry lock across both the status check and the state
+    /// transition, eliminating the TOCTOU window present when `status_for`
+    /// and `finalize_completion` are called separately.
+    pub(crate) fn try_to_poison(
+        &self,
+        generation: Generation,
+        poison: PoisonArc,
+    ) -> EventEntryResult<PoisonOutcome> {
+        let wakers;
+        {
+            let mut state = self.state.lock();
+
+            if generation <= state.last_triggered {
+                return if state.poisoned.contains_key(&generation) {
+                    Ok(PoisonOutcome::AlreadyPoisoned)
+                } else {
+                    Err(EventEntryError::AlreadyCompleted {
+                        key: self.key,
+                        generation,
+                    })
+                };
+            }
+
+            if state.active_generation != Some(generation) {
+                return Err(EventEntryError::InvalidGeneration {
+                    key: self.key,
+                    requested: generation,
+                    active: state.active_generation,
+                });
+            }
+
+            // Transition to poisoned (same mutations as finalize_completion)
+            state.last_triggered = generation;
+            state.active_generation = None;
+            state.poisoned.insert(generation, poison);
+            wakers = std::mem::take(&mut state.wakers);
+        }
+
+        for waker in wakers {
+            waker.wake();
+        }
+
+        Ok(PoisonOutcome::Poisoned)
+    }
+
     /// Poll for waiter resolution, called by [`super::waiter::EventAwaiter::poll`].
     ///
     /// Checks the entry state under lock and either returns a result or
@@ -278,9 +345,22 @@ impl EventEntry {
     }
 
     pub(crate) fn retire(&self) {
-        let mut state = self.state.lock();
-        state.retired = true;
-        state.active_generation = None;
+        let wakers;
+        {
+            let mut state = self.state.lock();
+            debug_assert!(
+                state.wakers.is_empty(),
+                "retire() called with {} registered wakers on {:?}",
+                state.wakers.len(),
+                self.key,
+            );
+            state.retired = true;
+            state.active_generation = None;
+            wakers = std::mem::take(&mut state.wakers);
+        }
+        for waker in wakers {
+            waker.wake();
+        }
     }
 
     pub(crate) fn is_retired(&self) -> bool {
@@ -551,5 +631,103 @@ mod tests {
         let next_generation = entry.begin_generation().unwrap();
         assert_eq!(next_generation, generation + 1);
         assert_eq!(wake_state.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn try_to_poison_pending_succeeds() {
+        let entry = make_entry(14);
+        let generation = entry.begin_generation().unwrap();
+        let handle = entry.key().handle(0, generation);
+        let poison = Arc::new(crate::status::EventPoison::new(handle, "boom"));
+        match entry.try_to_poison(generation, poison).unwrap() {
+            PoisonOutcome::Poisoned => {}
+            PoisonOutcome::AlreadyPoisoned => panic!("expected Poisoned"),
+        }
+        assert_eq!(entry.status_for(generation), EventStatus::Poisoned);
+    }
+
+    #[test]
+    fn try_to_poison_already_poisoned_is_idempotent() {
+        let entry = make_entry(15);
+        let generation = entry.begin_generation().unwrap();
+        let handle = entry.key().handle(0, generation);
+        let poison = Arc::new(crate::status::EventPoison::new(handle, "first"));
+        match entry.try_to_poison(generation, poison).unwrap() {
+            PoisonOutcome::Poisoned => {}
+            PoisonOutcome::AlreadyPoisoned => panic!("expected Poisoned on first call"),
+        }
+        let poison2 = Arc::new(crate::status::EventPoison::new(handle, "second"));
+        match entry.try_to_poison(generation, poison2).unwrap() {
+            PoisonOutcome::AlreadyPoisoned => {}
+            PoisonOutcome::Poisoned => panic!("expected AlreadyPoisoned on second call"),
+        }
+    }
+
+    #[test]
+    fn try_to_poison_already_triggered_returns_error() {
+        let entry = make_entry(16);
+        let generation = entry.begin_generation().unwrap();
+        entry
+            .finalize_completion(generation, CompletionKind::Triggered)
+            .unwrap();
+        let handle = entry.key().handle(0, generation);
+        let poison = Arc::new(crate::status::EventPoison::new(handle, "too late"));
+        let err = entry.try_to_poison(generation, poison).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("already completed successfully"), "got: {msg}");
+    }
+
+    #[test]
+    fn try_to_poison_invalid_generation() {
+        let entry = make_entry(17);
+        let _generation = entry.begin_generation().unwrap();
+        let handle = entry.key().handle(0, 999);
+        let poison = Arc::new(crate::status::EventPoison::new(handle, "wrong gen"));
+        let err = entry.try_to_poison(999, poison).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Invalid generation"), "got: {msg}");
+    }
+
+    #[test]
+    fn try_to_poison_wakes_waiters() {
+        let entry = make_entry(18);
+        let generation = entry.begin_generation().unwrap();
+
+        let (wake_state, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(entry.poll_waiter(generation, &mut cx).is_pending());
+
+        let handle = entry.key().handle(0, generation);
+        let poison = Arc::new(crate::status::EventPoison::new(handle, "wake test"));
+        entry.try_to_poison(generation, poison).unwrap();
+
+        assert_eq!(wake_state.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retire_wakes_registered_wakers() {
+        let entry = make_entry(13);
+        let generation = entry.begin_generation().unwrap();
+
+        let (wake_state, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Register a waker by polling the pending generation.
+        assert!(entry.poll_waiter(generation, &mut cx).is_pending());
+
+        // Retire the entry — in debug builds the debug_assert fires (catching
+        // the invariant violation), in release builds the wakers are defensively
+        // drained and woken.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            entry.retire();
+        }));
+
+        if cfg!(debug_assertions) {
+            assert!(result.is_err(), "debug_assert should fire when wakers are registered");
+        } else {
+            result.expect("retire() should not panic in release");
+            assert_eq!(wake_state.count.load(Ordering::SeqCst), 1);
+            assert!(entry.is_retired());
+        }
     }
 }

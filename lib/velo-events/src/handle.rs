@@ -94,19 +94,14 @@ impl EventHandle {
 }
 
 impl Display for EventHandle {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let kind = if self.is_local() {
-            "local"
-        } else {
-            "distributed"
-        };
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
-            "EventHandle(system={:#x}, index={}, generation={}, {})",
+            "EventHandle {{ system={}, index={}, generation={}, {} }}",
             self.system_id(),
             self.index_counter(),
             self.generation(),
-            kind,
+            if self.is_local() { "local" } else { "distributed" }
         )
     }
 }

@@ -1,4 +1,4 @@
-# velo-event
+# velo-events
 
 A generational event system for coordinating async tasks with [minimal overhead](https://drive.google.com/file/d/1s9M1I-dUbhqWLrMFB5ehPSM-qDQBGPZG).
 

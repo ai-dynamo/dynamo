@@ -15,7 +15,7 @@ use crate::event::Event;
 use crate::handle::{EventHandle, LOCAL_FLAG};
 use crate::manager::EventManager;
 use crate::slot::{
-    CompletionKind, EventAwaiter, EventEntry, EventKey, PoisonArc, WaitRegistration,
+    CompletionKind, EventAwaiter, EventEntry, EventKey, PoisonArc, PoisonOutcome, WaitRegistration,
 };
 use crate::status::{EventPoison, EventStatus};
 
@@ -160,14 +160,6 @@ impl LocalEventSystem {
             .map(|guard| guard.clone())
             .ok_or_else(|| anyhow!("Unknown event {}", handle))?;
 
-        match entry.status_for(handle.generation()) {
-            EventStatus::Poisoned => return Ok(()),
-            EventStatus::Ready => {
-                bail!("Event {} already completed successfully", handle);
-            }
-            EventStatus::Pending => {}
-        }
-
         let poison = Arc::new(EventPoison::new(handle, reason));
         self.poison_local_entry(entry, handle, poison)
     }
@@ -291,7 +283,16 @@ impl LocalEventSystem {
         handle: EventHandle,
         poison: PoisonArc,
     ) -> Result<()> {
-        self.complete_local_entry(entry, handle, CompletionKind::Poisoned(poison))
+        match entry
+            .try_to_poison(handle.generation(), poison)
+            .map_err(anyhow::Error::new)?
+        {
+            PoisonOutcome::Poisoned => {
+                self.recycle_entry(entry);
+                Ok(())
+            }
+            PoisonOutcome::AlreadyPoisoned => Ok(()),
+        }
     }
 
     fn complete_local_entry(
@@ -348,7 +349,7 @@ impl LocalEventSystem {
             .map_err(|_| {
                 anyhow!(
                     "Local event index space exhausted ({} entries)",
-                    (MAX_LOCAL_INDEX as u64) + 1
+                    MAX_LOCAL_INDEX
                 )
             })?;
 
@@ -377,6 +378,18 @@ impl LocalEventSystem {
         free_lists.push_back(entry);
     }
 
+    /// Mark an entry as permanently unusable but keep it in `self.events`.
+    ///
+    /// Retired entries are intentionally **not** removed from the DashMap so that
+    /// callers holding stale handles to poisoned generations can still query
+    /// poison history via `poison_reason()` / `status_for()`. Removing the entry
+    /// would turn a diagnosable poison into an opaque "Unknown event" error.
+    ///
+    /// Future optimisation: evict the full `EventEntry` from the DashMap and
+    /// migrate only the poisoned generation keys into a secondary
+    /// `HashSet<(EventKey, Generation)>` with a shared "entry retired" reason.
+    /// This trades per-generation `Arc<str>` detail for bounded memory on
+    /// long-running systems that exhaust many entries' generation spaces.
     fn retire_entry(&self, entry: Arc<EventEntry>) {
         entry.retire();
     }

@@ -62,6 +62,15 @@ impl Event for LocalEvent {
     }
 
     fn poison(&self, reason: impl Into<Arc<str>>) -> Result<()> {
+        if self
+            .inner
+            .triggered
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            bail!("Event {} already triggered", self.inner.handle);
+        }
+
         let reason: Arc<str> = reason.into();
         self.inner.system.poison_local_entry(
             self.inner.entry.clone(),

@@ -90,10 +90,32 @@ All transitions happen under a single lock acquisition.
 4. Register waker with deduplication (`will_wake` check)
 5. Return Pending
 
+### try_to_poison(generation, poison)
+
+1. Acquire lock
+2. If `generation <= last_triggered`:
+   - If `poisoned.contains_key(generation)`: return `AlreadyPoisoned`
+   - Else: return `AlreadyCompleted` error
+3. Validate: `active_generation == Some(generation)`
+4. Set `last_triggered = generation`
+5. Clear `active_generation`
+6. Insert into poison map
+7. Drain wakers
+8. Release lock
+9. Wake all drained wakers (outside lock)
+10. Return `Poisoned`
+
+This is equivalent to an atomic `status_for` + `finalize_completion(Poisoned)`,
+eliminating the TOCTOU window when the two are called separately.
+
 ### retire
 
 1. Acquire lock
-2. Set `retired = true`, clear `active_generation`
+2. Debug-assert: wakers list is empty (callers should ensure all waiters resolved before retirement)
+3. Set `retired = true`, clear `active_generation`
+4. Drain wakers (defensive, prevents silent hangs if invariant violated)
+5. Release lock
+6. Wake drained wakers (outside lock)
 
 ## Invariants
 
