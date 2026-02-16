@@ -6,8 +6,8 @@ use std::ops::Range;
 use crate::{BlockId, KvbmSequenceHashProvider, SequenceHash};
 use dynamo_tokens::TokenBlock;
 
-use crate::sequence::BlockSequenceError;
 use super::super::store::BlockStore;
+use crate::sequence::BlockSequenceError;
 
 /// Per-tier block_id tracking with an offset into the sequence.
 ///
@@ -86,9 +86,7 @@ impl ExternalBlockAssignments {
     /// Positional access: returns `(BlockId, SequenceHash)` at the given index
     /// (relative to the start of staged) in the staged collection.
     pub fn get_staged(&self, index: usize) -> Option<(BlockId, SequenceHash)> {
-        self.store
-            .get_staged(index)
-            .map(|(&id, &hash)| (id, hash))
+        self.store.get_staged(index).map(|(&id, &hash)| (id, hash))
     }
 
     /// Iterates over assigned blocks in positional order, yielding `(BlockId, SequenceHash)`.
@@ -157,9 +155,7 @@ impl ExternalBlockAssignments {
     pub fn get_pending_at_position(&self, abs_pos: usize) -> Option<BlockId> {
         let start = self.next_position();
         let relative = abs_pos.checked_sub(start)?;
-        self.store
-            .get_unassigned(relative)
-            .map(|(&id, _)| id)
+        self.store.get_unassigned(relative).map(|(&id, _)| id)
     }
 
     /// Add new block_ids to the unassigned queue.

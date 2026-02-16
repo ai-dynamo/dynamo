@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{BlockId, KvbmSequenceHashProvider, SequenceHash};
 use crate::sequence::{BlockSequence, BlockSequenceError};
+use crate::{BlockId, KvbmSequenceHashProvider, SequenceHash};
 
 use super::ExternalBlockAssignments;
 
@@ -17,7 +17,10 @@ fn create_test_sequence(num_complete_blocks: usize, partial_tokens: usize) -> Bl
 
 /// Helper to get the expected sequence hashes from a BlockSequence.
 fn get_expected_hashes(seq: &BlockSequence) -> Vec<SequenceHash> {
-    seq.blocks().iter().map(|b| b.kvbm_sequence_hash()).collect()
+    seq.blocks()
+        .iter()
+        .map(|b| b.kvbm_sequence_hash())
+        .collect()
 }
 
 // =========================================================================
@@ -333,9 +336,7 @@ fn test_empty_slot_receives_block_ids() {
     let seq = create_test_sequence(0, 0);
     let mut assignments = ExternalBlockAssignments::new(0);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
 
     assert_eq!(range, 0..0);
@@ -539,10 +540,7 @@ fn test_unassigned_blocks_with_new_blocks_all_assigned() {
         .extend_block_ids(vec![100, 200, 300, 400])
         .unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
-    assert_eq!(
-        assignments.unassigned_iter().collect::<Vec<_>>(),
-        vec![400]
-    );
+    assert_eq!(assignments.unassigned_iter().collect::<Vec<_>>(), vec![400]);
 
     // Add 3 more blocks
     for token in 12..24u32 {
@@ -796,9 +794,7 @@ fn test_empty_unassigned_with_new_blocks() {
     let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign exactly the right number
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
     assert_eq!(assignments.unassigned_count(), 0);
 
@@ -883,9 +879,7 @@ fn test_all_duplicates_noop() {
     let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign all 3
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
 
     // Re-extend with same — should be a no-op
@@ -923,9 +917,7 @@ fn test_shorter_sequence_slice_does_not_shrink_assigned() {
     let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign 3 blocks using the full sequence
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
     assert_eq!(assignments.assigned_count(), 3);
 
@@ -937,10 +929,10 @@ fn test_shorter_sequence_slice_does_not_shrink_assigned() {
     assert_eq!(assignments.unassigned_count(), 0);
 
     // All three original assignments are intact
-    for i in 0..3 {
+    for (i, &expected_hash) in expected_hashes.iter().enumerate().take(3) {
         let (id, hash) = assignments.get_assigned(i).unwrap();
         assert_eq!(id, (i + 1) * 100);
-        assert_eq!(hash, expected_hashes[i]);
+        assert_eq!(hash, expected_hash);
     }
 }
 
@@ -957,9 +949,7 @@ fn test_offset_assignments() {
     assert_eq!(assignments.offset(), 5);
     assert_eq!(assignments.next_position(), 5);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     let range = assignments.assign_pending(seq.blocks()).unwrap();
 
     // Should assign to positions 5, 6, 7
@@ -1048,15 +1038,10 @@ fn test_token_extension_then_flush() {
     let mut assignments = ExternalBlockAssignments::new(0);
 
     // 2 blocks available, 3 block_ids → 1 unassigned
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
     assert_eq!(assignments.assigned_count(), 2);
-    assert_eq!(
-        assignments.unassigned_iter().collect::<Vec<_>>(),
-        vec![300]
-    );
+    assert_eq!(assignments.unassigned_iter().collect::<Vec<_>>(), vec![300]);
 
     // Complete the partial block
     seq.append_token(10).unwrap();
@@ -1077,9 +1062,7 @@ fn test_extend_tokens_creates_new_blocks() {
     let mut assignments = ExternalBlockAssignments::new(0);
 
     // Assign 1 block + 2 excess
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
     assert_eq!(assignments.assigned_count(), 1);
     assert_eq!(
@@ -1110,9 +1093,7 @@ fn test_clear_preserves_offset() {
     let seq = create_test_sequence(5, 0);
     let mut assignments = ExternalBlockAssignments::new(3);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
     assert_eq!(assignments.assigned_count(), 2); // positions 3, 4
     assert_eq!(assignments.unassigned_count(), 1); // 300
@@ -1154,8 +1135,14 @@ fn test_position_mismatch_wrong_offset() {
     let range = assignments.assign_pending(seq.blocks()).unwrap();
     assert_eq!(range, 0..2);
     // Position 1 and 2 should be assigned
-    assert_eq!(assignments.get_assigned(0).unwrap().1, get_expected_hashes(&seq)[1]);
-    assert_eq!(assignments.get_assigned(1).unwrap().1, get_expected_hashes(&seq)[2]);
+    assert_eq!(
+        assignments.get_assigned(0).unwrap().1,
+        get_expected_hashes(&seq)[1]
+    );
+    assert_eq!(
+        assignments.get_assigned(1).unwrap().1,
+        get_expected_hashes(&seq)[2]
+    );
 }
 
 // =========================================================================
@@ -1167,9 +1154,7 @@ fn test_contains() {
     let seq = create_test_sequence(2, 0);
     let mut assignments = ExternalBlockAssignments::new(0);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
 
     // 100, 200 are assigned
@@ -1193,9 +1178,7 @@ fn test_assigned_iter() {
     let expected_hashes = get_expected_hashes(&seq);
     let mut assignments = ExternalBlockAssignments::new(0);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
 
     let assigned: Vec<(BlockId, SequenceHash)> = assignments.assigned_iter().collect();
@@ -1223,7 +1206,11 @@ fn test_block_sequence_all_sequence_hashes() {
     let hashes = seq.all_sequence_hashes();
     assert_eq!(hashes.len(), 2);
     // Hashes should match what we'd get from blocks directly
-    let expected: Vec<_> = seq.blocks().iter().map(|b| b.kvbm_sequence_hash()).collect();
+    let expected: Vec<_> = seq
+        .blocks()
+        .iter()
+        .map(|b| b.kvbm_sequence_hash())
+        .collect();
     assert_eq!(hashes, expected);
 }
 
@@ -1316,9 +1303,7 @@ fn test_get_at_position_in_range() {
     let seq = create_test_sequence(5, 0);
     let expected_hashes = get_expected_hashes(&seq);
     let mut assignments = ExternalBlockAssignments::new(2);
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.assign_pending(seq.blocks()).unwrap();
     // Assigned at positions 2, 3, 4
     let (id, hash) = assignments.get_at_position(2).unwrap();
@@ -1389,10 +1374,7 @@ fn test_zip_assigned_full_overlap() {
     b.assign_pending(seq.blocks()).unwrap();
 
     let pairs = zip_assigned(&a, &b);
-    assert_eq!(
-        pairs,
-        vec![(0, 10, 110), (1, 20, 120), (2, 30, 130)]
-    );
+    assert_eq!(pairs, vec![(0, 10, 110), (1, 20, 120), (2, 30, 130)]);
 }
 
 #[test]
@@ -1457,17 +1439,13 @@ fn test_zip_assigned_pending_full_overlap() {
     src.assign_pending(seq.blocks()).unwrap();
 
     // dst: only sees first 2 blocks → 2 assigned at 0, 1 + 3 pending at 2, 3, 4
-    dst.extend_block_ids(vec![110, 120, 130, 140, 150])
-        .unwrap();
+    dst.extend_block_ids(vec![110, 120, 130, 140, 150]).unwrap();
     dst.assign_pending(&seq.blocks()[..2]).unwrap();
     assert_eq!(dst.assigned_count(), 2);
     assert_eq!(dst.unassigned_count(), 3);
 
     let pairs = zip_assigned_pending(&src, &dst);
-    assert_eq!(
-        pairs,
-        vec![(2, 10, 130), (3, 20, 140), (4, 30, 150)]
-    );
+    assert_eq!(pairs, vec![(2, 10, 130), (3, 20, 140), (4, 30, 150)]);
 }
 
 #[test]
@@ -1481,8 +1459,7 @@ fn test_zip_assigned_pending_partial_overlap() {
     src.assign_pending(seq.blocks()).unwrap();
 
     // dst: only sees first 3 blocks → 3 assigned at 0, 1, 2 + 2 pending at 3, 4
-    dst.extend_block_ids(vec![110, 120, 130, 140, 150])
-        .unwrap();
+    dst.extend_block_ids(vec![110, 120, 130, 140, 150]).unwrap();
     dst.assign_pending(&seq.blocks()[..3]).unwrap();
     assert_eq!(dst.assigned_count(), 3);
     assert_eq!(dst.unassigned_count(), 2);
@@ -1592,9 +1569,7 @@ fn test_stage_pending_basic() {
     let expected_hashes = get_expected_hashes(&seq);
     let mut assignments = ExternalBlockAssignments::new(0);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
 
     // Stage — should move unassigned → staged with hashes
     let staged_range = assignments.stage_pending(seq.blocks()).unwrap();
@@ -1617,9 +1592,7 @@ fn test_commit_staged_basic() {
     let expected_hashes = get_expected_hashes(&seq);
     let mut assignments = ExternalBlockAssignments::new(0);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
 
     // Stage then commit
     assignments.stage_pending(seq.blocks()).unwrap();
@@ -1775,9 +1748,7 @@ fn test_staged_iter() {
     let expected_hashes = get_expected_hashes(&seq);
     let mut assignments = ExternalBlockAssignments::new(0);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.stage_pending(seq.blocks()).unwrap();
 
     let staged: Vec<(BlockId, SequenceHash)> = assignments.staged_iter().collect();
@@ -1797,9 +1768,7 @@ fn test_take_staged() {
     let expected_hashes = get_expected_hashes(&seq);
     let mut assignments = ExternalBlockAssignments::new(0);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
     assignments.stage_pending(seq.blocks()).unwrap();
     assert_eq!(assignments.staged_count(), 3);
 
@@ -1821,9 +1790,7 @@ fn test_next_position_accounts_for_staged() {
     let seq = create_test_sequence(5, 0);
     let mut assignments = ExternalBlockAssignments::new(0);
 
-    assignments
-        .extend_block_ids(vec![100, 200, 300])
-        .unwrap();
+    assignments.extend_block_ids(vec![100, 200, 300]).unwrap();
 
     // Before staging
     assert_eq!(assignments.next_position(), 0);
@@ -1896,10 +1863,8 @@ fn test_extend_assigned_then_stage_pending() {
     let mut assignments = ExternalBlockAssignments::new(0);
 
     // Direct-assign first 2
-    let items: Vec<(BlockId, SequenceHash)> = vec![
-        (100, expected_hashes[0]),
-        (200, expected_hashes[1]),
-    ];
+    let items: Vec<(BlockId, SequenceHash)> =
+        vec![(100, expected_hashes[0]), (200, expected_hashes[1])];
     assignments.extend_assigned(items).unwrap();
     assert_eq!(assignments.assigned_count(), 2);
 

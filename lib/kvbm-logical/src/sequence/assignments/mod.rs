@@ -7,5 +7,5 @@ mod logical;
 #[cfg(test)]
 mod tests;
 
-pub use external::{zip_assigned, zip_assigned_pending, ExternalBlockAssignments};
+pub use external::{ExternalBlockAssignments, zip_assigned, zip_assigned_pending};
 pub use logical::{LogicalBlockAssignmentError, LogicalBlockAssignments};

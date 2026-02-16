@@ -33,8 +33,8 @@ pub use blocks::{
 pub use manager::BlockManager;
 pub use registry::BlockRegistry;
 pub use sequence::{
-    zip_assigned, zip_assigned_pending, ExternalBlockAssignments, BlockSequence, BlockSequenceError,
-    LogicalBlockAssignmentError, LogicalBlockAssignments,
+    BlockSequence, BlockSequenceError, ExternalBlockAssignments, LogicalBlockAssignmentError,
+    LogicalBlockAssignments, zip_assigned, zip_assigned_pending,
 };
 
 pub type BlockId = usize;
