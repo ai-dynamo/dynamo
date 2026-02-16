@@ -35,19 +35,6 @@ from ..multimodal_utils.model import is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
-try:
-    import cupy as array_module
-
-    if not array_module.cuda.is_available():
-        raise ImportError("CUDA is not available.")
-    DEVICE = "cuda"
-    logger.info("Using cupy for array operations (GPU mode).")
-except ImportError as e:
-    logger.warning(f"Failed to import cupy, falling back to numpy: {e}.")
-    import numpy as array_module
-
-    DEVICE = "cpu"
-
 CACHE_SIZE_MAXIMUM = 8
 
 TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
@@ -81,7 +68,7 @@ class EncodeWorkerHandler:
         self.vision_encoder, self.projector = get_encoder_components(
             self.model, self.vision_model
         )
-        self._connector = None
+        self._connector: connect.Connector | None = None
         self._accumulated_time = 0.0
         self._processed_requests = 0
         self.readables = []
@@ -253,6 +240,9 @@ class EncodeWorkerHandler:
                     request.multimodal_inputs[idx].serialized_request = cache_path
                 else:
                     descriptor = connect.Descriptor(embedding_item.embeddings_cpu)
+                    assert (
+                        self._connector is not None
+                    ), "Connector not initialized; call async_init() first"
                     self.readables.append(
                         await self._connector.create_readable(descriptor)
                     )

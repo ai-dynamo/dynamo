@@ -226,14 +226,15 @@ See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#
 
 ### Automatic GPU Discovery
 
-Cluster-scoped operators can optionally enable automatic GPU discovery:
+The operator automatically discovers GPU resources from your Kubernetes cluster nodes when available. GPU discovery provides:
 
-```yaml
-spec:
-  enableGpuDiscovery: true
-```
+- Hardware information (GPU model, VRAM, GPUs per node)
+- Automatic calculation of profiling search space based on model size
+- Hardware system identifier for AI Configurator integration
 
-This is only available with cluster-scoped operators (`namespaceRestriction.enabled=false`) as it requires cluster-wide node access permissions.
+**Permissions**: GPU discovery requires cluster-wide node read permissions. Cluster-scoped operators automatically have these permissions. Namespace-restricted operators can also use GPU discovery if granted node read permissions via RBAC.
+
+If GPU discovery is unavailable (no permissions or no GPU labels), the profiler will use manually specified hardware configuration or defaults.
 
 ## Configuration
 
@@ -336,7 +337,7 @@ planner:
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See [SLA Planner documentation](/docs/components/planner/planner_guide.md) for full list.
+> Planner arguments use `planner_` prefix. See the AI Configurator documentation for full list.
 
 ### Model Cache PVC (Advanced)
 
@@ -640,8 +641,6 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 
 ## See Also
 
-- [Profiler Examples](profiler_examples.md) - Complete DGDR YAML examples
-- [SLA Planner Guide](/docs/components/planner/planner_guide.md) - End-to-end deployment workflow
-- [SLA Planner Architecture](/docs/components/planner/planner_guide.md) - How the Planner uses profiling data
+- [DGDR Examples](../../../components/src/dynamo/profiler/deploy/) - Complete DGDR YAML examples
 - [DGDR API Reference](/docs/kubernetes/api_reference.md) - DGDR specification
-- [Profiler Arguments Reference](/benchmarks/profiler/utils/profiler_argparse.py) - Full CLI reference
+- [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/utils/profiler_argparse.py) - Full CLI reference

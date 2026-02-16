@@ -8,9 +8,18 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import torch
+
+if not torch.cuda.is_available():
+    pytest.skip(
+        "Skipping to avoid errors during collection with '-m gpu_0'. "
+        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
+        allow_module_level=True,
+    )
 from tensorrt_llm.llmapi import DisaggregatedParams
 
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
 from dynamo.trtllm.multimodal.hasher import MultimodalHasher
 
@@ -53,9 +62,9 @@ def create_mock_encode_client(
 
 
 @pytest.fixture
-def encoder_cache() -> EncoderCacheManager:
+def encoder_cache() -> MultimodalEmbeddingCacheManager:
     """Create encoder cache with 10MB capacity."""
-    return EncoderCacheManager(capacity_bytes=10 * 1024 * 1024)
+    return MultimodalEmbeddingCacheManager(capacity_bytes=10 * 1024 * 1024)
 
 
 class TestFetchEmbeddingsFromEncoder:

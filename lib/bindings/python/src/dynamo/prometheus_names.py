@@ -57,6 +57,8 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
+    # Tokenizer latency in milliseconds
+    TOKENIZER_LATENCY_MS = "tokenizer_latency_ms"
     # Total number of output tokens generated (counter that updates in real-time)
     OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
@@ -98,6 +100,8 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
+    # Label name for tokenizer operation
+    OPERATION_LABEL = "operation"
 
 
 class kvbm:
@@ -160,8 +164,15 @@ class labels:
     # Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
     # It is used by worker/load-style metrics that need to disambiguate per-worker series.
     DP_RANK = "dp_rank"
-    # Label for model name
+    # Label for model name/path (OpenAI API standard, injected by Dynamo)
+    # This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
+    # Ensures compatibility with OpenAI-compatible tooling.
     MODEL = "model"
+    # Label for model name/path (alternative/native engine label, injected by Dynamo)
+    # Some engines natively use model_name, so we inject both model and model_name
+    # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
+    # When a metric already has a label, injection does not overwrite it (original is preserved).
+    MODEL_NAME = "model_name"
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     WORKER_TYPE = "worker_type"
 
