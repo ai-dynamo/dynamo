@@ -43,9 +43,6 @@ impl DistributedEventFactory {
     /// Currently uses the local backend; a future distributed backend will
     /// route remote handles over the network.
     pub fn event_manager(&self) -> EventManager {
-        EventManager::new(
-            self.base.clone(),
-            self.base.clone() as _,
-        )
+        EventManager::new(self.base.clone(), self.base.clone() as _)
     }
 }

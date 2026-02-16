@@ -89,8 +89,7 @@ impl EventManager {
     /// If any input is poisoned the merged event is poisoned with the
     /// accumulated reasons.
     pub fn merge_events(&self, inputs: Vec<EventHandle>) -> Result<EventHandle> {
-        self.base
-            .merge_events_with(inputs, self.backend.clone())
+        self.base.merge_events_with(inputs, self.backend.clone())
     }
 
     /// Poison every pending event and reject future allocations.
