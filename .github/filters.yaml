@@ -109,7 +109,9 @@ deploy:
 
 planner:
   - 'components/src/dynamo/planner/**'
+  - 'components/src/dynamo/global_planner/**'
   - 'tests/planner/**'
+  - 'tests/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
 

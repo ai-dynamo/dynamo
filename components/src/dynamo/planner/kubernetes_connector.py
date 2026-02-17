@@ -51,6 +51,7 @@ class KubernetesConnector(PlannerConnector):
         dynamo_namespace: str,
         model_name: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
+        parent_dgd_name: Optional[str] = None,
     ):
         self.kube_api = KubernetesAPI(k8s_namespace)
 
@@ -60,13 +61,19 @@ class KubernetesConnector(PlannerConnector):
                 model_name.lower()
             )  # normalize model name to lowercase (MDC)
 
-        graph_deployment_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
-        if not graph_deployment_name:
-            raise DeploymentValidationError(
-                ["DYN_PARENT_DGD_K8S_NAME environment variable is not set"]
-            )
+        # Allow overriding parent DGD name for centralized planner
+        if parent_dgd_name:
+            self.parent_dgd_name = parent_dgd_name
+        else:
+            graph_deployment_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
+            if not graph_deployment_name:
+                raise DeploymentValidationError(
+                    ["DYN_PARENT_DGD_K8S_NAME environment variable is not set"]
+                )
+            self.parent_dgd_name = graph_deployment_name
 
-        self.graph_deployment_name = graph_deployment_name
+        # For backwards compatibility
+        self.graph_deployment_name = self.parent_dgd_name
 
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True
@@ -411,7 +418,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--blocking", action="store_true")
     args = parser.parse_args()
-    connector = KubernetesConnector(args.dynamo_namespace, args.k8s_namespace)
+    connector = KubernetesConnector(
+        args.dynamo_namespace, k8s_namespace=args.k8s_namespace
+    )
 
     if args.action == "add":
         task = connector.add_component(SubComponentType(args.component), args.blocking)
