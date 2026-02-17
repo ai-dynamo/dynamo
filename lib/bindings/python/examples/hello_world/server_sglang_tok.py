@@ -9,7 +9,7 @@
 # do the pre/post-processing.
 #
 # The key differences between this and `server_sglang.py` are:
-# - The `register_llm` function registers us a `Chat` and `Completions` model that accepts `Text` input
+# - The `register_model` function registers us a `Chat` and `Completions` model that accepts `Text` input
 # - The `generate` function receives a chat completion request and must return matching response
 #
 # Setup a virtualenv with dynamo.llm, dynamo.runtime and sglang[all] installed
@@ -31,7 +31,7 @@ from sglang.srt.openai_api.adapter import v1_chat_generate_request
 from sglang.srt.openai_api.protocol import ChatCompletionRequest
 from sglang.srt.server_args import ServerArgs
 
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
@@ -104,7 +104,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(config.namespace).component(config.component)
 
     endpoint = component.endpoint(config.endpoint)
-    await register_llm(
+    await register_model(
         ModelInput.Text, ModelType.Chat | ModelType.Completions, endpoint, config.model
     )
 
