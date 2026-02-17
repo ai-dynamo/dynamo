@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
+use crate::protocols::openai::common_ext::CommonExt;
 
 // ---------------------------------------------------------------------------
 // Custom deserializers
@@ -617,7 +618,10 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 stream: Some(true), // Always stream internally
                 ..Default::default()
             },
-            common: Default::default(),
+            common: CommonExt {
+                top_k: req.top_k.map(|k| k as i32),
+                ..Default::default()
+            },
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
