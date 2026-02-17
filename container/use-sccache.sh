@@ -7,7 +7,7 @@ set -euo pipefail
 # sccache management script
 # This script handles sccache installation, environment setup, and statistics display
 
-SCCACHE_VERSION="v0.8.2"
+SCCACHE_VERSION="v0.14.0"
 
 
 usage() {
