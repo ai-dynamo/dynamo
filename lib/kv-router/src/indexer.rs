@@ -2654,8 +2654,7 @@ mod tests {
         );
 
         // Query with divergence at position 50
-        let mut divergent_query: Vec<LocalBlockHash> =
-            (1..=100).map(LocalBlockHash).collect();
+        let mut divergent_query: Vec<LocalBlockHash> = (1..=100).map(LocalBlockHash).collect();
         divergent_query[49] = LocalBlockHash(99999); // Position 49 (0-indexed) diverges
         let scores = index.find_matches(divergent_query).await.unwrap();
         assert_eq!(
@@ -2699,8 +2698,7 @@ mod tests {
         );
 
         // Query crossing continuation boundaries
-        let cross_boundary_query: Vec<LocalBlockHash> =
-            (45..=105).map(LocalBlockHash).collect();
+        let cross_boundary_query: Vec<LocalBlockHash> = (45..=105).map(LocalBlockHash).collect();
         let scores = index.find_matches(cross_boundary_query).await.unwrap();
         // Query starts at block 45, but stored sequence starts at 1, so this won't match
         // because the sequence hash at position 0 of our query (block 45) won't match
