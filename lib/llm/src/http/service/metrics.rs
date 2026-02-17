@@ -168,6 +168,8 @@ pub struct Metrics {
     cached_tokens: HistogramVec,
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
+    queue_wait: HistogramVec,
+    engine_time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
 
     // Runtime configuration metrics. Note: Some of these metrics represent counter-like values from
@@ -256,6 +258,8 @@ pub struct ResponseMetricCollector {
     osl: usize,
     // we track if cached_tokens has been observed to ensure we only increment once per request
     cached_tokens_observed: bool,
+    // time elapsed from start_time to when the engine dispatch completed
+    dispatch_time: Option<Duration>,
 }
 
 impl Default for Metrics {
@@ -426,6 +430,36 @@ impl Metrics {
         )
         .unwrap();
 
+        // Queue wait buckets: configurable via DYN_METRICS_QUEUE_WAIT_{MIN,MAX,COUNT}
+        let (qw_min, qw_max, qw_count) =
+            parse_bucket_config("DYN_METRICS_QUEUE_WAIT", 0.001, 120.0, 15);
+        let queue_wait_buckets = generate_log_buckets(qw_min, qw_max, qw_count);
+
+        let queue_wait = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::QUEUE_WAIT_SECONDS),
+                "Time from handler start to engine dispatch (queue/dispatch overhead)",
+            )
+            .buckets(queue_wait_buckets),
+            &["model"],
+        )
+        .unwrap();
+
+        // Engine TTFT buckets: configurable via DYN_METRICS_ENGINE_TTFT_{MIN,MAX,COUNT}
+        let (ettft_min, ettft_max, ettft_count) =
+            parse_bucket_config("DYN_METRICS_ENGINE_TTFT", 0.001, 480.0, 18);
+        let engine_ttft_buckets = generate_log_buckets(ettft_min, ettft_max, ettft_count);
+
+        let engine_time_to_first_token = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::ENGINE_TIME_TO_FIRST_TOKEN_SECONDS),
+                "Time from engine dispatch to first token (engine compute time)",
+            )
+            .buckets(engine_ttft_buckets),
+            &["model"],
+        )
+        .unwrap();
+
         // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
         let (itl_min, itl_max, itl_count) = parse_bucket_config("DYN_METRICS_ITL", 0.001, 2.0, 13);
         let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
@@ -528,6 +562,8 @@ impl Metrics {
             cached_tokens,
             output_tokens_counter,
             time_to_first_token,
+            queue_wait,
+            engine_time_to_first_token,
             inter_token_latency,
             model_total_kv_blocks,
             model_max_num_seqs,
@@ -625,6 +661,8 @@ impl Metrics {
         registry.register(Box::new(self.cached_tokens.clone()))?;
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
+        registry.register(Box::new(self.queue_wait.clone()))?;
+        registry.register(Box::new(self.engine_time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
 
         // Register runtime configuration metrics
@@ -886,7 +924,15 @@ impl ResponseMetricCollector {
             start_time: Instant::now(),
             osl: 0,
             cached_tokens_observed: false,
+            dispatch_time: None,
         }
+    }
+
+    /// Mark the time when the engine dispatch completed.
+    /// This records the elapsed time from request start to engine dispatch,
+    /// enabling TTFT breakdown into queue_wait and engine_ttft.
+    pub fn mark_dispatched(&mut self) {
+        self.dispatch_time = Some(self.start_time.elapsed());
     }
 
     /// Observe the current output sequence length
@@ -935,6 +981,20 @@ impl ResponseMetricCollector {
                 .time_to_first_token
                 .with_label_values(&[&self.model])
                 .observe(ttft);
+
+            // Publish TTFT breakdown (queue_wait + engine_ttft) if dispatch time was recorded
+            if let Some(dispatch_time) = self.dispatch_time {
+                let queue_wait = dispatch_time.as_secs_f64();
+                let engine_ttft = (ttft - queue_wait).max(0.0);
+                self.metrics
+                    .queue_wait
+                    .with_label_values(&[&self.model])
+                    .observe(queue_wait);
+                self.metrics
+                    .engine_time_to_first_token
+                    .with_label_values(&[&self.model])
+                    .observe(engine_ttft);
+            }
 
             // Publish ISL
             // TODO: publish ISL as soon as the tokenization process completes
@@ -1602,5 +1662,77 @@ mod tests {
                 .get_sample_count(),
             1
         );
+    }
+
+    #[test]
+    fn test_ttft_breakdown_with_mark_dispatched() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Simulate a small delay then mark dispatched
+        std::thread::sleep(Duration::from_millis(10));
+        collector.mark_dispatched();
+
+        // Simulate engine processing time then observe first token
+        std::thread::sleep(Duration::from_millis(20));
+        collector.observe_response(100, 1);
+
+        // Verify queue_wait was observed
+        let metric_families = registry.gather();
+        let qw_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == "dynamo_frontend_queue_wait_seconds")
+            .expect("queue_wait histogram should be registered");
+        assert_eq!(
+            qw_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        // Verify engine_time_to_first_token was observed
+        let ettft_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == "dynamo_frontend_engine_time_to_first_token_seconds")
+            .expect("engine_time_to_first_token histogram should be registered");
+        assert_eq!(
+            ettft_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_ttft_breakdown_without_mark_dispatched() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Observe first token without calling mark_dispatched
+        collector.observe_response(100, 1);
+
+        // Verify queue_wait was NOT observed (no dispatch time recorded)
+        let metric_families = registry.gather();
+        let qw_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == "dynamo_frontend_queue_wait_seconds");
+        // The metric family may not appear at all if no samples were observed,
+        // or it may appear with 0 samples
+        if let Some(family) = qw_family {
+            assert_eq!(
+                family.get_metric()[0]
+                    .get_histogram()
+                    .get_sample_count(),
+                0
+            );
+        }
     }
 }

@@ -80,6 +80,10 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Time from handler start to engine dispatch (queue/dispatch overhead)
+    QUEUE_WAIT_SECONDS = "queue_wait_seconds"
+    # Time from engine dispatch to first token (engine compute time)
+    ENGINE_TIME_TO_FIRST_TOKEN_SECONDS = "engine_time_to_first_token_seconds"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
 
@@ -117,6 +121,34 @@ class kvbm:
     OBJECT_READ_FAILURES = "object_read_failures"
     # Number of failed object storage write operations (blocks)
     OBJECT_WRITE_FAILURES = "object_write_failures"
+    # Device to Host transfer time
+    TRANSFER_D2H_SECONDS = "transfer_d2h_seconds"
+    # Host to Disk transfer time
+    TRANSFER_H2D_SECONDS = "transfer_h2d_seconds"
+    # Device to Disk direct transfer time
+    TRANSFER_D2D_SECONDS = "transfer_d2d_seconds"
+    # Device to Object Storage transfer time
+    TRANSFER_D2O_SECONDS = "transfer_d2o_seconds"
+    # Host to Device onboard transfer time
+    TRANSFER_H2D_ONBOARD_SECONDS = "transfer_h2d_onboard_seconds"
+    # Disk to Device onboard transfer time
+    TRANSFER_D2D_ONBOARD_SECONDS = "transfer_d2d_onboard_seconds"
+    # Object Storage to Device transfer time
+    TRANSFER_O2D_SECONDS = "transfer_o2d_seconds"
+    # D2H queue wait
+    QUEUE_D2H_SECONDS = "queue_d2h_seconds"
+    # H2D (offload) queue wait
+    QUEUE_H2D_SECONDS = "queue_h2d_seconds"
+    # D2D (offload) queue wait
+    QUEUE_D2D_SECONDS = "queue_d2d_seconds"
+    # D2O queue wait
+    QUEUE_D2O_SECONDS = "queue_d2o_seconds"
+    # H2D (onboard) queue wait
+    QUEUE_H2D_ONBOARD_SECONDS = "queue_h2d_onboard_seconds"
+    # D2D (onboard) queue wait
+    QUEUE_D2D_ONBOARD_SECONDS = "queue_d2d_onboard_seconds"
+    # O2D queue wait
+    QUEUE_O2D_SECONDS = "queue_o2d_seconds"
 
 
 class kvrouter:

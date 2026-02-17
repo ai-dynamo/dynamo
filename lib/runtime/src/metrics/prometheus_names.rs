@@ -150,6 +150,12 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Time from handler start to engine dispatch (queue/dispatch overhead)
+    pub const QUEUE_WAIT_SECONDS: &str = "queue_wait_seconds";
+
+    /// Time from engine dispatch to first token (engine compute time)
+    pub const ENGINE_TIME_TO_FIRST_TOKEN_SECONDS: &str = "engine_time_to_first_token_seconds";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
@@ -300,6 +306,50 @@ pub mod kvbm {
 
     /// Number of failed object storage write operations (blocks)
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
+
+    // Transfer latency histograms
+    /// Device to Host transfer time
+    pub const TRANSFER_D2H_SECONDS: &str = "transfer_d2h_seconds";
+
+    /// Host to Disk transfer time
+    pub const TRANSFER_H2D_SECONDS: &str = "transfer_h2d_seconds";
+
+    /// Device to Disk direct transfer time
+    pub const TRANSFER_D2D_SECONDS: &str = "transfer_d2d_seconds";
+
+    /// Device to Object Storage transfer time
+    pub const TRANSFER_D2O_SECONDS: &str = "transfer_d2o_seconds";
+
+    /// Host to Device onboard transfer time
+    pub const TRANSFER_H2D_ONBOARD_SECONDS: &str = "transfer_h2d_onboard_seconds";
+
+    /// Disk to Device onboard transfer time
+    pub const TRANSFER_D2D_ONBOARD_SECONDS: &str = "transfer_d2d_onboard_seconds";
+
+    /// Object Storage to Device transfer time
+    pub const TRANSFER_O2D_SECONDS: &str = "transfer_o2d_seconds";
+
+    // Queue wait histograms
+    /// D2H queue wait
+    pub const QUEUE_D2H_SECONDS: &str = "queue_d2h_seconds";
+
+    /// H2D (offload) queue wait
+    pub const QUEUE_H2D_SECONDS: &str = "queue_h2d_seconds";
+
+    /// D2D (offload) queue wait
+    pub const QUEUE_D2D_SECONDS: &str = "queue_d2d_seconds";
+
+    /// D2O queue wait
+    pub const QUEUE_D2O_SECONDS: &str = "queue_d2o_seconds";
+
+    /// H2D (onboard) queue wait
+    pub const QUEUE_H2D_ONBOARD_SECONDS: &str = "queue_h2d_onboard_seconds";
+
+    /// D2D (onboard) queue wait
+    pub const QUEUE_D2D_ONBOARD_SECONDS: &str = "queue_d2d_onboard_seconds";
+
+    /// O2D queue wait
+    pub const QUEUE_O2D_SECONDS: &str = "queue_o2d_seconds";
 }
 
 // KvRouter (including KvInexer) Prometheus metric names

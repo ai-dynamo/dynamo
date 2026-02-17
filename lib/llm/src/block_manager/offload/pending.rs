@@ -209,6 +209,8 @@ pub struct LocalTransferManager<
 > {
     futures_tx: mpsc::Sender<TransferFuture<Source, Target, Locality, Metadata>>,
     transfer_ctx: Arc<TransferContext>,
+    transfer_latency: Option<prometheus::Histogram>,
+    queue_latency: Option<prometheus::Histogram>,
 }
 
 impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>
@@ -219,6 +221,8 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         max_concurrent_transfers: usize,
         runtime: &Handle,
         cancellation_token: CancellationToken,
+        transfer_latency: Option<prometheus::Histogram>,
+        queue_latency: Option<prometheus::Histogram>,
     ) -> Result<Self> {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
 
@@ -261,6 +265,8 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         Ok(Self {
             futures_tx,
             transfer_ctx,
+            transfer_latency,
+            queue_latency,
         })
     }
 }
@@ -287,18 +293,27 @@ where
         &self,
         mut pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()> {
+        let transfer_start = std::time::Instant::now();
         let notify = pending_transfer
             .sources
             .write_to(&mut pending_transfer.targets, self.transfer_ctx.clone())?;
 
+        let transfer_metric = self.transfer_latency.clone();
         let completion_future = async move {
             let _ = notify.await;
+            if let Some(m) = &transfer_metric {
+                m.observe(transfer_start.elapsed().as_secs_f64());
+            }
             pending_transfer
         };
 
         // Futures_(tx/rx) has a capacity of 1. If the queue worker has received another future and is awaiting next() due to a full `FuturesUnordered`,
         // this call will block until the worker has processed the prior future.
+        let queue_start = std::time::Instant::now();
         self.futures_tx.send(Box::pin(completion_future)).await?;
+        if let Some(m) = &self.queue_latency {
+            m.observe(queue_start.elapsed().as_secs_f64());
+        }
 
         Ok(())
     }

@@ -7,11 +7,15 @@ use dynamo_runtime::metrics::prometheus_names::{
         DISK_CACHE_HIT_RATE, HOST_CACHE_HIT_RATE, MATCHED_TOKENS, OBJECT_CACHE_HIT_RATE,
         OBJECT_READ_FAILURES, OBJECT_WRITE_FAILURES, OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H,
         OFFLOAD_BLOCKS_D2O, OFFLOAD_BLOCKS_H2D, ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D,
-        ONBOARD_BLOCKS_O2D,
+        ONBOARD_BLOCKS_O2D, QUEUE_D2D_ONBOARD_SECONDS, QUEUE_D2D_SECONDS, QUEUE_D2H_SECONDS,
+        QUEUE_D2O_SECONDS, QUEUE_H2D_ONBOARD_SECONDS, QUEUE_H2D_SECONDS, QUEUE_O2D_SECONDS,
+        TRANSFER_D2D_ONBOARD_SECONDS, TRANSFER_D2D_SECONDS, TRANSFER_D2H_SECONDS,
+        TRANSFER_D2O_SECONDS, TRANSFER_H2D_ONBOARD_SECONDS, TRANSFER_H2D_SECONDS,
+        TRANSFER_O2D_SECONDS,
     },
     sanitize_prometheus_name,
 };
-use prometheus::{Gauge, IntCounter, Opts, Registry};
+use prometheus::{Gauge, Histogram, HistogramOpts, IntCounter, Opts, Registry};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, thread};
 use tokio::{net::TcpListener, sync::Notify};
 
@@ -57,6 +61,24 @@ pub struct KvbmMetrics {
 
     // number of failed object storage write operations (blocks)
     pub object_write_failures: IntCounter,
+
+    // Transfer latency histograms
+    pub transfer_d2h: Histogram,
+    pub transfer_h2d: Histogram,
+    pub transfer_d2d: Histogram,
+    pub transfer_d2o: Histogram,
+    pub transfer_h2d_onboard: Histogram,
+    pub transfer_d2d_onboard: Histogram,
+    pub transfer_o2d: Histogram,
+
+    // Queue wait histograms
+    pub queue_d2h: Histogram,
+    pub queue_h2d: Histogram,
+    pub queue_d2d: Histogram,
+    pub queue_d2o: Histogram,
+    pub queue_h2d_onboard: Histogram,
+    pub queue_d2d_onboard: Histogram,
+    pub queue_o2d: Histogram,
 
     shutdown_notify: Option<Arc<Notify>>,
 }
@@ -154,6 +176,71 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
+
+        // Transfer latency histograms
+        let transfer_d2h = mr
+            .create_histogram(TRANSFER_D2H_SECONDS, "Device to Host transfer time")
+            .unwrap();
+        let transfer_h2d = mr
+            .create_histogram(TRANSFER_H2D_SECONDS, "Host to Disk transfer time")
+            .unwrap();
+        let transfer_d2d = mr
+            .create_histogram(TRANSFER_D2D_SECONDS, "Device to Disk direct transfer time")
+            .unwrap();
+        let transfer_d2o = mr
+            .create_histogram(
+                TRANSFER_D2O_SECONDS,
+                "Device to Object Storage transfer time",
+            )
+            .unwrap();
+        let transfer_h2d_onboard = mr
+            .create_histogram(
+                TRANSFER_H2D_ONBOARD_SECONDS,
+                "Host to Device onboard transfer time",
+            )
+            .unwrap();
+        let transfer_d2d_onboard = mr
+            .create_histogram(
+                TRANSFER_D2D_ONBOARD_SECONDS,
+                "Disk to Device onboard transfer time",
+            )
+            .unwrap();
+        let transfer_o2d = mr
+            .create_histogram(
+                TRANSFER_O2D_SECONDS,
+                "Object Storage to Device transfer time",
+            )
+            .unwrap();
+
+        // Queue wait histograms
+        let queue_d2h = mr
+            .create_histogram(QUEUE_D2H_SECONDS, "D2H queue wait time")
+            .unwrap();
+        let queue_h2d = mr
+            .create_histogram(QUEUE_H2D_SECONDS, "H2D (offload) queue wait time")
+            .unwrap();
+        let queue_d2d = mr
+            .create_histogram(QUEUE_D2D_SECONDS, "D2D (offload) queue wait time")
+            .unwrap();
+        let queue_d2o = mr
+            .create_histogram(QUEUE_D2O_SECONDS, "D2O queue wait time")
+            .unwrap();
+        let queue_h2d_onboard = mr
+            .create_histogram(
+                QUEUE_H2D_ONBOARD_SECONDS,
+                "H2D (onboard) queue wait time",
+            )
+            .unwrap();
+        let queue_d2d_onboard = mr
+            .create_histogram(
+                QUEUE_D2D_ONBOARD_SECONDS,
+                "D2D (onboard) queue wait time",
+            )
+            .unwrap();
+        let queue_o2d = mr
+            .create_histogram(QUEUE_O2D_SECONDS, "O2D queue wait time")
+            .unwrap();
+
         // early return if no endpoint is needed
         if !create_endpoint {
             return Self {
@@ -170,6 +257,20 @@ impl KvbmMetrics {
                 object_cache_hit_rate,
                 object_read_failures,
                 object_write_failures,
+                transfer_d2h,
+                transfer_h2d,
+                transfer_d2d,
+                transfer_d2o,
+                transfer_h2d_onboard,
+                transfer_d2d_onboard,
+                transfer_o2d,
+                queue_d2h,
+                queue_h2d,
+                queue_d2d,
+                queue_d2o,
+                queue_h2d_onboard,
+                queue_d2d_onboard,
+                queue_o2d,
                 shutdown_notify: None,
             };
         }
@@ -231,6 +332,20 @@ impl KvbmMetrics {
             object_cache_hit_rate,
             object_read_failures,
             object_write_failures,
+            transfer_d2h,
+            transfer_h2d,
+            transfer_d2d,
+            transfer_d2o,
+            transfer_h2d_onboard,
+            transfer_d2d_onboard,
+            transfer_o2d,
+            queue_d2h,
+            queue_h2d,
+            queue_d2d,
+            queue_d2o,
+            queue_h2d_onboard,
+            queue_d2d_onboard,
+            queue_o2d,
             shutdown_notify: Some(notify),
         }
     }
@@ -313,6 +428,17 @@ impl KvbmMetricsRegistry {
         Ok(g)
     }
 
+    pub fn create_histogram(&self, name: &str, description: &str) -> anyhow::Result<Histogram> {
+        let metrics_name = sanitize_prometheus_name(&format!("{}_{}", self.prefix, name))?;
+        let buckets = vec![
+            0.0, 0.0001, 0.00032, 0.001, 0.0032, 0.01, 0.032, 0.1, 0.32, 1.0, 3.2, 10.0,
+        ];
+        let opts = HistogramOpts::new(metrics_name, description).buckets(buckets);
+        let h = Histogram::with_opts(opts)?;
+        self.registry.register(Box::new(h.clone()))?;
+        Ok(h)
+    }
+
     pub fn inner(&self) -> Arc<Registry> {
         Arc::clone(&self.registry)
     }
@@ -321,5 +447,32 @@ impl KvbmMetricsRegistry {
 impl Default for KvbmMetricsRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_histogram_basic() {
+        let mr = KvbmMetricsRegistry::new();
+        let h = mr
+            .create_histogram("test_latency", "A test histogram")
+            .unwrap();
+        h.observe(0.005);
+        h.observe(0.1);
+        assert_eq!(h.get_sample_count(), 2);
+    }
+
+    #[test]
+    fn test_kvbm_metrics_has_transfer_histograms() {
+        let mr = KvbmMetricsRegistry::new();
+        let metrics = KvbmMetrics::new(&mr, false, 0);
+        // Verify transfer histograms are functional
+        metrics.transfer_d2h.observe(0.001);
+        metrics.queue_d2h.observe(0.002);
+        assert_eq!(metrics.transfer_d2h.get_sample_count(), 1);
+        assert_eq!(metrics.queue_d2h.get_sample_count(), 1);
     }
 }

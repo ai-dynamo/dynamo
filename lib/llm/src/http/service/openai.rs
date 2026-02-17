@@ -393,6 +393,7 @@ async fn completions_single(
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    response_collector.mark_dispatched();
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -552,6 +553,7 @@ async fn completions_batch(
 
         all_streams.push(remapped_stream);
     }
+    response_collector.mark_dispatched();
 
     // Merge all streams
     let merged_stream = stream::select_all(all_streams);
@@ -678,6 +680,7 @@ async fn embeddings(
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate embeddings"))?;
+    response_collector.mark_dispatched();
 
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
@@ -936,6 +939,7 @@ async fn chat_completions(
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    response_collector.mark_dispatched();
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -1256,6 +1260,7 @@ async fn responses(
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    response_collector.mark_dispatched();
 
     // Create inflight_guard now that actual processing has begun
     let mut inflight_guard =
