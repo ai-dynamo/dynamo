@@ -27,7 +27,7 @@ from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from transformers import AutoProcessor
 from worker import TrtllmWorkers
 
-from dynamo._core import compute_block_hash_for_seq_py
+from dynamo._core import compute_block_hash_for_seq
 
 logger = logging.getLogger(__name__)
 
@@ -570,7 +570,7 @@ class ServiceAPI:
                     processed.image_offsets_list,
                 )
                 logger.debug(f"block_mm_infos: {block_mm_infos}")
-                local_hashes = compute_block_hash_for_seq_py(
+                local_hashes = compute_block_hash_for_seq(
                     processed.tokens, self.init_params.block_size, block_mm_infos
                 )
 

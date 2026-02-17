@@ -83,7 +83,7 @@ spec:
                 autoscaling:
                   description: |-
                     Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-                    with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+                    with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md
                     for migration guidance. This field will be removed in a future API version.
                   properties:
                     behavior:
@@ -11171,8 +11171,19 @@ spec:
                         - LeaderWorkerSet
                       type: string
                     componentName:
-                      description: ComponentName is the name of the underlying resource.
+                      description: |-
+                        ComponentName is the name of the primary underlying resource.
+                        DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.
+                        During rolling updates, this reflects the new (target) component name.
                       type: string
+                    componentNames:
+                      description: |-
+                        ComponentNames is the list of underlying resource names for this service.
+                        During normal operation, this contains a single name.
+                        During rolling updates, this contains both old and new component names.
+                      items:
+                        type: string
+                      type: array
                     readyReplicas:
                       description: |-
                         ReadyReplicas is the number of ready replicas.

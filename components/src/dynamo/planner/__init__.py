@@ -5,17 +5,12 @@ __all__ = [
     "PlannerConnector",
     "KubernetesConnector",
     "VirtualConnector",
-    "LoadPlannerDefaults",
     "SLAPlannerDefaults",
     "TargetReplica",
     "SubComponentType",
 ]
 # Import the classes
-from dynamo.planner.defaults import (
-    LoadPlannerDefaults,
-    SLAPlannerDefaults,
-    SubComponentType,
-)
+from dynamo.planner.defaults import SLAPlannerDefaults, SubComponentType
 from dynamo.planner.kubernetes_connector import KubernetesConnector, TargetReplica
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.planner.virtual_connector import VirtualConnector
