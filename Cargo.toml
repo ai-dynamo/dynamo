@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-default-members = [
+members = [
     "lib/llm",
     "lib/runtime",
     "lib/config",
