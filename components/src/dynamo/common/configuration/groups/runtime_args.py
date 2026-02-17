@@ -3,6 +3,7 @@
 
 """Dynamo runtime configuration ArgGroup."""
 
+import os
 from typing import List, Optional
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
@@ -35,6 +36,13 @@ class DynamoRuntimeConfig(ConfigBase):
     media_output_http_url: Optional[str] = None
 
     def validate(self) -> None:
+        # Apply DYN_NAMESPACE_WORKER_SUFFIX to the namespace if set.
+        # This enables multiple sets of workers for the same model by giving
+        # each set a distinct namespace (e.g., "dynamo-pool1", "dynamo-pool2").
+        suffix = os.environ.get("DYN_NAMESPACE_WORKER_SUFFIX")
+        if suffix:
+            self.namespace = f"{self.namespace}-{suffix}"
+
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events
         self._validate_output_modalities()
@@ -69,7 +77,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--namespace",
             env_var="DYN_NAMESPACE",
             default="dynamo",
-            help="Dynamo namespace",
+            help="Dynamo namespace. If DYN_NAMESPACE_WORKER_SUFFIX is set, "
+            "'-{suffix}' is appended to support multiple worker pools",
         )
         add_argument(
             g,
