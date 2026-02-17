@@ -90,8 +90,8 @@ RUN --mount=type=bind,source=container/deps/requirements.runtime.txt,target=/tmp
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
-        --requirement /tmp/deps/container/deps/requirements.runtime.txt \
-        --requirement /tmo/deps/container/deps/requirements.runtime.sglang.txt \
+        --requirement /tmp/deps/requirements.runtime.txt \
+        --requirement /tmo/deps/requirements.runtime.sglang.txt \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
