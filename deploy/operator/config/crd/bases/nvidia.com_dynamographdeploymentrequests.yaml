@@ -442,10 +442,10 @@ spec:
       subresources:
         status: {}
     - additionalPrinterColumns:
-        - jsonPath: .spec.model
+        - jsonPath: .spec.model.modelName
           name: Model
           type: string
-        - jsonPath: .spec.backend
+        - jsonPath: .spec.backend.backend
           name: Backend
           type: string
         - jsonPath: .status.phase
@@ -513,20 +513,29 @@ spec:
                     for manual review and application.
                   type: boolean
                 backend:
-                  allOf:
-                    - enum:
-                        - auto
-                        - sglang
-                        - trtllm
-                        - vllm
-                    - enum:
-                        - auto
-                        - sglang
-                        - trtllm
-                        - vllm
-                  default: auto
-                  description: Backend specifies the inference backend to use for profiling and deployment.
-                  type: string
+                  description: Backend specifies the inference backend and container image configuration.
+                  properties:
+                    backend:
+                      allOf:
+                        - enum:
+                            - auto
+                            - sglang
+                            - trtllm
+                            - vllm
+                        - enum:
+                            - auto
+                            - sglang
+                            - trtllm
+                            - vllm
+                      default: auto
+                      description: Backend specifies the inference backend to use for profiling and deployment.
+                      type: string
+                    dynamoImage:
+                      description: |-
+                        DynamoImage is the full K8s dynamo image reference
+                        (e.g. "nvcr.io/nvidia/dynamo-runtime:latest").
+                      type: string
+                  type: object
                 features:
                   description: Features controls optional Dynamo platform features in the generated deployment.
                   properties:
@@ -591,32 +600,37 @@ spec:
                       description: VRAMMB is the VRAM per GPU in MiB.
                       type: number
                   type: object
-                image:
-                  description: Image specifies the container image for profiling and deployment workers.
-                  type: string
                 model:
-                  description: |-
-                    Model specifies the model to deploy (e.g., "meta-llama/Llama-3-70b", "Qwen/Qwen3-0.6B").
-                    This can be a HuggingFace model ID or a served model name.
-                  minLength: 1
-                  type: string
-                modelCache:
-                  description: |-
-                    ModelCache references a PVC containing pre-downloaded model weights.
-                    Use this to avoid re-downloading large models during profiling and deployment.
+                  description: Model specifies the model to deploy including optional PVC cache configuration.
                   properties:
-                    pvcMountPath:
-                      default: /opt/model-cache
-                      description: PVCMountPath is the mount path for the PVC inside the container.
-                      type: string
-                    pvcName:
+                    modelCache:
                       description: |-
-                        PVCName is the name of the PersistentVolumeClaim containing model weights.
-                        The PVC must exist in the same namespace as the DGDR.
+                        ModelCache is the optional PVC model cache configuration.
+                        When provided, weights are loaded from the PVC instead of downloading from HF.
+                      properties:
+                        modelPathInPvc:
+                          description: |-
+                            ModelPathInPVC is the path to the model checkpoint directory within the PVC
+                            (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
+                          type: string
+                        pvcMountPath:
+                          default: /opt/model-cache
+                          description: PVCMountPath is the mount path for the PVC inside the container.
+                          type: string
+                        pvcName:
+                          description: |-
+                            PVCName is the name of the PersistentVolumeClaim containing model weights.
+                            The PVC must exist in the same namespace as the DGDR.
+                          type: string
+                      type: object
+                    modelName:
+                      description: |-
+                        ModelName is the model name or identifier (e.g. "meta-llama/Llama-3.1-405B").
+                        Can be a HuggingFace ID or a private model name. Always required.
+                      minLength: 1
                       type: string
-                    pvcPath:
-                      description: PVCPath is the subpath within the PVC where the model is stored.
-                      type: string
+                  required:
+                    - modelName
                   type: object
                 overrides:
                   description: Overrides allows customizing the profiling job and the generated DynamoGraphDeployment.
