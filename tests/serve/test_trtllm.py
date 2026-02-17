@@ -199,34 +199,25 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
-    # TensorRT-LLM Multimodal Tests for Nightly CI Pipeline
-    # Reference: Linear OPS-3014
-    # These tests validate multimodal inference capabilities with TensorRT-LLM
-    # using both aggregated and disaggregated deployment architectures.
+    # TensorRT-LLM EPD (Encode-Prefill-Decode) multimodal test for nightly CI
+    # Uses llava model with 2 GPUs (encode shares GPU with prefill)
     #
-    # Test Coverage from OPS-3014:
-    # - agg_multimodal: Covered by aggregated_multimodal_router (gpu_1)
-    # - disagg_multimodal: Covered by disaggregated_multimodal (gpu_2)
-    # - epd_multimodal: EPD (Encode-Prefill-Decode) multimodal with llava model (gpu_2)
-    #
-    # NOTE: Llama-4-Scout multimodal tests (agg_multimodal_llama, disagg_multimodal_llama)
-    # require 8 GPUs and new launch scripts. These will be added in a future PR once
-    # CI infrastructure supports gpu_8 runners and launch scripts are available.
+    # TODO: Add Llama-4-Scout multimodal tests (agg_multimodal_llama, disagg_multimodal_llama)
+    #       once CI supports gpu_8 runners and launch scripts are available
     "epd_multimodal": TRTLLMConfig(
         name="epd_multimodal",
         directory=trtllm_dir,
-        script_name="epd_multimodal_image.sh",  # Uses existing EPD script
+        script_name="epd_multimodal_image.sh",
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.nightly,
-            pytest.mark.timeout(900),  # 15 minutes for multimodal processing overhead
         ],
         model="llava-hf/llava-v1.6-mistral-7b-hf",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
-        delayed_start=120,  # Multimodal models require longer loading time
+        delayed_start=120,
         request_payloads=[
             multimodal_payload_default(
                 text="Describe what you see in this image.",
