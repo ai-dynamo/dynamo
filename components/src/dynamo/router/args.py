@@ -14,13 +14,13 @@ def build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig:
     """Build KvRouterConfig from DynamoRouterConfig.
 
     Maps CLI/config attribute names to KvRouterConfig constructor kwargs.
-    The only name difference is kv_overlap_score_weight -> overlap_score_weight.
+    The only name difference is router_kv_overlap_score_weight -> overlap_score_weight.
     """
     return KvRouterConfig(
-        overlap_score_weight=router_config.kv_overlap_score_weight,
+        overlap_score_weight=router_config.router_kv_overlap_score_weight,
         router_temperature=router_config.router_temperature,
-        use_kv_events=router_config.use_kv_events,
-        durable_kv_events=router_config.durable_kv_events,
+        use_kv_events=router_config.router_use_kv_events,
+        durable_kv_events=router_config.router_durable_kv_events,
         router_replica_sync=router_config.router_replica_sync,
         router_track_active_blocks=router_config.router_track_active_blocks,
         router_track_output_blocks=router_config.router_track_output_blocks,

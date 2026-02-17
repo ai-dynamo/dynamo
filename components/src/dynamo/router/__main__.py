@@ -165,11 +165,11 @@ async def worker(runtime: DistributedRuntime):
 
     logger.info("Starting Standalone Router Service")
     logger.debug(
-        f"Configuration: endpoint={config.endpoint}, block_size={config.block_size}, "
-        f"overlap_score_weight={config.kv_overlap_score_weight}, "
+        f"Configuration: endpoint={config.endpoint}, router_block_size={config.router_block_size}, "
+        f"overlap_score_weight={config.router_kv_overlap_score_weight}, "
         f"router_temperature={config.router_temperature}, "
-        f"use_kv_events={config.use_kv_events}, "
-        f"durable_kv_events={config.durable_kv_events}, "
+        f"router_use_kv_events={config.router_use_kv_events}, "
+        f"router_durable_kv_events={config.router_durable_kv_events}, "
         f"router_replica_sync={config.router_replica_sync}, "
         f"router_reset_states={config.router_reset_states}, "
         f"router_track_active_blocks={config.router_track_active_blocks}, "
@@ -187,7 +187,7 @@ async def worker(runtime: DistributedRuntime):
 
     # Create handler
     handler = StandaloneRouterHandler(
-        runtime, config.endpoint, config.block_size, kv_router_config
+        runtime, config.endpoint, config.router_block_size, kv_router_config
     )
     await handler.initialize()
 

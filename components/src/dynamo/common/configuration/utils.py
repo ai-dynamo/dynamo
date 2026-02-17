@@ -116,6 +116,7 @@ def add_negatable_bool_argument(
     default: bool,
     help: str,
     dest: Optional[str] = None,
+    obsolete_flag: Optional[str] = None,
 ) -> None:
     """
     Add negatable boolean flag (--foo / --no-foo).
@@ -126,6 +127,8 @@ def add_negatable_bool_argument(
         env_var: Environment variable name (e.g., "DYN_ENABLE_FEATURE")
         default: Default value
         help: Help text
+        dest: Optional destination name for the parsed value
+        obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')
     """
     add_argument(
         parser,
@@ -134,6 +137,7 @@ def add_negatable_bool_argument(
         default=default,
         help=help,
         dest=dest,
+        obsolete_flag=obsolete_flag,
         arg_type=None,
         action=argparse.BooleanOptionalAction,
     )
