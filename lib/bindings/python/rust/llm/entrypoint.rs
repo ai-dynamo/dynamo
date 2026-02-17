@@ -11,8 +11,8 @@ use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
+use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
-use dynamo_llm::entrypoint::EngineFactoryCallback;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
@@ -21,6 +21,7 @@ use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
 use super::model_card::ModelDeploymentCard;
@@ -51,12 +52,13 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=None, router_event_threads=1))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
         router_temperature: f64,
         use_kv_events: bool,
+        durable_kv_events: bool,
         router_replica_sync: bool,
         router_track_active_blocks: bool,
         router_track_output_blocks: bool,
@@ -66,12 +68,15 @@ impl KvRouterConfig {
         router_ttl_secs: f64,
         router_max_tree_size: usize,
         router_prune_target_ratio: f64,
+        router_queue_threshold: Option<f64>,
+        router_event_threads: u32,
     ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
                 overlap_score_weight,
                 router_temperature,
                 use_kv_events,
+                durable_kv_events,
                 router_replica_sync,
                 router_track_active_blocks,
                 router_track_output_blocks,
@@ -81,6 +86,8 @@ impl KvRouterConfig {
                 router_ttl_secs,
                 router_max_tree_size,
                 router_prune_target_ratio,
+                router_queue_threshold,
+                router_event_threads,
             },
         }
     }
@@ -89,8 +96,12 @@ impl KvRouterConfig {
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
-    router_mode: RouterMode,
-    kv_router_config: KvRouterConfig,
+    #[pyo3(get, set)]
+    pub router_mode: RouterMode,
+
+    #[pyo3(get, set)]
+    pub kv_router_config: KvRouterConfig,
+
     /// Threshold for active decode blocks utilization (0.0-1.0)
     active_decode_blocks_threshold: Option<f64>,
     /// Threshold for active prefill tokens utilization (literal token count)
@@ -173,14 +184,14 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     is_prefill: bool,
     migration_limit: u32,
-    engine_factory: Option<PyEngineFactory>,
+    chat_engine_factory: Option<PyEngineFactory>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, migration_limit=0, engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -200,7 +211,7 @@ impl EntrypointArgs {
         namespace: Option<String>,
         is_prefill: bool,
         migration_limit: u32,
-        engine_factory: Option<PyObject>,
+        chat_engine_factory: Option<PyObject>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -211,12 +222,12 @@ impl EntrypointArgs {
             ));
         }
 
-        // Capture TaskLocals at registration time for the engine factory callback
-        let engine_factory = engine_factory
+        // Capture TaskLocals at registration time for the chat engine factory callback
+        let chat_engine_factory = chat_engine_factory
             .map(|callback| {
                 let locals = pyo3_async_runtimes::tokio::get_current_locals(py).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to get TaskLocals for engine_factory: {}",
+                        "Failed to get TaskLocals for chat_engine_factory: {}",
                         e
                     ))
                 })?;
@@ -245,7 +256,7 @@ impl EntrypointArgs {
             namespace,
             is_prefill,
             migration_limit,
-            engine_factory,
+            chat_engine_factory,
         })
     }
 }
@@ -308,13 +319,15 @@ pub fn make_engine<'p>(
     })
 }
 
-/// Convert a PyEngineFactory to a Rust EngineFactoryCallback
-fn py_engine_factory_to_callback(factory: PyEngineFactory) -> EngineFactoryCallback {
+/// Convert a PyEngineFactory to a Rust ChatEngineFactoryCallback
+fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryCallback {
     let callback = factory.callback;
     let locals = factory.locals;
 
     Arc::new(
-        move |card: RsModelDeploymentCard| -> Pin<
+        move |instance_id: RsModelCardInstanceId,
+              card: RsModelDeploymentCard|
+              -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
         > {
             let callback = callback.clone();
@@ -323,27 +336,29 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> EngineFactoryCallb
             Box::pin(async move {
                 // Acquire GIL to call Python callback and convert coroutine to future
                 let py_future = Python::with_gil(|py| {
+                    let py_instance_id =
+                        Py::new(py, crate::ModelCardInstanceId { inner: instance_id }).map_err(
+                            |e| anyhow::anyhow!("Failed to create Python ModelCardInstanceId: {e}"),
+                        )?;
                     // Create Python ModelDeploymentCard wrapper
                     let py_card = ModelDeploymentCard { inner: card };
                     let py_card_obj = Py::new(py, py_card)
-                        .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {e}"))?;
 
                     // Call Python async function to get a coroutine
                     let coroutine = callback
-                        .call1(py, (py_card_obj,))
-                        .map_err(|e| anyhow::anyhow!("Failed to call engine_factory: {}", e))?;
+                        .call1(py, (py_instance_id, py_card_obj))
+                        .map_err(|e| anyhow::anyhow!("Failed to call chat_engine_factory: {e}"))?;
 
                     // Use the TaskLocals captured at registration time
                     pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
-                        .map_err(|e| {
-                            anyhow::anyhow!("Failed to convert coroutine to future: {}", e)
-                        })
+                        .map_err(|e| anyhow::anyhow!("Failed to convert coroutine to future: {e}"))
                 })?;
 
                 // Await the Python coroutine (GIL is released during await)
                 let py_result = py_future
                     .await
-                    .map_err(|e| anyhow::anyhow!("engine_factory callback failed: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("chat_engine_factory callback failed: {}", e))?;
 
                 // Extract PythonAsyncEngine from the Python result and wrap in Arc
                 let engine: OpenAIChatCompletionsStreamingEngine = Python::with_gil(|py| {
@@ -373,11 +388,11 @@ async fn select_engine(
             }
         }
         EngineType::Dynamic => {
-            //  Convert Python engine factory to Rust callback
-            let engine_factory = args.engine_factory.map(py_engine_factory_to_callback);
+            //  Convert Python chat engine factory to Rust callback
+            let chat_engine_factory = args.chat_engine_factory.map(py_engine_factory_to_callback);
             RsEngineConfig::Dynamic {
                 model: Box::new(local_model),
-                engine_factory,
+                chat_engine_factory,
             }
         }
         EngineType::Mocker => {

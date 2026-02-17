@@ -49,7 +49,7 @@ type ConfigMapKeySelector struct {
 
 // ProfilingConfigSpec defines configuration for the profiling process.
 // This structure maps directly to the profile_sla.py config format.
-// See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
+// See dynamo/profiler/utils/profiler_argparse.py for the complete schema.
 type ProfilingConfigSpec struct {
 	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.
 	// The profiler will validate the configuration and report any errors.
@@ -89,6 +89,11 @@ type ProfilingConfigSpec struct {
 	// For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint.
 	// +kubebuilder:validation:Optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// NodeSelector is a selector which must match a node's labels for the profiling pod to be scheduled on that node.
+	// For example, to schedule on ARM64 nodes, use {"kubernetes.io/arch": "arm64"}.
+	// +kubebuilder:validation:Optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
@@ -146,22 +151,28 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:default=false
 	UseMocker bool `json:"useMocker,omitempty"`
 
-	// EnableGpuDiscovery controls whether the profiler should automatically discover GPU
-	// resources from the Kubernetes cluster nodes. When enabled, the profiler will override
-	// any manually specified hardware configuration (minNumGpusPerEngine, maxNumGpusPerEngine,
-	// numGpusPerNode) with values detected from the cluster.
-	// Requires cluster-wide node access permissions - only available with cluster-scoped operators.
-	// +kubebuilder:default=false
-	// +kubebuilder:validation:Optional
-	EnableGpuDiscovery bool `json:"enableGpuDiscovery,omitempty"`
-
 	// ProfilingConfig provides the complete configuration for the profiling job.
+	// Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes
+	// cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted),
+	// discovered GPU configuration is used as defaults when hardware configuration is not manually
+	// specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values
+	// always take precedence over auto-discovered values. If GPU discovery fails (e.g.,
+	// namespace-restricted operator without node permissions), manual hardware config is required.
 	// This configuration is passed directly to the profiler.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
 	// Note: deployment.model and engine.backend are automatically set from the high-level
 	// modelName and backend fields and should not be specified in this config.
 	// +kubebuilder:validation:Required
 	ProfilingConfig ProfilingConfigSpec `json:"profilingConfig"`
+
+	// EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.
+	// DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always
+	// attempted automatically. Setting this field has no effect - the operator will always try to discover
+	// GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped
+	// operator without permissions), manual hardware configuration is required regardless of this setting.
+	// +optional
+	// +kubebuilder:default=true
+	EnableGPUDiscovery *bool `json:"enableGpuDiscovery,omitempty"`
 
 	// AutoApply indicates whether to automatically create a DynamoGraphDeployment
 	// after profiling completes. If false, only the spec is generated and stored in status.
@@ -216,7 +227,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
 	// ProfilingResults contains a reference to the ConfigMap holding profiling data.
-	// Format: "configmap/<name>"
+	// Format: "configmap/\<name\>"
 	// +kubebuilder:validation:Optional
 	ProfilingResults string `json:"profilingResults,omitempty"`
 

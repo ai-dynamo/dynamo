@@ -32,10 +32,17 @@ from typing import Awaitable, Callable, Dict, Optional, Union
 
 import msgpack
 import zmq
+from prometheus_client import CollectorRegistry
 
+from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 
 logging.basicConfig(level=logging.DEBUG)
+
+# Create a dedicated registry for dynamo_component metrics
+# This ensures these metrics are isolated and can be exposed via their own callback
+DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
+
 
 # Use non-blocking RPC calls; control overhead with backoff sleeps.
 _STATS_TIMEOUT_SEC = 0.01
@@ -295,6 +302,7 @@ class Publisher:
         worker_id,
         kv_block_size,
         metrics_labels,
+        component_gauges: LLMBackendMetrics,
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
     ):
@@ -305,6 +313,7 @@ class Publisher:
         self.kv_block_size = kv_block_size
         self.max_window_size = None
         self.metrics_labels = metrics_labels
+        self.component_gauges = component_gauges
         self.enable_local_indexer = enable_local_indexer
         self.attention_dp_size = engine.get_attention_dp_size()
 
@@ -396,7 +405,10 @@ class Publisher:
             return
 
         # Publish initial metrics with 0 active blocks
+        # TRT-LLM doesn't use data parallelism currently (dp_rank="0")
         self.metrics_publisher.publish(None, 0)
+        self.component_gauges.set_total_blocks("0", 0)
+        self.component_gauges.set_gpu_cache_usage("0", 0.0)
 
         # Prepare threads for publishing stats but don't start them yet.
         # TRTLLM needs to start generating tokens first before stats
@@ -458,9 +470,19 @@ class Publisher:
 
         def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
+            kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
-            # TRT-LLM doesn't use data parallelism currently (dp_rank=None)
+            # TRT-LLM doesn't use data parallelism currently (dp_rank=None for NATS, "0" for Prometheus)
             self.metrics_publisher.publish(None, kv_active_blocks)
+
+            # Publish Prometheus metrics
+            self.component_gauges.set_total_blocks("0", kv_total_blocks)
+
+            # Calculate and publish GPU cache usage percentage
+            gpu_cache_usage = (
+                kv_active_blocks / kv_total_blocks if kv_total_blocks > 0 else 0.0
+            )
+            self.component_gauges.set_gpu_cache_usage("0", gpu_cache_usage)
 
         await self._polling_loop(
             lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
@@ -744,6 +766,7 @@ async def get_publisher(
     worker_id,
     kv_block_size,
     metrics_labels,
+    component_gauges: LLMBackendMetrics,
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
 ):
@@ -754,6 +777,7 @@ async def get_publisher(
         worker_id,
         kv_block_size,
         metrics_labels,
+        component_gauges=component_gauges,
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
     )

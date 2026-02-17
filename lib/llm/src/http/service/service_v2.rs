@@ -16,16 +16,16 @@ use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
 use super::metrics::register_worker_timing_metrics;
-use crate::discovery::{ModelManager, register_worker_load_metrics};
+use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
+use crate::kv_router::metrics::{register_routing_overhead_metrics, register_worker_load_metrics};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::config::environment_names::llm as env_llm;
-use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
+use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::make_request_span;
-use dynamo_runtime::storage::kv;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -35,7 +35,6 @@ use tower_http::trace::TraceLayer;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    store: kv::Manager,
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
@@ -47,6 +46,7 @@ struct StateFlags {
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
+    videos_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
 }
 
@@ -57,6 +57,7 @@ impl StateFlags {
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
@@ -75,6 +76,9 @@ impl StateFlags {
             EndpointType::Images => self
                 .images_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Videos => self
+                .videos_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
@@ -85,27 +89,19 @@ impl StateFlags {
 impl State {
     pub fn new(
         manager: Arc<ModelManager>,
-        store: kv::Manager,
+        discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
     ) -> Self {
-        // Initialize discovery backed by KV store
-        // Create a cancellation token for the discovery's watch streams
-        let discovery_client = {
-            let discovery_cancel_token = cancel_token.child_token();
-            Arc::new(KVStoreDiscovery::new(store.clone(), discovery_cancel_token))
-                as Arc<dyn Discovery>
-        };
-
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            store,
             discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
+                videos_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
@@ -123,10 +119,6 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
-    }
-
-    pub fn store(&self) -> &kv::Manager {
-        &self.store
     }
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
@@ -198,8 +190,8 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
-    #[builder(default)]
-    store: kv::Manager,
+    #[builder(default = "None")]
+    discovery: Option<Arc<dyn Discovery>>,
 }
 
 impl HttpService {
@@ -361,7 +353,20 @@ impl HttpServiceConfigBuilder {
         let model_manager = Arc::new(ModelManager::new());
         // Create a temporary cancel token for building - will be replaced in spawn/run
         let temp_cancel_token = CancellationToken::new();
-        let state = Arc::new(State::new(model_manager, config.store, temp_cancel_token));
+        // Use the provided discovery client, or fall back to a no-op memory-backed one
+        // (for in-process modes that don't need discovery)
+        let discovery_client = config.discovery.unwrap_or_else(|| {
+            use dynamo_runtime::discovery::KVStoreDiscovery;
+            Arc::new(KVStoreDiscovery::new(
+                dynamo_runtime::storage::kv::Manager::memory(),
+                temp_cancel_token.child_token(),
+            )) as Arc<dyn Discovery>
+        });
+        let state = Arc::new(State::new(
+            model_manager,
+            discovery_client,
+            temp_cancel_token,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -389,6 +394,12 @@ impl HttpServiceConfigBuilder {
         // These are updated by ResponseMetricCollector when observing TTFT/ITL
         if let Err(e) = register_worker_timing_metrics(&registry) {
             tracing::warn!("Failed to register worker timing metrics: {}", e);
+        }
+
+        // Register routing overhead metrics (block hashing, find matches, scheduling latencies)
+        // These are updated by KvRouter::find_best_match on every routing decision
+        if let Err(e) = register_routing_overhead_metrics(&registry) {
+            tracing::warn!("Failed to register routing overhead metrics: {}", e);
         }
 
         let mut router = axum::Router::new();
@@ -484,6 +495,7 @@ impl HttpServiceConfigBuilder {
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
+        let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
@@ -495,6 +507,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
+        endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
         for endpoint_type in EndpointType::all() {

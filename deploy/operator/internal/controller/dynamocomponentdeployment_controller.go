@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -76,7 +77,6 @@ type DynamoComponentDeploymentReconciler struct {
 	client.Client
 	Recorder              record.EventRecorder
 	Config                commonController.Config
-	EtcdStorage           etcdStorage
 	DockerSecretRetriever dockerSecretRetriever
 }
 
@@ -322,6 +322,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	serviceReplicaStatus := &v1alpha1.ServiceReplicaStatus{
 		ComponentKind:     v1alpha1.ComponentKindDeployment,
 		ComponentName:     deployment.Name,
+		ComponentNames:    []string{deployment.Name},
 		Replicas:          deployment.Status.Replicas,
 		UpdatedReplicas:   deployment.Status.UpdatedReplicas,
 		ReadyReplicas:     &deployment.Status.ReadyReplicas,
@@ -460,14 +461,31 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
-	condition := metav1.Condition{
+	availableCondition := metav1.Condition{
 		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
 		Status:  componentReconcileResult.status,
 		Reason:  componentReconcileResult.reason,
 		Message: componentReconcileResult.message,
 	}
 
-	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, condition)
+	var componentReadyReason, componentReadyMessage string
+	if componentReconcileResult.status == metav1.ConditionTrue {
+		componentReadyReason = "ComponentReady"
+		componentReadyMessage = "DynamoComponent is ready"
+	} else {
+		componentReadyReason = "ComponentNotReady"
+		componentReadyMessage = "DynamoComponent is not ready"
+	}
+
+	componentReadyCondition := metav1.Condition{
+		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+		Status:  componentReconcileResult.status,
+		Reason:  componentReadyReason,
+		Message: componentReadyMessage,
+	}
+
+	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, availableCondition)
+	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, componentReadyCondition)
 	dynamoComponentDeployment.Status.Service = componentReconcileResult.serviceReplicaStatus
 	dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
 
@@ -482,6 +500,7 @@ func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderW
 	return v1alpha1.ServiceReplicaStatus{
 		ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 		ComponentName:   leaderWorkerSet.Name,
+		ComponentNames:  []string{leaderWorkerSet.Name},
 		Replicas:        leaderWorkerSet.Status.Replicas,
 		UpdatedReplicas: leaderWorkerSet.Status.UpdatedReplicas,
 		ReadyReplicas:   &leaderWorkerSet.Status.ReadyReplicas,
@@ -498,14 +517,18 @@ func combineLWSReplicaStatuses(serviceReplicaStatuses []v1alpha1.ServiceReplicaS
 	if firstServiceStatus.ReadyReplicas != nil {
 		readyReplicas = *firstServiceStatus.ReadyReplicas
 	}
+	allNames := append([]string{}, firstServiceStatus.ComponentNames...)
 	for _, serviceReplicaStatus := range serviceReplicaStatuses[1:] {
 		firstServiceStatus.Replicas += serviceReplicaStatus.Replicas
 		firstServiceStatus.UpdatedReplicas += serviceReplicaStatus.UpdatedReplicas
 		if serviceReplicaStatus.ReadyReplicas != nil {
 			readyReplicas += *serviceReplicaStatus.ReadyReplicas
 		}
+		allNames = append(allNames, serviceReplicaStatus.ComponentNames...)
 	}
 
+	slices.Sort(allNames)
+	firstServiceStatus.ComponentNames = allNames
 	firstServiceStatus.ReadyReplicas = &readyReplicas
 	return &firstServiceStatus
 }
@@ -740,20 +763,6 @@ func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Conte
 	logger := log.FromContext(ctx)
 	logger.Info("Finalizing the DynamoComponentDeployment", "dynamoComponentDeployment", dynamoComponentDeployment)
 
-	// Only delete etcd keys if using etcd discovery backend
-	// When using Kubernetes discovery (the default), skip etcd cleanup to avoid hangs
-	if r.Config.DiscoveryBackend != "etcd" {
-		return nil
-	}
-
-	if dynamoComponentDeployment.Spec.ServiceName != "" && dynamoComponentDeployment.Spec.DynamoNamespace != nil && *dynamoComponentDeployment.Spec.DynamoNamespace != "" {
-		logger.Info("Deleting the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
-		err := r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *dynamoComponentDeployment.Spec.DynamoNamespace, dynamoComponentDeployment.Spec.ServiceName))
-		if err != nil {
-			logger.Error(err, "Failed to delete the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
-			return err
-		}
-	}
 	return nil
 }
 
@@ -1335,8 +1344,11 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 
 	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace,
+		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,    // e.g. "worker"
+		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // result of ComputeDynamoNamespace(k8sNamespace, dgdName)
+		// The original user provided component name (the service map key, e.g. "VllmDecodeWorker" in the DGD).
+		// Needed to disambiguate amongst distinct components with the same component type within a DGD (e.g prefill/decode workers).
+		commonconsts.KubeLabelDynamoComponent: opt.dynamoComponentDeployment.Spec.ServiceName,
 	}
 	// // If using LeaderWorkerSet, modify selector to only target leaders
 	if opt.dynamoComponentDeployment.IsMultinode() {
@@ -1347,9 +1359,6 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 	if isK8sDiscovery {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
-	}
-	// Discovery is enabled for non frontend components
-	if isK8sDiscovery && !opt.dynamoComponentDeployment.IsFrontendComponent() {
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
