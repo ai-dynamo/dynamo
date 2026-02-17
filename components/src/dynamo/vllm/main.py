@@ -1265,12 +1265,12 @@ async def init_multimodal_worker(
         )
     else:
         handler = MultimodalPDWorkerHandler(
-            runtime,
-            component,
-            engine_client,
-            config,
-            decode_worker_client,
-            shutdown_event,
+            runtime=runtime,
+            component=component,
+            engine_client=engine_client,
+            config=config,
+            decode_worker_client=decode_worker_client,
+            shutdown_event=shutdown_event,
         )
     handler.add_temp_dir(prometheus_temp_dir)
 
