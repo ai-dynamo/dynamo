@@ -11,7 +11,7 @@ but internally routes requests to local routers in different namespaces based on
 a grid-based pool selection strategy.
 
 Key features:
-- Registers as BOTH prefill AND decode worker via register_llm()
+- Registers as BOTH prefill AND decode worker via register_model()
 - Routes prefill requests based on (ISL, TTFT) to prefill pools
 - Routes decode requests based on (context_length, ITL) to decode pools
 - Connects to local routers in each pool's namespace
@@ -24,7 +24,7 @@ import os
 
 import uvloop
 
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -122,7 +122,7 @@ async def worker(runtime: DistributedRuntime):
     logger.info("Registering as prefill worker...")
     # Register as prefill worker - frontend will send prefill requests here
     # Use model_name as model_path since we don't need tokenizer/model files
-    await register_llm(
+    await register_model(
         model_input=ModelInput.Tokens,
         model_type=ModelType.Prefill,
         endpoint=prefill_endpoint,
@@ -135,7 +135,7 @@ async def worker(runtime: DistributedRuntime):
 
     logger.info("Registering as decode worker...")
     # Register as decode worker - frontend will send decode requests here
-    await register_llm(
+    await register_model(
         model_input=ModelInput.Tokens,
         model_type=ModelType.Chat | ModelType.Completions,
         endpoint=decode_endpoint,

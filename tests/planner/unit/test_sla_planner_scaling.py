@@ -9,19 +9,17 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.exceptions import DeploymentValidationError
-from dynamo.planner.utils.planner_core import (
-    DecodePlanner,
-    PlannerSharedState,
-    PrefillPlanner,
-    _initialize_gpu_counts,
-)
+from dynamo.planner.utils.planner_core import PlannerSharedState, _initialize_gpu_counts
+from dynamo.planner.utils.prefill_planner import PrefillPlanner
 
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.planner,
+    pytest.mark.vllm,
 ]
 
 
@@ -81,8 +79,8 @@ def _build_planners(args, prometheus_client):
     shared_state = PlannerSharedState()
     prefill_planner = PrefillPlanner(None, args, shared_state=shared_state)
     decode_planner = DecodePlanner(None, args, shared_state=shared_state)
-    prefill_planner.prometheus_api_client = prometheus_client
-    decode_planner.prometheus_api_client = prometheus_client
+    prefill_planner.prometheus_traffic_client = prometheus_client
+    decode_planner.prometheus_traffic_client = prometheus_client
     prefill_planner.model_name = "test-model"
     decode_planner.model_name = "test-model"
 
@@ -130,7 +128,7 @@ def _expected_decode(args, decode_planner, sample):
 
 def _run_interval(prefill_planner, decode_planner, shared_state):
     asyncio.run(
-        prefill_planner.observe_metrics(require_prefill=True, require_decode=True)
+        prefill_planner.observe_traffic_stats(require_prefill=True, require_decode=True)
     )
     decode_planner.update_predictors_from_metrics(shared_state.last_metrics)
     next_num_p = prefill_planner.plan_adjustment()

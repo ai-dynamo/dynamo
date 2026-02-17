@@ -26,10 +26,10 @@ import (
 	"testing"
 	"time"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -2066,6 +2066,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -2111,6 +2116,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2259,6 +2276,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -2304,6 +2326,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3023,6 +3057,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -3068,6 +3107,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3203,6 +3254,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -3248,6 +3304,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -5269,6 +5337,9 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 							{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+							{Name: "NIXL_TELEMETRY_ENABLE", Value: "n"},
+							{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+							{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "19090"},
 							{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{
 									FieldPath: "metadata.name",
@@ -5328,6 +5399,11 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{
 								Name:          commonconsts.DynamoSystemPortName,
 								ContainerPort: int32(commonconsts.DynamoSystemPort),
+								Protocol:      corev1.ProtocolTCP,
+							},
+							{
+								Name:          commonconsts.DynamoNixlPortName,
+								ContainerPort: int32(commonconsts.DynamoNixlPort),
 								Protocol:      corev1.ProtocolTCP,
 							},
 						},
