@@ -542,7 +542,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyState(ctx context.Co
 	}
 
 	// Update deployment status
-	dgdr.Status.Deployment.State = string(dgd.Status.State)
+	dgdr.Status.Deployment.State = dgd.Status.State
 
 	// Check if DGD degraded from Ready
 	if dgd.Status.State != nvidiacomv1alpha1.DGDStateSuccessful {
@@ -599,7 +599,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	}
 
 	// Update deployment status
-	dgdr.Status.Deployment.State = string(dgd.Status.State)
+	dgdr.Status.Deployment.State = dgd.Status.State
 
 	// Check if DGD is Ready
 	if dgd.Status.State == nvidiacomv1alpha1.DGDStateSuccessful {
@@ -633,10 +633,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	logger.Info("DGD was deleted by user, transitioning to DeploymentDeleted state")
 
 	dgdr.Status.State = DGDRStateDeploymentDeleted
-	dgdr.Status.Deployment.State = ""
 
 	r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDeleted,
 		fmt.Sprintf(MessageDeploymentDeleted, dgdr.Status.Deployment.Name))
+
+	dgdr.Status.Deployment = nil
 
 	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 		Type:    ConditionTypeDeploymentReady,
@@ -745,7 +746,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 				Name:      dgdName,
 				Namespace: dgdNamespace,
-				State:     string(nvidiacomv1alpha1.DGDStatePending),
+				State:     nvidiacomv1alpha1.DGDStatePending,
 				Created:   true,
 			}
 			return ctrl.Result{}, r.Status().Update(ctx, dgdr)
@@ -758,7 +759,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 		Name:      dgdName,
 		Namespace: dgdNamespace,
-		State:     string(nvidiacomv1alpha1.DGDStatePending),
+		State:     nvidiacomv1alpha1.DGDStatePending,
 		Created:   true,
 	}
 

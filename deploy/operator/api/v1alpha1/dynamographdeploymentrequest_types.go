@@ -197,7 +197,8 @@ type DeploymentStatus struct {
 
 	// State is the current state of the DynamoGraphDeployment.
 	// This value is mirrored from the DGD's status.state field.
-	State string `json:"state,omitempty"`
+	// +kubebuilder:default=initializing
+	State DGDState `json:"state"`
 
 	// Created indicates whether the DGD has been successfully created.
 	// Used to prevent recreation if the DGD is manually deleted by users.
