@@ -149,7 +149,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
             flag_name="--override-engine-args",
             env_var="DYN_TRTLLM_OVERRIDE_ENGINE_ARGS",
             default="",
-            help="Python dictionary string to override specific engine arguments from the YAML file."
+            help="Python dictionary string to override specific engine arguments from the YAML file. "
             'Example: \'{"tensor_parallel_size": 2, "kv_cache_config": {"enable_block_reuse": false}}\'',
         )
         add_negatable_bool_argument(
