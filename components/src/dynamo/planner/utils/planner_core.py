@@ -18,6 +18,7 @@ from dynamo.planner import (
     VirtualConnector,
 )
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+from dynamo.planner.global_planner_connector import GlobalPlannerConnector
 from dynamo.planner.utils.exceptions import DeploymentValidationError
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
@@ -267,8 +268,16 @@ class BasePlanner:
             self.namespace = args.namespace
 
             if not args.no_operation:
-                if connector is not None:
-                    self.connector = connector
+                # Initialize connector based on environment
+                if args.environment == "global-planner":
+                    # Use GlobalPlannerConnector to delegate to GlobalPlanner
+                    self.connector = GlobalPlannerConnector(
+                        runtime,
+                        self.namespace,
+                        args.global_planner_namespace,
+                        "GlobalPlanner",
+                        getattr(args, "model_name", None),
+                    )
                 elif args.environment == "kubernetes":
                     self.connector = KubernetesConnector(
                         self.namespace, self.model_name
