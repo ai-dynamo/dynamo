@@ -512,6 +512,7 @@ fn prepare_worker_traces(
 
 /// Results from a single benchmark run.
 struct BenchmarkResults {
+    offered_request_throughput: f32,
     request_throughput: f32,
     event_throughput: f32,
     latency_p50_us: f32,
@@ -684,6 +685,8 @@ async fn run_benchmark(
         );
     }
 
+    let offered_request_throughput =
+        total_requests as f32 / benchmark_duration_ms as f32 * 1000.0;
     let request_throughput = total_requests as f32 / request_duration.as_millis() as f32 * 1000.0;
     let event_throughput = total_events as f32 / event_duration.as_millis() as f32 * 1000.0;
 
@@ -701,6 +704,7 @@ async fn run_benchmark(
     println!("Latency max: {}us", latency_max_us);
 
     Ok(BenchmarkResults {
+        offered_request_throughput,
         request_throughput,
         event_throughput,
         latency_p50_us,
@@ -711,41 +715,45 @@ async fn run_benchmark(
 }
 
 fn plot_sweep(results: &[(u64, BenchmarkResults)], output_path: &str) -> anyhow::Result<()> {
-    let throughputs: Vec<f32> = results
+    let offered: Vec<f32> = results
         .iter()
-        .map(|(_, r)| r.request_throughput + r.event_throughput)
+        .map(|(_, r)| r.offered_request_throughput)
         .collect();
     let p99s: Vec<f32> = results.iter().map(|(_, r)| r.latency_p99_us).collect();
 
-    let x_min = p99s.iter().cloned().reduce(f32::min).unwrap() * 0.9;
-    let x_max = p99s.iter().cloned().reduce(f32::max).unwrap() * 1.1;
-    let y_min = throughputs.iter().cloned().reduce(f32::min).unwrap() * 0.9;
-    let y_max = throughputs.iter().cloned().reduce(f32::max).unwrap() * 1.1;
+    let x_min = offered.iter().cloned().reduce(f32::min).unwrap() * 0.9;
+    let x_max = offered.iter().cloned().reduce(f32::max).unwrap() * 1.1;
+    let y_min = p99s.iter().cloned().reduce(f32::min).unwrap() * 0.9;
+    let y_max = p99s.iter().cloned().reduce(f32::max).unwrap() * 1.1;
 
     let root = BitMapBackend::new(output_path, (800, 500)).into_drawing_area();
     root.fill(&WHITE)?;
 
     let mut chart = ChartBuilder::on(&root)
-        .caption("p99 Latency vs Throughput", ("sans-serif", 22).into_font())
+        .caption(
+            "p99 Latency vs Offered Throughput",
+            ("sans-serif", 22).into_font(),
+        )
         .margin(20)
         .x_label_area_size(40)
-        .y_label_area_size(60)
+        .y_label_area_size(80)
         .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
 
     chart
         .configure_mesh()
-        .x_desc("p99 Latency (us)")
-        .y_desc("Combined Throughput (ops/s)")
+        .x_desc("Offered Request Throughput (req/s)")
+        .y_desc("p99 Latency (us)")
         .draw()?;
 
     chart.draw_series(LineSeries::new(
-        p99s.iter().zip(throughputs.iter()).map(|(&x, &y)| (x, y)),
+        offered.iter().zip(p99s.iter()).map(|(&x, &y)| (x, y)),
         &BLUE,
     ))?;
 
     chart.draw_series(
-        p99s.iter()
-            .zip(throughputs.iter())
+        offered
+            .iter()
+            .zip(p99s.iter())
             .map(|(&x, &y)| Circle::new((x, y), 4, BLUE.filled())),
     )?;
 
@@ -784,13 +792,14 @@ async fn main() -> anyhow::Result<()> {
 
         println!("\n=== Sweep Summary ===");
         println!(
-            "{:>12} {:>14} {:>14} {:>10} {:>10} {:>10} {:>10}",
-            "duration_ms", "req_thpt", "evt_thpt", "p50(us)", "p95(us)", "p99(us)", "max(us)"
+            "{:>12} {:>14} {:>14} {:>14} {:>10} {:>10} {:>10} {:>10}",
+            "duration_ms", "offered_thpt", "req_thpt", "evt_thpt", "p50(us)", "p95(us)", "p99(us)", "max(us)"
         );
         for (dur, r) in &results {
             println!(
-                "{:>12} {:>14.1} {:>14.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
+                "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
                 dur,
+                r.offered_request_throughput,
                 r.request_throughput,
                 r.event_throughput,
                 r.latency_p50_us,
