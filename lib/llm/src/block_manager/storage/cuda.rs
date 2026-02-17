@@ -605,8 +605,7 @@ mod tests {
         unsafe {
             ctx.bind_to_thread().expect("Failed to bind CUDA context");
 
-            let ptr = malloc_host_devicemap(size)
-                .expect("malloc_host_devicemap should succeed");
+            let ptr = malloc_host_devicemap(size).expect("malloc_host_devicemap should succeed");
 
             // Verify pointer is valid and non-null
             assert!(!ptr.is_null(), "Allocated pointer should not be null");

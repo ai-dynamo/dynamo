@@ -200,7 +200,9 @@ mod tests {
     ///
     /// # Safety
     /// The memory region must be valid and no mutable references may exist.
-    unsafe fn descriptor_as_slice(desc: &crate::block_manager::v2::memory::MemoryDescriptor) -> &[u8] {
+    unsafe fn descriptor_as_slice(
+        desc: &crate::block_manager::v2::memory::MemoryDescriptor,
+    ) -> &[u8] {
         std::slice::from_raw_parts(desc.addr as *const u8, desc.size)
     }
 

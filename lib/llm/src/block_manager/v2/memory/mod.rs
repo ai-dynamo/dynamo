@@ -27,7 +27,9 @@ pub use dynamo_memory::MemoryDescriptor as MemoryRegion;
 pub use dynamo_memory::MemoryRegion as MemoryDescriptor;
 
 // === Storage types (same names) ===
-pub use dynamo_memory::{DeviceStorage, DiskStorage, PinnedStorage, StorageError, StorageKind, SystemStorage};
+pub use dynamo_memory::{
+    DeviceStorage, DiskStorage, PinnedStorage, StorageError, StorageKind, SystemStorage,
+};
 
 // === NIXL types ===
 pub use dynamo_memory::nixl::{
