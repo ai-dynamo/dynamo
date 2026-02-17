@@ -147,18 +147,14 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
-        # Install test dependencies on-the-fly before running tests
-        # Note: Use uv if available (vllm/trtllm/frontend), fall back to pip --user for sglang
-        # (sglang runs as dynamo user without uv, needs --user flag for user site-packages)
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
-          -v "$(pwd)/container/deps:/tmp/deps:ro" \
           ${{ inputs.image_tag }} \
-          bash -c "set -x; if command -v uv >/dev/null 2>&1; then uv pip install -r /tmp/deps/requirements.test.txt; else export PATH=\"\$HOME/.local/bin:\$PATH\" && pip install --user --break-system-packages -r /tmp/deps/requirements.test.txt; fi && ${PYTEST_CMD}"
+          bash -c "${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
@@ -242,17 +238,13 @@ runs:
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
         echo "▶️ Executing: $PYTEST_CMD"
 
-        # Install test dependencies on-the-fly before running tests
-        # Note: Use uv if available (vllm/trtllm/frontend), fall back to pip --user for sglang
-        # (sglang runs as dynamo user without uv, needs --user flag for user site-packages)
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
-          -v "$(pwd)/container/deps:/tmp/deps:ro" \
           ${{ inputs.image_tag }} \
-          bash -c "set -x; if command -v uv >/dev/null 2>&1; then uv pip install -r /tmp/deps/requirements.test.txt; else export PATH=\"\$HOME/.local/bin:\$PATH\" && pip install --user --break-system-packages -r /tmp/deps/requirements.test.txt; fi && ${PYTEST_CMD}"
+          bash -c "${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV

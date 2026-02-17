@@ -127,6 +127,7 @@ jobs:
     runs-on: prod-builder-v3
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+      test_image: ${{ steps.build-test-image.outputs.test_image }}
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
@@ -224,6 +225,27 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
+      - name: Build and push test image
+        id: build-test-image
+        if: inputs.push_image == true
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          TEST_IMAGE="${{ steps.calculate-target-tag.outputs.default_target_image_uri }}-test"
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+          echo "Building test image on top of runtime: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
+          start_time=$(date +%s)
+          docker buildx build \
+            --progress=plain \
+            --tag "${TEST_IMAGE}" \
+            --platform linux/${{ inputs.platform }} \
+            -f ./container/test.Dockerfile \
+            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
+            --push \
+            container/deps/
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "⏱️ Test image build duration: ${duration}s"
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image && inputs.show_summary }}
@@ -270,6 +292,7 @@ jobs:
         run: |
           start_time=$(date +%s)
           docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          docker pull ${{ needs.build.outputs.test_image }}
           docker pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
@@ -300,7 +323,7 @@ jobs:
         timeout-minutes: ${{ inputs.test_cpu_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          image_tag: ${{ needs.build.outputs.test_image }}
           pytest_marks: ${{ format('pre_merge and {0} and gpu_0', inputs.framework) }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
@@ -317,7 +340,7 @@ jobs:
         if: ${{ inputs.platform == 'amd64' }} # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          image_tag: ${{ needs.build.outputs.test_image }}
           pytest_marks: ${{ format('pre_merge and {0} and gpu_1', inputs.framework) }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
@@ -366,7 +389,7 @@ jobs:
         shell: bash
         run: |
           start_time=$(date +%s)
-          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          docker pull ${{ needs.build.outputs.test_image }}
           docker pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
@@ -376,7 +399,7 @@ jobs:
       - name: Run GPU tests (sequential)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          image_tag: ${{ needs.build.outputs.test_image }}
           pytest_marks: '(gpu_2 or gpu_4) and pre_merge'
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
