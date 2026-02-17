@@ -20,6 +20,7 @@ Environment Variables Required:
     LOOKBACK_DAYS: Days to look back in history (default: 7)
 """
 
+import argparse
 import logging
 import os
 import subprocess
@@ -139,7 +140,31 @@ def download_and_parse_test_artifacts() -> List[Dict]:
             continue
 
     logger.info(f"Total failed tests found: {len(failed_tests)}")
-    return failed_tests
+
+    # Deduplicate by (test_name, test_classname, framework) — same test failing in
+    # multiple matrix variants (arch × cuda version) should appear once with all jobs listed.
+    deduped: Dict[tuple, Dict] = {}
+    for test in failed_tests:
+        key = (test["test_name"], test["test_classname"], test["framework"])
+        if key not in deduped:
+            deduped[key] = {
+                "test_name": test["test_name"],
+                "test_classname": test["test_classname"],
+                "framework": test["framework"],
+                "test_type": test["test_type"],
+                "status": test["status"],
+                "jobs": [],
+            }
+        deduped[key]["jobs"].append(
+            {"job_name": test["job_name"], "job_url": test["job_url"]}
+        )
+
+    unique_failed = list(deduped.values())
+    logger.info(
+        f"After deduplication: {len(unique_failed)} unique failing tests "
+        f"(from {len(failed_tests)} raw failures across matrix variants)"
+    )
+    return unique_failed
 
 
 def find_test_file_and_blame(test_name: str) -> Tuple[Optional[str], Optional[str]]:
@@ -308,6 +333,98 @@ def query_opensearch_test_history(
         return {"total_runs": 0, "passed_count": 0, "failed_count": 0, "error_count": 0}
 
 
+def query_opensearch_daily_failures() -> List[Dict]:
+    """
+    Query OpenSearch for all unique tests that failed on main in the last 24 hours.
+
+    Uses a composite aggregation to enumerate unique (test_name, classname, framework)
+    combinations without fetching individual documents.
+
+    Returns:
+        List of dicts with keys: test_name, test_classname, framework, test_type, status, jobs
+    """
+    if not OPENSEARCH_ENDPOINT:
+        logger.error("OPENSEARCH_ENDPOINT not configured")
+        return []
+
+    try:
+        query = {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"s_test_status.keyword": "failed"}},
+                        {"term": {"s_branch.keyword": "main"}},
+                        {"range": {"@timestamp": {"gte": "now-24h"}}},
+                    ]
+                }
+            },
+            "aggs": {
+                "unique_tests": {
+                    "composite": {
+                        "size": 1000,
+                        "sources": [
+                            {"test_name": {"terms": {"field": "s_test_name.keyword"}}},
+                            {
+                                "classname": {
+                                    "terms": {"field": "s_test_classname.keyword"}
+                                }
+                            },
+                            {
+                                "framework": {
+                                    "terms": {"field": "s_framework.keyword"}
+                                }
+                            },
+                        ],
+                    }
+                }
+            },
+        }
+
+        logger.info("Querying OpenSearch for all failures on main in the last 24h")
+
+        response = requests.post(
+            OPENSEARCH_ENDPOINT,
+            json=query,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        buckets = (
+            data.get("aggregations", {})
+            .get("unique_tests", {})
+            .get("buckets", [])
+        )
+
+        unique_tests = []
+        for bucket in buckets:
+            key = bucket.get("key", {})
+            unique_tests.append(
+                {
+                    "test_name": key.get("test_name", ""),
+                    "test_classname": key.get("classname", ""),
+                    "framework": key.get("framework", ""),
+                    "test_type": "unknown",
+                    "status": "failed",
+                    "jobs": [],
+                }
+            )
+
+        logger.info(
+            f"Found {len(unique_tests)} unique failing tests on main in the last 24h"
+        )
+        return unique_tests
+
+    except requests.RequestException as e:
+        logger.error(f"Failed to query OpenSearch for daily failures: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Error querying OpenSearch for daily failures: {e}")
+        return []
+
+
 def categorize_failed_tests(failed_tests: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
     """
     Categorize failed tests as flaky or legitimate failures.
@@ -408,19 +525,24 @@ def format_test_entry(test: Dict) -> str:
         Formatted string for Slack
     """
     test_name = test["test_name"]
-    job_name = test.get("job_name", "unknown-job")
-    job_url = test.get("job_url")
     author_mention = format_slack_mention(test["author"])
 
-    # Format job link if available
-    if job_url:
-        job_link = f"<{job_url}|{job_name}>"
+    # Build job links — one entry may span multiple matrix variants
+    jobs = test.get("jobs", [])
+    if jobs:
+        job_parts = []
+        for job in jobs:
+            j_name = job.get("job_name", "unknown-job")
+            j_url = job.get("job_url")
+            job_parts.append(f"<{j_url}|{j_name}>" if j_url else j_name)
+        jobs_str = ", ".join(job_parts)
+        job_suffix = f" ({jobs_str})"
     else:
-        job_link = job_name
+        job_suffix = ""
 
     if test["is_new_test"]:
         return (
-            f"• `{test_name}` ({job_link}) - "
+            f"• `{test_name}`{job_suffix} - "
             f"*new test, no history* - last modified by {author_mention}"
         )
     else:
@@ -429,7 +551,7 @@ def format_test_entry(test: Dict) -> str:
         pass_rate = test["pass_rate"]
 
         return (
-            f"• `{test_name}` ({job_link}) - "
+            f"• `{test_name}`{job_suffix} - "
             f"*{pass_rate:.0%} pass rate* ({passed_count}/{total_runs} runs) - "
             f"last modified by {author_mention}"
         )
@@ -551,10 +673,150 @@ def send_slack_notification(
         return False
 
 
+def send_digest_slack_notification(
+    flaky_tests: List[Dict], legitimate_failures: List[Dict]
+) -> bool:
+    """
+    Send a daily digest Slack notification summarising all failures on main.
+
+    Args:
+        flaky_tests: List of flaky test dictionaries
+        legitimate_failures: List of legitimate failure dictionaries
+
+    Returns:
+        True if notification sent successfully, False otherwise
+    """
+    if not SLACK_WEBHOOK_URL:
+        logger.error("SLACK_WEBHOOK_URL not configured")
+        return False
+
+    if not flaky_tests and not legitimate_failures:
+        logger.info("No failures to report in the last 24h, skipping digest")
+        return True
+
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        total_unique = len(flaky_tests) + len(legitimate_failures)
+
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"🔍 Flaky Test Daily Digest — {today}",
+                },
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Main branch failures in the past 24 hours:* "
+                        f"{total_unique} unique test(s)"
+                    ),
+                },
+            },
+        ]
+
+        if flaky_tests:
+            blocks.append({"type": "divider"})
+            flaky_text = "*🎲 Flaky Tests (>80% pass rate):*\n"
+            flaky_text += "\n".join(format_test_entry(t) for t in flaky_tests)
+            blocks.append(
+                {"type": "section", "text": {"type": "mrkdwn", "text": flaky_text}}
+            )
+
+        if legitimate_failures:
+            blocks.append({"type": "divider"})
+            legit_text = "*❌ Legitimate Failures (≤80% pass rate or new test):*\n"
+            legit_text += "\n".join(
+                format_test_entry(t) for t in legitimate_failures
+            )
+            blocks.append(
+                {"type": "section", "text": {"type": "mrkdwn", "text": legit_text}}
+            )
+
+        blocks.append({"type": "divider"})
+        footer_text = (
+            "Flaky tests may need retry logic; legitimate failures need investigation"
+        )
+        if SLACK_OPS_GROUP_ID:
+            footer_text = f"cc <!subteam^{SLACK_OPS_GROUP_ID}> — {footer_text}"
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": footer_text}]}
+        )
+
+        payload = {
+            "text": f"Flaky Test Daily Digest — {today}: {total_unique} unique failure(s)",
+            "blocks": blocks,
+        }
+
+        logger.info("Sending digest Slack notification")
+        response = requests.post(
+            SLACK_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        logger.info("Digest Slack notification sent successfully")
+        return True
+
+    except requests.RequestException as e:
+        logger.error(f"Failed to send digest Slack notification: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error building digest Slack notification: {e}")
+        return False
+
+
+def run_digest_mode() -> int:
+    """
+    Daily digest mode: query OpenSearch for all failures on main in the last 24h,
+    categorise them, and send one Slack notification.
+    """
+    logger.info("=" * 80)
+    logger.info("Starting Flaky Test Daily Digest")
+    logger.info("=" * 80)
+
+    failed_tests = query_opensearch_daily_failures()
+
+    if not failed_tests:
+        logger.info("No failures found on main in the last 24h — nothing to report")
+        return 0
+
+    flaky_tests, legitimate_failures = categorize_failed_tests(failed_tests)
+
+    logger.info("Categorization complete:")
+    logger.info(f"  - Flaky tests: {len(flaky_tests)}")
+    logger.info(f"  - Legitimate failures: {len(legitimate_failures)}")
+
+    success = send_digest_slack_notification(flaky_tests, legitimate_failures)
+    if not success:
+        logger.warning("Digest Slack notification failed")
+
+    logger.info("=" * 80)
+    logger.info("Flaky Test Daily Digest Complete")
+    logger.info("=" * 80)
+    return 0
+
+
 def main():
     """
     Main orchestration function for flaky test detection.
     """
+    parser = argparse.ArgumentParser(description="Flaky test detection / digest")
+    parser.add_argument(
+        "--mode",
+        choices=["detect", "digest"],
+        default="detect",
+        help="detect: parse local JUnit XML artifacts (default); digest: query OpenSearch for last 24h and send daily Slack digest",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "digest":
+        return run_digest_mode()
+
     logger.info("=" * 80)
     logger.info("Starting Flaky Test Detection")
     logger.info("=" * 80)
@@ -620,11 +882,11 @@ def main():
         if flaky_tests:
             print("🎲 FLAKY TESTS:")
             for test in flaky_tests:
-                job_name = test.get("job_name", "unknown-job")
-                job_url = test.get("job_url", "")
-                print(f"  - {test['test_name']} (Job: {job_name})")
-                if job_url:
-                    print(f"    Job URL: {job_url}")
+                print(f"  - {test['test_name']}")
+                for job in test.get("jobs", []):
+                    j_name = job.get("job_name", "unknown-job")
+                    j_url = job.get("job_url", "")
+                    print(f"    Job: {j_name}" + (f" ({j_url})" if j_url else ""))
                 print(
                     f"    Pass rate: {test['pass_rate']:.1%} ({test['passed_count']}/{test['total_runs']} runs)"
                 )
@@ -634,11 +896,11 @@ def main():
         if legitimate_failures:
             print("❌ LEGITIMATE FAILURES:")
             for test in legitimate_failures:
-                job_name = test.get("job_name", "unknown-job")
-                job_url = test.get("job_url", "")
-                print(f"  - {test['test_name']} (Job: {job_name})")
-                if job_url:
-                    print(f"    Job URL: {job_url}")
+                print(f"  - {test['test_name']}")
+                for job in test.get("jobs", []):
+                    j_name = job.get("job_name", "unknown-job")
+                    j_url = job.get("job_url", "")
+                    print(f"    Job: {j_name}" + (f" ({j_url})" if j_url else ""))
                 if test["is_new_test"]:
                     print("    New test (no history)")
                 else:

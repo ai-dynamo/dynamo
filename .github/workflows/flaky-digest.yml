@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Daily digest of flaky / failing tests on main.
+# Runs once a day (or on-demand) on the gitlab runner that can reach OpenSearch.
+# Sends a single Slack message covering all failures from the past 24 hours,
+# deduplicated across all matrix variants and workflow runs.
+
+name: Flaky Test Daily Digest
+
+on:
+  schedule:
+    - cron: '0 17 * * *'  # 5 PM UTC / 9 AM PST
+  workflow_dispatch:       # allow manual trigger for testing
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+  flaky-digest:
+    name: Flaky Test Daily Digest
+    runs-on: gitlab
+    timeout-minutes: 15
+    if: '!github.event.repository.fork'
+    env:
+      OPENSEARCH_ENDPOINT: https://gpuwa.nvidia.com/opensearch/df-swdl-triton-ops-gh-tests*
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+      SLACK_OPS_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
+      FLAKY_THRESHOLD: "0.80"
+      LOOKBACK_DAYS: "7"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python environment
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv || true
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install requests
+
+      - name: Run flaky test digest
+        id: flaky_digest
+        continue-on-error: true
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          source venv/bin/activate
+          python3 .github/workflows/detect_flaky_tests.py --mode=digest
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ steps.flaky_digest.outcome }}" == "success" ]; then
+            echo "✅ Flaky test digest completed successfully"
+          else
+            echo "⚠️ Flaky test digest encountered errors, check logs above"
+          fi
