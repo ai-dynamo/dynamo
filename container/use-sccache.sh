@@ -16,8 +16,17 @@ Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
     install         Install sccache binary (requires ARCH_ALT environment variable)
+    setup-env       Print export statements to configure sccache for compilation
     show-stats      Display sccache statistics with optional build name
     help            Show this help message
+
+setup-env modes:
+    setup-env           Wraps CC/CXX with sccache + sets RUSTC_WRAPPER.
+                        Works for autotools (make) and Meson builds.
+    setup-env cmake     Also sets CMAKE_C/CXX/CUDA_COMPILER_LAUNCHER.
+                        Use for CMake-based builds.
+
+    Usage: eval \$($0 setup-env [cmake])
 
 Environment variables:
     USE_SCCACHE             Set to 'true' to enable sccache
@@ -27,9 +36,9 @@ Environment variables:
     ARCH_ALT                Alternative architecture name for downloads (e.g., x86_64, aarch64)
 
 Examples:
-    # Install sccache (requires ARCH_ALT to be set)
     ARCH_ALT=x86_64 $0 install
-    # Show stats with build name
+    eval \$($0 setup-env)          # autotools / Meson
+    eval \$($0 setup-env cmake)    # CMake builds
     $0 show-stats "UCX"
 EOF
 }
@@ -48,6 +57,26 @@ install_sccache() {
     # Cleanup
     rm -rf sccache*
     echo "sccache installed successfully"
+}
+
+setup_env() {
+    local mode="${1:-default}"
+
+    # Wrap CC/CXX with sccache — works for autotools (make), Meson (>= 0.54
+    # recognizes sccache as a known compiler launcher), and is harmless for CMake
+    # (CMake uses its own CMAKE_*_COMPILER_LAUNCHER mechanism).
+    echo "export CC=\"sccache \${CC:-gcc}\";"
+    echo "export CXX=\"sccache \${CXX:-g++}\";"
+    echo "export RUSTC_WRAPPER=\"sccache\";"
+
+    # CMake-specific launcher variables — only set in cmake mode.
+    # CMAKE_CUDA_COMPILER_LAUNCHER must NOT be set for Meson builds because
+    # Meson picks it up and tries to use "sccache nvcc" as the compiler path.
+    if [ "$mode" = "cmake" ]; then
+        echo "export CMAKE_C_COMPILER_LAUNCHER=\"sccache\";"
+        echo "export CMAKE_CXX_COMPILER_LAUNCHER=\"sccache\";"
+        echo "export CMAKE_CUDA_COMPILER_LAUNCHER=\"sccache\";"
+    fi
 }
 
 show_stats() {
@@ -83,9 +112,9 @@ main() {
         install)
             install_sccache
             ;;
-        generate-env)
-            shift  # Remove the command from arguments
-            generate_env_file "$@"  # Pass all remaining arguments
+        setup-env)
+            shift
+            setup_env "$@"
             ;;
         show-stats)
             shift  # Remove the command from arguments

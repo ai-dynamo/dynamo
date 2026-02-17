@@ -152,9 +152,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export RUSTC_WRAPPER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     dnf install -y pkg-config && \
     cd /tmp && \
@@ -190,9 +188,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
      git clone https://github.com/openucx/ucx.git && \
@@ -225,9 +221,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
     git clone https://github.com/ofiwg/libfabric.git && \
@@ -257,6 +251,9 @@ ARG AWS_SDK_CPP_VERSION=1.11.581
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
+    fi && \
     git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
         https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
     mkdir -p /tmp/aws-sdk-cpp/build && \
@@ -281,9 +278,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone "https://github.com/ai-dynamo/nixl.git" && \
@@ -317,9 +312,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /workspace/nixl && \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
@@ -339,9 +332,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export RUSTC_WRAPPER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
