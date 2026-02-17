@@ -153,44 +153,6 @@ class BaseOmniHandler(BaseWorkerHandler):
 
 
 
-    def _format_text_chunk(
-        self,
-        request_output,
-        request_id: str,
-        previous_text: str,
-    ) -> Dict[str, Any] | None:
-        """Format text output as OpenAI chat completion chunk."""
-        if not request_output.outputs:
-            return self._error_chunk(request_id, "No outputs from engine")
-
-        output = request_output.outputs[0]
-
-        delta_text = output.text[len(previous_text) :]
-
-        chunk = {
-            "id": request_id,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "model": self.config.served_model_name or self.config.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": delta_text,
-                    },
-                    "finish_reason": self._normalize_finish_reason(output.finish_reason)
-                    if output.finish_reason
-                    else None,
-                }
-            ],
-        }
-
-        if output.finish_reason:
-            chunk["usage"] = self._build_completion_usage(request_output)
-
-        return chunk
-
     def _extract_text_prompt(self, request: Dict[str, Any]) -> str | None:
         """Extract text prompt from OpenAI messages format.
 

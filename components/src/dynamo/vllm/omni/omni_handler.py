@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, Union
 
-from pydantic import BaseModel
+from diffusers.utils import export_to_video
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.protocols.image_protocol import (
@@ -26,15 +26,14 @@ from dynamo.common.protocols.video_protocol import (
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import (
     compute_num_frames,
-    encode_to_mp4,
-    frames_to_numpy,
+    normalize_video_frames,
     parse_size,
 )
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 
 logger = logging.getLogger(__name__)
 
-# Default values for video generation parameters
+# TODO: Migrate to fs_url based approach in another PR
 DEFAULT_VIDEO_FPS = 16
 DEFAULT_VIDEO_OUTPUT_DIR = "/tmp/dynamo_videos"  # noqa: S108
 
@@ -125,10 +124,6 @@ class OmniHandler(BaseOmniHandler):
             shutdown_event=shutdown_event,
         )
 
-        # Video output configuration (from CLI args, with safe defaults)
-        self.output_dir = getattr(config, "video_output_dir", DEFAULT_VIDEO_OUTPUT_DIR)
-        self.default_fps = getattr(config, "default_video_fps", DEFAULT_VIDEO_FPS)
-
     async def generate(
         self, request: Dict[str, Any], context
     ) -> AsyncGenerator[Dict, None]:
@@ -189,12 +184,22 @@ class OmniHandler(BaseOmniHandler):
                         stage_output.final_output_type == "image"
                         and stage_output.images
                     ):
-                        chunk = self._format_image_chunk(
-                            stage_output.images,
-                            request_id,
-                            response_format=inputs.response_format,
-                            request_type=inputs.request_type,
-                        )
+                        # vllm-omni uses final_output_type="image" for both
+                        # image and video diffusion outputs. Use the parsed
+                        # request type to route to the correct formatter.
+                        if inputs.request_type == RequestType.VIDEO_GENERATION:
+                            chunk = await self._format_video_chunk(
+                                stage_output.images,
+                                request_id,
+                                fps=inputs.fps,
+                            )
+                        else:
+                            chunk = self._format_image_chunk(
+                                stage_output.images,
+                                request_id,
+                                response_format=inputs.response_format,
+                                request_type=inputs.request_type,
+                            )
                         if chunk:
                             yield chunk
 
@@ -207,7 +212,9 @@ class OmniHandler(BaseOmniHandler):
 
     def build_engine_inputs(
         self,
-        parsed_request: Union[BaseModel, Dict[str, Any]],
+        parsed_request: Union[
+            NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]
+        ],
         request_type: RequestType,
     ) -> EngineInputs:
         """Convert a parsed request into AsyncOmni engine inputs.
@@ -222,14 +229,12 @@ class OmniHandler(BaseOmniHandler):
         """
         if request_type == RequestType.CHAT_COMPLETION:
             return self._engine_inputs_from_chat(parsed_request)
+        elif request_type == RequestType.IMAGE_GENERATION:
+            return self._engine_inputs_from_image(parsed_request)
+        elif request_type == RequestType.VIDEO_GENERATION:
+            return self._engine_inputs_from_video(parsed_request)
 
-        if request_type == RequestType.IMAGE_GENERATION:
-            return self._engine_inputs_from_image(parsed_request)  # type: ignore[arg-type]
-
-        if request_type == RequestType.VIDEO_GENERATION:
-            return self._engine_inputs_from_video(parsed_request)  # type: ignore[arg-type]
-
-        if request_type == RequestType.AUDIO_GENERATION:
+        elif request_type == RequestType.AUDIO_GENERATION:
             raise NotImplementedError("Audio generation is not yet supported")
 
         raise ValueError(f"Unknown request type: {request_type}")
@@ -287,17 +292,22 @@ class OmniHandler(BaseOmniHandler):
     def _engine_inputs_from_video(self, req: NvCreateVideoRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateVideoRequest."""
         width, height = parse_size(req.size)
+        nvext = req.nvext
+
+        nvext_fps = nvext.fps if nvext else None
+        nvext_num_frames = nvext.num_frames if nvext else None
+
         num_frames = compute_num_frames(
-            num_frames=req.num_frames,
+            num_frames=nvext_num_frames,
             seconds=req.seconds,
-            fps=req.fps,
-            default_fps=self.default_fps,
+            fps=nvext_fps,
+            default_fps=DEFAULT_VIDEO_FPS,
         )
-        fps = req.fps if req.fps is not None else self.default_fps
+        fps = nvext_fps if nvext_fps is not None else DEFAULT_VIDEO_FPS
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=req.negative_prompt or "",
+            negative_prompt=nvext.negative_prompt or "" if nvext else "",
         )
 
         sp = OmniDiffusionSamplingParams(
@@ -305,12 +315,13 @@ class OmniHandler(BaseOmniHandler):
             width=width,
             num_frames=num_frames,
         )
-        if req.num_inference_steps is not None:
-            sp.num_inference_steps = req.num_inference_steps
-        if req.guidance_scale is not None:
-            sp.guidance_scale = req.guidance_scale
-        if req.seed is not None:
-            sp.seed = req.seed
+        if nvext:
+            if nvext.num_inference_steps is not None:
+                sp.num_inference_steps = nvext.num_inference_steps
+            if nvext.guidance_scale is not None:
+                sp.guidance_scale = nvext.guidance_scale
+            if nvext.seed is not None:
+                sp.seed = nvext.seed
         if fps is not None:
             sp.fps = fps
 
@@ -333,7 +344,17 @@ class OmniHandler(BaseOmniHandler):
         response_format: str | None = None,
         request_type: RequestType = RequestType.IMAGE_GENERATION,
     ) -> Dict[str, Any] | None:
-        """Format image output as OpenAI chat completion chunk with base64 data URLs."""
+        """Format image output as OpenAI chat completion chunk with base64 data URLs.
+
+        Args:
+            images: List of PIL Image objects generated by AsyncOmni engine.
+            request_id: Unique request identifier.
+            response_format: Response format (url, b64_json, None).
+            request_type: Request type (chat completion, image generation).
+
+        Returns:
+            Dict[str, Any] | None: Formatted chunk, or None if no images generated.
+        """
 
         if not images:
             return self._error_chunk(request_id, "No images generated")
@@ -341,6 +362,8 @@ class OmniHandler(BaseOmniHandler):
         data_urls = prepare_image_output(images, response_format)
 
         if request_type == RequestType.CHAT_COMPLETION:
+            # This branch is used when user send request via /v1/chat/completions endpoint.
+            # We need to return chat completion chunk with image_url content part.
             chunk = {
                 "id": request_id,
                 "created": int(time.time()),
@@ -362,6 +385,8 @@ class OmniHandler(BaseOmniHandler):
             }
             return chunk
         elif request_type == RequestType.IMAGE_GENERATION:
+            # This branch is used when user send request via /v1/images/generations endpoint.
+            # This will return NvImagesResponse with list of ImageData objects.
             image_data_list = []
             for data_url in data_urls:
                 if response_format == "url":
@@ -401,22 +426,22 @@ class OmniHandler(BaseOmniHandler):
         try:
             start_time = time.time()
 
-            # Convert PIL images to numpy array
-            frames = frames_to_numpy(images)
+            frame_list = normalize_video_frames(images)
 
             logger.info(
-                f"Encoding {len(frames)} frames to MP4 for request {request_id} "
-                f"(shape={frames.shape}, fps={fps})"
+                f"Encoding {len(frame_list)} frames to MP4 for request {request_id} "
+                f"(fps={fps})"
             )
 
-            # Run encoding in thread pool to avoid blocking the event loop
+            os.makedirs(DEFAULT_VIDEO_OUTPUT_DIR, exist_ok=True)
+            video_path = os.path.join(DEFAULT_VIDEO_OUTPUT_DIR, f"{request_id}.mp4")
+
             loop = asyncio.get_running_loop()
-            video_path = await loop.run_in_executor(
+            await loop.run_in_executor(
                 None,
-                encode_to_mp4,
-                frames,
-                self.output_dir,
-                request_id,
+                export_to_video,
+                frame_list,
+                video_path,
                 fps,
             )
 
@@ -449,3 +474,43 @@ class OmniHandler(BaseOmniHandler):
                 error=str(e),
             )
             return error_response.model_dump()
+
+    def _format_text_chunk(
+        self,
+        request_output,
+        request_id: str,
+        previous_text: str,
+    ) -> Dict[str, Any] | None:
+        """Format text output as OpenAI chat completion chunk."""
+        if not request_output.outputs:
+            return self._error_chunk(request_id, "No outputs from engine")
+
+        output = request_output.outputs[0]
+
+        # Calculate delta text (new text since last chunk)
+        delta_text = output.text[len(previous_text) :]
+
+        chunk = {
+            "id": request_id,
+            "created": int(time.time()),
+            "object": "chat.completion.chunk",
+            "model": self.config.served_model_name or self.config.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": delta_text,
+                    },
+                    "finish_reason": self._normalize_finish_reason(output.finish_reason)
+                    if output.finish_reason
+                    else None,
+                }
+            ],
+        }
+
+        # Add usage on final chunk
+        if output.finish_reason:
+            chunk["usage"] = self._build_completion_usage(request_output)
+
+        return chunk
