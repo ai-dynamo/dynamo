@@ -144,7 +144,6 @@ impl AnthropicStreamConverter {
                 }
 
                 // Emit text delta
-                self.output_token_count += 1; // Rough estimate
                 let block_delta = AnthropicStreamEvent::ContentBlockDelta {
                     index: self.text_block_index,
                     delta: AnthropicDelta::TextDelta {

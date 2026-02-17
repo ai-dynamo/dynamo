@@ -616,6 +616,12 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 stream: Some(true), // Always stream internally
+                stream_options: Some(
+                    dynamo_async_openai::types::ChatCompletionStreamOptions {
+                        include_usage: true,
+                        continuous_usage_stats: false,
+                    },
+                ),
                 ..Default::default()
             },
             common: CommonExt {
