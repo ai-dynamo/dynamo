@@ -27,7 +27,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 - **Dynamo Operator**: Kubernetes operator for managing Dynamo deployments
 - **NATS**: High-performance messaging system for component communication
-- **etcd**: Distributed key-value store for operator state management
+- **etcd**: Distributed key-value store for service discovery (optional, disabled by default)
 - **Grove**: Multi-node inference orchestration (optional)
 - **Kai Scheduler**: Advanced workload scheduling (optional)
 
@@ -98,7 +98,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 |-----|------|---------|-------------|
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
-| dynamo-operator.etcdAddr | string | `""` | etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port" |
+| dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port" |
 | dynamo-operator.nats.enabled | bool | `true` | Whether the NATS is enabled |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
 | dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | Namespace access controls for the operator |
@@ -165,7 +165,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
-| etcd.enabled | bool | `true` | Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd." |
+| global.etcd.install | bool | `false` | Whether to install the bundled etcd subchart. When true, deploys etcd and auto-configures the operator with its address. Use dynamo-operator.etcdAddr to point at an external instance instead. |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
 | nats.enabled | bool | `true` | Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats." |
 
@@ -176,7 +176,24 @@ For detailed NATS configuration options beyond `nats.enabled`, please refer to t
 
 ### etcd Configuration
 
-For detailed etcd configuration options beyond `etcd.enabled`, please refer to the official Bitnami etcd Helm chart documentation:
+etcd is **no longer required** for the Dynamo platform. The operator uses Kubernetes-native service discovery by default, and the bundled etcd subchart is **disabled by default**.
+
+To enable the bundled etcd subchart (e.g., for etcd-based service discovery):
+
+```yaml
+global:
+  etcd:
+    install: true
+```
+
+To use an external etcd instance instead:
+
+```yaml
+dynamo-operator:
+  etcdAddr: "http://my-external-etcd:2379"
+```
+
+For detailed etcd configuration options, please refer to the official Bitnami etcd Helm chart documentation:
 **[etcd Helm Chart Documentation](https://github.com/bitnami/charts/tree/main/bitnami/etcd)**
 
 ## 📚 Additional Resources

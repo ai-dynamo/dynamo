@@ -14,6 +14,13 @@
 # limitations under the License.
 # Used to generate top-level secrets (overridden by custom-values.yaml)
 
+global:
+  etcd:
+    # -- Whether this chart should install the bundled etcd subchart.
+    # When true, deploys etcd and auto-configures the operator with its address.
+    # When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd.
+    install: false
+
 # Subcharts configuration
 
 # Dynamo operator configuration
@@ -24,7 +31,7 @@ dynamo-operator:
   # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
   natsAddr: ""
 
-  # -- etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port"
+  # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port"
   etcdAddr: ""
 
   nats:
@@ -276,12 +283,9 @@ kai-scheduler:
     # -- Affinity for kai-scheduler pods
     affinity: {}
 
-# etcd configuration - distributed key-value store for operator state
+# etcd configuration - distributed key-value store
+# Installation is controlled by global.etcd.install above.
 etcd:
-
-  # -- Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd."
-  enabled: true
-
   image:
     # -- following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository
     repository: bitnamilegacy/etcd
