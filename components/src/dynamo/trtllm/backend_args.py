@@ -155,7 +155,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
         add_negatable_bool_argument(
             g,
             flag_name="--publish-events-and-metrics",
-            env_var="DYN_TRTLLM_PUBLISH_EVENTS",
+            env_var="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS",
             default=False,
             help="If set, publish events and metrics to Dynamo components.",
         )

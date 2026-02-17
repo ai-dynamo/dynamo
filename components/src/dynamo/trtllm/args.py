@@ -44,8 +44,14 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
                     "TRT-LLM supports at most one connector entry. Use `--connector none` or `--connector kvbm`."
                 )
             elif self.connector[0] not in VALID_TRTLLM_CONNECTORS:
-                logging.info(
-                    f"Unsupported connector '{self.connector[0]}' for TRT-LLM. Defaulting to 'none'."
+                source = (
+                    f"DYN_CONNECTOR environment variable ('{os.environ['DYN_CONNECTOR']}')"
+                    if "DYN_CONNECTOR" in os.environ
+                    else f"shared runtime default ('{self.connector[0]}')"
+                )
+                logging.warning(
+                    f"TRT-LLM does not support connector '{self.connector[0]}' (set via {source}). "
+                    f"Supported connectors: {VALID_TRTLLM_CONNECTORS}. Falling back to 'none'."
                 )
                 self.connector = ["none"]
 
