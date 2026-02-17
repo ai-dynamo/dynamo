@@ -51,6 +51,8 @@ navigation:
             path: ../pages-v0.9.0/kubernetes/deployment/dynamomodel-guide.md
           - page: Autoscaling
             path: ../pages-v0.9.0/kubernetes/autoscaling.md
+          - page: Inference Gateway (GAIE)
+            path: ../pages-v0.9.0/kubernetes/inference-gateway.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
