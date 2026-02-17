@@ -100,7 +100,10 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 	}
 
 	// Validate GPU hardware information is available (last, so other errors are collected first)
-	if gpuErr := v.validateGPUHardwareInfo(); gpuErr != nil {
+
+	gpuWarnings, gpuErr := v.validateGPUHardwareInfo()
+	warnings = append(warnings, gpuWarnings...)
+	if gpuErr != nil {
 		err = errors.Join(err, gpuErr)
 	}
 
@@ -108,14 +111,14 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 }
 
 // validateGPUHardwareInfo ensures GPU hardware information will be available for profiling.
-// This validation happens at admission time to fail fast before the DGDR is persisted to etcd.
-func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error {
+// Returns warnings for namespace-scoped operators without manual config (they need ClusterRole).
+func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() (admission.Warnings, error) {
 	// Parse profiling config
 	var config map[string]interface{}
 	if v.request.Spec.ProfilingConfig.Config != nil {
 		if err := yaml.Unmarshal(v.request.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
 			// Config parse errors will be caught by other validators
-			return nil
+			return nil, nil
 		}
 	} else {
 		config = make(map[string]interface{})
@@ -147,7 +150,7 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error 
 
 				// Validate that min <= max
 				if minVal > maxVal {
-					return fmt.Errorf("invalid GPU range: minNumGpusPerEngine (%v) cannot be greater than maxNumGpusPerEngine (%v)",
+					return nil, fmt.Errorf("invalid GPU range: minNumGpusPerEngine (%v) cannot be greater than maxNumGpusPerEngine (%v)",
 						minVal, maxVal)
 				}
 
@@ -158,40 +161,26 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error 
 
 	// If manual config or explicit ranges provided, validation passes
 	if hasManualHardwareConfig || hasExplicitGPURanges {
-		return nil
+		return nil, nil
 	}
 
 	// Neither manual config nor explicit ranges provided
-	// GPU discovery will be attempted at reconcile time, but if it's unavailable
-	// (e.g., namespace-scoped operator), the DGDR will fail
+	// GPU discovery will be attempted at reconcile time
 	//
-	// Fail at admission time to give users immediate feedback
-	if v.isClusterWideOperator {
-		// Cluster-wide operator should have GPU discovery available
-		// Allow DGDR to be created - GPU discovery will provide hardware info
-		return nil
+	// For namespace-scoped operators, warn that GPU discovery may fail if they don't have
+	// the optional ClusterRole applied
+	if !v.isClusterWideOperator {
+		warning := `GPU hardware configuration not provided. GPU discovery will be attempted but requires node read permissions.
+
+For namespace-scoped operators, ensure you have applied the GPU discovery ClusterRole:
+  kubectl apply -f https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml
+
+Or add hardware config to avoid this warning. See: https://github.com/ai-dynamo/dynamo/issues/6257`
+		return admission.Warnings{warning}, nil
 	}
 
-	// Namespace-scoped operator likely doesn't have node read permissions
-	// Require manual hardware config or explicit GPU ranges
-	return errors.New(`GPU hardware configuration required for namespace-scoped operators.
-
-Namespace-scoped operators typically lack node read permissions for GPU auto-discovery.
-
-Provide hardware configuration in one of these ways:
-
-1. Add hardware config in spec.profilingConfig.config:
-   hardware:
-     numGpusPerNode: 8
-     gpuModel: "H100-SXM5-80GB"
-     gpuVramMib: 81920
-
-2. Or specify explicit GPU search ranges:
-   engine:
-     minNumGpusPerEngine: 2
-     maxNumGpusPerEngine: 8
-
-See: https://github.com/ai-dynamo/dynamo/issues/6257`)
+	// Cluster-wide operators have node permissions by default, allow without warning
+	return nil, nil
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeploymentRequest.

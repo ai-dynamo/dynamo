@@ -192,6 +192,33 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 --set "dynamo-operator.namespaceRestriction.targetNamespace=dynamo-namespace" # optional
 ```
 
+### GPU Discovery for Namespace-Scoped Operators (Optional)
+
+By default, namespace-scoped operators lack permissions to access or auto-discover GPU hardware. You can either:
+
+**Option 1: Enable GPU Discovery** (read-only node access)
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml
+kubectl create clusterrolebinding dynamo-operator-gpu-discovery \
+  --clusterrole=dynamo-namespace-operator-gpu-discovery \
+  --serviceaccount=${NAMESPACE}:dynamo-operator-controller-manager
+```
+
+**Option 2: Manual Hardware Config When Creating DGDRs** (no additional permissions)
+
+```yaml
+spec:
+  profilingConfig:
+    config:
+      hardware:
+        numGpusPerNode: 8
+        gpuModel: "H100-SXM5-80GB"
+        gpuVramMib: 81920
+```
+
+See [GPU Discovery RBAC docs](../../operator/rbac/README.md) for details.
+
 → [Verify Installation](#verify-installation)
 
 ## Path B: Custom Build from Source

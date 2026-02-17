@@ -227,15 +227,34 @@ See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#
 
 ### Automatic GPU Discovery
 
-The operator automatically discovers GPU resources from your Kubernetes cluster nodes when available. GPU discovery provides:
+The operator automatically discovers GPU resources from cluster nodes, providing hardware info (GPU model, VRAM, GPUs per node) and automatic profiling search space calculation.
 
-- Hardware information (GPU model, VRAM, GPUs per node)
-- Automatic calculation of profiling search space based on model size
-- Hardware system identifier for AI Configurator integration
+**Requirements:**
+- **Cluster-scoped operators**: Have node read permissions by default
+- **Namespace-scoped operators**: Need optional RBAC to enable GPU discovery
 
-**Permissions**: GPU discovery requires cluster-wide node read permissions. Cluster-scoped operators automatically have these permissions. Namespace-restricted operators can also use GPU discovery if granted node read permissions via RBAC.
+**For namespace-scoped operators**, choose one approach:
 
-If GPU discovery is unavailable (no permissions or no GPU labels), the profiler will use manually specified hardware configuration or defaults.
+```bash
+# Option 1: Enable GPU discovery (read-only node access)
+kubectl apply -f https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml
+kubectl create clusterrolebinding dynamo-operator-gpu-discovery \
+  --clusterrole=dynamo-namespace-operator-gpu-discovery \
+  --serviceaccount=dynamo-system:dynamo-operator-controller-manager
+```
+
+```yaml
+# Option 2: Manual hardware config (no additional permissions)
+spec:
+  profilingConfig:
+    config:
+      hardware:
+        numGpusPerNode: 8
+        gpuModel: "H100-SXM5-80GB"
+        gpuVramMib: 81920
+```
+
+See [Installation Guide](../../kubernetes/installation-guide.md#gpu-discovery-for-namespace-scoped-operators-optional) for details.
 
 ## Configuration
 

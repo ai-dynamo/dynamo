@@ -1046,9 +1046,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 	if isNamespaceScoped {
 		return fmt.Errorf(`GPU hardware info required but cannot be auto-discovered (namespace-scoped operator lacks node read permissions).
 
-Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s.
+Options to resolve:
+
+1. Enable GPU discovery by granting node read permissions:
+   kubectl apply -f https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml
+   kubectl create clusterrolebinding dynamo-operator-gpu-discovery \
+     --clusterrole=dynamo-namespace-operator-gpu-discovery \
+     --serviceaccount=%s:dynamo-operator-controller-manager
+
+2. Add hardware config to profilingConfig.config.%s:
+   %s: 8
+   %s: "H100-SXM5-80GB"
+   %s: 81920
+
+3. Or specify %s.%s and %s.%s for explicit GPU search ranges.
 
 See: https://github.com/ai-dynamo/dynamo/issues/6257`,
+			r.Config.RestrictedNamespace,
 			ConfigKeyHardware, ConfigKeyNumGpusPerNode, ConfigKeyGPUModel, ConfigKeyGPUVramMib,
 			ConfigKeyEngine, ConfigKeyMinNumGpusPerEng, ConfigKeyEngine, ConfigKeyMaxNumGpusPerEng)
 	}

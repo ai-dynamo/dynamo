@@ -29,6 +29,7 @@ import (
 func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	validConfig := `{"engine": {"backend": "vllm"}, "deployment": {"model": "test-model"}}`
 	validConfigWithHardware := `{"engine": {"backend": "vllm"}, "deployment": {"model": "test-model"}, "hardware": {"numGpusPerNode": 8, "gpuModel": "H100-SXM5-80GB", "gpuVramMib": 81920}}`
+	minimalConfig := `{"sla": {"ttft": 200.0}}`
 	configWithDifferentBackend := `{"engine": {"backend": "sglang"}}`
 	configWithDifferentModel := `{"deployment": {"model": "different-model"}}`
 	invalidYAML := `{invalid yaml`
@@ -148,6 +149,30 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 			isClusterWide: false,
 			wantErr:       false,
+		},
+		{
+			name: "namespace-scoped operator without hardware config (should warn)",
+			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgdr",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: "vllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(minimalConfig),
+						},
+					},
+				},
+			},
+			isClusterWide:   false,
+			wantErr:         false,
+			wantWarnings:    true,
+			expectedWarning: "GPU hardware configuration not provided",
+			errContains:     true, // Check if warning contains this substring
 		},
 		{
 			name: "invalid config YAML",
@@ -273,8 +298,18 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() expected warnings but got none")
 			}
 
-			if tt.wantWarnings && len(warnings) > 0 && warnings[0] != tt.expectedWarning {
-				t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() warning = %v, want %v", warnings[0], tt.expectedWarning)
+			if tt.wantWarnings && len(warnings) > 0 {
+				if tt.errContains {
+					// Check if warning contains the expected substring
+					if !strings.Contains(warnings[0], tt.expectedWarning) {
+						t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() warning = %v, want to contain %v", warnings[0], tt.expectedWarning)
+					}
+				} else {
+					// Check for exact match
+					if warnings[0] != tt.expectedWarning {
+						t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() warning = %v, want %v", warnings[0], tt.expectedWarning)
+					}
+				}
 			}
 		})
 	}
