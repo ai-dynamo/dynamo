@@ -149,9 +149,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
-    m.add_class::<CancellationToken>()?;
-    m.add_class::<Namespace>()?;
-    m.add_class::<Component>()?;  // Available in _core, but only re-exported via _internal (not public API)
+    m.add_class::<CancellationToken>()?;  // Internal: only in _internal, not public API
+    m.add_class::<Namespace>()?;  // Internal: only in _internal, not public API
+    m.add_class::<Component>()?;  // Internal: only in _internal, not public API
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
@@ -162,8 +162,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
-    m.add_class::<llm::model_card::ModelDeploymentCard>()?;
-    m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
+    m.add_class::<llm::model_card::ModelDeploymentCard>()?;  // Internal: only in _internal, not public API
+    m.add_class::<llm::local_model::ModelRuntimeConfig>()?;  // Internal: only in _internal, not public API
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
@@ -173,7 +173,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
-    m.add_class::<context::Context>()?;
+    m.add_class::<context::Context>()?;  // Internal: only in _internal, not public API
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::KvRouter>()?;
