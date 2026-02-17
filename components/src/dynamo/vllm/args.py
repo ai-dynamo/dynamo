@@ -43,6 +43,9 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     enable_local_indexer: bool = True
     use_kv_events: bool
 
+    # GMS configuration
+    gms_mode: str = "normal"  # "normal" or "shadow"
+
     # mirror vLLM
     model: str
     served_model_name: Optional[str] = None
@@ -137,6 +140,25 @@ def cross_validate_config(
             "--stream-interval is currently not respected in Dynamo. "
             "Dynamo uses its own post-processing implementation on the frontend, "
             "bypassing vLLM's OutputProcessor buffering."
+        )
+
+    # Validate --gms-mode shadow requires --load-format gms
+    if dynamo_config.gms_mode == "shadow" and engine_config.load_format != "gms":
+        raise ValueError(
+            "--gms-mode shadow requires --load-format gms. "
+            "Shadow mode depends on GMS for VA-stable weight sharing."
+        )
+
+    # Validate --gms-mode shadow is incompatible with --enforce-eager
+    if dynamo_config.gms_mode == "shadow" and getattr(
+        engine_config, "enforce_eager", False
+    ):
+        raise ValueError(
+            "--gms-mode shadow is incompatible with --enforce-eager. "
+            "Shadow mode requires PIECEWISE CUDA graph mode so that attention ops "
+            "are stubbed during warm-up (no KV cache exists at init time). "
+            "--enforce-eager forces CUDA graph mode to NONE, which runs real "
+            "attention ops that need KV cache tensors."
         )
 
 

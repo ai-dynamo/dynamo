@@ -415,6 +415,58 @@ def setup_vllm_engine(config, stat_logger=None):
     if engine_args.load_format == "gms":
         engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 
+        # Shadow mode configuration
+        if config.gms_mode == "shadow":
+            os.environ["SHADOW_SKIP_KV_CACHE"] = "1"
+            logger.info(
+                "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
+            )
+
+            # Force PIECEWISE CUDA graph mode (required for shadow engines)
+            # In PIECEWISE mode, attention ops are stubbed during graph capture,
+            # so no KV cache is needed at capture time
+            if engine_args.compilation_config is None:
+                engine_args.compilation_config = {"cudagraph_mode": "PIECEWISE"}
+                logger.info("[Shadow] Set CUDA graph mode to PIECEWISE")
+            elif isinstance(engine_args.compilation_config, dict):
+                if engine_args.compilation_config.get("cudagraph_mode") != "PIECEWISE":
+                    logger.warning(
+                        "[Shadow] Overriding cudagraph_mode to PIECEWISE "
+                        "(required for shadow mode)"
+                    )
+                    engine_args.compilation_config["cudagraph_mode"] = "PIECEWISE"
+            elif isinstance(engine_args.compilation_config, str):
+                import json as _json
+
+                try:
+                    cc = _json.loads(engine_args.compilation_config)
+                    if cc.get("cudagraph_mode") != "PIECEWISE":
+                        logger.warning(
+                            "[Shadow] Overriding cudagraph_mode to PIECEWISE "
+                            "(required for shadow mode)"
+                        )
+                        cc["cudagraph_mode"] = "PIECEWISE"
+                        engine_args.compilation_config = _json.dumps(cc)
+                except _json.JSONDecodeError:
+                    logger.error(
+                        "[Shadow] Could not parse compilation_config as JSON, "
+                        "shadow mode may not work correctly"
+                    )
+            else:
+                # compilation_config is a CompilationConfig object
+                from vllm.config import CUDAGraphMode
+
+                if hasattr(engine_args.compilation_config, "cudagraph_mode"):
+                    current_mode = engine_args.compilation_config.cudagraph_mode
+                    if current_mode != CUDAGraphMode.PIECEWISE:
+                        logger.warning(
+                            "[Shadow] Overriding cudagraph_mode to PIECEWISE "
+                            "(required for shadow mode)"
+                        )
+                        engine_args.compilation_config.cudagraph_mode = (
+                            CUDAGraphMode.PIECEWISE
+                        )
+
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:
             from modelexpress import register_modelexpress_loaders
@@ -880,6 +932,18 @@ async def init(
         engine_client,
         vllm_config,
     )
+
+    # Shadow mode: auto-sleep after registration
+    # The sleep call unregisters from discovery, so the engine won't receive
+    # inference requests until woken. The wake_up route remains accessible
+    # via DYN_SYSTEM_PORT for external coordinators to activate the engine.
+    if config.gms_mode == "shadow":
+        logger.info("[Shadow] Auto-sleeping engine after registration")
+        await handler.sleep({"level": 1})
+        logger.info(
+            "[Shadow] Engine is now sleeping - call /engine/wake_up on port %s to activate",
+            os.environ.get("DYN_SYSTEM_PORT", "8080"),
+        )
 
     health_check_payload = VllmHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
