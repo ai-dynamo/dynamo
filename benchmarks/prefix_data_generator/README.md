@@ -105,6 +105,31 @@ For example, if rows 2 and 4 are offseted, then we would get:
 [10, 11, (14), (15)]
 ```
 
+### Staircase Rate Schedule
+
+For load testing scenarios where you need to measure how fast the system reacts to changing load, use `--step-duration` and `--step-rates` to generate a staircase request rate pattern. When a rate schedule is provided, `--num-requests` is optional — generation stops when the schedule duration is exhausted.
+
+```bash
+datagen synthesize \
+  --input-file trace.jsonl \
+  --step-duration 60 \
+  --step-rates 1,2,4,2,1
+```
+
+This produces a 5-step staircase over 300 seconds (60s per step):
+
+```
+rate  ^
+  4x  |          _____
+  2x  |    _____|     |_____
+  1x  |___|                 |___
+      +--0----60---120--180--240--300-->  time (s)
+```
+
+Each rate value is a multiplier on the base request rate from the original trace (same semantics as `--speedup-ratio`, but time-varying). `--step-rates` and `--speedup-ratio` are mutually exclusive.
+
+You can optionally add `--num-requests` as a cap to stop early if the schedule would produce more requests than needed.
+
 ### Implementation details
 
 The generation algorithm, simplified, is as follows

@@ -270,20 +270,62 @@ class Synthesizer:
         # Append a leaf path at the end
         return path + unique_user_prompt, True, context_len
 
+    @staticmethod
+    def _get_current_rate(
+        timestamp_ms: int, rate_schedule: list[tuple[int, float]]
+    ) -> float:
+        """Return the rate multiplier for the given timestamp based on the schedule."""
+        elapsed = 0
+        for duration_ms, rate in rate_schedule:
+            if timestamp_ms < elapsed + duration_ms:
+                return rate
+            elapsed += duration_ms
+        return rate_schedule[-1][1]
+
     def synthesize_requests(
         self,
-        num_requests: int,
+        num_requests: Optional[int] = None,
         max_isl: Optional[int] = None,
         min_isl: Optional[int] = None,
         min_osl: Optional[int] = None,
         max_osl: Optional[int] = None,
+        rate_schedule: Optional[list[tuple[int, float]]] = None,
     ) -> list[dict[str, Any]]:
-        timestamp = 0
+        """Synthesize requests with either a fixed count or a time-based rate schedule.
 
+        Args:
+            num_requests: Maximum number of requests to generate. Required if
+                rate_schedule is not provided.
+            max_isl: Filter out requests with input length above this value.
+            min_isl: Filter out requests with input length below this value.
+            min_osl: Clip output lengths below this value.
+            max_osl: Clip output lengths above this value.
+            rate_schedule: List of (duration_ms, rate_multiplier) tuples defining
+                a time-varying request rate. When provided, generation stops when
+                the schedule duration is exhausted. Each rate_multiplier acts as a
+                speedup ratio for that time window (higher = faster arrivals).
+        """
+        if num_requests is None and rate_schedule is None:
+            raise ValueError(
+                "At least one of num_requests or rate_schedule must be provided"
+            )
+
+        total_duration_ms = (
+            sum(duration for duration, _ in rate_schedule)
+            if rate_schedule is not None
+            else None
+        )
+
+        timestamp = 0
         requests: list[dict[str, Any]] = []
         request_id = 0
 
-        while request_id < num_requests:
+        while True:
+            if num_requests is not None and request_id >= num_requests:
+                break
+            if total_duration_ms is not None and timestamp >= total_duration_ms:
+                break
+
             requests_per_interval = self.request_counts_sampler.sample()
 
             for _ in range(requests_per_interval):
@@ -320,10 +362,15 @@ class Synthesizer:
                     }
                 )
                 request_id += 1
-                if request_id >= num_requests:
+                if num_requests is not None and request_id >= num_requests:
                     break
 
-            timestamp += round(self.timedeltas_sampler.sample() / self.speedup_ratio)
+            # Advance timestamp using rate schedule or global speedup ratio
+            if rate_schedule is not None:
+                rate = self._get_current_rate(timestamp, rate_schedule)
+            else:
+                rate = self.speedup_ratio
+            timestamp += round(self.timedeltas_sampler.sample() / rate)
 
         # Adjust hash_ids if num_copies > 1
         if self.num_copies > 1:
@@ -383,8 +430,8 @@ def main():
     parser.add_argument(
         "--num-requests",
         type=int,
-        default=int(1e5),
-        help="Number of requests to synthesize (default: 100000)",
+        default=None,
+        help="Number of requests to synthesize (default: 100000 if no rate schedule)",
     )
     parser.add_argument(
         "--speedup-ratio",
@@ -452,7 +499,41 @@ def main():
         default=None,
         help="Path to the output file (default: None, no output)",
     )
+    parser.add_argument(
+        "--step-duration",
+        type=int,
+        default=None,
+        help="Duration of each rate step in seconds (use with --step-rates)",
+    )
+    parser.add_argument(
+        "--step-rates",
+        type=str,
+        default=None,
+        help="Comma-separated rate multipliers for staircase load pattern (e.g., '1,2,4,2,1')",
+    )
     args = parser.parse_args()
+
+    # Validate rate schedule arguments
+    has_schedule = args.step_rates is not None or args.step_duration is not None
+    if has_schedule:
+        if args.step_rates is None or args.step_duration is None:
+            parser.error("--step-duration and --step-rates must be used together")
+        if args.speedup_ratio != 1:
+            parser.error("--speedup-ratio cannot be used with --step-rates")
+
+    rate_schedule = None
+    if args.step_rates is not None:
+        rates = [float(r) for r in args.step_rates.split(",")]
+        if any(r <= 0 for r in rates):
+            parser.error("All step rates must be positive")
+        if args.step_duration <= 0:
+            parser.error("--step-duration must be positive")
+        duration_ms = args.step_duration * 1000
+        rate_schedule = [(duration_ms, r) for r in rates]
+
+    # Default num_requests when no rate schedule is provided
+    if args.num_requests is None and rate_schedule is None:
+        args.num_requests = int(1e5)
 
     dataset_file = Path(args.input_file).resolve()
 
@@ -460,8 +541,12 @@ def main():
         suffix_parts = [
             f"{dataset_file.stem}_synth",
             f"{int(args.prefix_len_multiplier)}x{args.prefix_root_multiplier}+{args.prompt_len_multiplier}",
-            f"speedup{args.speedup_ratio}",
         ]
+        if rate_schedule is not None:
+            rates_str = "-".join(f"{r:g}" for _, r in rate_schedule)
+            suffix_parts.append(f"staircase_{args.step_duration}s_{rates_str}")
+        else:
+            suffix_parts.append(f"speedup{args.speedup_ratio}")
         if args.max_isl is not None:
             suffix_parts.append(f"maxisl{args.max_isl}")
         if args.min_isl is not None:
@@ -487,13 +572,21 @@ def main():
         osl_multiplier=args.osl_multiplier,
     )
 
+    if rate_schedule is not None:
+        total_duration_s = sum(d for d, _ in rate_schedule) / 1000
+        print(
+            f"Rate schedule: {len(rate_schedule)} steps of {args.step_duration}s each "
+            f"({total_duration_s:.0f}s total)"
+        )
+        print(f"Step rates: {[r for _, r in rate_schedule]}")
     print("synthesizing requests...", flush=True)
     requests = synthesizer.synthesize_requests(
-        args.num_requests,
+        num_requests=args.num_requests,
         max_isl=args.max_isl,
         min_isl=args.min_isl,
         min_osl=args.min_osl,
         max_osl=args.max_osl,
+        rate_schedule=rate_schedule,
     )
     print(f"synthesized {len(requests)} requests")
 
