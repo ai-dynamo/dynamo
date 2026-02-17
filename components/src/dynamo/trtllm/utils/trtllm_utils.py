@@ -65,7 +65,7 @@ class Config:
         self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
         self.dyn_endpoint_types: str = "chat,completions"
-        self.store_kv: str = ""
+        self.discovery_backend: str = ""
         self.request_plane: str = ""
         self.event_plane: str = ""
         self.enable_local_indexer: bool = True
@@ -124,7 +124,7 @@ class Config:
             f"tool_call_parser={self.tool_call_parser}, "
             f"dump_config_to={self.dump_config_to}, "
             f"custom_jinja_template={self.custom_jinja_template}, "
-            f"store_kv={self.store_kv}, "
+            f"discovery_backend={self.discovery_backend}, "
             f"request_plane={self.request_plane}, "
             f"event_plane={self.event_plane}, "
             f"enable_local_indexer={self.enable_local_indexer}, "
@@ -335,11 +335,11 @@ def cmd_line_args():
         help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
     )
     parser.add_argument(
-        "--store-kv",
+        "--discovery-backend",
         type=str,
-        choices=["etcd", "file", "mem"],
-        default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        choices=["kubernetes", "etcd", "file", "mem"],
+        default=os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        help="Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -551,7 +551,7 @@ def cmd_line_args():
     config.tool_call_parser = args.dyn_tool_call_parser
     config.dump_config_to = args.dump_config_to
     config.dyn_endpoint_types = args.dyn_endpoint_types
-    config.store_kv = args.store_kv
+    config.discovery_backend = args.discovery_backend
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
     config.enable_local_indexer = not args.durable_kv_events

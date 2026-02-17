@@ -24,9 +24,8 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::config::environment_names::llm as env_llm;
-use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
+use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::make_request_span;
-use dynamo_runtime::storage::kv;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -36,7 +35,6 @@ use tower_http::trace::TraceLayer;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    store: kv::Manager,
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
@@ -91,21 +89,12 @@ impl StateFlags {
 impl State {
     pub fn new(
         manager: Arc<ModelManager>,
-        store: kv::Manager,
+        discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
     ) -> Self {
-        // Initialize discovery backed by KV store
-        // Create a cancellation token for the discovery's watch streams
-        let discovery_client = {
-            let discovery_cancel_token = cancel_token.child_token();
-            Arc::new(KVStoreDiscovery::new(store.clone(), discovery_cancel_token))
-                as Arc<dyn Discovery>
-        };
-
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            store,
             discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -130,10 +119,6 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
-    }
-
-    pub fn store(&self) -> &kv::Manager {
-        &self.store
     }
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
@@ -205,8 +190,8 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
-    #[builder(default)]
-    store: kv::Manager,
+    #[builder(default = "None")]
+    discovery: Option<Arc<dyn Discovery>>,
 }
 
 impl HttpService {
@@ -368,7 +353,20 @@ impl HttpServiceConfigBuilder {
         let model_manager = Arc::new(ModelManager::new());
         // Create a temporary cancel token for building - will be replaced in spawn/run
         let temp_cancel_token = CancellationToken::new();
-        let state = Arc::new(State::new(model_manager, config.store, temp_cancel_token));
+        // Use the provided discovery client, or fall back to a no-op memory-backed one
+        // (for in-process modes that don't need discovery)
+        let discovery_client = config.discovery.unwrap_or_else(|| {
+            use dynamo_runtime::discovery::KVStoreDiscovery;
+            Arc::new(KVStoreDiscovery::new(
+                dynamo_runtime::storage::kv::Manager::memory(),
+                temp_cancel_token.child_token(),
+            )) as Arc<dyn Discovery>
+        });
+        let state = Arc::new(State::new(
+            model_manager,
+            discovery_client,
+            temp_cancel_token,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
