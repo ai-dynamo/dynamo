@@ -27,11 +27,13 @@ from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
+    VideoGenerationHealthCheckPayload,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher, setup_sgl_metrics
 from dynamo.sglang.register import (
     register_image_diffusion_model,
-    register_llm_with_readiness_gate,
+    register_model_with_readiness_gate,
+    register_video_generation_model,
 )
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
@@ -43,6 +45,7 @@ from dynamo.sglang.request_handlers import (
     MultimodalProcessorHandler,
     MultimodalWorkerHandler,
     PrefillWorkerHandler,
+    VideoGenerationWorkerHandler,
 )
 
 configure_dynamo_logging()
@@ -200,7 +203,7 @@ async def worker():
 
     dynamo_args = config.dynamo_args
     runtime, loop = create_runtime(
-        store_kv=dynamo_args.store_kv,
+        discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
         use_kv_events=dynamo_args.use_kv_events,
@@ -213,6 +216,8 @@ async def worker():
 
     if config.dynamo_args.image_diffusion_worker:
         await init_image_diffusion(runtime, config)
+    elif config.dynamo_args.video_generation_worker:
+        await init_video_generation(runtime, config)
     elif config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config, shutdown_event)
     elif config.dynamo_args.multimodal_processor:
@@ -280,13 +285,8 @@ async def init(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()
 
-    logging.info(
-        f"Registering model with endpoint types: {dynamo_args.dyn_endpoint_types}"
-    )
-    if (
-        dynamo_args.custom_jinja_template
-        and "chat" not in dynamo_args.dyn_endpoint_types
-    ):
+    logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
+    if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
         logging.warning(
             "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
@@ -302,12 +302,12 @@ async def init(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
                 dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
             ),
         )
@@ -380,7 +380,7 @@ async def init_prefill(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -457,7 +457,7 @@ async def init_diffusion(
     ).to_dict()
 
     logging.info(
-        f"Registering diffusion model with endpoint types: {dynamo_args.dyn_endpoint_types}"
+        f"Registering diffusion model with endpoint types: {dynamo_args.endpoint_types}"
     )
 
     try:
@@ -469,12 +469,12 @@ async def init_diffusion(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
                 dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
             ),
         )
@@ -533,7 +533,7 @@ async def init_embedding(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -643,6 +643,86 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
             await RUN_DEFERRED_HANDLERS()
 
 
+async def init_video_generation(runtime: DistributedRuntime, config: Config):
+    """Initialize video generation worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    # Initialize DiffGenerator (not sgl.Engine) - same as image diffusion
+    from sglang.multimodal_gen import DiffGenerator
+
+    if not server_args.model_path:
+        raise ValueError("--model is required for video generation workers")
+
+    # Parallelism configuration
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    num_gpus = tp_size * dp_size
+
+    # Distributed configuration
+    dist_timeout = getattr(server_args, "dist_timeout", None)
+
+    generator = DiffGenerator.from_pretrained(
+        model_path=server_args.model_path,
+        # Parallelism configuration
+        num_gpus=num_gpus,
+        tp_size=tp_size,
+        dp_size=dp_size,
+        # Distributed configuration
+        dist_timeout=dist_timeout,
+    )
+
+    # Initialize fsspec filesystems for video storage
+    fs_url = dynamo_args.video_generation_fs_url
+
+    # Initialize primary filesystem
+    if not fs_url:
+        raise ValueError(
+            "--video-generation-fs-url is required for video generation workers"
+        )
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    handler = VideoGenerationWorkerHandler(
+        component,
+        generator,
+        config,
+        publisher=None,
+        fs=get_fs(fs_url),
+    )
+
+    # Create proper health check payload that sends a minimal video request
+    health_check_payload = VideoGenerationHealthCheckPayload(
+        model_path=server_args.model_path
+    ).to_dict()
+
+    ready_event = asyncio.Event()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[],  # No LLM metrics labels
+                health_check_payload=health_check_payload,
+            ),
+            register_video_generation_model(
+                generator,
+                generate_endpoint,
+                server_args,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve video generation endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
 async def init_multimodal_processor(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
 ):
@@ -681,7 +761,7 @@ async def init_multimodal_processor(
                     (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
                 ],
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 None,  # engine
                 generate_endpoint,
                 server_args,

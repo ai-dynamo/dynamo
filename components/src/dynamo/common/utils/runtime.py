@@ -62,7 +62,7 @@ async def graceful_shutdown(
 
 
 def create_runtime(
-    store_kv: str,
+    discovery_backend: str,
     request_plane: str,
     event_plane: str,
     use_kv_events: bool,
@@ -74,7 +74,7 @@ def create_runtime(
     creates the runtime, and installs SIGTERM/SIGINT handlers.
 
     Args:
-        store_kv: Key-value backend type (etcd, file, mem).
+        discovery_backend: Discovery backend type (kubernetes, etcd, file, mem).
         request_plane: Request distribution method (nats, http, tcp).
         event_plane: Event publishing method (nats, zmq).
         use_kv_events: Whether KV events are enabled.
@@ -89,7 +89,7 @@ def create_runtime(
 
     enable_nats = request_plane == "nats" or (event_plane == "nats" and use_kv_events)
 
-    runtime = DistributedRuntime(loop, store_kv, request_plane, enable_nats)
+    runtime = DistributedRuntime(loop, discovery_backend, request_plane, enable_nats)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime, shutdown_event))

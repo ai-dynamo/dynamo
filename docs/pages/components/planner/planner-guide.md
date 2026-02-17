@@ -1,11 +1,34 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Planner Guide
 ---
 
 # Planner Guide
 
 Deployment, configuration, and integration guide for the Dynamo SLA Planner. For a quick overview, see the [Planner README](README.md). For architecture internals, see [Planner Design](../../design-docs/planner-design.md).
+
+## Scaling Modes
+
+The SLA Planner supports two scaling modes:
+
+- **Throughput-based scaling**: Uses pre-deployment profiling data and traffic prediction. Best for stable, predictable workloads where profiling data is available.
+- **Load-based scaling (Experimental)**: Uses real-time per-worker engine metrics and online regression. Best for bursty or unpredictable traffic. Does not require profiling data.
+
+**When to use which mode:**
+- Enable **throughput-based scaling** whenever engine profiling data is available. It provides stable, prediction-based capacity planning.
+- Enable **load-based scaling** when traffic is bursty or hard to predict. It reacts quickly to real-time load changes.
+- Enable **both modes together** for the best of both worlds: throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `--adjustment-interval` for throughput-based scaling.
+
+**DGDR and scaling modes:** Deploying via DGDR automatically triggers profiling and enables throughput-based scaling. To additionally enable load-based scaling, pass the planner arguments through the DGDR's planner config section:
+
+```yaml
+profilingConfig:
+  config:
+    planner:
+      plannerEnableLoadbasedScaling: true
+      plannerLoadbasedAdjustmentInterval: 5
+```
 
 ## Deployment
 
@@ -190,7 +213,7 @@ For detailed comparison, supported configurations, and limitations, see [SLA-Dri
 
 ### Load Predictors
 
-The SLA planner forecasts the number of requests, ISL, and OSL in the next adjustment interval. Four prediction models are supported:
+The throughput-based scaling mode forecasts the number of requests, ISL, and OSL in the next adjustment interval. Four prediction models are supported:
 
 #### Constant Predictor
 - **Use case**: Stable workloads with long prediction intervals
@@ -230,21 +253,21 @@ You can warm-start load predictors with a mooncake-style JSONL trace file:
 - **CLI argument**: `--load-predictor-warmup-trace <path/to/trace.jsonl>`
 - **Effect**: preloads predictors with historical request-count / ISL / OSL samples extracted from the trace
 
-### Planner Scaling Parameters
+### Throughput-Based Scaling Parameters
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--adjustment-interval` | `180` | Seconds between scaling decisions |
 | `--ttft` | `500.0` | Target Time To First Token (ms) |
 | `--itl` | `50.0` | Target Inter-Token Latency (ms) |
-| `--isl` | `3000` | Expected average input sequence length |
-| `--osl` | `150` | Expected average output sequence length |
 | `--max-gpu-budget` | `8` | Maximum GPUs across all workers |
 | `--min-endpoint` | `1` | Minimum replicas per worker type |
 | `--decode-engine-num-gpu` | `1` | GPUs per decode engine |
 | `--prefill-engine-num-gpu` | `1` | GPUs per prefill engine |
 | `--no-operation` | `false` | Observation mode (no actual scaling) |
 | `--no-correction` | `false` | Disable correction factors |
+
+For the full list of arguments including load-based scaling options, see the [Planner README](README.md#key-arguments).
 
 #### Planner Configuration Passthrough
 

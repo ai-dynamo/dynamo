@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: TensorRT-LLM Multimodal
 ---
 
 # TensorRT-LLM Multimodal
@@ -409,7 +410,7 @@ TRT-LLM workers register with Dynamo using:
 
 ```python
 # TRT-LLM Worker - Register with Tokens
-await register_llm(
+await register_model(
     ModelInput.Tokens,      # Rust does minimal preprocessing
     model_type,             # ModelType.Chat or ModelType.Prefill
     generate_endpoint,

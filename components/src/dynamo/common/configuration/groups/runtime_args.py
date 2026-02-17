@@ -15,7 +15,8 @@ class DynamoRuntimeConfig(ConfigBase):
     """Configuration for Dynamo runtime (common across all backends)."""
 
     namespace: str
-    store_kv: str
+    endpoint: Optional[str] = None
+    discovery_backend: str
     request_plane: str
     event_plane: str
     connector: list[str]
@@ -27,12 +28,17 @@ class DynamoRuntimeConfig(ConfigBase):
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
+    multimodal_embedding_cache_capacity_gb: float
 
     def validate(self) -> None:
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events
 
 
+# For simplicity, we do not prepend "dyn-" unless it's absolutely necessary. These are
+# exemplary exceptions:
+# - To avoid name conflicts with different backends, prefix "dyn-" for dynamo specific
+#   args.
 class DynamoRuntimeArgGroup(ArgGroup):
     """Dynamo runtime configuration parameters (common to all backends)."""
 
@@ -49,11 +55,18 @@ class DynamoRuntimeArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--store-kv",
-            env_var="DYN_STORE_KV",
+            flag_name="--endpoint",
+            env_var="DYN_ENDPOINT",
+            default=None,
+            help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: dyn://dynamo.backend.generate. Currently used only by TRT-LLM and SGLang backends.",
+        )
+        add_argument(
+            g,
+            flag_name="--discovery-backend",
+            env_var="DYN_DISCOVERY_BACKEND",
             default="etcd",
-            help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
-            choices=["etcd", "file", "mem"],
+            help="Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+            choices=["kubernetes", "etcd", "file", "mem"],
         )
         add_argument(
             g,
@@ -89,7 +102,6 @@ class DynamoRuntimeArgGroup(ArgGroup):
         )
 
         # Optional: tool/reasoning parsers (choices from dynamo._core when available)
-        # To avoid name conflicts with different backends, prefix "dyn-" for dynamo specific args
         add_argument(
             g,
             flag_name="--dyn-tool-call-parser",
@@ -129,4 +141,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_DUMP_CONFIG_TO",
             default=None,
             help="Dump resolved configuration to the specified file path.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--multimodal-embedding-cache-capacity-gb",
+            env_var="DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB",
+            default=0,
+            arg_type=float,
+            help="Capacity of the multimodal embedding cache in GB. 0 = disabled.",
         )

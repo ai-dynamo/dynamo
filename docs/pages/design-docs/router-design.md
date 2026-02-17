@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Router Design
 ---
 
 # Router Design
@@ -118,7 +119,7 @@ The two types of events are:
 - KV stored event
 - KV removed event
 
-The publisher can be initialized and used through C bindings or Python bindings.
+The publisher can be initialized and used through Python bindings.
 
 ### Deterministic Event IDs
 
@@ -223,7 +224,7 @@ graph TD
         E3[Engine 3<br/>LocalKvIndexer]
     end
 
-    subgraph "NATS Core"
+    subgraph "Event Plane (NATS / ZMQ)"
         NC[KV Events Pub/Sub<br/>- Block created<br/>- Block removed]
     end
 

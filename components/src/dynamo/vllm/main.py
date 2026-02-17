@@ -28,9 +28,8 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisherConfig,
-    fetch_llm,
-    register_llm,
+    fetch_model,
+    register_model,
 )
 
 # Optional imports for frontend decoding support
@@ -114,14 +113,14 @@ async def worker():
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
     #
-    # We don't set `config.engine_args.model` to the local path fetch_llm returns
+    # We don't set `config.engine_args.model` to the local path fetch_model returns
     # because vllm will send that name to its Ray pipeline-parallel workers, which
     # may not have the local path.
     # vllm will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
     if not os.path.exists(config.model):
-        await fetch_llm(config.model)
+        await fetch_model(config.model)
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
@@ -144,7 +143,7 @@ async def worker():
 
     shutdown_event = asyncio.Event()
     runtime, _ = create_runtime(
-        store_kv=config.store_kv,
+        discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
         use_kv_events=config.use_kv_events,
@@ -341,14 +340,14 @@ def setup_kv_event_publisher(
                 f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
             )
 
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.connection_id(),
+        kv_publisher = KvEventPublisher(
+            component=component,
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
+            zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
         )
-        kv_publisher = KvEventPublisher(component=component, zmq_config=zmq_config)
         kv_publishers.append(kv_publisher)
 
         logger.info(
@@ -401,6 +400,22 @@ def setup_vllm_engine(config, stat_logger=None):
 
     if engine_args.load_format == "gms":
         engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+
+    if engine_args.load_format in ("mx-source", "mx-target"):
+        try:
+            from modelexpress import register_modelexpress_loaders
+
+            # Ensure the ModelExpress server URL env var is set for the model loader
+            if config.model_express_url:
+                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
+            register_modelexpress_loaders()
+            # Use wrapper worker to ensure loaders are registered in spawned worker processes
+            engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
+        except ImportError as e:
+            raise ImportError(
+                f"ModelExpress package required for --load-format={engine_args.load_format}. "
+                "Install with: pip install modelexpress"
+            ) from e
 
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
@@ -518,7 +533,7 @@ async def register_vllm_model(
         media_fetcher.timeout_ms(30000)
         media_fetcher.allow_direct_port(True)
 
-    await register_llm(
+    await register_model(
         model_input,
         model_type,
         generate_endpoint,
@@ -954,7 +969,7 @@ async def init_multimodal_processor(
     await encode_worker_client.wait_for_instances()
 
     # Register the endpoint as entrypoint to a model
-    await register_llm(
+    await register_model(
         ModelInput.Tokens,
         ModelType.Chat,
         generate_endpoint,
@@ -1142,7 +1157,7 @@ async def init_ec_processor(
     await pd_client.wait_for_instances()
 
     # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
-    await register_llm(
+    await register_model(
         ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
         ModelType.Chat,
         generate_endpoint,
@@ -1325,7 +1340,7 @@ async def init_omni(
         return
 
     # TODO: extend for multi-stage pipelines
-    await register_llm(
+    await register_model(
         ModelInput.Text,
         ModelType.Images,
         generate_endpoint,

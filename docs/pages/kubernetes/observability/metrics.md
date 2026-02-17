@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Metrics
 ---
 
 ## Overview
@@ -108,6 +109,19 @@ curl localhost:8000/v1/chat/completions \
 For more information about validating the deployment, see the [vLLM README](../../backends/vllm/README.md).
 
 ## Set Up Metrics Collection
+
+### Enable NIXL Telemetry (Optional)
+
+To enable NIXL telemetry metrics in addition to Dynamo metrics, set the following environment variables in your worker component:
+
+spec:
+  services:
+    YourWorker:
+      envs:
+        - name: NIXL_TELEMETRY_ENABLE
+          value: "y"
+
+NIXL telemetry is disabled by default. When enabled, NIXL metrics will be exposed on the port specified by `NIXL_TELEMETRY_PROMETHEUS_PORT` (19090 by default).
 
 ### Create PodMonitors
 

@@ -43,7 +43,7 @@ The pip wheel is built through a Docker build process:
 
 ```bash
 # Render and build the Docker image with KVBM enabled (from the dynamo repo root)
-python container/render.py --framework=dynamo --target==runtime --output-short-filename
+python container/render.py --framework dynamo --target runtime --output-short-filename
 docker build --build-arg ENABLE_KVBM="true" -f container/rendered.Dockerfile .
 ```
 

@@ -142,7 +142,7 @@ Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) fro
 
 ```bash
 # Single command approach (recommended)
-export FRAMEWORK=VLLM         # Note: any of VLLM, SGLANG, TRTLLM can be used
+export FRAMEWORK=vllm         # Note: any of vllm, sglang, trtllm can be used
 python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
 docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
 
@@ -211,7 +211,7 @@ If `post-create.sh` fails, you can try to debug or [submit](https://github.com/a
 
 ### Building Rust Code
 
-If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries such as dynamo-run.
+If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries.
 
 ```bash
 cd /workspace && cargo build --locked --profile dev

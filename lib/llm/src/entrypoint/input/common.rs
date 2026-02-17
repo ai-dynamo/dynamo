@@ -9,7 +9,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{KvPushRouter, KvRouter, PrefillRouter},
+    kv_router::{DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
@@ -274,10 +274,10 @@ where
         .await?;
 
     let service_backend = match router_mode {
-        RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-            // Non-KV routing: use PushRouter directly.
-            // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
-            // available in KV routing mode where the router has actual bookkeeping.
+        RouterMode::Direct => {
+            ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
+        }
+        RouterMode::Random | RouterMode::RoundRobin => {
             ServiceBackend::from_engine(Arc::new(router))
         }
         RouterMode::KV => {
