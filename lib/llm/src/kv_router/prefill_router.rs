@@ -346,7 +346,12 @@ impl PrefillRouter {
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
-            .map_err(|e| PrefillError::PrefillError(String::new(), Some(e.into())))?;
+            .map_err(|e| {
+                PrefillError::PrefillError(
+                    "failed to route to prefill worker".to_string(),
+                    Some(e.into()),
+                )
+            })?;
 
         // Drop phase permit now - routing is complete, record_worker_full was called in select_worker.
         // This unblocks set_phase(Decode) in the main task without waiting for prefill output.

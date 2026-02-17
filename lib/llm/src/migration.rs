@@ -781,7 +781,6 @@ mod tests {
         // 4th response should be an error after retries are exhausted
         let error_response = &responses[3];
         assert!(error_response.err().is_some());
-        assert!(error_response.err().is_some());
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3); // 2 retries + 1 final failure
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1); // initial ongoing failure retry
@@ -838,7 +837,6 @@ mod tests {
 
         // 4th response should be an error after retries are exhausted
         let error_response = &responses[3];
-        assert!(error_response.err().is_some());
         assert!(error_response.err().is_some());
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
