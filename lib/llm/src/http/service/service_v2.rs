@@ -192,6 +192,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     discovery: Option<Arc<dyn Discovery>>,
+
+    #[builder(default = "None")]
+    cancel_token: Option<CancellationToken>,
 }
 
 impl HttpService {
@@ -351,22 +354,17 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        // Create a temporary cancel token for building - will be replaced in spawn/run
-        let temp_cancel_token = CancellationToken::new();
+        let cancel_token = config.cancel_token.unwrap_or_default();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
         let discovery_client = config.discovery.unwrap_or_else(|| {
             use dynamo_runtime::discovery::KVStoreDiscovery;
             Arc::new(KVStoreDiscovery::new(
                 dynamo_runtime::storage::kv::Manager::memory(),
-                temp_cancel_token.child_token(),
+                cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(
-            model_manager,
-            discovery_client,
-            temp_cancel_token,
-        ));
+        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
