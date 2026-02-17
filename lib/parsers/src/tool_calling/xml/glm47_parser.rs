@@ -5,9 +5,10 @@
 // Format: <tool_call>function_name<arg_key>param1</arg_key><arg_value>value1</arg_value></tool_call>
 // Reference: https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja
 
-use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value;
+use std::collections::HashMap;
+use tracing::warn;
 use uuid::Uuid;
 
 use super::super::ToolDefinition;
@@ -91,9 +92,14 @@ fn extract_tool_calls(
                 let abs_end = abs_start + end_pos + end_token.len();
                 let block = &text[abs_start..abs_end];
 
-                // Parse this tool call block
-                if let Ok(parsed_call) = parse_tool_call_block(block, config, tools) {
-                    calls.push(parsed_call);
+                // Parse this tool call block; preserve unparseable blocks as
+                // normal text so model output is never silently dropped.
+                match parse_tool_call_block(block, config, tools) {
+                    Ok(parsed_call) => calls.push(parsed_call),
+                    Err(e) => {
+                        warn!("Failed to parse GLM-4.7 tool call block: {e}");
+                        normal_parts.push(block);
+                    }
                 }
 
                 cursor = abs_end;
@@ -111,6 +117,84 @@ fn extract_tool_calls(
 
     let normal_text = normal_parts.join("").trim().to_string();
     Ok((normal_text, calls))
+}
+
+/// Decode XML character entities in a string.
+/// Handles the five predefined XML entities: &lt; &gt; &amp; &quot; &apos;
+fn decode_xml_entities(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+/// Coerce a raw string value to a JSON Value using the tool's parameter schema.
+/// Falls back to string if no schema is available or the type is unrecognized.
+fn coerce_value(raw: &str, schema_type: Option<&str>) -> Value {
+    let trimmed = raw.trim();
+
+    // If the value already looks like JSON (object, array, or quoted string), parse it directly
+    if (trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"'))
+        && let Ok(v) = serde_json::from_str(trimmed)
+    {
+        return v;
+    }
+
+    // Use schema type hints for coercion when available
+    match schema_type {
+        Some("integer") | Some("int") => {
+            if let Ok(n) = trimmed.parse::<i64>() {
+                return Value::Number(n.into());
+            }
+        }
+        Some("number") | Some("float") | Some("double") => {
+            if let Ok(n) = trimmed.parse::<f64>()
+                && let Some(num) = serde_json::Number::from_f64(n)
+            {
+                return Value::Number(num);
+            }
+        }
+        Some("boolean") | Some("bool") => match trimmed.to_lowercase().as_str() {
+            "true" | "1" | "yes" => return Value::Bool(true),
+            "false" | "0" | "no" => return Value::Bool(false),
+            _ => {}
+        },
+        Some("array") => {
+            // Try JSON parse first, then fall back to comma-separated splitting
+            if let Ok(v) = serde_json::from_str::<Value>(trimmed)
+                && v.is_array()
+            {
+                return v;
+            }
+            let items: Vec<Value> = trimmed
+                .split(',')
+                .map(|s| Value::String(s.trim().to_string()))
+                .collect();
+            return Value::Array(items);
+        }
+        Some("null") => {
+            if trimmed == "null" || trimmed == "None" || trimmed.is_empty() {
+                return Value::Null;
+            }
+        }
+        _ => {}
+    }
+
+    Value::String(raw.to_string())
+}
+
+/// Look up the JSON Schema type for a parameter by name from a tool's parameter schema.
+fn get_param_schema_type<'a>(
+    tools: Option<&'a [ToolDefinition]>,
+    function_name: &str,
+    param_name: &str,
+) -> Option<&'a str> {
+    let tool = tools?.iter().find(|t| t.name == function_name)?;
+    let schema = tool.parameters.as_ref()?;
+    let props = schema.get("properties")?;
+    let param = props.get(param_name)?;
+    param.get("type")?.as_str()
 }
 
 /// Parse a single GLM-4.7 tool call block
@@ -157,25 +241,22 @@ fn parse_tool_call_block(
     // because models often emit multi-line content in arg values.
     let pattern = format!(
         r"(?s){}([^<]+){}{}(.*?){}",
-        arg_key_start_escaped,
-        arg_key_end_escaped,
-        arg_value_start_escaped,
-        arg_value_end_escaped
+        arg_key_start_escaped, arg_key_end_escaped, arg_value_start_escaped, arg_value_end_escaped
     );
 
     let regex = Regex::new(&pattern)?;
 
     for cap in regex.captures_iter(args_section) {
         let key = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
-        let value = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+        let raw_value = cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
         if !key.is_empty() {
-            // Try to parse value as JSON, otherwise use as string
-            let json_value: Value = if value.trim().starts_with('{') || value.trim().starts_with('[') || value.trim().starts_with('"') {
-                serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()))
-            } else {
-                Value::String(value.to_string())
-            };
+            // Decode XML entities (e.g. &lt; → <, &amp; → &) before parsing
+            let decoded = decode_xml_entities(raw_value);
+
+            // Look up the expected type from the tool's parameter schema
+            let schema_type = get_param_schema_type(tools, &function_name, key);
+            let json_value = coerce_value(&decoded, schema_type);
 
             arguments.insert(key.to_string(), json_value);
         }
@@ -212,7 +293,10 @@ mod tests {
         let config = get_test_config();
 
         // Complete start token
-        assert!(detect_tool_call_start_glm47("<tool_call>get_weather", &config));
+        assert!(detect_tool_call_start_glm47(
+            "<tool_call>get_weather",
+            &config
+        ));
 
         // Partial start token (streaming)
         assert!(detect_tool_call_start_glm47("Some text <tool", &config));
@@ -232,8 +316,12 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
 
-        let args: HashMap<String, Value> = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args.get("location").unwrap().as_str().unwrap(), "San Francisco");
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(
+            args.get("location").unwrap().as_str().unwrap(),
+            "San Francisco"
+        );
         assert_eq!(normal_text, Some("".to_string()));
     }
 
@@ -247,7 +335,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "book_flight");
 
-        let args: HashMap<String, Value> = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args.get("from").unwrap().as_str().unwrap(), "NYC");
         assert_eq!(args.get("to").unwrap().as_str().unwrap(), "LAX");
         assert_eq!(args.get("date").unwrap().as_str().unwrap(), "2026-03-15");
@@ -263,7 +352,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "search");
 
-        let args: HashMap<String, Value> = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
         let filters = args.get("filters").unwrap();
         assert!(filters.is_object());
     }
@@ -289,7 +379,10 @@ mod tests {
 
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
-        assert_eq!(normal_text, Some("I'll check the weather for you.".to_string()));
+        assert_eq!(
+            normal_text,
+            Some("I'll check the weather for you.".to_string())
+        );
     }
 
     #[test]
@@ -302,17 +395,22 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_current_time");
 
-        let args: HashMap<String, Value> = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert!(args.is_empty());
     }
 
     #[test]
     fn test_find_tool_call_end_position() {
         let config = get_test_config();
-        let chunk = "<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>more text";
+        let chunk =
+            "<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>more text";
 
         let end_pos = find_tool_call_end_position_glm47(chunk, &config);
-        assert_eq!(&chunk[..end_pos], "<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>");
+        assert_eq!(
+            &chunk[..end_pos],
+            "<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>"
+        );
     }
 
     #[test]
@@ -325,7 +423,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "write_file");
 
-        let args: HashMap<String, Value> = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args.get("path").unwrap().as_str().unwrap(), "/tmp/hello.py");
         assert!(
             args.get("content").is_some(),
@@ -346,5 +445,152 @@ mod tests {
 
         let (calls, _) = result.unwrap();
         assert_eq!(calls.len(), 0);
+    }
+
+    #[test]
+    fn test_unparseable_block_preserved_as_normal_text() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: None,
+        }];
+
+        // Tool call block references a function not in the tools list
+        let message = "Here is the result: <tool_call>unknown_func<arg_key>x</arg_key><arg_value>1</arg_value></tool_call> done";
+        let (calls, normal_text) =
+            try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+
+        assert_eq!(calls.len(), 0);
+        // The unparseable block should be preserved in normal text, not dropped
+        let text = normal_text.unwrap();
+        assert!(
+            text.contains("unknown_func"),
+            "Unparseable block should be in normal text, got: {text}"
+        );
+    }
+
+    #[test]
+    fn test_xml_entity_decoding() {
+        let config = get_test_config();
+        let message = r#"<tool_call>write_file<arg_key>content</arg_key><arg_value>x &lt; y &amp;&amp; y &gt; z</arg_value></tool_call>"#;
+
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(
+            args.get("content").unwrap().as_str().unwrap(),
+            "x < y && y > z"
+        );
+    }
+
+    #[test]
+    fn test_type_coercion_with_schema() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "set_temperature".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "degrees": {"type": "number"},
+                    "enabled": {"type": "boolean"},
+                    "count": {"type": "integer"},
+                    "label": {"type": "string"}
+                }
+            })),
+        }];
+
+        let message = "<tool_call>set_temperature<arg_key>degrees</arg_key><arg_value>72.5</arg_value><arg_key>enabled</arg_key><arg_value>true</arg_value><arg_key>count</arg_key><arg_value>3</arg_value><arg_key>label</arg_key><arg_value>warm</arg_value></tool_call>";
+
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+        assert_eq!(calls.len(), 1);
+
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+
+        // number coercion
+        assert_eq!(args.get("degrees").unwrap().as_f64().unwrap(), 72.5);
+        // boolean coercion
+        assert_eq!(args.get("enabled").unwrap().as_bool().unwrap(), true);
+        // integer coercion
+        assert_eq!(args.get("count").unwrap().as_i64().unwrap(), 3);
+        // string stays string
+        assert_eq!(args.get("label").unwrap().as_str().unwrap(), "warm");
+    }
+
+    #[test]
+    fn test_type_coercion_array_comma_separated() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "tag_item".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tags": {"type": "array"}
+                }
+            })),
+        }];
+
+        // Model emits comma-separated values without JSON brackets
+        let message = "<tool_call>tag_item<arg_key>tags</arg_key><arg_value>rust, python, go</arg_value></tool_call>";
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let tags = args.get("tags").unwrap().as_array().unwrap();
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags[0].as_str().unwrap(), "rust");
+        assert_eq!(tags[1].as_str().unwrap(), "python");
+        assert_eq!(tags[2].as_str().unwrap(), "go");
+    }
+
+    #[test]
+    fn test_type_coercion_array_json() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "tag_item".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ids": {"type": "array"}
+                }
+            })),
+        }];
+
+        // Model emits proper JSON array
+        let message = r#"<tool_call>tag_item<arg_key>ids</arg_key><arg_value>[1, 2, 3]</arg_value></tool_call>"#;
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let ids = args.get("ids").unwrap().as_array().unwrap();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[0].as_i64().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_type_coercion_falls_back_to_string() {
+        let config = get_test_config();
+        let tools = vec![ToolDefinition {
+            name: "test_func".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer"}
+                }
+            })),
+        }];
+
+        // "not_a_number" can't be parsed as integer — should fall back to string
+        let message = "<tool_call>test_func<arg_key>count</arg_key><arg_value>not_a_number</arg_value></tool_call>";
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
+
+        let args: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert!(
+            args.get("count").unwrap().is_string(),
+            "Should fall back to string when coercion fails"
+        );
     }
 }
