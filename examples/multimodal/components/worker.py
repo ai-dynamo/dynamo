@@ -23,9 +23,8 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
-from dynamo._internal import Component
 from dynamo.llm import KvEventPublisher
-from dynamo.runtime import DistributedRuntime, Endpoint, dynamo_worker
+from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))

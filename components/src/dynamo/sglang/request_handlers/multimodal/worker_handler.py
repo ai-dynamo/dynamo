@@ -10,9 +10,8 @@ import sglang as sgl
 import torch
 
 import dynamo.nixl_connect as connect
-from dynamo._internal import Component, Context
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.runtime import Client
+from dynamo.runtime import Client, Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,

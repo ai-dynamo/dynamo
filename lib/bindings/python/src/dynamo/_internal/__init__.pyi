@@ -2,18 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Type stubs - re-export from _core
+# These classes are internal-only (used by components/, not for public use)
 from dynamo._core import CancellationToken as CancellationToken
-from dynamo._core import Component as Component
-from dynamo._core import Context as Context
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
-from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import Namespace as Namespace
 
 __all__ = [
     "CancellationToken",
-    "Component",
-    "Context",
     "ModelDeploymentCard",
-    "ModelRuntimeConfig",
     "Namespace",
 ]

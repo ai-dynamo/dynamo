@@ -10,9 +10,9 @@ from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
-from dynamo._internal import Component
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import WorkerMetricsPublisher
+from dynamo.runtime import Component
 
 # Create a dedicated registry for dynamo_component metrics
 # This ensures these metrics are isolated and can be exposed via their own callback

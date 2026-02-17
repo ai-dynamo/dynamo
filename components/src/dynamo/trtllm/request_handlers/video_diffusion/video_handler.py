@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-from dynamo._internal import Component, Context
+from dynamo.runtime import Component, Context
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.protocols.video_protocol import (

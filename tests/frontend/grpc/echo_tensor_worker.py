@@ -9,8 +9,7 @@
 import tritonclient.grpc.model_config_pb2 as mc
 import uvloop
 
-from dynamo._internal import ModelRuntimeConfig
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 

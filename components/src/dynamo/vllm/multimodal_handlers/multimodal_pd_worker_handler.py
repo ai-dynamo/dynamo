@@ -11,11 +11,10 @@ from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
-from dynamo._internal import Component
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
-from dynamo.runtime import Client, DistributedRuntime
+from dynamo.runtime import Client, Component, DistributedRuntime
 
 from ..args import Config
 from ..handlers import BaseWorkerHandler

@@ -13,7 +13,7 @@ from typing import Any, AsyncGenerator, Optional
 import torch
 from PIL import Image
 
-from dynamo._internal import Component, Context
+from dynamo.runtime import Component, Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse, NvExt
 from dynamo.sglang.publisher import DynamoSglangPublisher
