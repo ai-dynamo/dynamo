@@ -102,6 +102,22 @@ async fn handler_anthropic_messages(
     headers: HeaderMap,
     Json(request): Json<AnthropicCreateMessageRequest>,
 ) -> Result<Response, Response> {
+    // Validate required fields
+    if request.messages.is_empty() {
+        return Err(anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "messages: field required",
+        ));
+    }
+    if request.max_tokens == 0 {
+        return Err(anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "max_tokens: must be greater than 0",
+        ));
+    }
+
     // Create request context
     let request_id = get_or_create_request_id(None, &headers);
     let request = Context::with_id(request, request_id);
@@ -340,13 +356,25 @@ async fn handler_count_tokens(
 // ---------------------------------------------------------------------------
 
 /// Build an Anthropic-formatted error response.
+/// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
 fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Response {
+    let mapped_type = match status.as_u16() {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        429 => "rate_limit_error",
+        503 | 529 => "overloaded_error",
+        // Use the caller-provided type for other codes (e.g. 500 → "api_error")
+        _ => error_type,
+    };
+
     (
         status,
         Json(AnthropicErrorResponse {
             object_type: "error".to_string(),
             error: AnthropicErrorBody {
-                error_type: error_type.to_string(),
+                error_type: mapped_type.to_string(),
                 message: message.to_string(),
             },
         }),
