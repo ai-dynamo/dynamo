@@ -49,9 +49,12 @@ except ImportError as e:
 
 CACHE_SIZE_MAXIMUM = 8
 
+# Both embedding transmitter suffers from increasing latency as
+# number of concurrent requests increases, NixlPersistentEmbedding transmitters
+# scale worse than local. Need to investigate why.
 TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 # [gluo NOTE] default off to benchmark standalone encoder
-ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 0))
+ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 
 
 @dataclass
@@ -196,8 +199,8 @@ class EncodeWorkerHandler:
                 )
 
             if loaded_images:
-                image_embeds = self.image_processor(
-                    images=loaded_images, return_tensors="pt"
+                image_embeds = await asyncio.to_thread(
+                    self.image_processor, images=loaded_images, return_tensors="pt"
                 )
 
                 # Encode the image embeddings using model-specific encoder
@@ -252,6 +255,8 @@ class EncodeWorkerHandler:
                         ),
                     )
 
+            before_transfer_time = time.perf_counter()
+
             # Prepare transfer
             send_tasks = [
                 asyncio.create_task(
@@ -263,9 +268,13 @@ class EncodeWorkerHandler:
             ]
             transfer_requests = await asyncio.gather(*send_tasks)
 
+            after_transfer_time = time.perf_counter()
+
             for idx, item in enumerate(zip(embedding_lists, transfer_requests)):
                 embedding_item, transfer_request = item
-                # logger.info(f"{embedding_item.embeddings_cpu.shape} prepared for transfer.")
+                logger.debug(
+                    f"{embedding_item.embeddings_cpu.shape} prepared for transfer."
+                )
                 # Update request for transfer metadata
                 request.multimodal_inputs[idx].multimodal_input.image_url = None
                 request.multimodal_inputs[
@@ -286,6 +295,9 @@ class EncodeWorkerHandler:
             time_end = time.perf_counter()
             self._accumulated_time += time_end - time_start
             self._processed_requests += 1
+            logger.debug(
+                f"received request {{ id: {request_id} }} at time {time_start:.4f}, processed in {time_end - time_start:.4f} seconds, break down: image loading and encoding time {(before_transfer_time - time_start):.4f} seconds, transfer preparation time {(after_transfer_time - before_transfer_time):.4f} seconds, after transfer time {(time_end - after_transfer_time):.4f} seconds."
+            )
             logger.debug(
                 f"Encoded image(s) for request {{ id: {request_id} }} in {time_end - time_start:.4f} seconds. "
                 f"Average encoding time: {self._accumulated_time / self._processed_requests:.4f} seconds over {self._processed_requests} requests."

@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import uuid
 from collections import defaultdict
 from enum import Enum
@@ -26,6 +27,11 @@ from ..multimodal_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Whether to split the multimodal items into smaller batches for encoding. This can help if multimodal items can be speed up
+# by separately encodeded with multiple workers.
+# Need to experiment with this setting to see if it brings benefits when concurrency > encoder count.
+SPLIT_ENCODE = int(os.getenv("SPLIT_ENCODE", 1))
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
@@ -114,7 +120,11 @@ class PreprocessedHandler(ProcessMixIn):
                 "No encode workers available to process multimodal input"
             )
         total_items = sum(len(urls) for urls in multimodal_inputs.values())
-        encode_batch_size = max(1, total_items // self.encode_worker_count)
+        encode_batch_size = (
+            max(1, total_items // self.encode_worker_count)
+            if SPLIT_ENCODE
+            else total_items
+        )
         encode_res_gen = []
         for mm_type, urls in multimodal_inputs.items():
             for url in urls:

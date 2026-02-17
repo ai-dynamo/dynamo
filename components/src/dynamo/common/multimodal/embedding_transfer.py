@@ -114,6 +114,29 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         self.sender_id = uuid.uuid4().hex
         self.embedding_counter = 0
 
+    def save_embeddings_to_file(
+        self, embedding_key: str, embeddings: torch.Tensor
+    ) -> str:
+        """
+        Save the embeddings to a local file and return the file path.
+
+        Args:
+            embedding_key: A unique key for the embeddings.
+            embeddings: A torch.Tensor of the embeddings to save.
+        Returns:
+            The file path where the embeddings are saved.
+        """
+        fd, tensor_path = tempfile.mkstemp(
+            prefix=f"encoder_cache.{embedding_key}.", suffix=".safetensors"
+        )
+        os.close(fd)
+        tensors = {"ec_cache": embeddings.cpu()}
+        safetensors_torch.save_file(
+            tensors,
+            tensor_path,
+        )
+        return tensor_path
+
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
     ) -> tuple[TransferRequest, asyncio.Future]:
@@ -131,15 +154,10 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         # This could involve publishing to a message queue or making an API call
         embedding_key = f"{self.sender_id}_{self.embedding_counter}"
         self.embedding_counter += 1
-        tensor_path = f"/tmp/encoder_cache.{embedding_key}.safetensors"
-        fd, tensor_path = tempfile.mkstemp(
-            prefix=f"encoder_cache.{embedding_key}.", suffix=".safetensors"
-        )
-        os.close(fd)
-        tensors = {"ec_cache": embeddings.cpu()}
-        safetensors_torch.save_file(
-            tensors,
-            tensor_path,
+        tensor_path = await asyncio.to_thread(
+            self.save_embeddings_to_file,
+            embedding_key,
+            embeddings,
         )
         fut = asyncio.get_event_loop().create_future()
         fut.set_result(None)
@@ -177,7 +195,7 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
             Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
         """
         tensor_path = request.serialized_request
-        tensors = safetensors_torch.load_file(tensor_path)
+        tensors = await asyncio.to_thread(safetensors_torch.load_file, tensor_path)
         embedding_tensor = tensors["ec_cache"]
         tensor_id = self.tensor_id_counter
         self.tensor_id_counter += 1
