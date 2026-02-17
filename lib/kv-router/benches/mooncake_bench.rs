@@ -97,7 +97,12 @@ impl IndexerArgs {
 struct Args {
     /// Path to a JSONL mooncake trace file. Each line is a JSON object with
     /// fields: uuid, timestamp, hash_ids, output_length.
-    mooncake_trace_path: String,
+    /// Required unless --test is passed.
+    mooncake_trace_path: Option<String>,
+
+    /// Run built-in self-tests instead of the benchmark.
+    #[clap(long)]
+    test: bool,
 
     /// Number of GPU blocks available in the mock engine's KV cache.
     /// Smaller values force more evictions and produce more remove events.
@@ -238,7 +243,11 @@ fn load_mooncake_trace(path: &str) -> anyhow::Result<Vec<MooncakeRequest>> {
 
 /// Load, transform, and partition the mooncake trace into per-worker request lists.
 fn process_mooncake_trace(args: &Args) -> anyhow::Result<Vec<Vec<MooncakeRequest>>> {
-    let requests = load_mooncake_trace(&args.mooncake_trace_path)?;
+    let path = args
+        .mooncake_trace_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("mooncake_trace_path is required for benchmarking"))?;
+    let requests = load_mooncake_trace(path)?;
     let requests = expand_trace_lengths(requests, args.trace_length_factor);
     let requests = duplicate_traces(requests, args.trace_duplication_factor);
     Ok(partition_trace(
@@ -747,9 +756,89 @@ async fn run_benchmark(
     Ok(())
 }
 
+fn run_tests() -> anyhow::Result<()> {
+    use std::collections::HashSet;
+    use std::io::Write;
+
+    let path =
+        std::env::temp_dir().join(format!("mooncake_bench_test_{}.jsonl", std::process::id()));
+    {
+        let mut f = File::create(&path)?;
+        for (i, (hash_ids, output_length)) in
+            [(&[0u64, 1, 2] as &[u64], 10u64), (&[0, 1, 3, 4], 10)]
+                .iter()
+                .enumerate()
+        {
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "timestamp": i as u64,
+                    "hash_ids": hash_ids,
+                    "output_length": output_length,
+                })
+            )?;
+        }
+    }
+
+    let args = Args::parse_from([
+        "test",
+        "--test",
+        path.to_str().unwrap(),
+        "--num-unique-inference-workers",
+        "2",
+        "--trace-length-factor",
+        "2",
+        "--trace-duplication-factor",
+        "2",
+        "--seed",
+        "42",
+    ]);
+
+    let traces = process_mooncake_trace(&args)?;
+    std::fs::remove_file(&path).ok();
+
+    let mut all_hashes: Vec<Vec<u64>> = traces
+        .into_iter()
+        .flat_map(|w| w.into_iter().map(|r| r.hash_ids))
+        .collect();
+    all_hashes.sort();
+
+    // expand(2): [0,1,2] → [0,1,2,3,4,5], [0,1,3,4] → [0,1,2,3,6,7,8,9]
+    // duplicate(2): max=9, offset=10
+    let mut expected = vec![
+        vec![0, 1, 2, 3, 4, 5],
+        vec![10, 11, 12, 13, 14, 15],
+        vec![0, 1, 2, 3, 6, 7, 8, 9],
+        vec![10, 11, 12, 13, 16, 17, 18, 19],
+    ];
+    expected.sort();
+    assert_eq!(all_hashes, expected, "hash_ids mismatch");
+
+    // Verify prefix structure within each copy.
+    let copy0: Vec<&Vec<u64>> = all_hashes.iter().filter(|h| h[0] == 0).collect();
+    let copy1: Vec<&Vec<u64>> = all_hashes.iter().filter(|h| h[0] == 10).collect();
+    assert_eq!(copy0.len(), 2);
+    assert_eq!(copy1.len(), 2);
+    assert_eq!(copy0[0][..4], copy0[1][..4], "copy 0 shared prefix broken");
+    assert_eq!(copy1[0][..4], copy1[1][..4], "copy 1 shared prefix broken");
+
+    // Verify disjointness between copies.
+    let set0: HashSet<u64> = copy0.iter().flat_map(|h| h.iter().copied()).collect();
+    let set1: HashSet<u64> = copy1.iter().flat_map(|h| h.iter().copied()).collect();
+    assert!(set0.is_disjoint(&set1), "copies are not hash-disjoint");
+
+    println!("All tests passed.");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    if args.test {
+        return run_tests();
+    }
 
     let traces = process_mooncake_trace(&args)?;
 
@@ -760,85 +849,4 @@ async fn main() -> anyhow::Result<()> {
     run_benchmark(indexer, traces, events, &args).await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    fn write_trace_file(requests: &[(&[u64], u64)]) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "mooncake_bench_test_{}.jsonl",
-            std::process::id()
-        ));
-        let mut f = File::create(&path).unwrap();
-        for (i, (hash_ids, output_length)) in requests.iter().enumerate() {
-            let line = serde_json::json!({
-                "timestamp": i as u64,
-                "hash_ids": hash_ids,
-                "output_length": output_length,
-            });
-            writeln!(f, "{}", line).unwrap();
-        }
-        path
-    }
-
-    #[test]
-    fn process_mooncake_trace_expand_and_duplicate() {
-        // Two requests sharing prefix [0, 1], one diverges to [2], the other to [3, 4].
-        let trace_path = write_trace_file(&[(&[0, 1, 2], 10), (&[0, 1, 3, 4], 10)]);
-
-        let args = Args::parse_from([
-            "test",
-            trace_path.to_str().unwrap(),
-            "--num-unique-inference-workers",
-            "2",
-            "--trace-length-factor",
-            "2",
-            "--trace-duplication-factor",
-            "2",
-            "--seed",
-            "42",
-        ]);
-
-        let traces = process_mooncake_trace(&args).unwrap();
-        std::fs::remove_file(&trace_path).ok();
-
-        // Collect all hash_id vecs across workers, sorted for deterministic comparison.
-        let mut all_hashes: Vec<Vec<u64>> = traces
-            .into_iter()
-            .flat_map(|w| w.into_iter().map(|r| r.hash_ids))
-            .collect();
-        all_hashes.sort();
-
-        // expand(2): [0,1,2] → [0,1,2,3,4,5], [0,1,3,4] → [0,1,2,3,6,7,8,9]
-        // duplicate(2): max=9, offset=10
-        //   req0 copy0: [0,1,2,3,4,5]      req0 copy1: [10,11,12,13,14,15]
-        //   req1 copy0: [0,1,2,3,6,7,8,9]  req1 copy1: [10,11,12,13,16,17,18,19]
-        let mut expected = vec![
-            vec![0, 1, 2, 3, 4, 5],
-            vec![10, 11, 12, 13, 14, 15],
-            vec![0, 1, 2, 3, 6, 7, 8, 9],
-            vec![10, 11, 12, 13, 16, 17, 18, 19],
-        ];
-        expected.sort();
-
-        assert_eq!(all_hashes, expected);
-
-        // Verify prefix structure: within each copy, the shared prefix is preserved.
-        // Copy 0 sequences share [0,1,2,3], copy 1 sequences share [10,11,12,13].
-        let copy0: Vec<&Vec<u64>> = all_hashes.iter().filter(|h| h[0] == 0).collect();
-        let copy1: Vec<&Vec<u64>> = all_hashes.iter().filter(|h| h[0] == 10).collect();
-        assert_eq!(copy0.len(), 2);
-        assert_eq!(copy1.len(), 2);
-        assert_eq!(copy0[0][..4], copy0[1][..4]);
-        assert_eq!(copy1[0][..4], copy1[1][..4]);
-
-        // Verify disjointness between copies.
-        let set0: std::collections::HashSet<u64> =
-            copy0.iter().flat_map(|h| h.iter().copied()).collect();
-        let set1: std::collections::HashSet<u64> =
-            copy1.iter().flat_map(|h| h.iter().copied()).collect();
-        assert!(set0.is_disjoint(&set1));
-    }
 }
