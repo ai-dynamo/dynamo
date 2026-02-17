@@ -84,12 +84,13 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
 # Install common and test dependencies as root
-RUN --mount=type=bind,source=.,target=/mnt/local_src \
+RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/requirements.txt \
+    --mount=type=bind,source=container/deps/requirements.test.txt,target=/tmp/deps/requirements.test.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
-        --requirement /mnt/local_src/container/deps/requirements.txt \
-        --requirement /mnt/local_src/container/deps/requirements.test.txt \
+        --requirement /tmp/deps/requirements.txt \
+        --requirement /tmp/deps/requirements.test.txt \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \

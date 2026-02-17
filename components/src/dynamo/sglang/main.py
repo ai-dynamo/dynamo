@@ -285,13 +285,8 @@ async def init(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()
 
-    logging.info(
-        f"Registering model with endpoint types: {dynamo_args.dyn_endpoint_types}"
-    )
-    if (
-        dynamo_args.custom_jinja_template
-        and "chat" not in dynamo_args.dyn_endpoint_types
-    ):
+    logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
+    if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
         logging.warning(
             "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
@@ -312,7 +307,7 @@ async def init(
                 generate_endpoint,
                 server_args,
                 dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
             ),
         )
@@ -462,7 +457,7 @@ async def init_diffusion(
     ).to_dict()
 
     logging.info(
-        f"Registering diffusion model with endpoint types: {dynamo_args.dyn_endpoint_types}"
+        f"Registering diffusion model with endpoint types: {dynamo_args.endpoint_types}"
     )
 
     try:
@@ -479,7 +474,7 @@ async def init_diffusion(
                 generate_endpoint,
                 server_args,
                 dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
             ),
         )

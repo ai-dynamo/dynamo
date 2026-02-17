@@ -1296,6 +1296,162 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			wantErr: true,
 			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [gateway]",
 		},
+		{
+			name: "restart.id change while rolling update Pending - rejected",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "old-restart-id",
+					},
+				},
+				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
+					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
+						Phase: nvidiacomv1alpha1.RollingUpdatePhasePending,
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "new-restart-id",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.restart.id cannot be changed while a rolling update is Pending",
+		},
+		{
+			name: "restart.id change while rolling update InProgress - rejected",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "old-restart-id",
+					},
+				},
+				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
+					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
+						Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "new-restart-id",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.restart.id cannot be changed while a rolling update is InProgress",
+		},
+		{
+			name: "restart.id change while rolling update Completed - allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "old-restart-id",
+					},
+				},
+				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
+					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
+						Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "new-restart-id",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "restart.id change with no rolling update - allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "old-restart-id",
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "new-restart-id",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "spec change without restart.id change during rolling update - allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							Replicas: func() *int32 { r := int32(1); return &r }(),
+						},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "same-restart-id",
+					},
+				},
+				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
+					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
+						Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							Replicas: func() *int32 { r := int32(3); return &r }(),
+						},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "same-restart-id",
+					},
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
