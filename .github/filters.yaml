@@ -64,6 +64,7 @@ ci: &ci
   - '.github/filters.yaml'
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
+  - '.github/scripts/route_buildkit.sh'
 
 core:
   # Exclude documentation files first, then include patterns override for specific paths
