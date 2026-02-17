@@ -209,7 +209,7 @@ pub struct LocalTransferManager<
 > {
     futures_tx: mpsc::Sender<TransferFuture<Source, Target, Locality, Metadata>>,
     transfer_ctx: Arc<TransferContext>,
-    transfer_latency: Option<prometheus::Histogram>,
+    transfer_latency: Option<(prometheus::HistogramVec, String)>,
     queue_latency: Option<prometheus::Histogram>,
 }
 
@@ -221,7 +221,7 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         max_concurrent_transfers: usize,
         runtime: &Handle,
         cancellation_token: CancellationToken,
-        transfer_latency: Option<prometheus::Histogram>,
+        transfer_latency: Option<(prometheus::HistogramVec, String)>,
         queue_latency: Option<prometheus::Histogram>,
     ) -> Result<Self> {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
@@ -301,8 +301,8 @@ where
         let transfer_metric = self.transfer_latency.clone();
         let completion_future = async move {
             let _ = notify.await;
-            if let Some(m) = &transfer_metric {
-                m.observe(transfer_start.elapsed().as_secs_f64());
+            if let Some((hv, label)) = &transfer_metric {
+                hv.with_label_values(&[label]).observe(transfer_start.elapsed().as_secs_f64());
             }
             pending_transfer
         };
