@@ -34,14 +34,13 @@ The Dynamo Frontend is the API gateway for serving LLM inference requests. It pr
 python -m dynamo.frontend --http-port 8000
 ```
 
-This starts an OpenAI-compatible HTTP server with integrated preprocessing and routing. Backends are auto-discovered when they call `register_model`.
+This starts an OpenAI-compatible HTTP server with integrated pre/post processing and routing. Backends are auto-discovered when they call `register_model`.
 
 The frontend does the pre and post processing. To do this it will need access to the model configuration files: `config.json`, `tokenizer.json`, `tokenizer_config.json`, etc. It does not need the weights.
 
-To give frontend access to the model config files:
+Frontend will download the files it needs from Hugging Face, no setup is required. However we recommend setting up [modelexpress-server](https://github.com/ai-dynamo/modelexpress) and a shared folder such as a Kubernetes PVC. This ensures the model is only downloaded once across the whole cluster.
 
-1. Recommended. Use [modelexpress-server](https://github.com/ai-dynamo/modelexpress) and a shared folder. This allows only downloading the model from remote a single time for the whole cluster.
-2. Or make the model files available locally at the same file path as on the worker. This allows running a private or customized model that is not on Hugging Face. If the model is on Hugging Face, pre-download it to front-end machines with the [hf](https://huggingface.co/docs/huggingface_hub/en/guides/cli) tool.
+If the model is not available on Hugging Face, such as a private or customized model, you will need to make the model files available locally at the same file path as on the backend. The backend's `--model-path <here>` will need to exist on the frontend and contain at least the configuration (JSON) files.
 
 ### KServe gRPC Frontend
 
