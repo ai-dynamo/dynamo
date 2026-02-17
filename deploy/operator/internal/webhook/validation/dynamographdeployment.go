@@ -126,6 +126,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 		return warnings, err
 	}
 
+	// Validate no restart.id change during active rolling update
+	if err := v.validateNoRestartDuringRollingUpdate(old); err != nil {
+		return warnings, err
+	}
+
 	return warnings, nil
 }
 
@@ -471,4 +476,32 @@ func difference(a, b map[string]struct{}) []string {
 		}
 	}
 	return result
+}
+
+// validateNoRestartDuringRollingUpdate rejects restart.id changes while a rolling update is active.
+func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	// Check if a rolling update is active (Pending or InProgress)
+	if old.Status.RollingUpdate == nil {
+		return nil
+	}
+	phase := old.Status.RollingUpdate.Phase
+	if phase != nvidiacomv1alpha1.RollingUpdatePhasePending && phase != nvidiacomv1alpha1.RollingUpdatePhaseInProgress {
+		return nil
+	}
+
+	// Compare restart IDs
+	oldID := ""
+	if old.Spec.Restart != nil {
+		oldID = old.Spec.Restart.ID
+	}
+	newID := ""
+	if v.deployment.Spec.Restart != nil {
+		newID = v.deployment.Spec.Restart.ID
+	}
+
+	if oldID != newID {
+		return fmt.Errorf("spec.restart.id cannot be changed while a rolling update is %s", phase)
+	}
+
+	return nil
 }

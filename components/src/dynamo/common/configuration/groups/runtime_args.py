@@ -15,6 +15,7 @@ class DynamoRuntimeConfig(ConfigBase):
     """Configuration for Dynamo runtime (common across all backends)."""
 
     namespace: str
+    endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
     event_plane: str
@@ -51,6 +52,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_NAMESPACE",
             default="dynamo",
             help="Dynamo namespace",
+        )
+        add_argument(
+            g,
+            flag_name="--endpoint",
+            env_var="DYN_ENDPOINT",
+            default=None,
+            help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: dyn://dynamo.backend.generate. Currently used only by TRT-LLM and SGLang backends.",
         )
         add_argument(
             g,

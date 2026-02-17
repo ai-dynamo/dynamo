@@ -51,6 +51,8 @@ navigation:
             path: ../pages/kubernetes/deployment/dynamomodel-guide.md
           - page: Autoscaling
             path: ../pages/kubernetes/autoscaling.md
+          - page: Inference Gateway (GAIE)
+            path: ../pages/kubernetes/inference-gateway.md
           - section: Checkpointing
             path: ../pages/kubernetes/chrek/README.md
             contents:
