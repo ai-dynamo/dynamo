@@ -34,6 +34,7 @@ prometheus_client==0.23.1
 prophet==1.2.1
 protobuf>=5.29.5,<7.0.0
 pydantic>=2.11.4,<2.13  # vllm==0.12.0 depends on pydantic>=2.12.0
+pydantic-settings<2.13.0  # tensorrt_llm DynamicYamlWithDeepMergeSettingsSource incompatible with 2.13.0+ deep_merge param
 PyYAML==6.0.3
 scikit-learn==1.7.2
 scipy<1.14.0  # Upper bound for pmdarima compatibility
