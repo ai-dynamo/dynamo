@@ -129,7 +129,7 @@ runs:
           EXTRA_ARGS+=" --no-cache"
         fi
         if [ "${{ inputs.use_sccache }}" == "true" ]; then
-          EXTRA_ARGS+=" --build-arg USE_SCCACHE='true'"
+          EXTRA_ARGS+=" --build-arg USE_SCCACHE=true"
         fi
         if [ "${{ inputs.push_image }}" == "true" ]; then
           EXTRA_ARGS+=" --push"
