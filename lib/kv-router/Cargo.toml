@@ -53,6 +53,7 @@ dynamo-mocker = { workspace = true }
 dynamo-tokens = { workspace = true }
 minstant = "0.1.7"
 futures = "0.3"
+plotters = "0.3"
 
 
 [[bench]]

@@ -7,57 +7,48 @@
 //! progression from naive approaches to the production indexers.
 //!
 //! - [`NaiveNestedMap`]: `worker -> { local_hash -> set<seq_hash> }`.  O(W × D)
-//!   per `find_matches` call.  Blog section 2.
+//!   per `find_matches` call, behind a true single-threaded actor.  Blog section 2.
 //! - [`InvertedIndex`]: `local_hash -> { seq_hash -> set<worker> }`.  O(D + W)
 //!   per `find_matches` call.  Blog section 3.
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::indexer::SyncIndexer;
+use crate::indexer::{KvIndexerInterface, KvRouterError, SyncIndexer};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, LocalBlockHash, OverlapScores,
-    RouterEvent, WorkerId, WorkerWithDpRank,
+    RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
 };
 
 // ============================================================================
-// Section 2 — Naive Nested Map
+// Section 2 — Naive Nested Map + Actor
 // ============================================================================
 
-/// Naive per-worker nested `HashMap` index (blog section 2).
+/// Plain nested `HashMap` index — no locks, owned exclusively by the actor thread.
 ///
 /// Structure: `worker -> { local_hash -> set<seq_hash> }`.
-///
-/// `find_matches` iterates every worker and walks the full query depth for each
-/// one, giving O(W × D) per call.  A coarse `RwLock` serializes readers and
-/// writers, mirroring the blog's single-threaded actor semantics.
-pub struct NaiveNestedMap {
-    index: RwLock<
-        HashMap<WorkerWithDpRank, HashMap<LocalBlockHash, HashSet<ExternalSequenceBlockHash>>>,
-    >,
-    reverse: RwLock<HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, LocalBlockHash>>>,
+struct NaiveNestedMapInner {
+    index: HashMap<WorkerWithDpRank, HashMap<LocalBlockHash, HashSet<ExternalSequenceBlockHash>>>,
+    reverse: HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, LocalBlockHash>>,
 }
 
-impl NaiveNestedMap {
-    pub fn new() -> Self {
+impl NaiveNestedMapInner {
+    fn new() -> Self {
         Self {
-            index: RwLock::new(HashMap::new()),
-            reverse: RwLock::new(HashMap::new()),
+            index: HashMap::new(),
+            reverse: HashMap::new(),
         }
     }
-}
 
-impl SyncIndexer for NaiveNestedMap {
-    fn find_matches(&self, sequence: &[LocalBlockHash], _early_exit: bool) -> OverlapScores {
+    fn find_matches(&self, sequence: &[LocalBlockHash]) -> OverlapScores {
         let mut scores = OverlapScores::new();
         if sequence.is_empty() {
             return scores;
         }
 
-        let index = self.index.read().unwrap();
-
-        for (worker, blocks) in index.iter() {
+        for (worker, blocks) in &self.index {
             let mut depth = 0u32;
             for local_hash in sequence {
                 let Some(set) = blocks.get(local_hash) else {
@@ -76,15 +67,13 @@ impl SyncIndexer for NaiveNestedMap {
         scores
     }
 
-    fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+    fn apply_event(&mut self, event: RouterEvent) {
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
 
         match event.event.data {
             KvCacheEventData::Stored(store_data) => {
-                let mut index = self.index.write().unwrap();
-                let mut reverse = self.reverse.write().unwrap();
-                let worker_map = index.entry(worker).or_default();
-                let rev_map = reverse.entry(worker).or_default();
+                let worker_map = self.index.entry(worker).or_default();
+                let rev_map = self.reverse.entry(worker).or_default();
 
                 for block in store_data.blocks {
                     worker_map
@@ -93,18 +82,13 @@ impl SyncIndexer for NaiveNestedMap {
                         .insert(block.block_hash);
                     rev_map.insert(block.block_hash, block.tokens_hash);
                 }
-
-                Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                let mut index = self.index.write().unwrap();
-                let mut reverse = self.reverse.write().unwrap();
-
-                let Some(worker_map) = index.get_mut(&worker) else {
-                    return Ok(());
+                let Some(worker_map) = self.index.get_mut(&worker) else {
+                    return;
                 };
-                let Some(rev_map) = reverse.get_mut(&worker) else {
-                    return Ok(());
+                let Some(rev_map) = self.reverse.get_mut(&worker) else {
+                    return;
                 };
 
                 for seq_hash in &remove_data.block_hashes {
@@ -115,34 +99,131 @@ impl SyncIndexer for NaiveNestedMap {
                         set.remove(seq_hash);
                     }
                 }
-
-                Ok(())
             }
             KvCacheEventData::Cleared => {
-                self.clear_worker(worker);
-                Ok(())
+                self.index.remove(&worker);
+                self.reverse.remove(&worker);
             }
         }
     }
 
-    fn remove_worker(&self, worker_id: WorkerId) {
-        let mut index = self.index.write().unwrap();
-        let mut reverse = self.reverse.write().unwrap();
-        index.retain(|w, _| w.worker_id != worker_id);
-        reverse.retain(|w, _| w.worker_id != worker_id);
-    }
-
-    fn dump_events(&self) -> Vec<RouterEvent> {
-        Vec::new()
+    fn remove_worker(&mut self, worker_id: WorkerId) {
+        self.index.retain(|w, _| w.worker_id != worker_id);
+        self.reverse.retain(|w, _| w.worker_id != worker_id);
     }
 }
 
+struct MatchRequest {
+    sequence: Vec<LocalBlockHash>,
+    reply: oneshot::Sender<OverlapScores>,
+}
+
+enum ActorMessage {
+    Event(RouterEvent),
+    Match(MatchRequest),
+    RemoveWorker(WorkerId),
+}
+
+/// Single-threaded actor wrapping [`NaiveNestedMapInner`] (blog section 2).
+///
+/// All reads and writes are serialized through a single OS thread via channels.
+/// This is the pure actor pattern described in the blog — no concurrent access
+/// to the data structure at all.
+pub struct NaiveNestedMap {
+    tx: mpsc::Sender<ActorMessage>,
+}
+
 impl NaiveNestedMap {
-    fn clear_worker(&self, worker: WorkerWithDpRank) {
-        let mut index = self.index.write().unwrap();
-        let mut reverse = self.reverse.write().unwrap();
-        index.remove(&worker);
-        reverse.remove(&worker);
+    pub fn new() -> Self {
+        let (tx, mut rx) = mpsc::channel::<ActorMessage>(2048);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async move {
+                let mut inner = NaiveNestedMapInner::new();
+
+                while let Some(msg) = rx.recv().await {
+                    match msg {
+                        ActorMessage::Event(event) => {
+                            inner.apply_event(event);
+                        }
+                        ActorMessage::Match(req) => {
+                            let scores = inner.find_matches(&req.sequence);
+                            let _ = req.reply.send(scores);
+                        }
+                        ActorMessage::RemoveWorker(worker_id) => {
+                            inner.remove_worker(worker_id);
+                        }
+                    }
+                }
+            });
+        });
+
+        Self { tx }
+    }
+}
+
+#[async_trait]
+impl KvIndexerInterface for NaiveNestedMap {
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ActorMessage::Match(MatchRequest {
+                sequence,
+                reply: reply_tx,
+            }))
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        reply_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+
+    async fn find_matches_for_request(
+        &self,
+        _tokens: &[u32],
+    ) -> Result<OverlapScores, KvRouterError> {
+        unimplemented!("not used in bench")
+    }
+
+    async fn apply_event(&self, event: RouterEvent) {
+        let _ = self.tx.send(ActorMessage::Event(event)).await;
+    }
+
+    async fn remove_worker(&self, worker: WorkerId) {
+        let _ = self.tx.send(ActorMessage::RemoveWorker(worker)).await;
+    }
+
+    fn shutdown(&self) {}
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        Ok(Vec::new())
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        _tokens_with_hashes: &mut TokensWithHashes,
+        _worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        unimplemented!("not used in bench")
+    }
+
+    async fn flush(&self) -> usize {
+        let curr_size = self.tx.max_capacity() - self.tx.capacity();
+        loop {
+            if self.tx.capacity() == self.tx.max_capacity() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        }
+        curr_size
     }
 }
 

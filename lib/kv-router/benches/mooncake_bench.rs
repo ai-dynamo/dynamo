@@ -27,6 +27,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+use plotters::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Indexer backend selection and its backend-specific parameters.
@@ -60,12 +61,9 @@ enum IndexerArgs {
         num_event_workers: usize,
     },
 
-    /// Naive per-worker nested HashMap indexer (blog section 2).
-    NaiveNestedMap {
-        /// Number of OS threads that consume and apply KV cache events.
-        #[clap(long, default_value = "1")]
-        num_event_workers: usize,
-    },
+    /// Naive per-worker nested HashMap indexer behind a single-threaded actor
+    /// (blog section 2).
+    NaiveNestedMap {},
 
     /// Inverted index keyed by local_hash (blog section 3).
     InvertedIndex {
@@ -105,11 +103,7 @@ impl IndexerArgs {
                     args.block_size,
                 ))
             }
-            IndexerArgs::NaiveNestedMap { num_event_workers } => Arc::new(ThreadPoolIndexer::new(
-                NaiveNestedMap::new(),
-                num_event_workers,
-                args.block_size,
-            )),
+            IndexerArgs::NaiveNestedMap {} => Arc::new(NaiveNestedMap::new()),
             IndexerArgs::InvertedIndex { num_event_workers } => Arc::new(ThreadPoolIndexer::new(
                 InvertedIndex::new(),
                 num_event_workers,
@@ -128,7 +122,7 @@ struct Args {
 
     /// Number of GPU blocks available in the mock engine's KV cache.
     /// Smaller values force more evictions and produce more remove events.
-    #[clap(long, default_value = "2048")]
+    #[clap(long, default_value = "16384")]
     num_gpu_blocks: usize,
 
     /// Number of tokens per KV cache block.
@@ -148,7 +142,7 @@ struct Args {
 
     /// Number of unique simulated inference workers. Each gets a random
     /// partition of the trace and its own mock engine for event generation.
-    #[clap(short, long, default_value = "64")]
+    #[clap(short, long, default_value = "256")]
     num_unique_inference_workers: usize,
 
     /// How many times to duplicate the set of unique workers during the
@@ -160,6 +154,27 @@ struct Args {
     /// RNG seed for reproducible worker-to-trace assignment.
     #[clap(long, default_value = "42")]
     seed: u64,
+
+    /// Enable throughput vs p99 latency sweep mode. Runs the benchmark at
+    /// multiple benchmark_duration_ms values and plots the results.
+    #[clap(long)]
+    sweep: bool,
+
+    /// Minimum benchmark duration (ms) for sweep mode.
+    #[clap(long, default_value = "1000")]
+    sweep_min_ms: u64,
+
+    /// Maximum benchmark duration (ms) for sweep mode.
+    #[clap(long, default_value = "50000")]
+    sweep_max_ms: u64,
+
+    /// Number of logarithmically spaced sweep steps between min and max.
+    #[clap(long, default_value = "10")]
+    sweep_steps: usize,
+
+    /// Output path for the sweep plot PNG.
+    #[clap(long, default_value = "sweep_plot.png")]
+    sweep_output: String,
 
     /// Indexer backend to benchmark (defaults to radix-tree if not specified).
     #[clap(subcommand)]
@@ -437,7 +452,9 @@ async fn generate_events(
 fn prepare_worker_traces(
     traces: Vec<Vec<MooncakeRequest>>,
     events: Vec<Vec<(KvCacheEvent, Instant)>>,
-    args: &Args,
+    block_size: u32,
+    benchmark_duration_ms: u64,
+    trace_simulation_duration_ms: u64,
 ) -> Vec<Vec<WorkerTrace>> {
     assert!(traces.len() == events.len());
 
@@ -449,13 +466,13 @@ fn prepare_worker_traces(
             trace
                 .into_iter()
                 .map(|request| WorkerTrace {
-                    timestamp_us: request.timestamp * 1000 * args.benchmark_duration_ms
+                    timestamp_us: request.timestamp * 1000 * benchmark_duration_ms
                         / trace_duration_ms,
                     entry: WorkerTraceEntry::Request(
                         request
                             .hash_ids
                             .iter()
-                            .map(|id| local_block_hash_from_id(*id, args.block_size))
+                            .map(|id| local_block_hash_from_id(*id, block_size))
                             .collect(),
                     ),
                 })
@@ -471,8 +488,8 @@ fn prepare_worker_traces(
                 .into_iter()
                 .map(|(event, timestamp)| WorkerTrace {
                     timestamp_us: (timestamp - start_instant).as_micros() as u64
-                        * args.benchmark_duration_ms
-                        / args.trace_simulation_duration_ms,
+                        * benchmark_duration_ms
+                        / trace_simulation_duration_ms,
                     entry: WorkerTraceEntry::Event(event),
                 })
                 .collect::<Vec<_>>()
@@ -493,6 +510,16 @@ fn prepare_worker_traces(
         .collect()
 }
 
+/// Results from a single benchmark run.
+struct BenchmarkResults {
+    request_throughput: f32,
+    event_throughput: f32,
+    latency_p50_us: f32,
+    latency_p95_us: f32,
+    latency_p99_us: f32,
+    latency_max_us: f32,
+}
+
 /// Run the benchmark: replay each worker's merged trace against the indexer,
 /// measuring find_matches latency and event processing throughput.
 ///
@@ -504,8 +531,15 @@ async fn run_benchmark(
     traces: Vec<Vec<MooncakeRequest>>,
     events: Vec<Vec<(KvCacheEvent, Instant)>>,
     args: &Args,
-) -> anyhow::Result<()> {
-    let worker_traces = prepare_worker_traces(traces, events, args);
+    benchmark_duration_ms: u64,
+) -> anyhow::Result<BenchmarkResults> {
+    let worker_traces = prepare_worker_traces(
+        traces,
+        events,
+        args.block_size,
+        benchmark_duration_ms,
+        args.trace_simulation_duration_ms,
+    );
     let worker_traces = worker_traces
         .into_iter()
         .map(|trace| Arc::new(trace))
@@ -604,7 +638,7 @@ async fn run_benchmark(
         latencies.extend(task.await??);
     }
 
-    if progress.elapsed() > Duration::from_millis(args.benchmark_duration_ms * 11 / 10) {
+    if progress.elapsed() > Duration::from_millis(benchmark_duration_ms * 11 / 10) {
         eprintln!(
             "WARNING: The benchmarker is unable to keep up with the request/event generation rate. Rerun with a larger --benchmark-duration-ms."
         )
@@ -650,33 +684,73 @@ async fn run_benchmark(
         );
     }
 
-    println!(
-        "Request Throughput: {} req/s",
-        total_requests as f32 / request_duration.as_millis() as f32 * 1000.0
-    );
-    println!(
-        "Event Throughput: {} events/s",
-        total_events as f32 / event_duration.as_millis() as f32 * 1000.0
-    );
+    let request_throughput = total_requests as f32 / request_duration.as_millis() as f32 * 1000.0;
+    let event_throughput = total_events as f32 / event_duration.as_millis() as f32 * 1000.0;
 
     latencies.sort_unstable();
-    println!(
-        "Latency p50: {}us",
-        latencies[latencies.len() / 2] as f32 / 1000.0
-    );
-    println!(
-        "Latency p95: {}us",
-        latencies[latencies.len() * 95 / 100] as f32 / 1000.0
-    );
-    println!(
-        "Latency p99: {}us",
-        latencies[latencies.len() * 99 / 100] as f32 / 1000.0
-    );
-    println!(
-        "Latency max: {}us",
-        *latencies.last().unwrap() as f32 / 1000.0
-    );
+    let latency_p50_us = latencies[latencies.len() / 2] as f32 / 1000.0;
+    let latency_p95_us = latencies[latencies.len() * 95 / 100] as f32 / 1000.0;
+    let latency_p99_us = latencies[latencies.len() * 99 / 100] as f32 / 1000.0;
+    let latency_max_us = *latencies.last().unwrap() as f32 / 1000.0;
 
+    println!("Request Throughput: {} req/s", request_throughput);
+    println!("Event Throughput: {} events/s", event_throughput);
+    println!("Latency p50: {}us", latency_p50_us);
+    println!("Latency p95: {}us", latency_p95_us);
+    println!("Latency p99: {}us", latency_p99_us);
+    println!("Latency max: {}us", latency_max_us);
+
+    Ok(BenchmarkResults {
+        request_throughput,
+        event_throughput,
+        latency_p50_us,
+        latency_p95_us,
+        latency_p99_us,
+        latency_max_us,
+    })
+}
+
+fn plot_sweep(results: &[(u64, BenchmarkResults)], output_path: &str) -> anyhow::Result<()> {
+    let throughputs: Vec<f32> = results
+        .iter()
+        .map(|(_, r)| r.request_throughput + r.event_throughput)
+        .collect();
+    let p99s: Vec<f32> = results.iter().map(|(_, r)| r.latency_p99_us).collect();
+
+    let x_min = p99s.iter().cloned().reduce(f32::min).unwrap() * 0.9;
+    let x_max = p99s.iter().cloned().reduce(f32::max).unwrap() * 1.1;
+    let y_min = throughputs.iter().cloned().reduce(f32::min).unwrap() * 0.9;
+    let y_max = throughputs.iter().cloned().reduce(f32::max).unwrap() * 1.1;
+
+    let root = BitMapBackend::new(output_path, (800, 500)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("p99 Latency vs Throughput", ("sans-serif", 22).into_font())
+        .margin(20)
+        .x_label_area_size(40)
+        .y_label_area_size(60)
+        .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+
+    chart
+        .configure_mesh()
+        .x_desc("p99 Latency (us)")
+        .y_desc("Combined Throughput (ops/s)")
+        .draw()?;
+
+    chart.draw_series(LineSeries::new(
+        p99s.iter().zip(throughputs.iter()).map(|(&x, &y)| (x, y)),
+        &BLUE,
+    ))?;
+
+    chart.draw_series(
+        p99s.iter()
+            .zip(throughputs.iter())
+            .map(|(&x, &y)| Circle::new((x, y), 4, BLUE.filled())),
+    )?;
+
+    root.present()?;
+    println!("Sweep plot saved to {}", output_path);
     Ok(())
 }
 
@@ -685,12 +759,52 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let traces = process_mooncake_trace(&args)?;
-
     let events = generate_events(&traces, &args).await?;
 
-    let indexer = args.get_indexer().build(&args);
+    if args.sweep {
+        let log_min = (args.sweep_min_ms as f64).ln();
+        let log_max = (args.sweep_max_ms as f64).ln();
+        let n = args.sweep_steps;
+        let durations: Vec<u64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / (n - 1) as f64;
+                (log_max * (1.0 - t) + log_min * t).exp().round() as u64
+            })
+            .collect();
 
-    run_benchmark(indexer, traces, events, &args).await?;
+        let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
+
+        for &dur_ms in &durations {
+            println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
+            let indexer = args.get_indexer().build(&args);
+            let result =
+                run_benchmark(indexer, traces.clone(), events.clone(), &args, dur_ms).await?;
+            results.push((dur_ms, result));
+        }
+
+        println!("\n=== Sweep Summary ===");
+        println!(
+            "{:>12} {:>14} {:>14} {:>10} {:>10} {:>10} {:>10}",
+            "duration_ms", "req_thpt", "evt_thpt", "p50(us)", "p95(us)", "p99(us)", "max(us)"
+        );
+        for (dur, r) in &results {
+            println!(
+                "{:>12} {:>14.1} {:>14.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
+                dur,
+                r.request_throughput,
+                r.event_throughput,
+                r.latency_p50_us,
+                r.latency_p95_us,
+                r.latency_p99_us,
+                r.latency_max_us,
+            );
+        }
+
+        plot_sweep(&results, &args.sweep_output)?;
+    } else {
+        let indexer = args.get_indexer().build(&args);
+        run_benchmark(indexer, traces, events, &args, args.benchmark_duration_ms).await?;
+    }
 
     Ok(())
 }
