@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from dynamo.runtime import Context
+from dynamo._internal import Context
 
 pytestmark = pytest.mark.pre_merge
 
