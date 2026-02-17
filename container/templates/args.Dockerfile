@@ -24,24 +24,13 @@ ARG PYTHON_VERSION={{ context.dynamo.python_version }}
 ARG CUDA_VERSION={{ cuda_version }}
 ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
 
-{% if framework == "vllm" or framework == "sglang" -%}
+# Base and runtime images configuration
 {% set cuda_context_key = "cuda" + cuda_version %}
-# Base image configuration
 ARG BASE_IMAGE={{ context[framework].base_image }}
 ARG BASE_IMAGE_TAG={{ context[framework][cuda_context_key].base_image_tag }}
-{% elif framework != "vllm" and framework != "sglang" -%}
-ARG BASE_IMAGE={{ context[framework].base_image }}
-ARG BASE_IMAGE_TAG={{ context[framework].base_image_tag }}
-{%- endif %}
-
-{% if framework == "sglang" -%}
-{% set cuda_context_key = "cuda" + cuda_version %}
-# Base image configuration
+{% if framework in ["sglang", "trtllm", "vllm"] -%}
 ARG RUNTIME_IMAGE={{ context[framework].runtime_image }}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][cuda_context_key].runtime_image_tag }}
-{% elif framework != "dynamo" -%}
-ARG RUNTIME_IMAGE={{ context[framework].runtime_image }}
-ARG RUNTIME_IMAGE_TAG={{ context[framework].runtime_image_tag }}
 {%- endif %}
 
 # Build configuration
