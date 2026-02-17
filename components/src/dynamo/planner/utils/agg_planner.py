@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import logging
 from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.planner_args import PlannerConfig
 from dynamo.planner.utils.load_based_regression import LoadBasedRegressionModel
 from dynamo.planner.utils.planner_core import (
     BasePlanner,
@@ -41,17 +41,17 @@ class AggPlanner:
     ENGINE_WORKER_TYPE = "decode"
 
     def __init__(
-        self, runtime: Optional[DistributedRuntime], args: argparse.Namespace
+        self, runtime: Optional[DistributedRuntime], config: PlannerConfig
     ) -> None:
-        self.args = args
+        self.args = config
         self.shared_state = PlannerSharedState()
 
-        if getattr(args, "enable_throughput_scaling", False):
+        if getattr(config, "enable_throughput_scaling", False):
             raise ValueError(
                 "Aggregated planner only supports load-based scaling. "
                 "Please use --disable-throughput-scaling or do not set --enable-throughput-scaling."
             )
-        if not getattr(args, "enable_loadbased_scaling", False):
+        if not getattr(config, "enable_loadbased_scaling", False):
             raise ValueError("Aggregated planner requires --enable-loadbased-scaling.")
 
         prometheus_metrics = PlannerPrometheusMetrics()
@@ -60,7 +60,7 @@ class AggPlanner:
         # We use DECODE component_type because engine metrics are labeled "decode"
         self.planner = BasePlanner(
             runtime,
-            args,
+            config,
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
             start_prometheus_server=True,
@@ -70,12 +70,12 @@ class AggPlanner:
 
         # Create both regression models (agg needs both TTFT and ITL)
         self.ttft_regression = LoadBasedRegressionModel(
-            window_size=args.loadbased_learning_window,
-            min_observations=args.loadbased_min_observations,
+            window_size=config.loadbased_learning_window,
+            min_observations=config.loadbased_min_observations,
         )
         self.itl_regression = LoadBasedRegressionModel(
-            window_size=args.loadbased_learning_window,
-            min_observations=args.loadbased_min_observations,
+            window_size=config.loadbased_learning_window,
+            min_observations=config.loadbased_min_observations,
         )
 
         self.cached_load_metrics = CachedLoadMetrics()

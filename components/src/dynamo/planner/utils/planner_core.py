@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import logging
 import math
@@ -18,6 +17,7 @@ from dynamo.planner import (
     VirtualConnector,
 )
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+from dynamo.planner.planner_args import PlannerConfig
 from dynamo.planner.utils.exceptions import DeploymentValidationError
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
@@ -115,7 +115,7 @@ class PlannerSharedState:
 
 
 def _apply_global_gpu_budget(
-    next_num_p: int, next_num_d: int, args: argparse.Namespace
+    next_num_p: int, next_num_d: int, config: PlannerConfig
 ) -> tuple[int, int]:
     """Apply GPU budget constraint to both prefill and decode replicas.
 
@@ -125,45 +125,45 @@ def _apply_global_gpu_budget(
     GPUs for min_endpoint decode replicas. Remaining budget is then allocated to decode.
     Returns (0, 0) if budget cannot satisfy min_endpoint for both components.
     """
-    if args.max_gpu_budget < 0:
+    if config.max_gpu_budget < 0:
         return next_num_p, next_num_d
     total_gpu_required = (
-        next_num_p * args.prefill_engine_num_gpu
-        + next_num_d * args.decode_engine_num_gpu
+        next_num_p * config.prefill_engine_num_gpu
+        + next_num_d * config.decode_engine_num_gpu
     )
-    if total_gpu_required <= args.max_gpu_budget:
+    if total_gpu_required <= config.max_gpu_budget:
         return next_num_p, next_num_d
     min_required = (
-        args.min_endpoint * args.prefill_engine_num_gpu
-        + args.min_endpoint * args.decode_engine_num_gpu
+        config.min_endpoint * config.prefill_engine_num_gpu
+        + config.min_endpoint * config.decode_engine_num_gpu
     )
-    if args.max_gpu_budget < min_required:
+    if config.max_gpu_budget < min_required:
         logger.warning(
-            f"max_gpu_budget ({args.max_gpu_budget}) is below the minimum required "
+            f"max_gpu_budget ({config.max_gpu_budget}) is below the minimum required "
             f"for min_endpoint ({min_required}); enforcing zero replicas"
         )
         return 0, 0
-    scale = args.max_gpu_budget / total_gpu_required
+    scale = config.max_gpu_budget / total_gpu_required
     max_prefill = math.floor(
-        (args.max_gpu_budget - args.min_endpoint * args.decode_engine_num_gpu)
-        / args.prefill_engine_num_gpu
+        (config.max_gpu_budget - config.min_endpoint * config.decode_engine_num_gpu)
+        / config.prefill_engine_num_gpu
     )
     next_num_p = max(
-        args.min_endpoint, min(max_prefill, math.floor(next_num_p * scale))
+        config.min_endpoint, min(max_prefill, math.floor(next_num_p * scale))
     )
-    remaining = args.max_gpu_budget - next_num_p * args.prefill_engine_num_gpu
+    remaining = config.max_gpu_budget - next_num_p * config.prefill_engine_num_gpu
     next_num_d = max(
-        args.min_endpoint, math.floor(remaining / args.decode_engine_num_gpu)
+        config.min_endpoint, math.floor(remaining / config.decode_engine_num_gpu)
     )
     logger.warning(
-        f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({args.max_gpu_budget}), "
+        f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({config.max_gpu_budget}), "
         f"scaling down to {next_num_p} prefill and {next_num_d} decode replicas"
     )
     return next_num_p, next_num_d
 
 
 def _apply_component_gpu_budget(
-    desired_replicas: int, engine_num_gpu: int, args: argparse.Namespace
+    desired_replicas: int, engine_num_gpu: int, config: PlannerConfig
 ) -> int:
     """Apply GPU budget constraint to a single component (prefill-only or decode-only).
 
@@ -171,29 +171,29 @@ def _apply_component_gpu_budget(
     using scale = budget / total_required, floored and clamped to at least min_endpoint.
     Returns 0 if budget cannot satisfy min_endpoint replicas.
     """
-    if args.max_gpu_budget < 0:
+    if config.max_gpu_budget < 0:
         return desired_replicas
     total_gpu_required = desired_replicas * engine_num_gpu
-    if total_gpu_required <= args.max_gpu_budget:
+    if total_gpu_required <= config.max_gpu_budget:
         return desired_replicas
-    min_required = args.min_endpoint * engine_num_gpu
-    if args.max_gpu_budget < min_required:
+    min_required = config.min_endpoint * engine_num_gpu
+    if config.max_gpu_budget < min_required:
         logger.warning(
-            f"max_gpu_budget ({args.max_gpu_budget}) is below the minimum required "
+            f"max_gpu_budget ({config.max_gpu_budget}) is below the minimum required "
             f"for min_endpoint ({min_required}); enforcing zero replicas"
         )
         return 0
-    scale = args.max_gpu_budget / total_gpu_required
-    next_num = max(args.min_endpoint, math.floor(desired_replicas * scale))
+    scale = config.max_gpu_budget / total_gpu_required
+    next_num = max(config.min_endpoint, math.floor(desired_replicas * scale))
     logger.warning(
-        f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({args.max_gpu_budget}), "
+        f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({config.max_gpu_budget}), "
         f"scaling down to {next_num} replicas"
     )
     return next_num
 
 
 def _initialize_gpu_counts(
-    args: argparse.Namespace,
+    config: PlannerConfig,
     connector,
     require_prefill: bool,
     require_decode: bool,
@@ -214,8 +214,8 @@ def _initialize_gpu_counts(
                 require_prefill=require_prefill,
                 require_decode=require_decode,
             )
-            args.prefill_engine_num_gpu = prefill_gpu
-            args.decode_engine_num_gpu = decode_gpu
+            config.prefill_engine_num_gpu = prefill_gpu
+            config.decode_engine_num_gpu = decode_gpu
             logger.info(
                 f"Detected GPU counts from DGD: prefill={prefill_gpu}, decode={decode_gpu}"
             )
@@ -228,15 +228,15 @@ def _initialize_gpu_counts(
 
     # Use CLI flags (virtual mode, or K8s fallback when DGD lacks GPU resources)
     errors = []
-    if require_prefill and args.prefill_engine_num_gpu is None:
+    if require_prefill and config.prefill_engine_num_gpu is None:
         errors.append("Missing --prefill-engine-num-gpu flag")
-    if require_decode and args.decode_engine_num_gpu is None:
+    if require_decode and config.decode_engine_num_gpu is None:
         errors.append("Missing --decode-engine-num-gpu flag")
     if errors:
         raise DeploymentValidationError(errors)
     logger.info(
-        f"Using GPU counts from CLI: prefill={args.prefill_engine_num_gpu}, "
-        f"decode={args.decode_engine_num_gpu}"
+        f"Using GPU counts from CLI: prefill={config.prefill_engine_num_gpu}, "
+        f"decode={config.decode_engine_num_gpu}"
     )
 
 
@@ -246,7 +246,7 @@ class BasePlanner:
     def __init__(
         self,
         runtime: Optional[DistributedRuntime],
-        args: argparse.Namespace,
+        config: PlannerConfig,
         dryrun: bool = False,
         shared_state: Optional[PlannerSharedState] = None,
         prometheus_metrics: Optional[PlannerPrometheusMetrics] = None,
@@ -255,7 +255,7 @@ class BasePlanner:
         connector=None,
         start_prometheus_server: bool = True,
     ):
-        self.args = args
+        self.args = config
         self.dryrun = dryrun
         self.shared_state = shared_state or PlannerSharedState()
 
@@ -264,45 +264,45 @@ class BasePlanner:
 
         if not self.dryrun:
             self.runtime = runtime
-            self.namespace = args.namespace
+            self.namespace = config.namespace
 
-            if not args.no_operation:
+            if not config.no_operation:
                 if connector is not None:
                     self.connector = connector
-                elif args.environment == "kubernetes":
+                elif config.environment == "kubernetes":
                     self.connector = KubernetesConnector(
                         self.namespace, self.model_name
                     )
-                elif args.environment == "virtual":
+                elif config.environment == "virtual":
                     self.connector = VirtualConnector(
                         runtime,
                         self.namespace,
-                        args.model_name,
+                        config.model_name,
                     )
                 else:
-                    raise ValueError(f"Invalid environment: {args.environment}")
+                    raise ValueError(f"Invalid environment: {self.args.environment}")
 
             self.prometheus_traffic_client = (
                 prometheus_traffic_client
                 or PrometheusAPIClient(
-                    args.metric_pulling_prometheus_endpoint,
-                    args.namespace,
+                    config.metric_pulling_prometheus_endpoint,
+                    config.namespace,
                 )
             )
 
-        predictor_cls = LOAD_PREDICTORS[args.load_predictor]
-        # Predictors read configuration from `args` directly.
-        self.num_req_predictor = predictor_cls(args)
-        self.isl_predictor = predictor_cls(args)
-        self.osl_predictor = predictor_cls(args)
+        predictor_cls = LOAD_PREDICTORS[config.load_predictor]
+        # Predictors read configuration from config (same attribute interface as args).
+        self.num_req_predictor = predictor_cls(config)
+        self.isl_predictor = predictor_cls(config)
+        self.osl_predictor = predictor_cls(config)
 
         # Optional warmup: preload predictors with historical observations from a
         # mooncake-style JSONL trace (request_count/avg_isl/avg_osl per interval).
-        if getattr(args, "load_predictor_warmup_trace", None):
-            warmup_trace = args.load_predictor_warmup_trace
+        if getattr(config, "load_predictor_warmup_trace", None):
+            warmup_trace = config.load_predictor_warmup_trace
             try:
                 metrics = extract_metrics_from_mooncake(
-                    warmup_trace, args.adjustment_interval
+                    warmup_trace, config.adjustment_interval
                 )
                 for m in metrics:
                     self.num_req_predictor.add_data_point(float(m["request_count"]))
@@ -328,15 +328,15 @@ class BasePlanner:
 
         # Load-based scaling flags.
         # Argument validation (flag resolution, constraint checks, correction factor
-        # auto-disable) is handled by validate_sla_planner_args() in planner_argparse.
-        self.enable_loadbased = getattr(args, "enable_loadbased_scaling", False)
-        self.enable_throughput = getattr(args, "enable_throughput_scaling", True)
+        # auto-disable) is handled by PlannerConfig.validate().
+        self.enable_loadbased = getattr(config, "enable_loadbased_scaling", False)
+        self.enable_throughput = getattr(config, "enable_throughput_scaling", True)
 
         # Only create interpolators when throughput-based scaling is enabled
         # (they require profiling data that isn't needed for load-based-only mode)
         if self.enable_throughput:
-            if "use-pre-swept-results" in args.profile_results_dir:
-                config_list = args.profile_results_dir.split(":")
+            if "use-pre-swept-results" in config.profile_results_dir:
+                config_list = config.profile_results_dir.split(":")
                 configs = {
                     "gpu_type": config_list[1],
                     "model": config_list[2],
@@ -363,9 +363,11 @@ class BasePlanner:
                     )
             else:
                 self.prefill_interpolator = PrefillInterpolator(
-                    args.profile_results_dir
+                    config.profile_results_dir
                 )
-                self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
+                self.decode_interpolator = DecodeInterpolator(
+                    config.profile_results_dir
+                )
 
         self.prefill_component_name = WORKER_COMPONENT_NAMES[
             self.args.backend
@@ -378,7 +380,7 @@ class BasePlanner:
             self.prefill_client = None
             self.workers_client = None
 
-            self.prometheus_port = args.metric_reporting_prometheus_port
+            self.prometheus_port = config.metric_reporting_prometheus_port
 
             if prometheus_metrics is None:
                 self.prometheus_metrics = PlannerPrometheusMetrics()
@@ -403,20 +405,20 @@ class BasePlanner:
         if self.dryrun:
             self.no_correction = True
         else:
-            self.no_correction = args.no_correction
+            self.no_correction = config.no_correction
 
         if self.enable_loadbased:
             if prometheus_engine_client is not None:
                 self.prometheus_engine_client = prometheus_engine_client
             else:
                 # Auto-discover frontend metrics URL in Kubernetes mode
-                if not args.loadbased_router_metrics_url and isinstance(
+                if not config.loadbased_router_metrics_url and isinstance(
                     getattr(self, "connector", None), KubernetesConnector
                 ):
-                    args.loadbased_router_metrics_url = (
+                    config.loadbased_router_metrics_url = (
                         self.connector.get_frontend_metrics_url()
                     )
-                    if not args.loadbased_router_metrics_url:
+                    if not config.loadbased_router_metrics_url:
                         raise ValueError(
                             "Could not auto-discover frontend metrics URL from DGD. "
                             "No service with componentType 'frontend' found. "
@@ -424,11 +426,11 @@ class BasePlanner:
                         )
                     else:
                         logger.info(
-                            f"Auto-discovered frontend metrics URL: {args.loadbased_router_metrics_url}"
+                            f"Auto-discovered frontend metrics URL: {config.loadbased_router_metrics_url}"
                         )
 
                 self.prometheus_engine_client = DirectRouterMetricsClient(
-                    args.loadbased_router_metrics_url, args.namespace
+                    config.loadbased_router_metrics_url, config.namespace
                 )
             self.cached_load_metrics = CachedLoadMetrics()
 

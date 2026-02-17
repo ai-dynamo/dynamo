@@ -270,7 +270,7 @@ def generate_dgd_config_with_planner(
     # Build planner args dynamically from parsed arguments
     # This includes shared args (ttft, itl, backend, namespace) from profile_sla
     # and planner-specific args (with planner_ prefix)
-    planner_args = build_planner_args_from_namespace(args, prefix="planner_")
+    planner_args = build_planner_args_from_namespace(args)
 
     # Override profiling-specific arguments with results from profiling
     # Remove and re-add to ensure correct values from profiling context

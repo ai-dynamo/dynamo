@@ -13,19 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
 import asyncio
 import logging
 
 from pydantic import BaseModel
 
+from dynamo.planner.planner_args import PlannerConfig
 from dynamo.planner.utils.agg_planner import AggPlanner
 from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.disagg_planner import DisaggPlanner
-from dynamo.planner.utils.planner_argparse import (
-    create_sla_planner_parser,
-    validate_sla_planner_args,
-)
+from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -40,18 +37,16 @@ class RequestType(BaseModel):
     text: str
 
 
-async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
-    validate_sla_planner_args(args)
-
-    mode = getattr(args, "mode", "disagg")
+async def start_sla_planner(runtime: DistributedRuntime, config: PlannerConfig):
+    mode = config.mode
     if mode == "disagg":
-        planner = DisaggPlanner(runtime, args)
+        planner = DisaggPlanner(runtime, config)
     elif mode == "prefill":
-        planner = PrefillPlanner(runtime, args)
+        planner = PrefillPlanner(runtime, config)
     elif mode == "decode":
-        planner = DecodePlanner(runtime, args)
+        planner = DecodePlanner(runtime, config)
     elif mode == "agg":
-        planner = AggPlanner(runtime, args)
+        planner = AggPlanner(runtime, config)
     else:
         raise ValueError(f"Invalid planner mode: {mode}")
     await planner._async_init()
@@ -59,12 +54,12 @@ async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespac
 
 
 @dynamo_worker()
-async def init_planner(runtime: DistributedRuntime, args):
+async def init_planner(runtime: DistributedRuntime, config: PlannerConfig):
     await asyncio.sleep(INIT_PLANNER_START_DELAY)
 
-    await start_sla_planner(runtime, args)
+    await start_sla_planner(runtime, config)
 
-    component = runtime.namespace(args.namespace).component("Planner")
+    component = runtime.namespace(config.namespace).component("Planner")
 
     async def generate(request: RequestType):
         """Dummy endpoint to satisfy that each component has an endpoint"""
@@ -77,4 +72,6 @@ async def init_planner(runtime: DistributedRuntime, args):
 if __name__ == "__main__":
     parser = create_sla_planner_parser()
     args = parser.parse_args()
-    asyncio.run(init_planner(args))
+    config = PlannerConfig.from_cli_args(args)
+    config.validate()
+    asyncio.run(init_planner(config))

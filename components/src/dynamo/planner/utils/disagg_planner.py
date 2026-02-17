@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import logging
 import time
 from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.planner_args import PlannerConfig
 from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.planner_core import (
     PlannerPrometheusMetrics,
@@ -25,25 +25,25 @@ logger = logging.getLogger(__name__)
 
 class DisaggPlanner:
     def __init__(
-        self, runtime: Optional[DistributedRuntime], args: argparse.Namespace
+        self, runtime: Optional[DistributedRuntime], config: PlannerConfig
     ) -> None:
-        self.args = args
+        self.args = config
         self.shared_state = PlannerSharedState()
         prometheus_metrics = PlannerPrometheusMetrics()
 
-        self.enable_throughput = getattr(args, "enable_throughput_scaling", True)
-        self.enable_loadbased = getattr(args, "enable_loadbased_scaling", False)
+        self.enable_throughput = getattr(config, "enable_throughput_scaling", True)
+        self.enable_loadbased = getattr(config, "enable_loadbased_scaling", False)
 
         self.prefill_planner = PrefillPlanner(
             runtime,
-            args,
+            config,
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
             start_prometheus_server=True,
         )
         self.decode_planner = DecodePlanner(
             runtime,
-            args,
+            config,
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
             prometheus_traffic_client=getattr(

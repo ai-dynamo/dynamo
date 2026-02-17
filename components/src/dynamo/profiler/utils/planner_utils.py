@@ -27,7 +27,8 @@ def _get_action_type(action: argparse.Action) -> str | None:
         action: The argparse Action object
 
     Returns:
-        Action type string ('store_true', 'store_false', 'store_const') or None
+        Action type string ('store_true', 'store_false', 'store_const',
+        'boolean_optional') or None
     """
     action_class_name = type(action).__name__
     if action_class_name == "_StoreTrueAction":
@@ -36,6 +37,8 @@ def _get_action_type(action: argparse.Action) -> str | None:
         return "store_false"
     elif action_class_name == "_StoreConstAction":
         return "store_const"
+    elif action_class_name == "BooleanOptionalAction":
+        return "boolean_optional"
     return None
 
 
@@ -48,24 +51,28 @@ def _build_action_kwargs(
     Args:
         action: The argparse Action object
         action_type: The action type string ('store_true', 'store_false', etc.)
-        prefix: Prefix for the destination name
+        prefix: Prefix for the destination name (empty string for no prefix)
 
     Returns:
         Dictionary of kwargs for add_argument
     """
+    dest = f"{prefix.replace('-', '_')}{action.dest}" if prefix else action.dest
     kwargs = {
-        "dest": f"{prefix.replace('-', '_')}{action.dest}",
+        "dest": dest,
         "default": action.default,
         "help": action.help,
     }
 
     # Add action type if specified
     if action_type is not None:
-        kwargs["action"] = action_type
+        if action_type == "boolean_optional":
+            kwargs["action"] = argparse.BooleanOptionalAction
+        else:
+            kwargs["action"] = action_type
 
-    # For store_true/store_false, don't add type, nargs, metavar, const
+    # For store_true/store_false/boolean_optional, don't add type, nargs, metavar, const
     # For other actions, add them if they're set
-    if action_type not in ["store_true", "store_false"]:
+    if action_type not in ["store_true", "store_false", "boolean_optional"]:
         if action.type is not None:
             kwargs["type"] = action.type
         if action.nargs is not None:
@@ -168,16 +175,19 @@ def add_planner_arguments_to_parser(
 ):
     """
     Dynamically add planner arguments from create_sla_planner_parser() to the given parser.
-    Only adds arguments that don't already exist in the parser (without prefix).
+    Only adds arguments that don't already exist in the parser.
+
+    Planner flags are added without any prefix so that BooleanOptionalAction
+    (e.g. --load-predictor-log1p / --no-load-predictor-log1p) works correctly.
 
     Args:
         parser: The ArgumentParser to add arguments to
-        prefix: Prefix to add to planner argument names to avoid conflicts
+        prefix: Optional prefix for dest only (default ""). Do not use a flag prefix.
     """
     # Create a temporary planner parser to extract its arguments
     planner_parser = create_sla_planner_parser()
 
-    # Get existing argument names in the parser (without dashes)
+    # Get existing argument names in the parser
     existing_dests = {action.dest for action in parser._actions}
 
     # Add a group for planner arguments
@@ -186,53 +196,44 @@ def add_planner_arguments_to_parser(
         "Arguments that will be passed to the planner service (only showing args not already in profile_sla)",
     )
 
-    # Iterate through planner parser actions and add them with prefix
+    # Use planner's option strings as-is (no flag prefix) so BooleanOptionalAction works
     for action in planner_parser._actions:
         # Skip help and positional arguments
         if action.dest in ["help"] or not action.option_strings:
             continue
 
-        # Skip if this argument already exists in the main parser (without prefix)
+        # Skip if this argument already exists in the main parser
         if action.dest in existing_dests:
             continue
 
-        # Create new option strings with prefix
-        new_option_strings = [
-            f"--{prefix}{opt.lstrip('-')}" for opt in action.option_strings
-        ]
+        option_strings = action.option_strings
 
         # Determine the action type and build kwargs
         action_type = _get_action_type(action)
         kwargs = _build_action_kwargs(action, action_type, prefix)
 
-        planner_group.add_argument(*new_option_strings, **kwargs)
+        planner_group.add_argument(*option_strings, **kwargs)
 
 
 def build_planner_args_from_namespace(
-    args: argparse.Namespace, prefix: str = "planner_"
+    args: argparse.Namespace, prefix: str = ""
 ) -> list[str]:
     """
     Build planner command-line arguments from parsed args namespace.
-    Automatically detects shared arguments between profile_sla and planner,
-    and uses profile_sla values for those.
+    Collects all planner argument dests that exist in the namespace (no flag prefix).
 
     Args that match their default values are skipped, allowing the operator's
     injected environment variables to take effect (e.g., PLANNER_PROMETHEUS_PORT).
 
     Args:
         args: Parsed arguments namespace
-        prefix: Prefix used for planner arguments
+        prefix: Optional dest prefix to strip when collecting (default ""). Unused when no prefix.
 
     Returns:
         List of planner command-line arguments
     """
-    planner_args = []
-
-    # Get default values to skip args that match defaults
-    # This allows operator-injected env vars to take effect
     defaults = _get_planner_defaults()
 
-    # Auto-detect shared arguments by comparing planner parser with args namespace
     planner_parser = create_sla_planner_parser()
     planner_arg_dests = {
         action.dest
@@ -240,21 +241,19 @@ def build_planner_args_from_namespace(
         if action.dest != "help" and action.option_strings
     }
 
-    # Find arguments in args namespace that match planner arguments (not prefixed)
-    # These are shared arguments that should come from profile_sla
     shared_arg_dests = {dest for dest in planner_arg_dests if hasattr(args, dest)}
+    prefix_to_strip = prefix.replace("-", "_") if prefix else ""
 
-    # Add shared arguments from profile_sla (without prefix)
-    planner_args.extend(
-        _collect_args_from_namespace(args, list(shared_arg_dests), defaults=defaults)
+    planner_args = _collect_args_from_namespace(
+        args, list(shared_arg_dests), prefix_to_strip=prefix_to_strip, defaults=defaults
     )
 
-    # Get all planner-prefixed attributes from args (planner-specific only)
-    prefixed_attrs = [attr for attr in dir(args) if attr.startswith(prefix)]
-    planner_args.extend(
-        _collect_args_from_namespace(
-            args, prefixed_attrs, prefix_to_strip=prefix, defaults=defaults
+    if prefix:
+        prefixed_attrs = [attr for attr in dir(args) if attr.startswith(prefix)]
+        planner_args.extend(
+            _collect_args_from_namespace(
+                args, prefixed_attrs, prefix_to_strip=prefix, defaults=defaults
+            )
         )
-    )
 
     return planner_args
