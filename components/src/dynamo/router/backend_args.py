@@ -125,7 +125,7 @@ class DynamoRouterArgGroup(ArgGroup):
             flag_name="--router-reset-states",
             env_var="DYN_ROUTER_RESET_STATES",
             default=False,
-            help="KV Router: Reset router state on startup, purging stream and object store. WARNING: Can affect existing router replicas. WARNING: This can affect existing router replicas.",
+            help="KV Router: Reset router state on startup, purging stream and object store. WARNING: Can affect existing router replicas.",
         )
 
         add_negatable_bool_argument(
