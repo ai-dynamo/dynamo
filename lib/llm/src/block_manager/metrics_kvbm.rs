@@ -15,8 +15,8 @@ use dynamo_runtime::metrics::prometheus_names::{
     },
     sanitize_prometheus_name,
 };
-use prometheus::{Gauge, Histogram, HistogramOpts, IntCounter, Opts, Registry};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, thread};
+use prometheus::{Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, Opts, Registry};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, sync::OnceLock, thread};
 use tokio::{net::TcpListener, sync::Notify};
 
 use crate::http::service::{RouteDoc, metrics::router};
@@ -62,14 +62,14 @@ pub struct KvbmMetrics {
     // number of failed object storage write operations (blocks)
     pub object_write_failures: IntCounter,
 
-    // Transfer latency histograms
-    pub transfer_d2h: Histogram,
-    pub transfer_h2d: Histogram,
-    pub transfer_d2d: Histogram,
-    pub transfer_d2o: Histogram,
-    pub transfer_h2d_onboard: Histogram,
-    pub transfer_d2d_onboard: Histogram,
-    pub transfer_o2d: Histogram,
+    // Transfer latency histograms (HistogramVec with worker_id label)
+    pub transfer_d2h: HistogramVec,
+    pub transfer_h2d: HistogramVec,
+    pub transfer_d2d: HistogramVec,
+    pub transfer_d2o: HistogramVec,
+    pub transfer_h2d_onboard: HistogramVec,
+    pub transfer_d2d_onboard: HistogramVec,
+    pub transfer_o2d: HistogramVec,
 
     // Queue wait histograms
     pub queue_d2h: Histogram,
@@ -177,36 +177,36 @@ impl KvbmMetrics {
             )
             .unwrap();
 
-        // Transfer latency histograms
+        // Transfer latency histograms (HistogramVec with worker_id label)
         let transfer_d2h = mr
-            .create_histogram(TRANSFER_D2H_SECONDS, "Device to Host transfer time")
+            .create_histogram_vec(TRANSFER_D2H_SECONDS, "Device to Host transfer time")
             .unwrap();
         let transfer_h2d = mr
-            .create_histogram(TRANSFER_H2D_SECONDS, "Host to Disk transfer time")
+            .create_histogram_vec(TRANSFER_H2D_SECONDS, "Host to Disk transfer time")
             .unwrap();
         let transfer_d2d = mr
-            .create_histogram(TRANSFER_D2D_SECONDS, "Device to Disk direct transfer time")
+            .create_histogram_vec(TRANSFER_D2D_SECONDS, "Device to Disk direct transfer time")
             .unwrap();
         let transfer_d2o = mr
-            .create_histogram(
+            .create_histogram_vec(
                 TRANSFER_D2O_SECONDS,
                 "Device to Object Storage transfer time",
             )
             .unwrap();
         let transfer_h2d_onboard = mr
-            .create_histogram(
+            .create_histogram_vec(
                 TRANSFER_H2D_ONBOARD_SECONDS,
                 "Host to Device onboard transfer time",
             )
             .unwrap();
         let transfer_d2d_onboard = mr
-            .create_histogram(
+            .create_histogram_vec(
                 TRANSFER_D2D_ONBOARD_SECONDS,
                 "Disk to Device onboard transfer time",
             )
             .unwrap();
         let transfer_o2d = mr
-            .create_histogram(
+            .create_histogram_vec(
                 TRANSFER_O2D_SECONDS,
                 "Object Storage to Device transfer time",
             )
@@ -365,7 +365,19 @@ impl KvbmMetrics {
     pub fn record_object_write_failure(&self, num_blocks: u64) {
         self.object_write_failures.inc_by(num_blocks);
     }
+
+    /// Store metrics in the process-global singleton. First call wins; subsequent calls are no-ops.
+    pub fn init_global(metrics: KvbmMetrics) {
+        let _ = GLOBAL_KVBM_METRICS.set(metrics);
+    }
+
+    /// Get a reference to the process-global metrics, if initialized.
+    pub fn get_global() -> Option<&'static KvbmMetrics> {
+        GLOBAL_KVBM_METRICS.get()
+    }
 }
+
+static GLOBAL_KVBM_METRICS: OnceLock<KvbmMetrics> = OnceLock::new();
 
 impl Drop for KvbmMetrics {
     fn drop(&mut self) {
@@ -428,6 +440,21 @@ impl KvbmMetricsRegistry {
         Ok(g)
     }
 
+    pub fn create_histogram_vec(
+        &self,
+        name: &str,
+        description: &str,
+    ) -> anyhow::Result<HistogramVec> {
+        let metrics_name = sanitize_prometheus_name(&format!("{}_{}", self.prefix, name))?;
+        let buckets = vec![
+            0.0, 0.0001, 0.00032, 0.001, 0.0032, 0.01, 0.032, 0.1, 0.32, 1.0, 3.2, 10.0,
+        ];
+        let opts = HistogramOpts::new(metrics_name, description).buckets(buckets);
+        let h = HistogramVec::new(opts, &["worker_id"])?;
+        self.registry.register(Box::new(h.clone()))?;
+        Ok(h)
+    }
+
     pub fn create_histogram(&self, name: &str, description: &str) -> anyhow::Result<Histogram> {
         let metrics_name = sanitize_prometheus_name(&format!("{}_{}", self.prefix, name))?;
         let buckets = vec![
@@ -469,10 +496,19 @@ mod tests {
     fn test_kvbm_metrics_has_transfer_histograms() {
         let mr = KvbmMetricsRegistry::new();
         let metrics = KvbmMetrics::new(&mr, false, 0);
-        // Verify transfer histograms are functional
-        metrics.transfer_d2h.observe(0.001);
+        // Verify transfer histograms (HistogramVec) are functional
+        metrics
+            .transfer_d2h
+            .with_label_values(&["test"])
+            .observe(0.001);
         metrics.queue_d2h.observe(0.002);
-        assert_eq!(metrics.transfer_d2h.get_sample_count(), 1);
+        assert_eq!(
+            metrics
+                .transfer_d2h
+                .with_label_values(&["test"])
+                .get_sample_count(),
+            1
+        );
         assert_eq!(metrics.queue_d2h.get_sample_count(), 1);
     }
 }

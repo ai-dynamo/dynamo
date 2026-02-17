@@ -19,6 +19,7 @@ use crate::block_manager::{
         transfer::{TransferContext, WriteTo, WriteToStrategy},
     },
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
+    metrics_kvbm::KvbmMetrics,
     offload::MAX_TRANSFER_BATCH_SIZE,
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
 };
@@ -92,7 +93,8 @@ pub struct BlockTransferHandler {
     context: Arc<TransferContext>,
     scheduler_client: Option<TransferSchedulerClient>,
     batcher: ConnectorTransferBatcher,
-    // add worker-connector scheduler client here
+    metrics: Option<&'static KvbmMetrics>,
+    worker_id: String,
 }
 
 impl BlockTransferHandler {
@@ -102,7 +104,8 @@ impl BlockTransferHandler {
         disk_blocks: Option<Vec<LocalBlock<DiskStorage, BasicMetadata>>>,
         context: Arc<TransferContext>,
         scheduler_client: Option<TransferSchedulerClient>,
-        // add worker-connector scheduler client here
+        metrics: Option<&'static KvbmMetrics>,
+        worker_id: String,
     ) -> Result<Self> {
         Ok(Self {
             device: Self::get_local_data(device_blocks),
@@ -111,6 +114,8 @@ impl BlockTransferHandler {
             context,
             scheduler_client,
             batcher: ConnectorTransferBatcher::new(),
+            metrics,
+            worker_id,
         })
     }
 
@@ -195,7 +200,11 @@ impl BlockTransferHandler {
 
         tracing::debug!("request: {request:#?}");
 
-        let notify = match (request.from_pool(), request.to_pool()) {
+        let from_pool = *request.from_pool();
+        let to_pool = *request.to_pool();
+        let transfer_start = std::time::Instant::now();
+
+        let notify = match (from_pool, to_pool) {
             (Device, Host) => self.begin_transfer(&self.device, &self.host, request).await,
             (Device, Disk) => self.begin_transfer(&self.device, &self.disk, request).await,
             (Host, Device) => self.begin_transfer(&self.host, &self.device, request).await,
@@ -207,6 +216,28 @@ impl BlockTransferHandler {
         }?;
 
         notify.await?;
+
+        if let Some(m) = self.metrics {
+            let elapsed = transfer_start.elapsed().as_secs_f64();
+            let labels = &[self.worker_id.as_str()];
+            match (from_pool, to_pool) {
+                (Device, Host) => m.transfer_d2h.with_label_values(labels).observe(elapsed),
+                (Device, Disk) => m.transfer_d2d.with_label_values(labels).observe(elapsed),
+                (Host, Device) => {
+                    m.transfer_h2d_onboard
+                        .with_label_values(labels)
+                        .observe(elapsed)
+                }
+                (Host, Disk) => m.transfer_h2d.with_label_values(labels).observe(elapsed),
+                (Disk, Device) => {
+                    m.transfer_d2d_onboard
+                        .with_label_values(labels)
+                        .observe(elapsed)
+                }
+                _ => {}
+            }
+        }
+
         Ok(())
     }
 }

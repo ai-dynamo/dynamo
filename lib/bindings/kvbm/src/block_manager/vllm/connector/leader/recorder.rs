@@ -106,6 +106,7 @@ impl KvConnectorLeaderRecorder {
             kvbm_metrics_endpoint_enabled(),
             parse_kvbm_metrics_port(),
         );
+        KvbmMetrics::init_global(kvbm_metrics.clone());
         let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let token = CancellationToken::new();

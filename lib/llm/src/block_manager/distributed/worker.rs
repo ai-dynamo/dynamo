@@ -16,6 +16,7 @@ use crate::block_manager::{
     },
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
+    metrics_kvbm::KvbmMetrics,
     offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
     storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
 };
@@ -185,6 +186,8 @@ async fn perform_allocation_and_build_handler(
         disk_blocks,
         transfer_context,
         scheduler_client,
+        KvbmMetrics::get_global(),
+        worker_id.to_string(),
     )?;
     Ok(handler)
 }
