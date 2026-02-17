@@ -21,6 +21,7 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
+    http::service::metrics::Metrics,
     kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, protocols::BlockExtraInfo},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
@@ -100,6 +101,7 @@ pub struct PrefillRouter {
     enforce_disagg: bool,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
+    metrics: Arc<Metrics>,
 }
 
 impl PrefillRouter {
@@ -121,6 +123,7 @@ impl PrefillRouter {
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         enforce_disagg: bool,
+        metrics: Arc<Metrics>,
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
@@ -130,6 +133,7 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             model_name: String::new(), // Not used for disabled router
+            metrics,
         })
     }
 
@@ -141,6 +145,7 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         enforce_disagg: bool,
         model_name: String,
+        metrics: Arc<Metrics>,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -153,6 +158,7 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             model_name,
+            metrics,
         });
 
         // Spawn background task to wait for activation
@@ -702,6 +708,7 @@ impl
                     return Err(anyhow::anyhow!(PrefillError::NotActivated));
                 }
                 tracing::debug!("Prefill router not activated, falling back to decode-only");
+                self.metrics.inc_decode_only_fallback(&self.model_name);
                 next.generate(context.map(|_| req)).await
             }
             Err(e) => {
@@ -716,6 +723,7 @@ impl
                     error = %e,
                     "Remote prefill failed, falling back to decode-only. This may impact performance in disaggregated deployments. Verify prefill workers are healthy and accessible."
                 );
+                self.metrics.inc_decode_only_fallback(&self.model_name);
                 next.generate(context.map(|_| req)).await
             }
         }

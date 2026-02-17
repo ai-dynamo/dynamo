@@ -19,6 +19,7 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::http::service::metrics::Metrics;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
@@ -704,6 +705,7 @@ pub unsafe extern "C" fn create_routers(
                     Some(prefill_config),
                     enforce_disagg,
                     model_name.clone(),
+                    Arc::new(Metrics::new()),
                 )
             }
             None if enforce_disagg => {
@@ -712,7 +714,7 @@ pub unsafe extern "C" fn create_routers(
             }
             None => {
                 tracing::info!("No prefill workers found, running in aggregated mode");
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg, Arc::new(Metrics::new()))
             }
         };
 

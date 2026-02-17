@@ -244,7 +244,7 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
+    let migration = Migration::from_mdc(card, migration_limit, metrics.clone()).into_operator();
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {
@@ -291,7 +291,7 @@ where
 
     // Use the provided prefill chooser, or create a disabled one if not provided
     let prefill_chooser = prefill_chooser
-        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
+        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg, metrics.clone()));
     let prefill_op = prefill_chooser.into_operator();
 
     // Link with prefill chooser including backward edge for response flow

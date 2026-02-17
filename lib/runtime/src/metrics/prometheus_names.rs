@@ -185,6 +185,9 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Total number of requests that fell back to decode-only mode
+    pub const MODEL_DECODE_ONLY_FALLBACK_TOTAL: &str = "model_decode_only_fallback_total";
+
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
     pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";

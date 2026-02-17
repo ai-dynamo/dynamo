@@ -249,6 +249,7 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    decode_only_fallback_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -623,6 +624,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let decode_only_fallback_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_DECODE_ONLY_FALLBACK_TOTAL),
+                "Total number of requests that fell back to decode-only mode",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -643,6 +653,7 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            decode_only_fallback_total,
         }
     }
 
@@ -743,6 +754,7 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(self.decode_only_fallback_total.clone()))?;
 
         Ok(())
     }
@@ -823,6 +835,20 @@ impl Metrics {
     pub fn get_migration_ongoing_request_count(&self, model: &str) -> u64 {
         self.model_migration_total
             .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .get()
+    }
+
+    /// Increment the counter for decode-only fallback
+    pub fn inc_decode_only_fallback(&self, model: &str) {
+        self.decode_only_fallback_total
+            .with_label_values(&[model])
+            .inc();
+    }
+
+    /// Get the current count of decode-only fallbacks for a model
+    pub fn get_decode_only_fallback_count(&self, model: &str) -> u64 {
+        self.decode_only_fallback_total
+            .with_label_values(&[model])
             .get()
     }
 
