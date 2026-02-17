@@ -261,10 +261,10 @@ def query_opensearch_test_history(
             "query": {
                 "bool": {
                     "must": [
-                        {"term": {"s_test_name.keyword": test_name}},
-                        {"term": {"s_test_classname.keyword": test_classname}},
-                        {"term": {"s_framework.keyword": framework}},
-                        {"term": {"s_branch.keyword": "main"}},
+                        {"term": {"s_test_name": test_name}},
+                        {"term": {"s_test_classname": test_classname}},
+                        {"term": {"s_framework": framework}},
+                        {"term": {"s_branch": "main"}},
                         {
                             "range": {
                                 "@timestamp": {
@@ -278,7 +278,7 @@ def query_opensearch_test_history(
             },
             "aggs": {
                 "status_counts": {
-                    "terms": {"field": "s_test_status.keyword", "size": 10}
+                    "terms": {"field": "s_test_status", "size": 10}
                 }
             },
         }
@@ -354,8 +354,8 @@ def query_opensearch_daily_failures() -> List[Dict]:
             "query": {
                 "bool": {
                     "must": [
-                        {"term": {"s_test_status.keyword": "failed"}},
-                        {"term": {"s_branch.keyword": "main"}},
+                        {"terms": {"s_test_status": ["failed", "error"]}},
+                        {"term": {"s_branch": "main"}},
                         {"range": {"@timestamp": {"gte": "now-24h"}}},
                     ]
                 }
@@ -365,17 +365,9 @@ def query_opensearch_daily_failures() -> List[Dict]:
                     "composite": {
                         "size": 1000,
                         "sources": [
-                            {"test_name": {"terms": {"field": "s_test_name.keyword"}}},
-                            {
-                                "classname": {
-                                    "terms": {"field": "s_test_classname.keyword"}
-                                }
-                            },
-                            {
-                                "framework": {
-                                    "terms": {"field": "s_framework.keyword"}
-                                }
-                            },
+                            {"test_name": {"terms": {"field": "s_test_name"}}},
+                            {"classname": {"terms": {"field": "s_test_classname"}}},
+                            {"framework": {"terms": {"field": "s_framework"}}},
                         ],
                     }
                 }
