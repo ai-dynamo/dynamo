@@ -403,7 +403,7 @@ def query_opensearch_run_sequence(
 
 
 def detect_regression(
-    recent_runs: List[Dict], min_streak: int = 3
+    recent_runs: List[Dict], min_streak: int = 2
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Scan recent_runs (newest-first) for a leading streak of failures.
