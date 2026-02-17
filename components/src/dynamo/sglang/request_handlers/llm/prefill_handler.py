@@ -118,6 +118,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+        priority = (inner_request.get("extra_args") or {}).get("priority")
 
         trace_header = self._get_trace_header(context) if self.enable_trace else None
 
@@ -130,6 +131,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
+            priority=priority,
         )
 
         task = asyncio.create_task(self._consume_results(results, context))
