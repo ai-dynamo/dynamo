@@ -12,6 +12,9 @@ on:
   schedule:
     - cron: '50 19 * * *'  # 11:50 AM PST / 7:50 PM UTC
   workflow_dispatch:       # allow manual trigger for testing
+  push:
+    branches:
+      - nmailhot/flaky-tests  # TEMPORARY: remove before merging
 
 permissions:
   contents: read
