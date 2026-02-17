@@ -81,8 +81,8 @@ impl PrometheusParser {
         }
 
         // Apply macro prefix to constants if needed
-        if is_macro_generated && macro_prefix.is_some() {
-            let prefix = macro_prefix.as_ref().unwrap();
+        if is_macro_generated {
+            if let Some(prefix) = macro_prefix.as_ref() {
             for constant in &mut constants {
                 // Only apply if the constant doesn't already have the prefix
                 if constant.name == "PREFIX" {
@@ -94,6 +94,7 @@ impl PrometheusParser {
                 if !constant.value.starts_with(prefix) {
                     constant.value = format!("{}_{}", prefix, constant.value);
                 }
+            }
             }
         }
 
