@@ -131,3 +131,7 @@ package-lock.json
 
 # Compiled static libraries
 *.a
+
+# macOS
+.DS_Store
+**/.DS_Store

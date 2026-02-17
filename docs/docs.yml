@@ -32,6 +32,8 @@ products:
 redirects:
   - source: "/dynamo/index.html"
     destination: "/dynamo/"
+  - source: "/dynamo/latest/index.html"
+    destination: "/dynamo/"
 
 # GitHub repository link in navbar
 navbar-links:
