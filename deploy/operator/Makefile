@@ -141,8 +141,15 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	done
 
 .PHONY: generate
-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
+
+.PHONY: generate-pydantic
+generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types
+	@echo "Generating Pydantic models from v1beta1 DGDR types..."
+	@python3 api/scripts/generate_pydantic_from_go.py
+	@echo "Running Pydantic validation tests..."
+	@python3 api/scripts/test_pydantic_models.py
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.

@@ -592,6 +592,14 @@ spec:
                     gpuSku:
                       description: GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").
                       type: string
+                    maxNumGpusPerEngine:
+                      description: MaxNumGPUsPerEngine is the maximum number of GPUs per engine for profiling search space.
+                      format: int32
+                      type: integer
+                    minNumGpusPerEngine:
+                      description: MinNumGPUsPerEngine is the minimum number of GPUs per engine for profiling search space.
+                      format: int32
+                      type: integer
                     numGpusPerNode:
                       description: NumGPUsPerNode is the number of GPUs per node.
                       format: int32
@@ -620,9 +628,9 @@ spec:
                     ModelCache provides optional PVC configuration for pre-downloaded model weights.
                     When provided, weights are loaded from the PVC instead of downloading from HuggingFace.
                   properties:
-                    modelPathInPvc:
+                    pvcModelPath:
                       description: |-
-                        ModelPathInPVC is the path to the model checkpoint directory within the PVC
+                        PVCModelPath is the path to the model checkpoint directory within the PVC
                         (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
                       type: string
                     pvcMountPath:

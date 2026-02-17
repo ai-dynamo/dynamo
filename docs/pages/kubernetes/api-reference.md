@@ -1347,6 +1347,8 @@ _Appears in:_
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
+| `minNumGpusPerEngine` _integer_ | MinNumGPUsPerEngine is the minimum number of GPUs per engine for profiling search space. |  | Optional: \{\} <br /> |
+| `maxNumGpusPerEngine` _integer_ | MaxNumGPUsPerEngine is the maximum number of GPUs per engine for profiling search space. |  | Optional: \{\} <br /> |
 
 
 #### MockerSpec
@@ -1379,7 +1381,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `pvcName` _string_ | PVCName is the name of the PersistentVolumeClaim containing model weights.<br />The PVC must exist in the same namespace as the DGDR. |  | Optional: \{\} <br /> |
-| `modelPathInPvc` _string_ | ModelPathInPVC is the path to the model checkpoint directory within the PVC<br />(e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). |  | Optional: \{\} <br /> |
+| `pvcModelPath` _string_ | PVCModelPath is the path to the model checkpoint directory within the PVC<br />(e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). |  | Optional: \{\} <br /> |
 | `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache | Optional: \{\} <br /> |
 
 

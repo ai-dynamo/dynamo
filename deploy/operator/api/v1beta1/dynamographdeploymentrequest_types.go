@@ -243,10 +243,10 @@ type ModelCacheSpec struct {
 	// +optional
 	PVCName string `json:"pvcName,omitempty"`
 
-	// ModelPathInPVC is the path to the model checkpoint directory within the PVC
+	// PVCModelPath is the path to the model checkpoint directory within the PVC
 	// (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
 	// +optional
-	ModelPathInPVC string `json:"modelPathInPvc,omitempty"`
+	PVCModelPath string `json:"pvcModelPath,omitempty"`
 
 	// PVCMountPath is the mount path for the PVC inside the container.
 	// +optional
@@ -339,6 +339,14 @@ type HardwareSpec struct {
 	// NumGPUsPerNode is the number of GPUs per node.
 	// +optional
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
+
+	// MinNumGPUsPerEngine is the minimum number of GPUs per engine for profiling search space.
+	// +optional
+	MinNumGPUsPerEngine *int32 `json:"minNumGpusPerEngine,omitempty"`
+
+	// MaxNumGPUsPerEngine is the maximum number of GPUs per engine for profiling search space.
+	// +optional
+	MaxNumGPUsPerEngine *int32 `json:"maxNumGpusPerEngine,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
