@@ -486,6 +486,69 @@ def categorize_failed_tests(failed_tests: List[Dict]) -> Tuple[List[Dict], List[
     return flaky_tests, legitimate_failures
 
 
+def group_parameterized_tests(tests: List[Dict]) -> List[Dict]:
+    """
+    Collapse parameterized test variants with identical pass rates into a single entry.
+
+    Tests like test_foo[engine_args0-True] and test_foo[engine_args1-True] that share
+    the same base name and identical pass rates are merged into one line:
+
+        test_foo (N variants) - 98% pass (84/86 runs)
+
+    Variants with different pass rates remain as separate entries.
+    Non-parameterized tests (no '[' in name) are always returned unchanged (group size 1).
+
+    Args:
+        tests: List of enriched test dicts (output of categorize_failed_tests)
+
+    Returns:
+        List of test dicts, with same-rate variants collapsed into grouped entries.
+    """
+    from collections import defaultdict
+
+    # Group by (base_name, classname, framework, passed_count, total_runs, is_new_test).
+    # Using integer counts instead of float pass_rate avoids floating-point comparison issues.
+    groups: Dict[tuple, List[Dict]] = defaultdict(list)
+    for test in tests:
+        base_name = test["test_name"].split("[")[0]
+        key = (
+            base_name,
+            test.get("test_classname", ""),
+            test.get("framework", ""),
+            test.get("passed_count", 0),
+            test.get("total_runs", 0),
+            test.get("is_new_test", False),
+        )
+        groups[key].append(test)
+
+    result = []
+    for (base_name, _classname, _framework, _passed, _total, _new), members in groups.items():
+        if len(members) == 1:
+            result.append(members[0])
+        else:
+            # Merge jobs lists from all variants, deduplicating by (name, url).
+            merged_jobs = []
+            seen_jobs: set = set()
+            for m in members:
+                for job in m.get("jobs", []):
+                    job_key = (job.get("job_name"), job.get("job_url"))
+                    if job_key not in seen_jobs:
+                        seen_jobs.add(job_key)
+                        merged_jobs.append(job)
+
+            representative = members[0]
+            merged = {
+                **representative,
+                "test_name": base_name,
+                "is_grouped": True,
+                "variant_count": len(members),
+                "jobs": merged_jobs,
+            }
+            result.append(merged)
+
+    return result
+
+
 def format_slack_mention(github_username: Optional[str]) -> str:
     """
     Format GitHub username for Slack mention.
@@ -519,8 +582,13 @@ def format_test_entry(test: Dict) -> str:
     Returns:
         Formatted string for Slack
     """
-    test_name = test["test_name"]
     author_mention = format_slack_mention(test["author"])
+
+    # Name display — grouped variants show "(N variants)" suffix
+    if test.get("is_grouped"):
+        name_str = f"`{test['test_name']}` ({test['variant_count']} variants)"
+    else:
+        name_str = f"`{test['test_name']}`"
 
     # Build job links — one entry may span multiple matrix variants
     jobs = test.get("jobs", [])
@@ -537,7 +605,7 @@ def format_test_entry(test: Dict) -> str:
 
     if test["is_new_test"]:
         return (
-            f"• `{test_name}`{job_suffix} - "
+            f"• {name_str}{job_suffix} - "
             f"*new test, no history* - last modified by {author_mention}"
         )
     else:
@@ -546,7 +614,7 @@ def format_test_entry(test: Dict) -> str:
         pass_rate = test["pass_rate"]
 
         return (
-            f"• `{test_name}`{job_suffix} - "
+            f"• {name_str}{job_suffix} - "
             f"*{pass_rate:.0%} pass rate* ({passed_count}/{total_runs} runs) - "
             f"last modified by {author_mention}"
         )
@@ -781,6 +849,8 @@ def run_digest_mode() -> int:
         return 0
 
     flaky_tests, legitimate_failures = categorize_failed_tests(failed_tests)
+    flaky_tests = group_parameterized_tests(flaky_tests)
+    legitimate_failures = group_parameterized_tests(legitimate_failures)
 
     logger.info("Categorization complete:")
     logger.info(f"  - Flaky tests: {len(flaky_tests)}")
@@ -849,6 +919,8 @@ def main():
         # Step 2: Categorize failed tests
         logger.info("Step 2: Categorizing failed tests")
         flaky_tests, legitimate_failures = categorize_failed_tests(failed_tests)
+        flaky_tests = group_parameterized_tests(flaky_tests)
+        legitimate_failures = group_parameterized_tests(legitimate_failures)
 
         logger.info("Categorization complete:")
         logger.info(f"  - Flaky tests: {len(flaky_tests)}")
