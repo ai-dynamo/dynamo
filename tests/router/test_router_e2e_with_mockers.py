@@ -117,7 +117,7 @@ def _build_mocker_command(
         MODEL_NAME,
         "--endpoint",
         endpoint,
-        "--store-kv",
+        "--discovery-backend",
         store_backend,
         "--num-workers",
         str(num_workers),

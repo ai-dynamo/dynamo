@@ -21,7 +21,7 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
+    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, protocols::BlockExtraInfo},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
     protocols::common::timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},
@@ -106,6 +106,19 @@ pub struct PrefillRouter {
 }
 
 impl PrefillRouter {
+    fn routing_inputs(req: &PreprocessedRequest) -> (&[u32], Option<&[Option<BlockExtraInfo>]>) {
+        if let Some(mm_routing_info) = req.mm_routing_info.as_ref() {
+            let routing_tokens = mm_routing_info.routing_token_ids.as_slice();
+            if !routing_tokens.is_empty() {
+                return (
+                    routing_tokens,
+                    Some(mm_routing_info.block_mm_infos.as_slice()),
+                );
+            }
+        }
+        (&req.token_ids, None)
+    }
+
     /// Create a disabled prefill router that will never activate (passthrough only)
     pub fn disabled(
         model_manager: Arc<ModelManager>,
@@ -288,8 +301,15 @@ impl PrefillRouter {
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
+            let (routing_token_ids, block_mm_infos) = Self::routing_inputs(req);
             match self
-                .query_prefill_worker(&req.token_ids, false, lora_name, priority_jump)
+                .query_prefill_worker(
+                    routing_token_ids,
+                    block_mm_infos,
+                    false,
+                    lora_name,
+                    priority_jump,
+                )
                 .await
             {
                 Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
@@ -485,6 +505,7 @@ impl PrefillRouter {
     pub async fn query_prefill_worker(
         &self,
         token_ids: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
@@ -501,6 +522,7 @@ impl PrefillRouter {
                     .find_best_match(
                         None,
                         token_ids,
+                        block_mm_infos,
                         None,
                         update_states,
                         lora_name,

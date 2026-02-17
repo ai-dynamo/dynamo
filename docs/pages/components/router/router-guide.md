@@ -27,7 +27,7 @@ This command:
 - Exposes the service on port 8000 (configurable)
 - Automatically handles all backend workers registered to the Dynamo endpoint
 
-Backend workers register themselves using the `register_llm` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
+Backend workers register themselves using the `register_model` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
 
 #### CLI Arguments
 
@@ -187,7 +187,7 @@ The main KV-aware routing arguments:
 > - **No KV events** (`--no-kv-events`): State persistence is not supported.
 >
 > **Request plane is independent of KV event transport.**
-> The request plane (`DYN_REQUEST_PLANE` / `--request-plane`) controls how requests reach workers (TCP/HTTP/NATS), while KV events travel over a separate path. KV events use NATS in JetStream or NATS Core modes, or ZMQ when `--event-plane zmq` is set. With `--event-plane zmq` and `--store-kv file` or `mem`, the router can run entirely without etcd or NATS. When using a NATS-based event plane (the default), NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`. Use `--no-kv-events` to disable KV event transport entirely.
+> The request plane (`DYN_REQUEST_PLANE` / `--request-plane`) controls how requests reach workers (TCP/HTTP/NATS), while KV events travel over a separate path. KV events use NATS in JetStream or NATS Core modes, or ZMQ when `--event-plane zmq` is set. With `--event-plane zmq` and `--discovery-backend file` or `mem`, the router can run entirely without etcd or NATS. When using a NATS-based event plane (the default), NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`. Use `--no-kv-events` to disable KV event transport entirely.
 >
 > When `--kv-overlap-score-weight` is set to 0, no KVIndexer is created and prefix matching is disabled (pure load balancing). When `--no-kv-events` is set, a KVIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning.
 >
@@ -201,6 +201,8 @@ The main KV-aware routing arguments:
 > **Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`.
 
 To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
+
+For details on per-request agent hints (`latency_sensitivity`, `osl`, `speculative_prefill`), see the [Agent Hints Guide](agent-hints.md).
 
 ## Basic Routing
 
@@ -267,7 +269,7 @@ Dynamo supports disaggregated serving where prefill (prompt processing) and deco
 ### Automatic Prefill Router Activation
 
 The prefill router is automatically created when:
-1. A decode model is registered (e.g., via `register_llm()` with `ModelType.Chat | ModelType.Completions`)
+1. A decode model is registered (e.g., via `register_model()` with `ModelType.Chat | ModelType.Completions`)
 2. A prefill worker is detected with the same model name and `ModelType.Prefill`
 
 **Key characteristics of the prefill router:**
@@ -283,7 +285,7 @@ When both workers are registered, requests are automatically routed.
 # Decode worker registration (in your decode worker)
 decode_endpoint = runtime.namespace("dynamo").component("decode").endpoint("generate")
 
-await register_llm(
+await register_model(
     model_input=ModelInput.Tokens,
     model_type=ModelType.Chat | ModelType.Completions,
     endpoint=decode_endpoint,
@@ -296,7 +298,7 @@ await decode_endpoint.serve_endpoint(decode_handler.generate)
 # Prefill worker registration (in your prefill worker)
 prefill_endpoint = runtime.namespace("dynamo").component("prefill").endpoint("generate")
 
-await register_llm(
+await register_model(
     model_input=ModelInput.Tokens,
     model_type=ModelType.Prefill,  # <-- Mark as prefill worker
     endpoint=prefill_endpoint,
