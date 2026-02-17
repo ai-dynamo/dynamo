@@ -906,10 +906,12 @@ class BaseWorkerHandler(ABC):
         mm_map = request["multi_modal_data"]
         vllm_mm_data = {}
 
-        async with self._nixl_connector_lock:
-            if self._nixl_connector is None:
-                self._nixl_connector = nixl_connect.Connector()
-                await self._nixl_connector.initialize()
+        # Lazy-init NIXL connector only when frontend decoding is enabled
+        if self.enable_frontend_decoding:
+            async with self._nixl_connector_lock:
+                if self._nixl_connector is None:
+                    self._nixl_connector = nixl_connect.Connector()
+                    await self._nixl_connector.initialize()
 
         # Process image_url entries
         images = await self.image_loader.load_image_batch(
