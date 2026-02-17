@@ -80,7 +80,13 @@ def validate_args(args):
             "cuda_version": ["13.1"],
         },
         "sglang": {
-            "target": ["runtime", "dev", "local-dev", "wheel_builder", "base"],
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "wheel_builder",
+                "base",
+            ],
             "cuda_version": ["12.9", "13.0"],
         },
         "dynamo": {
