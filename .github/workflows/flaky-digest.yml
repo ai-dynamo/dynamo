@@ -10,7 +10,7 @@ name: Flaky Test Daily Digest
 
 on:
   schedule:
-    - cron: '0 17 * * *'  # 5 PM UTC / 9 AM PST
+    - cron: '50 19 * * *'  # 11:50 AM PST / 7:50 PM UTC
   workflow_dispatch:       # allow manual trigger for testing
 
 permissions:
