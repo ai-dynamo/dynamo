@@ -184,7 +184,7 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         default=None,
         help="Namespace of GlobalPlanner component (required when environment=global-planner)",
     )
-    
+
     # Scaling mode flags
     parser.add_argument(
         "--enable-throughput-scaling",
@@ -254,7 +254,8 @@ def validate_planner_args(args):
                 "--global-planner-namespace required when environment=global-planner. "
                 "Please specify the namespace where GlobalPlanner is running."
             )
-            
+
+
 def validate_sla_planner_args(args: argparse.Namespace) -> None:
     """Validate and normalize SLA planner arguments.
 
