@@ -788,7 +788,16 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
             AnthropicToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
             AnthropicToolChoiceMode::Any => ChatCompletionToolChoiceOption::Required,
             AnthropicToolChoiceMode::None => ChatCompletionToolChoiceOption::None,
-            AnthropicToolChoiceMode::Tool => ChatCompletionToolChoiceOption::Auto,
+            AnthropicToolChoiceMode::Tool => {
+                // {"type": "tool"} without a "name" field is invalid per the Anthropic spec.
+                // It deserialized as Simple because Named requires the name field.
+                // Treat as "any" (required) since the caller wants a specific tool but
+                // didn't specify which — this is the closest semantic match.
+                tracing::warn!(
+                    "tool_choice has type 'tool' without a 'name' field; treating as 'any' (required)"
+                );
+                ChatCompletionToolChoiceOption::Required
+            }
         },
         AnthropicToolChoice::Named(named) => {
             ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {

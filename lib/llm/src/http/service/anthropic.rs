@@ -150,12 +150,11 @@ async fn anthropic_messages(
     mut request: Context<AnthropicCreateMessageRequest>,
     mut stream_handle: ConnectionHandle,
 ) -> Result<Response, Response> {
-    let model = request.model.clone();
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
     let streaming = request.stream;
     let request_id = request.id().to_string();
 
-    // Apply template defaults
+    // Apply template defaults before capturing model (must happen first so
+    // engine lookup and metrics use the resolved model name).
     if let Some(template) = template {
         if request.model.is_empty() {
             request.model = template.model.clone();
@@ -167,6 +166,9 @@ async fn anthropic_messages(
             request.max_tokens = template.max_completion_tokens;
         }
     }
+
+    let model = request.model.clone();
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
