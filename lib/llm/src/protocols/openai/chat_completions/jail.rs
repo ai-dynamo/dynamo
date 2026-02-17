@@ -311,7 +311,6 @@ impl ChoiceJailState {
                 jail_stream.should_end_jail(&self.accumulated_content).await;
 
             if should_end {
-
                 // Split the content
                 let (jailed_part, trailing_part) = self.accumulated_content.split_at(split_pos);
 

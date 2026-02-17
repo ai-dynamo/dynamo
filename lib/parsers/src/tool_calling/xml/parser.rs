@@ -175,7 +175,6 @@ fn parse_tool_call_block(
     config: &XmlParserConfig,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<Vec<ToolCallResponse>> {
-    // Normalize block to fix common model output issues (e.g., missing `<` before tags)
     let block = normalize_tool_call_block(block, config);
 
     // Build regex patterns based on config
