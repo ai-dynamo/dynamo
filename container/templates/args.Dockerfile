@@ -85,6 +85,10 @@ ARG LMCACHE_REF={{ context.vllm.lmcache_ref }}
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
+
+# ModelExpress for P2P weight transfer (optional)
+ARG ENABLE_MODELEXPRESS_P2P={{ context.vllm.enable_modelexpress_p2p }}
+ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
 {%- endif -%}
 
 {% if framework == "trtllm" %}

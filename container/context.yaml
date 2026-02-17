@@ -45,6 +45,8 @@ vllm:
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
+  enable_modelexpress_p2p: "false"
+  modelexpress_ref: "3d73992ce6c10e52ddc54f7f12af35d27e173f15"
 
 sglang:
   base_image: nvcr.io/nvidia/cuda-dl-base

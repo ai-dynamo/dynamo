@@ -33,11 +33,10 @@ VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     component: str
-    endpoint: str
     is_prefill_worker: bool
     is_decode_worker: bool
     custom_jinja_template: Optional[str] = None
-    store_kv: str
+    discovery_backend: str
     request_plane: str
     event_plane: str
     enable_local_indexer: bool = True
@@ -85,6 +84,7 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser(
         description="Dynamo vLLM worker configuration",
         formatter_class=argparse.RawTextHelpFormatter,
+        allow_abbrev=False,
     )
 
     # Build argument parser
@@ -214,6 +214,14 @@ def update_dynamo_config_with_engine(
                 "Cannot specify both --kv-transfer-config and --connector flags"
             )
         dynamo_config.connector = normalized  # type: ignore[assignment]
+
+    # Validate ModelExpress P2P server URL
+    if getattr(engine_config, "load_format", None) in ("mx-source", "mx-target"):
+        if not dynamo_config.model_express_url:
+            raise ValueError(
+                f"--model-express-url or MODEL_EXPRESS_URL env var is required "
+                f"when using --load-format={engine_config.load_format}"
+            )
 
 
 def update_engine_config_with_dynamo(

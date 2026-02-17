@@ -62,7 +62,7 @@ class KVRouterProcess(ManagedProcess):
             "kv",
             "--http-port",
             str(frontend_port),
-            "--store-kv",
+            "--discovery-backend",
             store_backend,
             "--namespace",
             namespace,
