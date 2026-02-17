@@ -79,7 +79,6 @@ const (
 type ProfilingPhase string
 
 const (
-
 	// Profiler is loading the DGD template, detecting GPU hardware,
 	// and resolving the model architecture from HuggingFace.
 	ProfilingPhaseInitializing ProfilingPhase = "Initializing"
@@ -255,34 +254,6 @@ type ModelCacheSpec struct {
 	PVCMountPath string `json:"pvcMountPath,omitempty"`
 }
 
-// ModelSpec defines the model to deploy.
-type ModelSpec struct {
-	// ModelName is the model name or identifier (e.g. "meta-llama/Llama-3.1-405B").
-	// Can be a HuggingFace ID or a private model name. Always required.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	ModelName string `json:"modelName"`
-
-	// ModelCache is the optional PVC model cache configuration.
-	// When provided, weights are loaded from the PVC instead of downloading from HF.
-	// +optional
-	ModelCache *ModelCacheSpec `json:"modelCache,omitempty"`
-}
-
-// BackendSpec defines the inference backend and container image configuration.
-type BackendSpec struct {
-	// Backend specifies the inference backend to use for profiling and deployment.
-	// +optional
-	// +kubebuilder:default=auto
-	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
-	Backend BackendType `json:"backend,omitempty"`
-
-	// DynamoImage is the full K8s dynamo image reference
-	// (e.g. "nvcr.io/nvidia/dynamo-runtime:latest").
-	// +optional
-	DynamoImage string `json:"dynamoImage,omitempty"`
-}
-
 // OverridesSpec allows customizing the profiling job and the generated DynamoGraphDeployment.
 type OverridesSpec struct {
 	// ProfilingJob allows overriding the profiling Job specification.
@@ -373,13 +344,27 @@ type HardwareSpec struct {
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
 // Only the Model field is required; all other fields are optional and have sensible defaults.
 type DynamoGraphDeploymentRequestSpec struct {
-	// Model specifies the model to deploy including optional PVC cache configuration.
+	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
+	// Can be a HuggingFace ID or a private model name.
 	// +kubebuilder:validation:Required
-	Model ModelSpec `json:"model"`
+	// +kubebuilder:validation:MinLength=1
+	Model string `json:"model"`
 
-	// Backend specifies the inference backend and container image configuration.
+	// Backend specifies the inference backend to use for profiling and deployment.
 	// +optional
-	Backend *BackendSpec `json:"backend,omitempty"`
+	// +kubebuilder:default=auto
+	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
+	Backend BackendType `json:"backend,omitempty"`
+
+	// Image is the container image reference for the deployment.
+	// Example: "nvcr.io/nvidia/dynamo-runtime:latest"
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// ModelCache provides optional PVC configuration for pre-downloaded model weights.
+	// When provided, weights are loaded from the PVC instead of downloading from HuggingFace.
+	// +optional
+	ModelCache *ModelCacheSpec `json:"modelCache,omitempty"`
 
 	// Hardware describes the hardware resources available for profiling and deployment.
 	// Typically auto-filled by the operator from cluster discovery.
@@ -511,8 +496,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
-// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model.modelName`
-// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend.backend`
+// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
+// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Profiling",type=string,JSONPath=`.status.profilingPhase`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`,priority=1
@@ -529,8 +514,6 @@ type DynamoGraphDeploymentRequest struct {
 	// Status reflects the current observed state of this deployment request.
 	Status DynamoGraphDeploymentRequestStatus `json:"status,omitempty"`
 }
-
-const hello = batchv1.JobComplete
 
 // +kubebuilder:object:root=true
 
