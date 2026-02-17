@@ -50,8 +50,8 @@ use crate::{
         approx::PruneConfig,
         indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
-            DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
-            TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+            BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
+            RouterResponse, TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
             compute_block_hash_for_seq,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
@@ -371,6 +371,7 @@ impl KvRouter {
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -385,7 +386,7 @@ impl KvRouter {
         let isl_tokens = tokens.len();
 
         let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
-            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, None));
+            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos));
         let hash_elapsed = start.elapsed();
 
         let overlap_scores = self
@@ -566,9 +567,20 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let context_id = ctx.context().id().to_string();
         // Handle different request types
         let response = match request {
-            RouterRequest::New { tokens } => {
+            RouterRequest::New {
+                tokens,
+                block_mm_infos,
+            } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(Some(&context_id), &tokens, None, true, None, 0.0)
+                    .find_best_match(
+                        Some(&context_id),
+                        &tokens,
+                        block_mm_infos.as_deref(),
+                        None,
+                        true,
+                        None,
+                        0.0,
+                    )
                     .await?;
 
                 RouterResponse::New {
