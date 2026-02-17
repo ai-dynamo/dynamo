@@ -140,7 +140,12 @@ pub enum AnthropicMessageContent {
 }
 
 /// A single content block within a message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Uses a custom deserializer so that unknown block types (e.g. `citations`,
+/// `server_tool_use`, `redacted_thinking`) are captured as `Unknown` instead
+/// of causing a hard deserialization failure. This is important because Claude
+/// Code may send block types that we don't yet handle.
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum AnthropicContentBlock {
     /// Text content block.
@@ -160,11 +165,158 @@ pub enum AnthropicContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        content: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_tool_result_content"
+        )]
+        content: Option<ToolResultContent>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    /// Thinking content block from assistant (extended thinking / reasoning).
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
+    /// Catch-all for unrecognized block types. Silently accepted and skipped
+    /// during conversion so that new Anthropic features don't break the endpoint.
+    #[serde(skip)]
+    Unknown {
+        block_type: String,
+    },
+}
+
+/// Content of a `tool_result` block — either a plain string or an array of
+/// content blocks (the Anthropic API accepts both).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<ToolResultContentBlock>),
+}
+
+impl ToolResultContent {
+    /// Extract the text content, concatenating array blocks if needed.
+    pub fn into_text(self) -> String {
+        match self {
+            ToolResultContent::Text(s) => s,
+            ToolResultContent::Blocks(blocks) => blocks
+                .into_iter()
+                .filter_map(|b| match b {
+                    ToolResultContentBlock::Text { text } => Some(text),
+                    ToolResultContentBlock::Other(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+/// A content block within a `tool_result.content` array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultContentBlock {
+    Text {
+        text: String,
+    },
+    /// Catch-all for non-text blocks (images, etc.) in tool results.
+    Other(serde_json::Value),
+}
+
+/// Custom deserializer for `Option<ToolResultContent>`.
+fn deserialize_tool_result_content<'de, D>(
+    deserializer: D,
+) -> Result<Option<ToolResultContent>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<ToolResultContent>::deserialize(deserializer)
+}
+
+/// Custom deserializer for `AnthropicContentBlock` that handles unknown types
+/// gracefully. Since serde's `#[serde(other)]` is not supported on internally
+/// tagged enums, we deserialize as `Value` first and dispatch manually.
+impl<'de> Deserialize<'de> for AnthropicContentBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let block_type = value
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        match block_type.as_str() {
+            "text" => {
+                let text = value
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(AnthropicContentBlock::Text { text })
+            }
+            "image" => {
+                let source: AnthropicImageSource =
+                    serde_json::from_value(value.get("source").cloned().unwrap_or_default())
+                        .map_err(serde::de::Error::custom)?;
+                Ok(AnthropicContentBlock::Image { source })
+            }
+            "tool_use" => {
+                let id = value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = value
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input = value.get("input").cloned().unwrap_or(serde_json::json!({}));
+                Ok(AnthropicContentBlock::ToolUse { id, name, input })
+            }
+            "tool_result" => {
+                let tool_use_id = value
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content: Option<ToolResultContent> = value
+                    .get("content")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok());
+                let is_error = value.get("is_error").and_then(|v| v.as_bool());
+                Ok(AnthropicContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                })
+            }
+            "thinking" => {
+                let thinking = value
+                    .get("thinking")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let signature = value
+                    .get("signature")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(AnthropicContentBlock::Thinking {
+                    thinking,
+                    signature,
+                })
+            }
+            other => {
+                tracing::debug!("Unknown Anthropic content block type '{}', skipping", other);
+                Ok(AnthropicContentBlock::Unknown {
+                    block_type: other.to_string(),
+                })
+            }
+        }
+    }
 }
 
 /// Image source for image content blocks.
@@ -504,11 +656,13 @@ fn convert_user_blocks(
                     ));
                     text_parts.clear();
                 }
+                let text = content
+                    .clone()
+                    .map(|c| c.into_text())
+                    .unwrap_or_default();
                 messages.push(ChatCompletionRequestMessage::Tool(
                     ChatCompletionRequestToolMessage {
-                        content: ChatCompletionRequestToolMessageContent::Text(
-                            content.clone().unwrap_or_default(),
-                        ),
+                        content: ChatCompletionRequestToolMessageContent::Text(text),
                         tool_call_id: tool_use_id.clone(),
                     },
                 ));
@@ -519,8 +673,10 @@ fn convert_user_blocks(
                 );
                 text_parts.push("[image]".to_string());
             }
-            AnthropicContentBlock::ToolUse { .. } => {
-                // tool_use in a user message is unexpected, skip
+            AnthropicContentBlock::ToolUse { .. }
+            | AnthropicContentBlock::Thinking { .. }
+            | AnthropicContentBlock::Unknown { .. } => {
+                // tool_use/thinking/unknown in a user message: skip
             }
         }
     }
@@ -541,17 +697,25 @@ fn convert_user_blocks(
 
 /// Convert assistant-role content blocks into chat completion messages.
 /// Text blocks become an assistant message; tool_use blocks become tool_calls on an assistant message.
+/// Thinking blocks are passed through as `reasoning_content`.
 fn convert_assistant_blocks(
     blocks: &[AnthropicContentBlock],
     messages: &mut Vec<ChatCompletionRequestMessage>,
 ) {
     let mut text_content = String::new();
+    let mut thinking_content = String::new();
     let mut tool_calls = Vec::new();
 
     for block in blocks {
         match block {
             AnthropicContentBlock::Text { text } => {
                 text_content.push_str(text);
+            }
+            AnthropicContentBlock::Thinking { thinking, .. } => {
+                if !thinking_content.is_empty() {
+                    thinking_content.push('\n');
+                }
+                thinking_content.push_str(thinking);
             }
             AnthropicContentBlock::ToolUse { id, name, input } => {
                 tool_calls.push(ChatCompletionMessageToolCall {
@@ -575,6 +739,12 @@ fn convert_assistant_blocks(
         ))
     };
 
+    let reasoning = if thinking_content.is_empty() {
+        None
+    } else {
+        Some(thinking_content)
+    };
+
     let tc = if tool_calls.is_empty() {
         None
     } else {
@@ -584,7 +754,7 @@ fn convert_assistant_blocks(
     messages.push(ChatCompletionRequestMessage::Assistant(
         ChatCompletionRequestAssistantMessage {
             content,
-            reasoning_content: None,
+            reasoning_content: reasoning,
             refusal: None,
             name: None,
             audio: None,
@@ -715,6 +885,97 @@ pub fn chat_completion_to_anthropic_response(
 }
 
 // ---------------------------------------------------------------------------
+// Count tokens
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /v1/messages/count_tokens`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnthropicCountTokensRequest {
+    pub model: String,
+    pub messages: Vec<AnthropicMessage>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_system_prompt"
+    )]
+    pub system: Option<String>,
+    #[serde(default)]
+    pub tools: Option<Vec<AnthropicTool>>,
+}
+
+/// Response body for `POST /v1/messages/count_tokens`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AnthropicCountTokensResponse {
+    pub input_tokens: u32,
+}
+
+impl AnthropicCountTokensRequest {
+    /// Estimate input token count using a `len/3` heuristic.
+    pub fn estimate_tokens(&self) -> u32 {
+        let mut total_len: usize = 0;
+
+        if let Some(system) = &self.system {
+            total_len += system.len();
+        }
+
+        for msg in &self.messages {
+            // Count role
+            total_len += match msg.role {
+                AnthropicRole::User => 4,
+                AnthropicRole::Assistant => 9,
+            };
+            // Count content
+            match &msg.content {
+                AnthropicMessageContent::Text { content } => total_len += content.len(),
+                AnthropicMessageContent::Blocks { content } => {
+                    for block in content {
+                        total_len += estimate_block_len(block);
+                    }
+                }
+            }
+        }
+
+        if let Some(tools) = &self.tools {
+            for tool in tools {
+                total_len += tool.name.len();
+                if let Some(desc) = &tool.description {
+                    total_len += desc.len();
+                }
+                total_len += tool.input_schema.to_string().len();
+            }
+        }
+
+        let tokens = total_len / 3;
+        if tokens == 0 && total_len > 0 { 1 } else { tokens as u32 }
+    }
+}
+
+fn estimate_block_len(block: &AnthropicContentBlock) -> usize {
+    match block {
+        AnthropicContentBlock::Text { text } => text.len(),
+        AnthropicContentBlock::ToolUse { name, input, .. } => {
+            name.len() + input.to_string().len()
+        }
+        AnthropicContentBlock::ToolResult { content, .. } => content
+            .as_ref()
+            .map(|c| match c {
+                ToolResultContent::Text(s) => s.len(),
+                ToolResultContent::Blocks(blocks) => blocks
+                    .iter()
+                    .map(|b| match b {
+                        ToolResultContentBlock::Text { text } => text.len(),
+                        ToolResultContentBlock::Other(v) => v.to_string().len(),
+                    })
+                    .sum(),
+            })
+            .unwrap_or(0),
+        AnthropicContentBlock::Thinking { thinking, .. } => thinking.len(),
+        AnthropicContentBlock::Image { .. } => 256, // rough estimate for image metadata
+        AnthropicContentBlock::Unknown { .. } => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -822,7 +1083,7 @@ mod tests {
                     content: AnthropicMessageContent::Blocks {
                         content: vec![AnthropicContentBlock::ToolResult {
                             tool_use_id: "tool_123".into(),
-                            content: Some("72F and sunny".into()),
+                            content: Some(ToolResultContent::Text("72F and sunny".into())),
                             is_error: None,
                         }],
                     },
@@ -1011,5 +1272,215 @@ mod tests {
             }
             _ => panic!("expected blocks content"),
         }
+    }
+
+    #[test]
+    fn test_deserialize_thinking_block() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Let me reason about this...", "signature": "sig123"},
+                    {"type": "text", "text": "Here is my answer."}
+                ]
+            }]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        match &req.messages[0].content {
+            AnthropicMessageContent::Blocks { content } => {
+                assert_eq!(content.len(), 2);
+                match &content[0] {
+                    AnthropicContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => {
+                        assert_eq!(thinking, "Let me reason about this...");
+                        assert_eq!(signature, "sig123");
+                    }
+                    other => panic!("expected Thinking, got {other:?}"),
+                }
+            }
+            _ => panic!("expected blocks content"),
+        }
+    }
+
+    #[test]
+    fn test_thinking_block_becomes_reasoning_content() {
+        let req = AnthropicCreateMessageRequest {
+            model: "test-model".into(),
+            max_tokens: 100,
+            messages: vec![AnthropicMessage {
+                role: AnthropicRole::Assistant,
+                content: AnthropicMessageContent::Blocks {
+                    content: vec![
+                        AnthropicContentBlock::Thinking {
+                            thinking: "I should think...".into(),
+                            signature: "sig".into(),
+                        },
+                        AnthropicContentBlock::Text {
+                            text: "Answer".into(),
+                        },
+                    ],
+                },
+            }],
+            system: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: false,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        match &chat_req.inner.messages[0] {
+            ChatCompletionRequestMessage::Assistant(a) => {
+                assert_eq!(
+                    a.reasoning_content.as_deref(),
+                    Some("I should think...")
+                );
+                match &a.content {
+                    Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => {
+                        assert_eq!(t, "Answer");
+                    }
+                    other => panic!("expected text content, got {other:?}"),
+                }
+            }
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_block_type_does_not_fail() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "server_tool_use", "id": "stu_1", "name": "web_search", "input": {}},
+                    {"type": "redacted_thinking", "data": "encrypted"},
+                    {"type": "text", "text": "world"}
+                ]
+            }]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        match &req.messages[0].content {
+            AnthropicMessageContent::Blocks { content } => {
+                assert_eq!(content.len(), 4);
+                assert!(matches!(&content[0], AnthropicContentBlock::Text { .. }));
+                assert!(matches!(
+                    &content[1],
+                    AnthropicContentBlock::Unknown { block_type } if block_type == "server_tool_use"
+                ));
+                assert!(matches!(
+                    &content[2],
+                    AnthropicContentBlock::Unknown { block_type } if block_type == "redacted_thinking"
+                ));
+                assert!(matches!(&content[3], AnthropicContentBlock::Text { .. }));
+            }
+            _ => panic!("expected blocks content"),
+        }
+
+        // Conversion should succeed, skipping unknown blocks
+        let chat_req: NvCreateChatCompletionRequest = AnthropicCreateMessageRequest {
+            model: "test".into(),
+            max_tokens: 100,
+            messages: req.messages,
+            system: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: false,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        }
+        .try_into()
+        .unwrap();
+        assert_eq!(chat_req.inner.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_tool_result_string_content() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "simple text"}
+                ]
+            }]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        match &req.messages[0].content {
+            AnthropicMessageContent::Blocks { content } => {
+                match &content[0] {
+                    AnthropicContentBlock::ToolResult { content, .. } => {
+                        let text = content.clone().unwrap().into_text();
+                        assert_eq!(text, "simple text");
+                    }
+                    other => panic!("expected ToolResult, got {other:?}"),
+                }
+            }
+            _ => panic!("expected blocks"),
+        }
+    }
+
+    #[test]
+    fn test_tool_result_array_content() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": [
+                        {"type": "text", "text": "line 1"},
+                        {"type": "text", "text": "line 2"}
+                    ]}
+                ]
+            }]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        match &req.messages[0].content {
+            AnthropicMessageContent::Blocks { content } => {
+                match &content[0] {
+                    AnthropicContentBlock::ToolResult { content, .. } => {
+                        let text = content.clone().unwrap().into_text();
+                        assert_eq!(text, "line 1line 2");
+                    }
+                    other => panic!("expected ToolResult, got {other:?}"),
+                }
+            }
+            _ => panic!("expected blocks"),
+        }
+    }
+
+    #[test]
+    fn test_count_tokens_estimate() {
+        let req = AnthropicCountTokensRequest {
+            model: "test".into(),
+            messages: vec![AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicMessageContent::Text {
+                    content: "Hello, world! This is a test message.".into(),
+                },
+            }],
+            system: Some("You are helpful.".into()),
+            tools: None,
+        };
+
+        let tokens = req.estimate_tokens();
+        assert!(tokens > 0, "should estimate non-zero tokens");
+        // "Hello, world! This is a test message." (37) + "You are helpful." (16) + role (4) = 57 / 3 = 19
+        assert_eq!(tokens, 19);
     }
 }

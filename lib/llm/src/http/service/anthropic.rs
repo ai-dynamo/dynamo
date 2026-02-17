@@ -33,8 +33,8 @@ use super::{
 };
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
-    AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse,
-    chat_completion_to_anthropic_response,
+    AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
+    AnthropicErrorBody, AnthropicErrorResponse, chat_completion_to_anthropic_response,
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -49,20 +49,23 @@ use super::openai::{get_body_limit, get_or_create_request_id};
 // Router
 // ---------------------------------------------------------------------------
 
-/// Creates the router for the `/v1/messages` endpoint.
+/// Creates the router for the `/v1/messages` and `/v1/messages/count_tokens` endpoints.
 pub fn anthropic_messages_router(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/messages".to_string());
+    let count_tokens_path = format!("{}/count_tokens", &path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let count_doc = RouteDoc::new(axum::http::Method::POST, &count_tokens_path);
     let router = Router::new()
         .route(&path, post(handler_anthropic_messages))
+        .route(&count_tokens_path, post(handler_count_tokens))
         .layer(middleware::from_fn(anthropic_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc], router)
+    (vec![doc, count_doc], router)
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +316,23 @@ async fn anthropic_messages(
 
         Ok(Json(response).into_response())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Count tokens
+// ---------------------------------------------------------------------------
+
+/// Handler for POST /v1/messages/count_tokens.
+/// Returns an estimated input token count using a len/3 heuristic.
+async fn handler_count_tokens(
+    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Json(request): Json<AnthropicCountTokensRequest>,
+) -> Result<Response, Response> {
+    let tokens = request.estimate_tokens();
+    Ok(Json(AnthropicCountTokensResponse {
+        input_tokens: tokens,
+    })
+    .into_response())
 }
 
 // ---------------------------------------------------------------------------

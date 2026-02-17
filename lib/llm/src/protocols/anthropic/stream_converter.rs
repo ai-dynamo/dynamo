@@ -7,6 +7,8 @@
 //! `message_start` -> `content_block_start` -> N x `content_block_delta` ->
 //! `content_block_stop` -> `message_delta` -> `message_stop`
 
+use std::collections::HashSet;
+
 use axum::response::sse::Event;
 use dynamo_async_openai::types::ChatCompletionMessageContent;
 use uuid::Uuid;
@@ -25,9 +27,12 @@ pub struct AnthropicStreamConverter {
     text_block_started: bool,
     text_block_closed: bool,
     text_block_index: u32,
+    // Token usage (from engine)
+    input_token_count: u32,
     output_token_count: u32,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
+    tool_calls_sent: HashSet<String>,
     // Block index counter
     next_block_index: u32,
     // Stop reason
@@ -50,8 +55,10 @@ impl AnthropicStreamConverter {
             text_block_started: false,
             text_block_closed: false,
             text_block_index: 0,
+            input_token_count: 0,
             output_token_count: 0,
             tool_call_states: Vec::new(),
+            tool_calls_sent: HashSet::new(),
             next_block_index: 0,
             stop_reason: None,
         }
@@ -83,6 +90,12 @@ impl AnthropicStreamConverter {
         chunk: &NvCreateChatCompletionStreamResponse,
     ) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
+
+        // Capture real token usage from engine when available (typically on the final chunk).
+        if let Some(usage) = &chunk.usage {
+            self.input_token_count = usage.prompt_tokens;
+            self.output_token_count = usage.completion_tokens;
+        }
 
         for choice in &chunk.choices {
             let delta = &choice.delta;
@@ -181,10 +194,20 @@ impl AnthropicStreamConverter {
                         if let Some(args) = &func.arguments {
                             // Emit content_block_start on first delta for this tool call
                             if !self.tool_call_states[tc_index].started {
+                                let tc_id = self.tool_call_states[tc_index].id.clone();
+
+                                // Dedup guard: skip if we've already emitted this tool call ID
+                                if !tc_id.is_empty() && self.tool_calls_sent.contains(&tc_id) {
+                                    continue;
+                                }
+
                                 self.tool_call_states[tc_index].started = true;
                                 let block_index = self.tool_call_states[tc_index].block_index;
-                                let tc_id = self.tool_call_states[tc_index].id.clone();
                                 let tc_name = self.tool_call_states[tc_index].name.clone();
+
+                                if !tc_id.is_empty() {
+                                    self.tool_calls_sent.insert(tc_id.clone());
+                                }
 
                                 let block_start = AnthropicStreamEvent::ContentBlockStart {
                                     index: block_index,
@@ -240,14 +263,14 @@ impl AnthropicStreamConverter {
             }
         }
 
-        // Emit message_delta with stop_reason
+        // Emit message_delta with stop_reason and real token usage from engine
         let message_delta = AnthropicStreamEvent::MessageDelta {
             delta: AnthropicMessageDeltaBody {
                 stop_reason: self.stop_reason.clone(),
                 stop_sequence: None,
             },
             usage: AnthropicUsage {
-                input_tokens: 0,
+                input_tokens: self.input_token_count,
                 output_tokens: self.output_token_count,
             },
         };
@@ -303,6 +326,11 @@ impl AnthropicStreamConverter {
         chunk: &NvCreateChatCompletionStreamResponse,
     ) -> Vec<TaggedEvent> {
         let mut events = Vec::new();
+
+        if let Some(usage) = &chunk.usage {
+            self.input_token_count = usage.prompt_tokens;
+            self.output_token_count = usage.completion_tokens;
+        }
 
         for choice in &chunk.choices {
             let delta = &choice.delta;
@@ -388,10 +416,16 @@ impl AnthropicStreamConverter {
                         }
                         if let Some(args) = &func.arguments {
                             if !self.tool_call_states[tc_index].started {
+                                let tc_id = self.tool_call_states[tc_index].id.clone();
+                                if !tc_id.is_empty() && self.tool_calls_sent.contains(&tc_id) {
+                                    continue;
+                                }
                                 self.tool_call_states[tc_index].started = true;
                                 let block_index = self.tool_call_states[tc_index].block_index;
-                                let tc_id = self.tool_call_states[tc_index].id.clone();
                                 let tc_name = self.tool_call_states[tc_index].name.clone();
+                                if !tc_id.is_empty() {
+                                    self.tool_calls_sent.insert(tc_id.clone());
+                                }
                                 let ev = AnthropicStreamEvent::ContentBlockStart {
                                     index: block_index,
                                     content_block: AnthropicResponseContentBlock::ToolUse {
@@ -448,7 +482,7 @@ impl AnthropicStreamConverter {
                 stop_sequence: None,
             },
             usage: AnthropicUsage {
-                input_tokens: 0,
+                input_tokens: self.input_token_count,
                 output_tokens: self.output_token_count,
             },
         };
