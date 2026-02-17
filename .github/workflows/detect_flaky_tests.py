@@ -285,9 +285,10 @@ def query_opensearch_test_history(
 
         logger.info(f"Querying OpenSearch for {test_name} ({framework})")
 
-        # Make request to OpenSearch
+        # Make request to OpenSearch — index URL needs /_search suffix
+        search_url = OPENSEARCH_ENDPOINT.rstrip("/") + "/_search"
         response = requests.post(
-            OPENSEARCH_ENDPOINT,
+            search_url,
             json=query,
             headers={"Content-Type": "application/json"},
             timeout=30,
@@ -383,8 +384,10 @@ def query_opensearch_daily_failures() -> List[Dict]:
 
         logger.info("Querying OpenSearch for all failures on main in the last 24h")
 
+        # Index URL needs /_search suffix
+        search_url = OPENSEARCH_ENDPOINT.rstrip("/") + "/_search"
         response = requests.post(
-            OPENSEARCH_ENDPOINT,
+            search_url,
             json=query,
             headers={"Content-Type": "application/json"},
             timeout=30,
