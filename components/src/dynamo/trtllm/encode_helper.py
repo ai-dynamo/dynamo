@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import threading
 from dataclasses import asdict
 from typing import Any, Dict, Optional, Union
 
@@ -18,11 +19,14 @@ class EncodeHelper:
 
     # Shared ImageLoader for full EPD flow (async image loading)
     _image_loader: Optional[ImageLoader] = None
+    _image_loader_lock = threading.Lock()
 
     @classmethod
     def _get_image_loader(cls) -> ImageLoader:
         if cls._image_loader is None:
-            cls._image_loader = ImageLoader()
+            with cls._image_loader_lock:
+                if cls._image_loader is None:
+                    cls._image_loader = ImageLoader()
         return cls._image_loader
 
     @staticmethod
