@@ -55,7 +55,7 @@ inputs:
   use_sccache:
     description: 'Use SCCache for caching'
     required: false
-    default: 'false'
+    default: 'true'
   ci:
     description: 'CI mode: for frontend target, uses existing buildx builder and pushes EPP image to ECR'
     required: false
