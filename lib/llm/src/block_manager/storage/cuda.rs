@@ -92,7 +92,10 @@ unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, Stora
     // First, try write-combined allocation (optimal for PCIe systems)
     // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
     match unsafe {
-        cudarc::driver::result::malloc_host(size, cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED)
+        cudarc::driver::result::malloc_host(
+            size,
+            cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+        )
     } {
         Ok(ptr) => Ok(ptr as *mut u8),
         Err(_) => {
