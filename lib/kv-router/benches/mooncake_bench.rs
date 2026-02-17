@@ -8,7 +8,9 @@ use dynamo_kv_router::indexer::{
 };
 use dynamo_kv_router::protocols::RouterEvent;
 use dynamo_kv_router::protocols::XXH3_SEED;
-use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
+use dynamo_kv_router::{
+    ConcurrentRadixTree, InvertedIndex, NaiveNestedMap, PositionalIndexer, ThreadPoolIndexer,
+};
 use dynamo_tokens::compute_hash_v2;
 use rand::prelude::*;
 use std::fs::File;
@@ -57,6 +59,20 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
+
+    /// Naive per-worker nested HashMap indexer (blog section 2).
+    NaiveNestedMap {
+        /// Number of OS threads that consume and apply KV cache events.
+        #[clap(long, default_value = "1")]
+        num_event_workers: usize,
+    },
+
+    /// Inverted index keyed by local_hash (blog section 3).
+    InvertedIndex {
+        /// Number of OS threads that consume and apply KV cache events.
+        #[clap(long, default_value = "16")]
+        num_event_workers: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -89,6 +105,16 @@ impl IndexerArgs {
                     args.block_size,
                 ))
             }
+            IndexerArgs::NaiveNestedMap { num_event_workers } => Arc::new(ThreadPoolIndexer::new(
+                NaiveNestedMap::new(),
+                num_event_workers,
+                args.block_size,
+            )),
+            IndexerArgs::InvertedIndex { num_event_workers } => Arc::new(ThreadPoolIndexer::new(
+                InvertedIndex::new(),
+                num_event_workers,
+                args.block_size,
+            )),
         }
     }
 }
