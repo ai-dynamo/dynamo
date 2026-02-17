@@ -156,6 +156,12 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_hints: Option<AgentHints>,
+
+    /// Cache control hint (Anthropic-style). When present, the router pins
+    /// the prefix on the selected worker with the given TTL.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -188,14 +194,53 @@ pub struct AgentHints {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+}
 
-    /// When true, the router will pin the prefix blocks on the selected worker
-    /// after generation completes. This protects the cached prefix from eviction
-    /// for subsequent requests with the same prefix (e.g., system prompt reuse
-    /// in agentic workflows).
-    #[builder(default, setter(strip_option))]
+/// Anthropic-style cache control hint for prefix pinning with TTL.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub control_type: CacheControlType,
+    /// TTL string: "5m", "30m", "1h". Default 300s (5m) when None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin: Option<bool>,
+    pub ttl: Option<String>,
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheControlType {
+    #[default]
+    Ephemeral,
+}
+
+impl CacheControl {
+    /// Parse TTL string to seconds.
+    /// - None   -> 300  (5 minutes, Anthropic default)
+    /// - "5m"   -> 300
+    /// - "30m"  -> 1800
+    /// - "1h"   -> 3600
+    /// - "<N>s" -> N
+    pub fn ttl_seconds(&self) -> u64 {
+        match self.ttl.as_deref() {
+            None => 300,
+            Some("5m") => 300,
+            Some("30m") => 1800,
+            Some("1h") => 3600,
+            Some(other) => {
+                // Try parsing "<N>s" format
+                if let Some(s) = other.strip_suffix('s') {
+                    s.parse::<u64>().unwrap_or(300)
+                } else if let Some(m) = other.strip_suffix('m') {
+                    m.parse::<u64>().map(|v| v * 60).unwrap_or(300)
+                } else if let Some(h) = other.strip_suffix('h') {
+                    h.parse::<u64>().map(|v| v * 3600).unwrap_or(300)
+                } else {
+                    tracing::warn!("Unrecognized TTL format '{}', defaulting to 300s", other);
+                    300
+                }
+            }
+        }
+    }
 }
 
 impl Default for NvExt {
@@ -245,6 +290,58 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
+        assert_eq!(nv_ext.cache_control, None);
+    }
+
+    // Test CacheControl serde roundtrip and TTL parsing
+    #[test]
+    fn test_cache_control_serde_and_ttl() {
+        // Default (ephemeral, no TTL)
+        let cc = CacheControl::default();
+        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
+        assert_eq!(cc.ttl, None);
+        assert_eq!(cc.ttl_seconds(), 300);
+
+        // With explicit TTL values
+        let cc_5m = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("5m".to_string()),
+        };
+        assert_eq!(cc_5m.ttl_seconds(), 300);
+
+        let cc_30m = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("30m".to_string()),
+        };
+        assert_eq!(cc_30m.ttl_seconds(), 1800);
+
+        let cc_1h = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("1h".to_string()),
+        };
+        assert_eq!(cc_1h.ttl_seconds(), 3600);
+
+        let cc_60s = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("60s".to_string()),
+        };
+        assert_eq!(cc_60s.ttl_seconds(), 60);
+
+        // Serde roundtrip
+        let json = serde_json::to_string(&cc_5m).unwrap();
+        let deser: CacheControl = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, cc_5m);
+
+        // Deserialize from API-style JSON
+        let api_json = r#"{"type": "ephemeral", "ttl": "30m"}"#;
+        let from_api: CacheControl = serde_json::from_str(api_json).unwrap();
+        assert_eq!(from_api.ttl_seconds(), 1800);
+
+        // NvExt with cache_control
+        let nvext_json = r#"{"cache_control": {"type": "ephemeral", "ttl": "5m"}}"#;
+        let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
+        assert!(nvext.cache_control.is_some());
+        assert_eq!(nvext.cache_control.unwrap().ttl_seconds(), 300);
     }
 
     // Test valid builder configurations

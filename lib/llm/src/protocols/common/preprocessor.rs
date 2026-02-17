@@ -55,10 +55,9 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
 
-    /// When true, the router pins the prefix blocks on the selected worker
-    /// after generation completes, protecting them from eviction.
+    /// TTL in seconds for cache control pinning. None = no pinning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin: Option<bool>,
+    pub cache_control_ttl: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

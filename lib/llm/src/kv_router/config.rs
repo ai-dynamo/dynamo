@@ -88,9 +88,9 @@ pub struct KvRouterConfig {
     pub router_event_threads: u32,
 
     /// Enable agentic cache control (PIN/UNPIN) via the worker's cache_control service mesh endpoint.
-    /// When true, the router creates a cache_control client and honors agent_hints.pin on requests,
-    /// firing a pin_prefix call to the worker after generation completes.
-    /// When false (default), agent_hints.pin is ignored and no cache_control client is created.
+    /// When true, the router creates a cache_control client and honors nvext.cache_control on
+    /// requests, firing a pin_prefix call (with TTL) to the worker after generation completes.
+    /// When false (default), cache_control is ignored and no cache_control client is created.
     pub router_enable_agentic_cache_control: bool,
 }
 

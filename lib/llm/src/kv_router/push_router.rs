@@ -425,16 +425,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
-        // Extract PIN hint before consuming the request
-        let pin_prefix = request
+        // Extract cache_control TTL before consuming the request
+        let cache_control_ttl = request
             .routing
             .as_ref()
-            .and_then(|r| r.pin)
-            .unwrap_or(false);
-        let token_ids_for_pin = pin_prefix.then(|| request.token_ids.clone());
-        let cc_client = pin_prefix
-            .then(|| self.cache_control_client.clone())
-            .flatten();
+            .and_then(|r| r.cache_control_ttl);
+        let token_ids_for_pin = cache_control_ttl.map(|_| request.token_ids.clone());
+        let cc_client = cache_control_ttl.and_then(|_| self.cache_control_client.clone());
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
@@ -508,7 +505,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             // `generation_completed` bool, set it on natural stream end, and gate
             // the PIN call on it.
             if let Some(ref token_ids) = token_ids_for_pin {
-                spawn_pin_prefix(cc_client.as_ref(), token_ids, instance_id, &context_id);
+                spawn_pin_prefix(cc_client.as_ref(), token_ids, instance_id, &context_id,
+                                 cache_control_ttl.unwrap_or(300));
             }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))

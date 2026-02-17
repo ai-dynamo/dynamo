@@ -31,17 +31,18 @@ pub async fn create_cache_control_client(component: &Component) -> Result<CacheC
 /// Fire-and-forget pin_prefix to the worker that served this request.
 ///
 /// Spawns a detached task that sends the pin request and logs the outcome.
-/// Does nothing if `client` is `None` (logs a warning) or `pin` is false.
+/// Does nothing if `client` is `None` (logs a warning).
 pub fn spawn_pin_prefix(
     client: Option<&CacheControlClient>,
     token_ids: &[TokenIdType],
     instance_id: u64,
     context_id: &str,
+    ttl_seconds: u64,
 ) {
     let Some(cc) = client else {
         tracing::warn!(
             request_id = %context_id,
-            "pin=true but no cache_control_client configured"
+            "cache_control set but no cache_control_client configured"
         );
         return;
     };
@@ -54,6 +55,7 @@ pub fn spawn_pin_prefix(
         let pin_request = serde_json::json!({
             "action": "pin_prefix",
             "token_ids": token_ids,
+            "ttl_seconds": ttl_seconds,
         });
         match cc.direct(SingleIn::new(pin_request), instance_id).await {
             Ok(mut stream) => {

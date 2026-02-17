@@ -334,13 +334,15 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Pin a prefix by token_ids to resist eviction.
 
         Args:
-            body: Dict with "token_ids" list of token IDs.
+            body: Dict with "token_ids" list of token IDs and optional
+                  "ttl_seconds" (default 300).
         """
         token_ids = body.get("token_ids", [])
+        ttl_seconds = body.get("ttl_seconds", 300)
         if not token_ids:
             return {"status": "error", "message": "token_ids required"}
         try:
-            result = await self.engine.tokenizer_manager.pin_prefix(token_ids)
+            result = await self.engine.tokenizer_manager.pin_prefix(token_ids, ttl_seconds)
             return {
                 "status": "ok" if result.success else "error",
                 "pinned_count": result.pinned_count,
