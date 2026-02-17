@@ -77,4 +77,5 @@ async def init_planner(runtime: DistributedRuntime, args):
 if __name__ == "__main__":
     parser = create_sla_planner_parser()
     args = parser.parse_args()
+    validate_sla_planner_args(args)
     asyncio.run(init_planner(args))
