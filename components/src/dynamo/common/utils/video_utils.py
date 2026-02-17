@@ -62,6 +62,26 @@ def compute_num_frames(
     return default_num_frames
 
 
+def normalize_video_frames(images) -> list:
+    """Normalize stage_output.images into a frame list for export_to_video.
+
+    Args:
+        images: stage_output.images -- a list that may contain a single
+            torch.Tensor or np.ndarray representing the full video.
+
+    Returns:
+        List of frames suitable for diffusers export_to_video.
+    """
+    frames = images[0] if len(images) == 1 else images
+
+    if isinstance(frames, np.ndarray):
+        if frames.ndim == 5:
+            frames = frames[0]
+        return list(frames)
+
+    return list(frames)
+
+
 def frames_to_numpy(images: list) -> np.ndarray:
     """Convert a list of PIL Images to a numpy array suitable for video encoding.
 
