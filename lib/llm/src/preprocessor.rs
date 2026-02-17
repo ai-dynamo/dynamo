@@ -13,6 +13,7 @@
 
 pub mod media;
 pub mod prompt;
+pub mod speculative_prefill;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
@@ -1164,6 +1165,15 @@ impl
         } else {
             transformed_stream
         };
+
+        // Step 5: Speculative next-turn prefill
+        let final_stream = speculative_prefill::maybe_wrap_stream(
+            final_stream,
+            &request,
+            &next,
+            &self.formatter,
+            &self.tokenizer,
+        );
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);

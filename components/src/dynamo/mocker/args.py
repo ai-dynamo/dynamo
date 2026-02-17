@@ -119,6 +119,11 @@ def create_temp_engine_args_file(args) -> Path:
         # Note: bootstrap_port is NOT included here - it's set per-worker in launch_workers()
     }
 
+    # Parse --reasoning JSON string into a nested object
+    reasoning_str = getattr(args, "reasoning", None)
+    if reasoning_str:
+        engine_args["reasoning"] = json.loads(reasoning_str)
+
     # Remove None values to only include explicitly set arguments
     engine_args = {k: v for k, v in engine_args.items() if v is not None}
 
@@ -277,6 +282,16 @@ def parse_args():
         default=1,
         help="Number of mocker workers to launch in the same process (default: 1). "
         "All workers share the same tokio runtime and thread pool.",
+    )
+
+    # Reasoning token output
+    parser.add_argument(
+        "--reasoning",
+        type=str,
+        default=None,
+        help="Enable reasoning token output. JSON object with fields: "
+        "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
+        'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
     )
 
     # Legacy support - allow direct JSON file specification
