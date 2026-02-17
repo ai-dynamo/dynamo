@@ -352,30 +352,8 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             logging.error(f"Failed to pin prefix: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def unpin_prefix(self, body: dict) -> dict:
-        """Unpin a prefix by token_ids to allow normal eviction.
-
-        Args:
-            body: Dict with "token_ids" list of token IDs.
-        """
-        token_ids = body.get("token_ids", [])
-        if not token_ids:
-            return {"status": "error", "message": "token_ids required"}
-        try:
-            result = await self.engine.tokenizer_manager.unpin_prefix(token_ids)
-            return {
-                "status": "ok" if result.success else "error",
-                "unpinned_count": result.unpinned_count,
-                "message": result.message,
-            }
-        except Exception as e:
-            logging.error(f"Failed to unpin prefix: {e}")
-            return {"status": "error", "message": str(e)}
-
     async def cache_control(self, request, context=None):
         """Service mesh endpoint for cache control operations.
-
-        Dispatches to pin_prefix / unpin_prefix.
 
         Args:
             request: Dict with "action" key and action-specific parameters.
@@ -387,8 +365,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         action = request.get("action")
         if action == "pin_prefix":
             result = await self.pin_prefix(request)
-        elif action == "unpin_prefix":
-            result = await self.unpin_prefix(request)
         else:
             result = {"status": "error", "message": f"Unknown action: {action}"}
         yield result
@@ -408,7 +384,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             "resume_memory_occupation", self.resume_memory_occupation
         )
         runtime.register_engine_route("pin_prefix", self.pin_prefix)
-        runtime.register_engine_route("unpin_prefix", self.unpin_prefix)
         runtime.register_engine_route(
             "update_weights_from_disk", self.update_weights_from_disk
         )
