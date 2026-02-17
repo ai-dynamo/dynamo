@@ -57,7 +57,7 @@ Tune these values based on your workload. Connection window should accommodate `
 
 ## Registering a Backend
 
-Similar to HTTP frontend, the registered backend will be auto-discovered and added to the frontend list of serving model. To register a backend, the same `register_llm()` API will be used. Currently the frontend support serving of the following model type and model input combination:
+Similar to HTTP frontend, the registered backend will be auto-discovered and added to the frontend list of serving model. To register a backend, the same `register_model()` API will be used. Currently the frontend support serving of the following model type and model input combination:
 
 * `ModelType::Completions` and `ModelInput::Text`: Combination for LLM backend that uses custom preprocessor
 * `ModelType::Completions` and `ModelInput::Token`: Combination for LLM backend that uses Dynamo preprocessor (i.e. Dynamo vLLM / SGLang / TRTLLM backend)
@@ -153,7 +153,7 @@ See [Router Documentation](../router/README.md) for routing configuration detail
 
 ### With Backends
 
-Backends auto-register with the frontend when they call `register_llm()`. Supported backends:
+Backends auto-register with the frontend when they call `register_model()`. Supported backends:
 
 - [vLLM Backend](../../backends/vllm/README.md)
 - [SGLang Backend](../../backends/sglang/README.md)
