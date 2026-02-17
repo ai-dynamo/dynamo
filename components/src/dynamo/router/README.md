@@ -35,10 +35,10 @@ For detailed descriptions of all KV router configuration options including `--bl
 
 The standalone router exposes two endpoints via the Dynamo runtime:
 
-1. **`find_best_worker`**: Given a request with token IDs, returns the best worker to handle it
-2. **`free`**: Cleans up router state when a request completes
+1. **`generate`**: Routes requests to the best worker and streams back generation results (KV-aware routing).
+2. **`best_worker_id`**: Given token IDs, returns the best worker ID for the request without routing; useful for debugging or custom routing logic.
 
-Clients query the `find_best_worker` endpoint to determine which worker should process each request, then call the selected worker directly.
+Clients call the `generate` endpoint to stream completions, or call `best_worker_id` to decide which worker to use and then contact that worker directly.
 
 ## Example: Manual Disaggregated Serving (Alternative Setup)
 
@@ -95,9 +95,9 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
 
 To integrate the standalone router with a backend:
 
-1. Clients should query the `router.find_best_worker` endpoint before sending requests
-2. Workers should register at the endpoint specified by the `--endpoint` argument
-3. Clients should call the `router.free` endpoint when requests complete
+1. Workers should register at the endpoint specified by the `--endpoint` argument
+2. Clients call the `router.generate` endpoint to stream completions (router selects the best worker), or call `router.best_worker_id` to get the best worker ID and then send requests to that worker
+3. Router state is updated automatically as requests are routed; no separate "free" call is required
 
 See [`components/src/dynamo/vllm/handlers.py`](../vllm/handlers.py) for a reference implementation (search for `prefill_router_client`).
 

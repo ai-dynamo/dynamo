@@ -12,15 +12,16 @@ to prefill workers) or any other scenario requiring intelligent KV cache-aware
 routing decisions.
 """
 
-import argparse
 import asyncio
 import logging
-import os
 from typing import Optional
 
 import uvloop
 
 from dynamo.llm import KvRouter, KvRouterConfig
+from dynamo.router.args import build_kv_router_config
+from dynamo.router.args import parse_args as parse_router_args
+from dynamo.router.backend_args import DynamoRouterConfig
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -151,192 +152,42 @@ class StandaloneRouterHandler:
         yield worker_id
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Dynamo Standalone Router Service: Configurable KV-aware routing for any worker endpoint",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-
-    parser.add_argument(
-        "--endpoint",
-        type=str,
-        required=True,
-        help=(
-            "Full endpoint path for workers in the format namespace.component.endpoint\n"
-            "(e.g., dynamo.prefill.generate for prefill workers)"
-        ),
-    )
-
-    parser.add_argument(
-        "--block-size",
-        type=int,
-        default=128,
-        help="KV cache block size for routing decisions (default: 128)",
-    )
-
-    parser.add_argument(
-        "--kv-overlap-score-weight",
-        type=float,
-        default=1.0,
-        help="KV Router: Weight for overlap score in worker selection. Higher values prioritize KV cache reuse (default: 1.0)",
-    )
-
-    parser.add_argument(
-        "--router-temperature",
-        type=float,
-        default=0.0,
-        help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic (default: 0.0)",
-    )
-
-    parser.add_argument(
-        "--no-kv-events",
-        action="store_false",
-        dest="use_kv_events",
-        default=True,
-        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
-    )
-
-    parser.add_argument(
-        "--router-replica-sync",
-        action="store_true",
-        default=False,
-        help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state (default: False)",
-    )
-
-    parser.add_argument(
-        "--router-snapshot-threshold",
-        type=int,
-        default=1000000,
-        help="KV Router: Number of messages in stream before triggering a snapshot (default: 1000000)",
-    )
-
-    parser.add_argument(
-        "--router-reset-states",
-        action="store_true",
-        dest="router_reset_states",
-        default=False,
-        help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas (default: False)",
-    )
-
-    parser.add_argument(
-        "--durable-kv-events",
-        action="store_true",
-        dest="durable_kv_events",
-        default=False,
-        help="KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. By default, the router uses the generic event plane (NATS Core or ZMQ) with local_indexer mode. Use this flag when you need durability and multi-replica consistency. Requires NATS with JetStream enabled.",
-    )
-
-    parser.add_argument(
-        "--no-track-active-blocks",
-        action="store_false",
-        dest="router_track_active_blocks",
-        default=True,
-        help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing (default: True)",
-    )
-
-    parser.add_argument(
-        "--no-assume-kv-reuse",
-        action="store_false",
-        dest="router_assume_kv_reuse",
-        default=True,
-        help="KV Router: When tracking active blocks, do not assume KV cache reuse (generate random hashes instead of computing actual block hashes). Useful when KV cache reuse is not expected. By default, KV cache reuse is assumed.",
-    )
-
-    parser.add_argument(
-        "--track-output-blocks",
-        action="store_true",
-        dest="router_track_output_blocks",
-        default=False,
-        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected output sequence length (agent_hints.osl in nvext). Default: False.",
-    )
-
-    parser.add_argument(
-        "--router-ttl-secs",
-        type=float,
-        default=120.0,
-        help="KV Router: TTL for blocks in seconds. Only used when --no-kv-events is set. Controls how long cached blocks are considered valid without explicit events (default: 120.0)",
-    )
-
-    parser.add_argument(
-        "--router-max-tree-size",
-        type=int,
-        default=2**20,
-        help="KV Router: Maximum tree size before pruning. Only used when --no-kv-events is set. When the indexer tree exceeds this size, pruning is triggered (default: 1048576, which is 2^20)",
-    )
-
-    parser.add_argument(
-        "--router-prune-target-ratio",
-        type=float,
-        default=0.8,
-        help="KV Router: Target size ratio after pruning (0.0-1.0). Only used when --no-kv-events is set. Determines how aggressively to prune the tree (default: 0.8)",
-    )
-
-    parser.add_argument(
-        "--router-event-threads",
-        type=int,
-        default=int(os.environ.get("DYN_ROUTER_EVENT_THREADS", "1")),
-        help="KV Router: Number of event processing threads. When > 1, uses a concurrent radix tree with a thread pool for higher throughput. Can be set via DYN_ROUTER_EVENT_THREADS env var (default: 1).",
-    )
-
-    return parser.parse_args()
+def parse_args(argv=None) -> DynamoRouterConfig:
+    """Parse router CLI arguments (compatibility shim delegating to args.parse_args)."""
+    return parse_router_args(argv)
 
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     """Main worker function for the standalone router service."""
 
-    args = parse_args()
-
-    # Parse endpoint path to get namespace for service registration
-    endpoint_parts = args.endpoint.split(".")
-    if len(endpoint_parts) != 3:
-        raise ValueError(
-            f"Invalid endpoint path format: {args.endpoint}. "
-            "Expected format: namespace.component.endpoint"
-        )
-    namespace = endpoint_parts[0]
+    config = parse_args()
 
     logger.info("Starting Standalone Router Service")
     logger.debug(
-        f"Configuration: endpoint={args.endpoint}, block_size={args.block_size}, "
-        f"overlap_score_weight={args.kv_overlap_score_weight}, "
-        f"router_temperature={args.router_temperature}, "
-        f"use_kv_events={args.use_kv_events}, "
-        f"durable_kv_events={args.durable_kv_events}, "
-        f"router_replica_sync={args.router_replica_sync}, "
-        f"router_reset_states={args.router_reset_states}, "
-        f"router_track_active_blocks={args.router_track_active_blocks}, "
-        f"router_track_output_blocks={args.router_track_output_blocks}, "
-        f"router_assume_kv_reuse={args.router_assume_kv_reuse}, "
-        f"router_ttl_secs={args.router_ttl_secs}, "
-        f"router_max_tree_size={args.router_max_tree_size}, "
-        f"router_prune_target_ratio={args.router_prune_target_ratio}"
+        f"Configuration: endpoint={config.endpoint}, block_size={config.block_size}, "
+        f"overlap_score_weight={config.kv_overlap_score_weight}, "
+        f"router_temperature={config.router_temperature}, "
+        f"use_kv_events={config.use_kv_events}, "
+        f"durable_kv_events={config.durable_kv_events}, "
+        f"router_replica_sync={config.router_replica_sync}, "
+        f"router_reset_states={config.router_reset_states}, "
+        f"router_track_active_blocks={config.router_track_active_blocks}, "
+        f"router_track_output_blocks={config.router_track_output_blocks}, "
+        f"router_assume_kv_reuse={config.router_assume_kv_reuse}, "
+        f"router_ttl_secs={config.router_ttl_secs}, "
+        f"router_max_tree_size={config.router_max_tree_size}, "
+        f"router_prune_target_ratio={config.router_prune_target_ratio}"
     )
 
-    # Create KvRouter configuration
-    kv_router_config = KvRouterConfig(
-        overlap_score_weight=args.kv_overlap_score_weight,
-        router_temperature=args.router_temperature,
-        use_kv_events=args.use_kv_events,
-        durable_kv_events=args.durable_kv_events,
-        router_replica_sync=args.router_replica_sync,
-        router_track_active_blocks=args.router_track_active_blocks,
-        router_track_output_blocks=args.router_track_output_blocks,
-        router_assume_kv_reuse=args.router_assume_kv_reuse,
-        router_snapshot_threshold=args.router_snapshot_threshold,
-        router_reset_states=args.router_reset_states,
-        router_ttl_secs=args.router_ttl_secs,
-        router_max_tree_size=args.router_max_tree_size,
-        router_prune_target_ratio=args.router_prune_target_ratio,
-        router_event_threads=args.router_event_threads,
-    )
+    kv_router_config = build_kv_router_config(config)
 
     # Create service component - use "router" as component name
-    component = runtime.namespace(namespace).component("router")
+    component = runtime.namespace(config.namespace).component("router")
 
     # Create handler
     handler = StandaloneRouterHandler(
-        runtime, args.endpoint, args.block_size, kv_router_config
+        runtime, config.endpoint, config.block_size, kv_router_config
     )
     await handler.initialize()
 
