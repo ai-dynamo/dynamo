@@ -430,8 +430,8 @@ mod tests {
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
         // Process a complete reasoning block
-        let r1 = parser
-            .parse_reasoning_streaming_incremental("<think>reasoning content</think>", &[]);
+        let r1 =
+            parser.parse_reasoning_streaming_incremental("<think>reasoning content</think>", &[]);
         assert_eq!(r1.reasoning_text, "reasoning content");
         assert_eq!(r1.normal_text, "");
 
@@ -471,8 +471,7 @@ mod tests {
         let r5 = parser.parse_reasoning_streaming_incremental("<", &[]);
         assert_eq!(r5.normal_text, "<");
 
-        let r6 =
-            parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
+        let r6 = parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
         assert_eq!(r6.normal_text, "invoke name=\"get_weather\">");
     }
 }

@@ -30,7 +30,10 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("mistral", ReasoningParserType::Mistral);
         map.insert("granite", ReasoningParserType::Granite);
         map.insert("nemotron_nano", ReasoningParserType::NemotronDeci); // nemotron nano is <think>...</think>
-        map.insert("minimax_append_think", ReasoningParserType::MiniMaxAppendThink);
+        map.insert(
+            "minimax_append_think",
+            ReasoningParserType::MiniMaxAppendThink,
+        );
         map
     })
 }

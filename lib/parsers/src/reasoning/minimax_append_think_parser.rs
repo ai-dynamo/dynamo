@@ -25,8 +25,8 @@ pub struct MiniMaxAppendThinkParser {
     is_first_chunk: bool,
 }
 
-impl MiniMaxAppendThinkParser {
-    pub fn new() -> Self {
+impl Default for MiniMaxAppendThinkParser {
+    fn default() -> Self {
         Self {
             inner: BasicReasoningParser::new(
                 "<think>".into(),
@@ -36,6 +36,12 @@ impl MiniMaxAppendThinkParser {
             ),
             is_first_chunk: true,
         }
+    }
+}
+
+impl MiniMaxAppendThinkParser {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -99,8 +105,7 @@ mod tests {
         assert_eq!(r2.normal_text, "");
 
         // End of reasoning
-        let r3 =
-            parser.parse_reasoning_streaming_incremental("</think>The weather is sunny.", &[]);
+        let r3 = parser.parse_reasoning_streaming_incremental("</think>The weather is sunny.", &[]);
         assert_eq!(r3.reasoning_text, "");
         assert_eq!(r3.normal_text, "The weather is sunny.");
     }
@@ -151,9 +156,10 @@ mod tests {
             &[],
         );
         assert_eq!(r2.reasoning_text, "");
-        assert!(r2
-            .normal_text
-            .contains("<minimax:tool_call><invoke name=\"get_weather\">"));
+        assert!(
+            r2.normal_text
+                .contains("<minimax:tool_call><invoke name=\"get_weather\">")
+        );
     }
 
     #[test]
@@ -184,8 +190,7 @@ mod tests {
         assert_eq!(r5.normal_text, "<");
 
         // Rest of the invoke tag
-        let r6 =
-            parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
+        let r6 = parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
         assert_eq!(r6.normal_text, "invoke name=\"get_weather\">");
     }
 }

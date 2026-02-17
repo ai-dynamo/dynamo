@@ -994,8 +994,8 @@ rust programming
     fn test_normalize_missing_angle_bracket_minimax() {
         // The MiniMax-M2.5 model sometimes drops the `<` before `invoke`.
         // The normalization step should fix this.
-        use crate::tool_calling::config::ToolCallConfig;
         use crate::tool_calling::config::ParserConfig;
+        use crate::tool_calling::config::ToolCallConfig;
         let config = match ToolCallConfig::minimax_m2().parser_config {
             ParserConfig::Xml(c) => c,
             _ => panic!("Expected XML config"),
@@ -1009,7 +1009,11 @@ invoke name="get_weather">
 </minimax:tool_call>"#;
 
         let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
-        assert_eq!(calls.len(), 1, "Should parse tool call even with missing < before invoke");
+        assert_eq!(
+            calls.len(),
+            1,
+            "Should parse tool call even with missing < before invoke"
+        );
         assert_eq!(calls[0].function.name, "get_weather");
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
@@ -1020,8 +1024,8 @@ invoke name="get_weather">
     #[test]
     fn test_normalize_does_not_double_add_angle_bracket() {
         // When `<` is already present, normalization should not add another one.
-        use crate::tool_calling::config::ToolCallConfig;
         use crate::tool_calling::config::ParserConfig;
+        use crate::tool_calling::config::ToolCallConfig;
         let config = match ToolCallConfig::minimax_m2().parser_config {
             ParserConfig::Xml(c) => c,
             _ => panic!("Expected XML config"),
