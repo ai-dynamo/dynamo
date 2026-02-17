@@ -197,15 +197,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="Maximum size of downloadable embedding files/Image URLs.",
         )
-        add_argument(
-            g,
-            flag_name="--encoder-cache-capacity-gb",
-            env_var="DYN_TRTLLM_ENCODER_CACHE_CAPACITY_GB",
-            default=0,
-            arg_type=float,
-            help="Capacity of the encoder cache in GB for multimodal embeddings.",
-            obsolete_flag="--dyn-encoder-cache-capacity-gb",
-        )
 
         diffusion_group = parser.add_argument_group(
             "Diffusion Options [Experimental]",
@@ -393,7 +384,6 @@ class DynamoTrtllmConfig(ConfigBase):
     encode_endpoint: str
     allowed_local_media_path: str
     max_file_size_mb: int
-    encoder_cache_capacity_gb: float
 
     output_dir: str
     default_height: int
