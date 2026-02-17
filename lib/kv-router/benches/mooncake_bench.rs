@@ -6,10 +6,7 @@ use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded,
 };
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
-    RouterEvent, XXH3_SEED,
-};
+use dynamo_kv_router::protocols::{RouterEvent, XXH3_SEED};
 use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
 use dynamo_tokens::compute_hash_v2;
 use rand::prelude::*;
@@ -139,10 +136,10 @@ struct Args {
     #[clap(long, default_value = "1")]
     trace_length_factor: usize,
 
-    /// How many times to duplicate the trace data with offset hashes at
-    /// replay time. Each duplication creates a structurally identical copy
-    /// of the prefix tree with disjoint hash values, increasing the number
-    /// of unique prefix groups.
+    /// How many times to duplicate the raw trace data with offset hash_ids
+    /// before event generation. Each copy is a structurally identical prefix
+    /// tree with disjoint hash values, increasing the number of unique
+    /// prefix groups and workers.
     #[clap(long, default_value = "1")]
     trace_duplication_factor: usize,
 
@@ -222,30 +219,47 @@ struct WorkerTrace {
     timestamp_us: u64,
 }
 
-/// Load the mooncake trace from disk and randomly partition requests across
-/// `num_unique_inference_workers` worker buckets using the configured seed.
-fn process_mooncake_trace(args: &Args) -> anyhow::Result<Vec<Vec<MooncakeRequest>>> {
-    let mut traces: Vec<Vec<MooncakeRequest>> = Vec::new();
-    for _ in 0..args.num_unique_inference_workers {
-        traces.push(Vec::new());
-    }
-
-    let mut rng = StdRng::seed_from_u64(args.seed);
-
-    let file = File::open(&args.mooncake_trace_path)?;
+/// Load the mooncake trace from disk into a flat list of requests.
+fn load_mooncake_trace(path: &str) -> anyhow::Result<Vec<MooncakeRequest>> {
+    let file = File::open(path)?;
     let reader = BufReader::new(file);
 
     println!("Loading trace...");
-
     let progress = make_progress_bar(None);
 
+    let mut requests = Vec::new();
     for line in reader.lines() {
-        let request = serde_json::from_str::<MooncakeRequest>(&line?)?;
-        traces[rng.random_range(0..args.num_unique_inference_workers)].push(request);
+        requests.push(serde_json::from_str::<MooncakeRequest>(&line?)?);
         progress.inc(1);
     }
 
-    Ok(traces)
+    Ok(requests)
+}
+
+/// Load, transform, and partition the mooncake trace into per-worker request lists.
+fn process_mooncake_trace(args: &Args) -> anyhow::Result<Vec<Vec<MooncakeRequest>>> {
+    let requests = load_mooncake_trace(&args.mooncake_trace_path)?;
+    let requests = expand_trace_lengths(requests, args.trace_length_factor);
+    let requests = duplicate_traces(requests, args.trace_duplication_factor);
+    Ok(partition_trace(
+        requests,
+        args.num_unique_inference_workers,
+        args.seed,
+    ))
+}
+
+/// Randomly partition a flat request list across `num_workers` worker buckets.
+fn partition_trace(
+    requests: Vec<MooncakeRequest>,
+    num_workers: usize,
+    seed: u64,
+) -> Vec<Vec<MooncakeRequest>> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut traces: Vec<Vec<MooncakeRequest>> = (0..num_workers).map(|_| Vec::new()).collect();
+    for request in requests {
+        traces[rng.random_range(0..num_workers)].push(request);
+    }
+    traces
 }
 
 /// Linearly rescale all timestamps in a worker's trace so the total span equals
@@ -267,35 +281,62 @@ fn scale_mooncake_trace(trace: &Vec<MooncakeRequest>, duration: u64) -> Vec<Moon
 /// Each hash `h` becomes `factor` consecutive hashes:
 /// `h * factor`, `h * factor + 1`, ..., `h * factor + (factor - 1)`.
 /// Two sequences that shared a k-block prefix now share a k*factor-block prefix.
-fn expand_trace_lengths(
-    traces: Vec<Vec<MooncakeRequest>>,
-    factor: usize,
-) -> Vec<Vec<MooncakeRequest>> {
+fn expand_trace_lengths(requests: Vec<MooncakeRequest>, factor: usize) -> Vec<MooncakeRequest> {
     if factor <= 1 {
-        return traces;
+        return requests;
     }
 
     println!("Expanding trace lengths by {}x", factor);
 
-    traces
+    requests
         .into_iter()
-        .map(|worker_trace| {
-            worker_trace
-                .into_iter()
-                .map(|mut request| {
-                    request.hash_ids = request
-                        .hash_ids
-                        .iter()
-                        .flat_map(|&h| {
-                            let base = h * factor as u64;
-                            (0..factor as u64).map(move |offset| base + offset)
-                        })
-                        .collect();
-                    request
+        .map(|mut request| {
+            request.hash_ids = request
+                .hash_ids
+                .iter()
+                .flat_map(|&h| {
+                    let base = h * factor as u64;
+                    (0..factor as u64).map(move |offset| base + offset)
                 })
-                .collect()
+                .collect();
+            request
         })
         .collect()
+}
+
+/// Duplicate all worker traces with offset hash_ids, creating `factor`
+/// structurally identical copies of the prefix tree with disjoint hash spaces.
+///
+/// Copy `d` (1-indexed) offsets every hash_id by `(max_hash_id + 1) * d`.
+/// The original traces (copy 0) are kept as-is.
+fn duplicate_traces(requests: Vec<MooncakeRequest>, factor: usize) -> Vec<MooncakeRequest> {
+    if factor <= 1 {
+        return requests;
+    }
+
+    let max_hash_id = requests
+        .iter()
+        .flat_map(|r| r.hash_ids.iter().copied())
+        .max()
+        .unwrap_or(0);
+    let offset_base = max_hash_id + 1;
+
+    println!(
+        "Duplicating traces: {}x (hash offset base: {})",
+        factor, offset_base
+    );
+
+    let mut out = Vec::with_capacity(requests.len() * factor);
+    for r in &requests {
+        for d in 0..factor {
+            let offset = offset_base * d as u64;
+            out.push(MooncakeRequest {
+                hash_ids: r.hash_ids.iter().map(|&h| h + offset).collect(),
+                ..r.clone()
+            });
+        }
+    }
+    out
 }
 
 /// Expand a request's block-level hash_ids into per-token IDs by repeating each
@@ -333,129 +374,6 @@ fn make_progress_bar(total: Option<u64>) -> ProgressBar {
     );
 
     progress
-}
-
-/// Scan all hashes in the prepared worker traces to find the global maximum.
-/// Used to compute a safe per-duplication offset that keeps hash spaces disjoint.
-fn compute_max_hash(traces: &[Arc<Vec<WorkerTrace>>]) -> u64 {
-    let mut max_hash: u64 = 0;
-    for trace in traces {
-        for entry in trace.iter() {
-            match &entry.entry {
-                WorkerTraceEntry::Request(hashes) => {
-                    for h in hashes {
-                        max_hash = max_hash.max(h.0);
-                    }
-                }
-                WorkerTraceEntry::Event(event) => match &event.data {
-                    KvCacheEventData::Stored(store) => {
-                        if let Some(parent) = &store.parent_hash {
-                            max_hash = max_hash.max(parent.0);
-                        }
-                        for block in &store.blocks {
-                            max_hash = max_hash.max(block.tokens_hash.0);
-                            max_hash = max_hash.max(block.block_hash.0);
-                        }
-                    }
-                    KvCacheEventData::Removed(remove) => {
-                        for h in &remove.block_hashes {
-                            max_hash = max_hash.max(h.0);
-                        }
-                    }
-                    KvCacheEventData::Cleared => {}
-                },
-            }
-        }
-    }
-    max_hash
-}
-
-/// Create a new WorkerTrace entry with all hashes offset by the given amount.
-/// Preserves the prefix tree structure while making all hash values disjoint
-/// from the original. Both LocalBlockHash and ExternalSequenceBlockHash values
-/// are shifted by the same constant so parent_hash chains remain valid.
-fn offset_trace_entry(entry: &WorkerTrace, offset: u64) -> WorkerTrace {
-    WorkerTrace {
-        timestamp_us: entry.timestamp_us,
-        entry: match &entry.entry {
-            WorkerTraceEntry::Request(hashes) => WorkerTraceEntry::Request(
-                hashes
-                    .iter()
-                    .map(|h| LocalBlockHash(h.0 + offset))
-                    .collect(),
-            ),
-            WorkerTraceEntry::Event(event) => WorkerTraceEntry::Event(KvCacheEvent {
-                event_id: event.event_id,
-                dp_rank: event.dp_rank,
-                data: match &event.data {
-                    KvCacheEventData::Stored(store) => KvCacheEventData::Stored(KvCacheStoreData {
-                        parent_hash: store
-                            .parent_hash
-                            .map(|h| ExternalSequenceBlockHash(h.0 + offset)),
-                        blocks: store
-                            .blocks
-                            .iter()
-                            .map(|b| KvCacheStoredBlockData {
-                                tokens_hash: LocalBlockHash(b.tokens_hash.0 + offset),
-                                block_hash: ExternalSequenceBlockHash(b.block_hash.0 + offset),
-                                mm_extra_info: b.mm_extra_info.clone(),
-                            })
-                            .collect(),
-                    }),
-                    KvCacheEventData::Removed(remove) => {
-                        KvCacheEventData::Removed(KvCacheRemoveData {
-                            block_hashes: remove
-                                .block_hashes
-                                .iter()
-                                .map(|h| ExternalSequenceBlockHash(h.0 + offset))
-                                .collect(),
-                        })
-                    }
-                    KvCacheEventData::Cleared => KvCacheEventData::Cleared,
-                },
-            }),
-        },
-    }
-}
-
-/// Pre-expand worker traces by appending offset copies of every entry.
-///
-/// For each original entry, `(trace_duplication_factor - 1)` copies are
-/// inserted immediately after it, each with all hashes shifted by
-/// `(max_hash + 1) * d`. The copies share the same `timestamp_us` so the
-/// existing same-timestamp batching in the replay loop handles them
-/// transparently.
-fn expand_traces_with_offsets(
-    worker_traces: Vec<Arc<Vec<WorkerTrace>>>,
-    trace_duplication_factor: usize,
-    compute_max_hash_fn: &dyn Fn(&[Arc<Vec<WorkerTrace>>]) -> u64,
-) -> Vec<Arc<Vec<WorkerTrace>>> {
-    if trace_duplication_factor <= 1 {
-        return worker_traces;
-    }
-
-    let hash_offset_base = compute_max_hash_fn(&worker_traces) + 1;
-    println!(
-        "Expanding traces: {}x duplication (hash offset base: {})",
-        trace_duplication_factor, hash_offset_base
-    );
-
-    worker_traces
-        .into_iter()
-        .map(|trace| {
-            let trace = Arc::try_unwrap(trace).unwrap_or_else(|arc| (*arc).clone());
-            let mut expanded = Vec::with_capacity(trace.len() * trace_duplication_factor);
-            for entry in trace {
-                // Compute offset copies from a reference before moving the original.
-                let offsets: Vec<_> = (1..trace_duplication_factor)
-                    .map(|d| offset_trace_entry(&entry, hash_offset_base * d as u64))
-                    .collect();
-                expanded.push(entry); // move original first, no clone
-                expanded.extend(offsets);
-            }
-            Arc::new(expanded)
-        })
-        .collect()
 }
 
 /// Replay each worker's request trace through a mock engine in real-time to
@@ -660,15 +578,6 @@ async fn run_benchmark(
         .map(|trace| Arc::new(trace))
         .collect::<Vec<_>>();
 
-    // Pre-expand traces with offset copies so the replay loop has zero
-    // per-entry overhead. Each original entry is followed by
-    // (trace_duplication_factor - 1) offset copies at the same timestamp.
-    let worker_traces = expand_traces_with_offsets(
-        worker_traces,
-        args.trace_duplication_factor,
-        &compute_max_hash,
-    );
-
     let progress = make_progress_bar(Some(
         worker_traces
             .iter()
@@ -843,7 +752,6 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let traces = process_mooncake_trace(&args)?;
-    let traces = expand_trace_lengths(traces, args.trace_length_factor);
 
     let events = generate_events(&traces, &args).await?;
 
@@ -852,4 +760,85 @@ async fn main() -> anyhow::Result<()> {
     run_benchmark(indexer, traces, events, &args).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    fn write_trace_file(requests: &[(&[u64], u64)]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mooncake_bench_test_{}.jsonl",
+            std::process::id()
+        ));
+        let mut f = File::create(&path).unwrap();
+        for (i, (hash_ids, output_length)) in requests.iter().enumerate() {
+            let line = serde_json::json!({
+                "timestamp": i as u64,
+                "hash_ids": hash_ids,
+                "output_length": output_length,
+            });
+            writeln!(f, "{}", line).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn process_mooncake_trace_expand_and_duplicate() {
+        // Two requests sharing prefix [0, 1], one diverges to [2], the other to [3, 4].
+        let trace_path = write_trace_file(&[(&[0, 1, 2], 10), (&[0, 1, 3, 4], 10)]);
+
+        let args = Args::parse_from([
+            "test",
+            trace_path.to_str().unwrap(),
+            "--num-unique-inference-workers",
+            "2",
+            "--trace-length-factor",
+            "2",
+            "--trace-duplication-factor",
+            "2",
+            "--seed",
+            "42",
+        ]);
+
+        let traces = process_mooncake_trace(&args).unwrap();
+        std::fs::remove_file(&trace_path).ok();
+
+        // Collect all hash_id vecs across workers, sorted for deterministic comparison.
+        let mut all_hashes: Vec<Vec<u64>> = traces
+            .into_iter()
+            .flat_map(|w| w.into_iter().map(|r| r.hash_ids))
+            .collect();
+        all_hashes.sort();
+
+        // expand(2): [0,1,2] → [0,1,2,3,4,5], [0,1,3,4] → [0,1,2,3,6,7,8,9]
+        // duplicate(2): max=9, offset=10
+        //   req0 copy0: [0,1,2,3,4,5]      req0 copy1: [10,11,12,13,14,15]
+        //   req1 copy0: [0,1,2,3,6,7,8,9]  req1 copy1: [10,11,12,13,16,17,18,19]
+        let mut expected = vec![
+            vec![0, 1, 2, 3, 4, 5],
+            vec![10, 11, 12, 13, 14, 15],
+            vec![0, 1, 2, 3, 6, 7, 8, 9],
+            vec![10, 11, 12, 13, 16, 17, 18, 19],
+        ];
+        expected.sort();
+
+        assert_eq!(all_hashes, expected);
+
+        // Verify prefix structure: within each copy, the shared prefix is preserved.
+        // Copy 0 sequences share [0,1,2,3], copy 1 sequences share [10,11,12,13].
+        let copy0: Vec<&Vec<u64>> = all_hashes.iter().filter(|h| h[0] == 0).collect();
+        let copy1: Vec<&Vec<u64>> = all_hashes.iter().filter(|h| h[0] == 10).collect();
+        assert_eq!(copy0.len(), 2);
+        assert_eq!(copy1.len(), 2);
+        assert_eq!(copy0[0][..4], copy0[1][..4]);
+        assert_eq!(copy1[0][..4], copy1[1][..4]);
+
+        // Verify disjointness between copies.
+        let set0: std::collections::HashSet<u64> =
+            copy0.iter().flat_map(|h| h.iter().copied()).collect();
+        let set1: std::collections::HashSet<u64> =
+            copy1.iter().flat_map(|h| h.iter().copied()).collect();
+        assert!(set0.is_disjoint(&set1));
+    }
 }
