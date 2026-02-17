@@ -74,34 +74,29 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use cudarc::driver::{CudaContext, sys};
+use cudarc::driver::CudaContext;
 
 use crate::block_manager::numa_allocator;
 
-/// Allocates pinned host memory, preferring write-combined if supported.
+/// Allocates page-locked host memory with `CU_MEMHOSTALLOC_DEVICEMAP`.
 ///
-/// Write-combined (WC) memory is optimal for PCIe DMA transfers but may not be
-/// supported on systems with cache-coherent CPU-GPU interconnects (e.g., Grace
-/// Hopper/Blackwell with NVLink-C2C). This function tries WC first and falls
-/// back to regular pinned memory if not supported.
+/// DEVICEMAP maps the allocation into the GPU's address space, enabling
+/// zero-copy access from CUDA kernels. This is preferred over WRITECOMBINED
+/// because pinned memory is accessed bidirectionally:
+/// - CUDA kernels read from and write into host KV cache blocks
+/// - G3 (disk) offload reads from pinned memory on the CPU side
+///
+/// WRITECOMBINED would make CPU reads very slow (uncached), penalizing the
+/// G3 offload path. DEVICEMAP has no such penalty.
 ///
 /// # Safety
 ///
 /// Caller must ensure a valid CUDA context is bound to the current thread.
-unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, StorageError> {
-    // First, try write-combined allocation (optimal for PCIe systems)
-    // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
-    match unsafe { cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED) } {
-        Ok(ptr) => Ok(ptr as *mut u8),
-        Err(_) => {
-            // Write-combined not supported (e.g., Grace Hopper/Blackwell),
-            // fall back to regular pinned memory
-            tracing::debug!("Write-combined memory not supported, using regular pinned memory");
-            // SAFETY: Same as above - caller guarantees valid CUDA context
-            unsafe { cudarc::driver::result::malloc_host(size, 0) }
-                .map(|ptr| ptr as *mut u8)
-                .map_err(StorageError::Cuda)
-        }
+unsafe fn malloc_host_devicemap(size: usize) -> Result<*mut u8, StorageError> {
+    unsafe {
+        cudarc::driver::result::malloc_host(size, cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP)
+            .map(|ptr| ptr as *mut u8)
+            .map_err(StorageError::Cuda)
     }
 }
 
@@ -205,7 +200,7 @@ impl PinnedStorage {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-            // Try NUMA-aware allocation if enabled, otherwise use direct allocation
+            // Try NUMA-aware allocation if enabled, otherwise use direct allocation.
             let ptr = if numa_allocator::is_numa_enabled() {
                 let device_id = ctx.cu_device() as u32;
                 match numa_allocator::worker_pool::NumaWorkerPool::global()
@@ -214,11 +209,11 @@ impl PinnedStorage {
                     Ok(ptr) => ptr,
                     Err(e) => {
                         tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
-                        malloc_host_prefer_writecombined(size)?
+                        malloc_host_devicemap(size)?
                     }
                 }
             } else {
-                malloc_host_prefer_writecombined(size)?
+                malloc_host_devicemap(size)?
             };
 
             assert!(!ptr.is_null(), "Failed to allocate pinned memory");
@@ -603,16 +598,15 @@ mod tests {
     }
 
     #[test]
-    fn test_malloc_host_prefer_writecombined_allocates_memory() {
+    fn test_pinned_devicemap_allocates_memory() {
         let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
         let size = 4096; // One page
 
         unsafe {
             ctx.bind_to_thread().expect("Failed to bind CUDA context");
 
-            // Test allocation succeeds (either write-combined or fallback)
-            let ptr = malloc_host_prefer_writecombined(size)
-                .expect("malloc_host_prefer_writecombined should succeed");
+            let ptr = malloc_host_devicemap(size)
+                .expect("malloc_host_devicemap should succeed");
 
             // Verify pointer is valid and non-null
             assert!(!ptr.is_null(), "Allocated pointer should not be null");
@@ -627,14 +621,8 @@ mod tests {
         }
     }
 
-    /// Test PinnedStorage::new with NUMA disabled (the direct allocation path)
-    ///
-    /// This test confirms that when `DYN_KVBM_ENABLE_NUMA` is not set,
-    /// PinnedStorage::new uses the direct malloc_host_prefer_writecombined path
-    /// (lines 222-224 in the source).
+    /// Test PinnedStorage::new with NUMA disabled (the direct allocation path).
     #[test]
-    // `remove_var` is not thread-safe, so we need to run this test in a serial context
-    // #[serial]
     fn test_pinned_storage_new_without_numa() {
         // Verify NUMA is actually disabled for this test
         assert!(
