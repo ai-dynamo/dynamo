@@ -19,7 +19,7 @@ use crate::{
     kv_router::{
         KvRouter,
         metrics::RouterRequestMetrics,
-        protocols::{BlockExtraInfo, TokensWithHashes, WorkerWithDpRank},
+        protocols::{TokensWithHashes, WorkerWithDpRank},
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -108,21 +108,6 @@ impl KvPushRouter {
         KvPushRouter { inner, chooser }
     }
 
-    fn routing_inputs(
-        request: &PreprocessedRequest,
-    ) -> (&[u32], Option<&[Option<BlockExtraInfo>]>) {
-        if let Some(mm_routing_info) = request.mm_routing_info.as_ref() {
-            let routing_tokens = mm_routing_info.routing_token_ids.as_slice();
-            if !routing_tokens.is_empty() {
-                return (
-                    routing_tokens,
-                    Some(mm_routing_info.block_mm_infos.as_slice()),
-                );
-            }
-        }
-        (&request.token_ids, None)
-    }
-
     /// Select a worker for the request, either using a preselected worker or finding the best match.
     ///
     /// When `is_query_only` is false, this also registers the request with the scheduler via `add_request`.
@@ -138,7 +123,7 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
-        let (routing_token_ids, block_mm_infos) = Self::routing_inputs(request);
+        let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
         let preselected_id = match phase {
@@ -313,7 +298,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let request_metrics =
             RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
         if let Some(ref tracker) = request.tracker {
-            let (routing_token_ids, _) = Self::routing_inputs(&request);
+            let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);
             tracker.record_kv_hit(overlap_amount, isl_blocks);
             tracker.record_isl(

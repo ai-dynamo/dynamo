@@ -201,6 +201,19 @@ impl PreprocessedRequest {
     pub fn routing_mut(&mut self) -> &mut RoutingHints {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
+
+    /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
+    /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
+    pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
+        let Some(mm) = self.mm_routing_info.as_ref() else {
+            return (&self.token_ids, None);
+        };
+        let tokens = mm.routing_token_ids.as_slice();
+        if tokens.is_empty() {
+            return (&self.token_ids, None);
+        }
+        (tokens, Some(mm.block_mm_infos.as_slice()))
+    }
 }
 
 /// [`PreprocessedEmbeddingRequest`] is the internal representation of an embedding request
