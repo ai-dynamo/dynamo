@@ -27,7 +27,7 @@ This command:
 - Exposes the service on port 8000 (configurable)
 - Automatically handles all backend workers registered to the Dynamo endpoint
 
-Backend workers register themselves using the `register_llm` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
+Backend workers register themselves using the `register_model` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
 
 #### CLI Arguments
 
@@ -202,6 +202,8 @@ The main KV-aware routing arguments:
 
 To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 
+For details on per-request agent hints (`latency_sensitivity`, `osl`, `speculative_prefill`), see the [Agent Hints Guide](agent-hints.md).
+
 ## Basic Routing
 
 Dynamo supports several routing strategies when sending requests from one component to another component's endpoint.
@@ -267,7 +269,7 @@ Dynamo supports disaggregated serving where prefill (prompt processing) and deco
 ### Automatic Prefill Router Activation
 
 The prefill router is automatically created when:
-1. A decode model is registered (e.g., via `register_llm()` with `ModelType.Chat | ModelType.Completions`)
+1. A decode model is registered (e.g., via `register_model()` with `ModelType.Chat | ModelType.Completions`)
 2. A prefill worker is detected with the same model name and `ModelType.Prefill`
 
 **Key characteristics of the prefill router:**
@@ -283,7 +285,7 @@ When both workers are registered, requests are automatically routed.
 # Decode worker registration (in your decode worker)
 decode_endpoint = runtime.namespace("dynamo").component("decode").endpoint("generate")
 
-await register_llm(
+await register_model(
     model_input=ModelInput.Tokens,
     model_type=ModelType.Chat | ModelType.Completions,
     endpoint=decode_endpoint,
@@ -296,7 +298,7 @@ await decode_endpoint.serve_endpoint(decode_handler.generate)
 # Prefill worker registration (in your prefill worker)
 prefill_endpoint = runtime.namespace("dynamo").component("prefill").endpoint("generate")
 
-await register_llm(
+await register_model(
     model_input=ModelInput.Tokens,
     model_type=ModelType.Prefill,  # <-- Mark as prefill worker
     endpoint=prefill_endpoint,

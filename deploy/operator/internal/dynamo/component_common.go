@@ -50,6 +50,7 @@ type ComponentContext struct {
 	ParentGraphDeploymentNamespace string
 	DiscoveryBackend               string
 	EPPConfig                      *v1alpha1.EPPConfig
+	WorkerHashSuffix               string
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {

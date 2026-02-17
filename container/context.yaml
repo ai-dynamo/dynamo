@@ -11,7 +11,10 @@
 
 dynamo:
   base_image: nvcr.io/nvidia/cuda-dl-base
-  base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
+  cuda12.9:
+    base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
+  cuda13.0:
+    base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
   epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
   python_version: "3.12"
@@ -33,11 +36,12 @@ dynamo:
 vllm:
   base_image: nvcr.io/nvidia/cuda-dl-base
   runtime_image: nvcr.io/nvidia/cuda
-  runtime_image_tag: ${CUDA_VERSION}.0-runtime-ubuntu24.04
   cuda12.9:
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
+    runtime_image_tag: 12.9.1-runtime-ubuntu24.04
   cuda13.0:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
+    runtime_image_tag: 13.0.2-runtime-ubuntu24.04
   vllm_ref: v0.15.1
   flashinf_ref: v0.6.1
   lmcache_ref: 0.3.13
@@ -45,6 +49,8 @@ vllm:
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
+  enable_modelexpress_p2p: "false"
+  modelexpress_ref: "3d73992ce6c10e52ddc54f7f12af35d27e173f15"
 
 sglang:
   base_image: nvcr.io/nvidia/cuda-dl-base
@@ -61,9 +67,10 @@ sglang:
 
 trtllm:
   base_image: nvcr.io/nvidia/pytorch
-  base_image_tag: 25.12-py3
   runtime_image: nvcr.io/nvidia/cuda-dl-base
-  runtime_image_tag: 25.12-cuda13.1-runtime-ubuntu24.04
+  cuda13.1:
+    base_image_tag: 25.12-py3
+    runtime_image_tag: 25.12-cuda13.1-runtime-ubuntu24.04
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "false"
   enable_kvbm: "true"
