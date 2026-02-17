@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -76,7 +77,6 @@ type DynamoComponentDeploymentReconciler struct {
 	client.Client
 	Recorder              record.EventRecorder
 	Config                commonController.Config
-	EtcdStorage           etcdStorage
 	DockerSecretRetriever dockerSecretRetriever
 }
 
@@ -322,6 +322,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	serviceReplicaStatus := &v1alpha1.ServiceReplicaStatus{
 		ComponentKind:     v1alpha1.ComponentKindDeployment,
 		ComponentName:     deployment.Name,
+		ComponentNames:    []string{deployment.Name},
 		Replicas:          deployment.Status.Replicas,
 		UpdatedReplicas:   deployment.Status.UpdatedReplicas,
 		ReadyReplicas:     &deployment.Status.ReadyReplicas,
@@ -499,6 +500,7 @@ func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderW
 	return v1alpha1.ServiceReplicaStatus{
 		ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
 		ComponentName:   leaderWorkerSet.Name,
+		ComponentNames:  []string{leaderWorkerSet.Name},
 		Replicas:        leaderWorkerSet.Status.Replicas,
 		UpdatedReplicas: leaderWorkerSet.Status.UpdatedReplicas,
 		ReadyReplicas:   &leaderWorkerSet.Status.ReadyReplicas,
@@ -515,14 +517,18 @@ func combineLWSReplicaStatuses(serviceReplicaStatuses []v1alpha1.ServiceReplicaS
 	if firstServiceStatus.ReadyReplicas != nil {
 		readyReplicas = *firstServiceStatus.ReadyReplicas
 	}
+	allNames := append([]string{}, firstServiceStatus.ComponentNames...)
 	for _, serviceReplicaStatus := range serviceReplicaStatuses[1:] {
 		firstServiceStatus.Replicas += serviceReplicaStatus.Replicas
 		firstServiceStatus.UpdatedReplicas += serviceReplicaStatus.UpdatedReplicas
 		if serviceReplicaStatus.ReadyReplicas != nil {
 			readyReplicas += *serviceReplicaStatus.ReadyReplicas
 		}
+		allNames = append(allNames, serviceReplicaStatus.ComponentNames...)
 	}
 
+	slices.Sort(allNames)
+	firstServiceStatus.ComponentNames = allNames
 	firstServiceStatus.ReadyReplicas = &readyReplicas
 	return &firstServiceStatus
 }
@@ -757,20 +763,6 @@ func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Conte
 	logger := log.FromContext(ctx)
 	logger.Info("Finalizing the DynamoComponentDeployment", "dynamoComponentDeployment", dynamoComponentDeployment)
 
-	// Only delete etcd keys if using etcd discovery backend
-	// When using Kubernetes discovery (the default), skip etcd cleanup to avoid hangs
-	if r.Config.DiscoveryBackend != "etcd" {
-		return nil
-	}
-
-	if dynamoComponentDeployment.Spec.ServiceName != "" && dynamoComponentDeployment.Spec.DynamoNamespace != nil && *dynamoComponentDeployment.Spec.DynamoNamespace != "" {
-		logger.Info("Deleting the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
-		err := r.EtcdStorage.DeleteKeys(ctx, fmt.Sprintf("/%s/components/%s", *dynamoComponentDeployment.Spec.DynamoNamespace, dynamoComponentDeployment.Spec.ServiceName))
-		if err != nil {
-			logger.Error(err, "Failed to delete the etcd keys for the service", "service", dynamoComponentDeployment.Spec.ServiceName, "dynamoNamespace", *dynamoComponentDeployment.Spec.DynamoNamespace)
-			return err
-		}
-	}
 	return nil
 }
 

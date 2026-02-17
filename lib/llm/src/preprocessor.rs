@@ -13,6 +13,7 @@
 
 pub mod media;
 pub mod prompt;
+pub mod speculative_prefill;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
@@ -94,7 +95,11 @@ pub struct LLMMetricAnnotation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokenizer_latency: Option<Duration>,
+    pub tokenize_latency: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detokenize_total_latency: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detokenize_count: Option<u64>,
 }
 
 impl LLMMetricAnnotation {
@@ -270,13 +275,14 @@ impl OpenAIPreprocessor {
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
+            let hints = nvext.agent_hints.as_ref();
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
-                enable_local_updates: nvext.enable_local_updates,
-                expected_output_tokens: nvext.expected_output_tokens,
+                expected_output_tokens: hints.and_then(|h| h.osl),
+                priority_jump: hints.and_then(|h| h.latency_sensitivity),
                 lora_name,
             };
             builder.routing(Some(routing));
@@ -525,7 +531,7 @@ impl OpenAIPreprocessor {
         let encode_start = Instant::now();
         let encoding = self.tokenizer.encode(prompt)?;
         if let Some(t) = tracker {
-            t.record_tokenizer_latency(encode_start.elapsed());
+            t.record_tokenize_latency(encode_start.elapsed());
         }
         Ok(encoding)
     }
@@ -715,7 +721,9 @@ impl OpenAIPreprocessor {
                         decode_worker_id,
                         decode_dp_rank,
                         decode_worker_type,
-                        tokenizer_latency: tracker.as_ref().and_then(|t| t.tokenizer_latency()),
+                        tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                        detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
+                        detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
@@ -776,7 +784,11 @@ impl OpenAIPreprocessor {
                             decode_worker_id,
                             decode_dp_rank,
                             decode_worker_type,
-                            tokenizer_latency: tracker.as_ref().and_then(|t| t.tokenizer_latency()),
+                            tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
+                            detokenize_total_latency: tracker
+                                .as_ref()
+                                .and_then(|t| t.detokenize_total_latency()),
+                            detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
 
                         // Create annotation string
@@ -1153,6 +1165,15 @@ impl
         } else {
             transformed_stream
         };
+
+        // Step 5: Speculative next-turn prefill
+        let final_stream = speculative_prefill::maybe_wrap_stream(
+            final_stream,
+            &request,
+            &next,
+            &self.formatter,
+            &self.tokenizer,
+        );
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);

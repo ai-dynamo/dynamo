@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use dynamo_kv_router::{ConcurrentRadixTree, ThreadPoolIndexer};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
@@ -17,6 +19,8 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 use futures::stream;
+use tokio::sync::oneshot;
+use tracing::Instrument;
 use validator::Validate;
 
 // Re-export from dynamo-kv-router crate
@@ -29,6 +33,7 @@ pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
+pub mod queue;
 pub mod recorder;
 pub mod scheduler;
 pub mod sequence;
@@ -37,19 +42,20 @@ pub mod worker_query;
 
 pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use prefill_router::PrefillRouter;
-pub use push_router::KvPushRouter;
+pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
 use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::{
         approx::PruneConfig,
-        indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
+        indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
-            DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
-            TokensWithHashes, WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
+            BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
+            RouterResponse, TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+            compute_block_hash_for_seq,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
-        sequence::SequenceError,
+        sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
 };
@@ -113,11 +119,17 @@ pub trait WorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
+#[derive(Clone)]
 pub enum Indexer {
-    /// Updates itself based on KV events emitted by backend workers or routing decisions.
+    /// Single-threaded radix tree with channel-based event processing.
     /// Supports TTL-based expiration and size-based pruning.
     /// Has the ability to persist and snapshot states.
     KvIndexer(KvIndexer),
+
+    /// Concurrent radix tree with a thread pool for event processing.
+    /// Uses sticky worker routing for per-worker event serialization.
+    /// Does not support TTL/pruning.
+    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTree>>),
 
     /// Used when we do not wish to use the indexer at all (e.g., when overlap_score_weight is 0).
     /// Note: This will cause KV events to accumulate in JetStream as we do not regularly purge them.
@@ -132,30 +144,37 @@ impl Indexer {
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Self {
         if kv_router_config.overlap_score_weight == 0.0 {
-            // When overlap_score_weight is zero, we don't need to track prefixes
-            Indexer::None
-        } else {
-            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
-
-            // If use_kv_events is false, enable TTL and pruning for approximate behavior
-            let prune_config = if !kv_router_config.use_kv_events {
-                Some(PruneConfig {
-                    ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
-                    max_tree_size: kv_router_config.router_max_tree_size,
-                    prune_target_ratio: kv_router_config.router_prune_target_ratio,
-                })
-            } else {
-                None
-            };
-
-            Indexer::KvIndexer(KvIndexer::new_with_frequency(
-                cancellation_token,
-                None, // expiration_duration for frequency tracking
-                block_size,
-                kv_indexer_metrics,
-                prune_config,
-            ))
+            return Indexer::None;
         }
+
+        if kv_router_config.router_event_threads > 1 {
+            return Indexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
+                ConcurrentRadixTree::new(),
+                kv_router_config.router_event_threads as usize,
+                block_size,
+            )));
+        }
+
+        let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+
+        // If use_kv_events is false, enable TTL and pruning for approximate behavior
+        let prune_config = if !kv_router_config.use_kv_events {
+            Some(PruneConfig {
+                ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
+                max_tree_size: kv_router_config.router_max_tree_size,
+                prune_target_ratio: kv_router_config.router_prune_target_ratio,
+            })
+        } else {
+            None
+        };
+
+        Indexer::KvIndexer(KvIndexer::new_with_frequency(
+            cancellation_token,
+            None, // expiration_duration for frequency tracking
+            block_size,
+            kv_indexer_metrics,
+            prune_config,
+        ))
     }
 
     pub(crate) async fn find_matches(
@@ -164,6 +183,7 @@ impl Indexer {
     ) -> Result<OverlapScores, KvRouterError> {
         match self {
             Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
+            Indexer::Concurrent(tpi) => tpi.find_matches(sequence).await,
             Indexer::None => Ok(OverlapScores {
                 scores: HashMap::new(),
                 frequencies: Vec::new(),
@@ -175,6 +195,7 @@ impl Indexer {
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         match self {
             Indexer::KvIndexer(indexer) => indexer.dump_events().await,
+            Indexer::Concurrent(tpi) => tpi.dump_events().await,
             Indexer::None => {
                 panic!(
                     "Cannot dump events: indexer does not exist (is overlap_score_weight set to 0?)"
@@ -194,7 +215,53 @@ impl Indexer {
                     .process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
             }
+            Indexer::Concurrent(tpi) => {
+                tpi.process_routing_decision_for_request(tokens_with_hashes, worker)
+                    .await
+            }
             Indexer::None => Ok(()),
+        }
+    }
+
+    pub(crate) async fn apply_event(&self, event: RouterEvent) {
+        match self {
+            Indexer::KvIndexer(indexer) => {
+                if let Err(e) = indexer.event_sender().send(event).await {
+                    tracing::warn!("Failed to send event to indexer: {e}");
+                }
+            }
+            Indexer::Concurrent(tpi) => tpi.apply_event(event).await,
+            Indexer::None => {}
+        }
+    }
+
+    pub(crate) async fn remove_worker(&self, worker_id: WorkerId) {
+        match self {
+            Indexer::KvIndexer(indexer) => {
+                if let Err(e) = indexer.remove_worker_sender().send(worker_id).await {
+                    tracing::warn!("Failed to send worker removal for {worker_id}: {e}");
+                }
+            }
+            Indexer::Concurrent(tpi) => {
+                KvIndexerInterface::remove_worker(tpi.as_ref(), worker_id).await;
+            }
+            Indexer::None => {}
+        }
+    }
+
+    pub(crate) async fn get_workers(&self) -> Vec<WorkerId> {
+        match self {
+            Indexer::KvIndexer(indexer) => {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                let req = GetWorkersRequest { resp: resp_tx };
+                if let Err(e) = indexer.get_workers_sender().send(req).await {
+                    tracing::warn!("Failed to send get_workers request: {e}");
+                    return Vec::new();
+                }
+                resp_rx.await.unwrap_or_default()
+            }
+            Indexer::Concurrent(tpi) => tpi.backend().get_workers(),
+            Indexer::None => Vec::new(),
         }
     }
 }
@@ -250,23 +317,17 @@ impl KvRouter {
             kv_router_config.router_replica_sync,
             router_id,
             worker_type,
+            kv_router_config.router_queue_threshold,
         )
         .await?;
 
         // Start KV event subscription if needed (use_kv_events=true and overlap_score_weight>0)
         if kv_router_config.should_subscribe_to_kv_events() {
-            // Guaranteed to be KvIndexer since overlap_score_weight > 0.0
-            let Indexer::KvIndexer(kv_indexer) = &indexer else {
-                unreachable!(
-                    "should_subscribe_to_kv_events implies overlap_score_weight > 0 implies KvIndexer"
-                )
-            };
-
             subscriber::start_subscriber(
                 component.clone(),
                 &kv_router_config,
                 router_id,
-                kv_indexer,
+                indexer.clone(),
                 cancellation_token.clone(),
             )
             .await?;
@@ -310,9 +371,11 @@ impl KvRouter {
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
+        priority_jump: f64,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let start = Instant::now();
 
@@ -322,16 +385,25 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
+            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos));
         let hash_elapsed = start.elapsed();
 
-        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+        let overlap_scores = self
+            .indexer
+            .find_matches(block_hashes)
+            .instrument(tracing::info_span!("kv_router.find_matches"))
+            .await?;
         let find_matches_elapsed = start.elapsed();
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
-        let maybe_seq_hashes = self
-            .kv_router_config
-            .compute_seq_hashes_for_tracking(tokens, self.block_size);
+        let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
+            self.kv_router_config.compute_seq_hashes_for_tracking(
+                tokens,
+                self.block_size,
+                router_config_override,
+            )
+        });
         let seq_hash_elapsed = start.elapsed();
 
         let best_worker = self
@@ -344,7 +416,9 @@ impl KvRouter {
                 router_config_override,
                 update_states,
                 lora_name,
+                priority_jump,
             )
+            .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
         let total_elapsed = start.elapsed();
 
@@ -386,24 +460,27 @@ impl KvRouter {
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
+        router_config_override: Option<&RouterConfigOverride>,
     ) {
         let isl_tokens = tokens.len();
 
-        let maybe_seq_hashes = self
-            .kv_router_config
-            .compute_seq_hashes_for_tracking(tokens, self.block_size);
+        let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
+            tokens,
+            self.block_size,
+            router_config_override,
+        );
 
         if let Err(e) = self
             .scheduler
-            .add_request(
-                request_id.clone(),
-                maybe_seq_hashes,
-                isl_tokens,
-                overlap_blocks,
+            .add_request(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: maybe_seq_hashes,
+                isl: isl_tokens,
+                overlap: overlap_blocks,
                 expected_output_tokens,
                 worker,
                 lora_name,
-            )
+            })
             .await
         {
             tracing::warn!("Failed to add request {request_id}: {e}");
@@ -451,14 +528,20 @@ impl KvRouter {
     }
 
     /// Get potential prefill and decode loads for all workers
-    pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
+    pub async fn get_potential_loads(
+        &self,
+        tokens: &[u32],
+        router_config_override: Option<&RouterConfigOverride>,
+    ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
-        let maybe_seq_hashes = self
-            .kv_router_config
-            .compute_seq_hashes_for_tracking(tokens, self.block_size);
+        let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
+            tokens,
+            self.block_size,
+            router_config_override,
+        );
 
         Ok(self
             .scheduler
@@ -484,9 +567,20 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let context_id = ctx.context().id().to_string();
         // Handle different request types
         let response = match request {
-            RouterRequest::New { tokens } => {
+            RouterRequest::New {
+                tokens,
+                block_mm_infos,
+            } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(Some(&context_id), &tokens, None, true, None)
+                    .find_best_match(
+                        Some(&context_id),
+                        &tokens,
+                        block_mm_infos.as_deref(),
+                        None,
+                        true,
+                        None,
+                        0.0,
+                    )
                     .await?;
 
                 RouterResponse::New {

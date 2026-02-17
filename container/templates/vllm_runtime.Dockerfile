@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #}
+# === BEGIN templates/vllm_runtime.Dockerfile ===
 ##################################################
 ########## Runtime Image ########################
 ##################################################
@@ -212,6 +213,15 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     uv pip install . && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
+
+
+# Install ModelExpress for P2P weight transfer (optional)
+ARG ENABLE_MODELEXPRESS_P2P
+ARG MODELEXPRESS_REF
+RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
+        echo "Installing ModelExpress from ref: ${MODELEXPRESS_REF}" && \
+        uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
+    fi
 
 # Install common and test dependencies. Cache uv downloads; uv handles its own locking for this cache.
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \

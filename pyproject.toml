@@ -57,7 +57,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.9.0",
-    "vllm[flashinfer,runai]==0.14.1",
+    "vllm[flashinfer,runai]==0.15.1",
     "vllm-omni==0.14.0",
 ]
 
@@ -139,6 +139,13 @@ balanced_wrapping = true
 indent = "    "
 skip = ["build"]
 known_first_party = ["dynamo"]
+# isort may confuse what is 1st or 3rd library. e.g.
+# when dynamo/vllm/omni/xx.py import vllm, local isort may treat this `vllm` as first
+# party heuristically. This causes local sort differs from GitHub sort and pre-commit
+# failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
+# 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
+# as the last resort.
+known_third_party = ["vllm", "tensorrt_llm", "sglang"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -238,6 +245,7 @@ markers = [
     "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
+    "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
     "router: marks tests for router component",
     "planner: marks tests for planner component",
     "kvbm: marks tests for KV behavior and model determinism",

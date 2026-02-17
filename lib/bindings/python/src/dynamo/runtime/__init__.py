@@ -34,8 +34,10 @@ def dynamo_worker(enable_nats: bool = True):
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
-            store_kv = os.environ.get("DYN_STORE_KV", "etcd")
-            runtime = DistributedRuntime(loop, store_kv, request_plane, enable_nats)
+            discovery_backend = os.environ.get("DYN_DISCOVERY_BACKEND", "etcd")
+            runtime = DistributedRuntime(
+                loop, discovery_backend, request_plane, enable_nats
+            )
 
             await func(runtime, *args, **kwargs)
 

@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DynamoGraphDeploymentRequest for MoE model profiling
+# Converted from profile_sla_moe_job.yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: sla-moe
+spec:
+  model: deepseek-ai/DeepSeek-R1
+  backend: sglang
+
+  # ProfilingConfig maps directly to the profile_sla.py config format
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag"
+
+    # NOTE: any image built before January 10 and any release prior to 0.8.1
+    # will need to use snake_case within profilingConfig.config
+    config:
+      # 0.8.1 and later: Model cache PVC to access model weights
+      deployment:
+        modelCache:
+          pvcName: "model-cache"                      # Name of PVC containing model weights
+          pvcPath: "deepseek-r1"                      # Subpath within PVC where model is stored
+
+      searchStrategy: rapid
+      hardware:
+        # for h200, sweep over 8-16 GPUs per engine
+        minNumGpusPerEngine: 8
+        maxNumGpusPerEngine: 16
+        numGpusPerNode: 8  # Override auto-discovered value if different
+
+      sla:
+        isl: 3000
+        osl: 150
+        ttft: 200.0
+        itl: 20.0
+
+    # Reference to ConfigMap containing the DGD base config
+    # For MoE models, this should point to the appropriate disagg config
+    # Original path: /sgl-workspace/dynamo/recipes/deepseek-r1/sglang/disagg-16gpu/deploy.yaml
+    configMapRef:
+      name: deepseek-r1-config
+      key: tep16p-dep16d-disagg.yaml
+
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag"
+  autoApply: true
+
