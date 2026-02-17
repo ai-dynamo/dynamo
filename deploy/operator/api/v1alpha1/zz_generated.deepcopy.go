@@ -726,6 +726,11 @@ func (in *DynamoGraphDeploymentRequestList) DeepCopyObject() runtime.Object {
 func (in *DynamoGraphDeploymentRequestSpec) DeepCopyInto(out *DynamoGraphDeploymentRequestSpec) {
 	*out = *in
 	in.ProfilingConfig.DeepCopyInto(&out.ProfilingConfig)
+	if in.EnableGPUDiscovery != nil {
+		in, out := &in.EnableGPUDiscovery, &out.EnableGPUDiscovery
+		*out = new(bool)
+		**out = **in
+	}
 	if in.DeploymentOverrides != nil {
 		in, out := &in.DeploymentOverrides, &out.DeploymentOverrides
 		*out = new(DeploymentOverridesSpec)
@@ -1353,6 +1358,13 @@ func (in *ProfilingConfigSpec) DeepCopyInto(out *ProfilingConfigSpec) {
 		*out = make([]v1.Toleration, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.NodeSelector != nil {
+		in, out := &in.NodeSelector, &out.NodeSelector
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
 		}
 	}
 }
