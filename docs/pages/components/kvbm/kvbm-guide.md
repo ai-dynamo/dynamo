@@ -427,7 +427,7 @@ maturin build --release --out /workspace/dist
 uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 ```
 
-To use [Nsight System](https://developer.nvidia.com/nsight-systems) for perf analysis, please follow below steps (using vLLM as example). KVBM has NVTX annotation on top level KV Connector APIs (search for `@nvtx_annotate`). If more is needed, please add then rebuild.
+To use [Nsight Systems](https://developer.nvidia.com/nsight-systems) for perf analysis, please follow below steps (using vLLM as example). KVBM has NVTX annotation on top level KV Connector APIs (search for `@nvtx_annotate`). If more is needed, please add then rebuild.
 ```bash
 # build and run local-dev container, which contains nsys
 python container/render.py --framework=vllm --target=local-dev --output-short-filename
