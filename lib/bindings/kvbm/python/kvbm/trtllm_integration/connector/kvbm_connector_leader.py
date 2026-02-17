@@ -107,7 +107,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             consolidator_output_endpoint=consolidator_output_ep,
         )
 
-    @nvtx_annotate
+    @nvtx_annotate(category="scheduler")
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
         """
         Build the metadata for the worker.
@@ -155,7 +155,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
 
         return self._connector.build_connector_metadata(output)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="scheduler")
     def get_num_new_matched_tokens(
         self, request: LlmRequest, num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -176,7 +176,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             num_computed_tokens,
         )
 
-    @nvtx_annotate
+    @nvtx_annotate(category="scheduler")
     def update_state_after_alloc(self, request: LlmRequest, block_ids: List[int]):
         """
         Called after get_num_new_matched_tokens is called to provide the block ids to the scheduler.
@@ -188,7 +188,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             str(request.request_id), block_ids, request.context_current_position
         )
 
-    @nvtx_annotate
+    @nvtx_annotate(category="scheduler")
     def request_finished(self, request: LlmRequest, cache_block_ids: list[int]) -> bool:
         """
         Called when a request is finished generating tokens.

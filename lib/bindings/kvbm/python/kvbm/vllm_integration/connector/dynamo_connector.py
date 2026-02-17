@@ -69,7 +69,7 @@ class DynamoConnector(KVConnectorBase_V1):
 
     # Scheduler/Leader
 
-    @nvtx_annotate
+    @nvtx_annotate(category="scheduler")
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -77,20 +77,20 @@ class DynamoConnector(KVConnectorBase_V1):
     ) -> tuple[int, bool]:
         return self._scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="scheduler")
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         self._scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="scheduler")
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         data = self._scheduler.build_connector_meta(scheduler_output)
         return DynamoConnectorMetadata(data)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="scheduler")
     def request_finished(
         self,
         request: "Request",
@@ -100,11 +100,11 @@ class DynamoConnector(KVConnectorBase_V1):
 
     # Worker
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         self._worker.register_kv_caches(kv_caches)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     @override
     def bind_connector_metadata(
         self, connector_metadata: DynamoConnectorMetadata
@@ -115,23 +115,23 @@ class DynamoConnector(KVConnectorBase_V1):
         assert isinstance(connector_metadata.metadata, bytes)
         self._worker.bind_connector_metadata(connector_metadata.metadata)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     @override
     def clear_connector_metadata(self) -> None:
         super().clear_connector_metadata()
         self._worker.clear_connector_metadata()
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     @override
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         self._worker.start_load_kv(forward_context, **kwargs)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     @override
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     @override
     def save_kv_layer(
         self,
@@ -142,7 +142,7 @@ class DynamoConnector(KVConnectorBase_V1):
     ) -> None:
         self._worker.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     @override
     def wait_for_save(self):
         pass

@@ -50,7 +50,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         # Default to old way of processing offload
         self.use_forward_pass_callable = False
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     def register_forward_pass_callable(self) -> callable:
         """
         Register a callable object which will be called at the
@@ -59,7 +59,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         self.use_forward_pass_callable = True
         return self._callable_object()
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     def register_kv_caches(self, kv_cache_tensor: torch.Tensor):
         """
         Register the KV cache tensors to the worker.
@@ -96,7 +96,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             raw_event_handles,
         )
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     def bind_connector_meta(self, metadata: object):
         """Set the connector metadata from the scheduler.
 
@@ -110,7 +110,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         super().bind_connector_meta(metadata)
         self._connector.bind_connector_meta(metadata)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     def start_load_kv(self, stream: torch.cuda.Stream):
         """
         Begin loading the KV cache in preparation for the next forward pass.
@@ -118,14 +118,14 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         """
         self._connector.start_load_kv()
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     def wait_for_save(self, stream: torch.cuda.Stream):
         """
         Block until all synchronous saving operations are complete. Called at the end of the forward pass.
         """
         pass
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     def wait_for_layer_load(self, layer_idx: int, stream: torch.cuda.Stream):
         """
         Wait for a layer to finish being loaded before proceeding with the forward pass on the layer.
@@ -136,7 +136,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         """
         pass
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     def save_kv_layer(self, layer_idx: int, stream: torch.cuda.Stream):
         """
         Begin saving the KV cache for a layer.
@@ -149,7 +149,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             self.events[layer_idx].record(stream)
             self._connector.save_kv_layer(layer_idx)
 
-    @nvtx_annotate
+    @nvtx_annotate(category="worker")
     def get_finished(
         self, finished_gen_req_ids: list[int], started_loading_req_ids: list[int]
     ) -> tuple[list[int], list[int]]:

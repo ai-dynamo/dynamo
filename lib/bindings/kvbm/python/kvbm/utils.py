@@ -37,9 +37,15 @@ def is_dyn_runtime_enabled() -> bool:
     return val in {"1", "true"}
 
 
-def nvtx_annotate(func, domain="kvbm"):
-    return annotate(
-        message=func.__qualname__,
-        color="green",
-        domain=domain,
-    )(func)
+def nvtx_annotate(func=None, *, domain="kvbm", category=None):
+    """Decorator for NVTX annotation. Use as @nvtx_annotate or @nvtx_annotate(category="...")."""
+
+    def decorator(f):
+        kwargs = dict(message=f.__qualname__, color="green", domain=domain)
+        if category is not None:
+            kwargs["category"] = category
+        return annotate(**kwargs)(f)
+
+    if func is not None:
+        return decorator(func)
+    return decorator
