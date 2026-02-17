@@ -149,6 +149,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
     m.add_function(wrap_pyfunction!(llm::postprocessor::encode_image, m)?)?;
     m.add_function(wrap_pyfunction!(llm::postprocessor::encode_base64, m)?)?;
+    #[cfg(feature = "media-ffmpeg")]
+    m.add_function(wrap_pyfunction!(llm::postprocessor::encode_video, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;

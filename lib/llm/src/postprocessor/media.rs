@@ -4,3 +4,5 @@
 pub mod encoders;
 
 pub use encoders::{encode_base64, Encoder, ImageEncoder};
+#[cfg(feature = "media-ffmpeg")]
+pub use encoders::encode_video;

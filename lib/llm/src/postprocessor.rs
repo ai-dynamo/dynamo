@@ -8,3 +8,5 @@
 pub mod media;
 
 pub use media::encoders::{encode_base64, ImageEncoder};
+#[cfg(feature = "media-ffmpeg")]
+pub use media::encode_video;

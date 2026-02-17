@@ -44,3 +44,30 @@ pub fn encode_image<'py>(
 pub fn encode_base64(py: Python<'_>, data: &[u8]) -> String {
     py.allow_threads(|| encoders::encode_base64(data))
 }
+
+/// Encode NHWC RGB24 frames into an H.264 MP4 in memory.
+///
+/// Releases the GIL during encoding so other Python threads can run.
+///
+/// # Arguments
+/// * `data` - Contiguous NHWC RGB24 u8 buffer (all frames concatenated)
+/// * `width` - Frame width in pixels (must be even)
+/// * `height` - Frame height in pixels (must be even)
+/// * `num_frames` - Number of frames
+/// * `fps` - Output frames per second
+#[cfg(feature = "media-ffmpeg")]
+#[pyfunction]
+#[pyo3(text_signature = "(data, width, height, num_frames, fps)")]
+pub fn encode_video<'py>(
+    py: Python<'py>,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    fps: u32,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let result = py
+        .allow_threads(|| llm_rs::postprocessor::encode_video(data, width, height, num_frames, fps))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(PyBytes::new(py, &result))
+}

@@ -12,6 +12,17 @@ from typing import Any, AsyncGenerator, Optional
 import torch
 
 from dynamo._core import Component, Context
+
+# Rust fast-path for video encoding + base64
+try:
+    from dynamo._core import encode_video as _rust_encode_video
+except ImportError:
+    _rust_encode_video = None
+
+try:
+    from dynamo._core import encode_base64 as _rust_encode_base64
+except ImportError:
+    _rust_encode_base64 = None
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     CreateVideoRequest,
@@ -245,21 +256,31 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         Returns:
             Video bytes in mp4 format.
         """
+        import numpy as np
+        from PIL import Image
+
+        # Convert frames to numpy arrays if needed
+        np_frames = []
+        for frame in frames:
+            if isinstance(frame, Image.Image):
+                np_frames.append(np.array(frame))
+            elif isinstance(frame, np.ndarray):
+                np_frames.append(frame)
+            else:
+                raise ValueError(f"Unsupported frame type: {type(frame)}")
+
+        # Rust fast-path: in-process H.264 encoding, no subprocess
+        if _rust_encode_video is not None:
+            stacked = np.ascontiguousarray(np.stack(np_frames, axis=0), dtype=np.uint8)
+            n, h, w, _c = stacked.shape
+            return bytes(
+                await asyncio.to_thread(
+                    _rust_encode_video, stacked.tobytes(), w, h, n, fps
+                )
+            )
+
+        # Python fallback: imageio + ffmpeg subprocess
         try:
-            import numpy as np
-            from PIL import Image
-
-            # Convert frames to numpy arrays if needed
-            np_frames = []
-            for frame in frames:
-                if isinstance(frame, Image.Image):
-                    np_frames.append(np.array(frame))
-                elif isinstance(frame, np.ndarray):
-                    np_frames.append(frame)
-                else:
-                    raise ValueError(f"Unsupported frame type: {type(frame)}")
-
-            # Use imageio to write video
             import imageio
 
             output_buffer = io.BytesIO()
@@ -311,4 +332,6 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
 
     def _encode_base64(self, video_bytes: bytes) -> str:
         """Encode video as base64 string"""
+        if _rust_encode_base64 is not None:
+            return _rust_encode_base64(video_bytes)
         return base64.b64encode(video_bytes).decode("utf-8")

@@ -5,8 +5,12 @@ use anyhow::Result;
 use base64::Engine as _;
 
 pub mod image;
+#[cfg(feature = "media-ffmpeg")]
+pub mod video;
 
 pub use image::ImageEncoder;
+#[cfg(feature = "media-ffmpeg")]
+pub use video::encode_video;
 
 /// Trait for encoding raw pixel data into a specific format (e.g., PNG).
 pub trait Encoder {

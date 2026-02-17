@@ -8989,6 +8989,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "859aad7261bac267f90f9635ec9addba3b4bcb4bbb2edb03fec3e6b765657bee"
 dependencies = [
  "ffmpeg-next",
+ "ndarray",
  "tracing",
  "url",
 ]
