@@ -13,7 +13,7 @@ Requirements:
     - visual_gen: Part of TensorRT-LLM, located at tensorrt_llm/visual_gen/.
       Currently on the feat/visual_gen branch (not yet merged to main).
       See: https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen
-    - See docs/backends/trtllm/README.md for setup instructions.
+    - See docs/pages/backends/trtllm/README.md for setup instructions.
 
 Note on imports:
     visual_gen is imported lazily in initialize() because:

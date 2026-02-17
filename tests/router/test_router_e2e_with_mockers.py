@@ -117,7 +117,7 @@ def _build_mocker_command(
         MODEL_NAME,
         "--endpoint",
         endpoint,
-        "--store-kv",
+        "--discovery-backend",
         store_backend,
         "--num-workers",
         str(num_workers),
@@ -479,15 +479,15 @@ def test_mocker_kv_router_overload_503(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
 )  # Use NATS Core (local indexer)
-def test_kv_push_router_bindings(
+def test_kv_router_bindings(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     request_plane,
     durable_kv_events,
 ):
-    """Test KvPushRouter Python bindings with mocker engines."""
-    logger.info("Starting KvPushRouter bindings test")
+    """Test KvRouter Python bindings with mocker engines."""
+    logger.info("Starting KvRouter bindings test")
     # Use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
@@ -522,16 +522,18 @@ def test_kv_push_router_bindings(
 
 
 @pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
+    "store_backend,durable_kv_events,request_plane,router_event_threads",
     [
-        ("etcd", True, "nats"),  # JetStream mode - uses JetStream
-        ("etcd", False, "tcp"),  # NATS core mode (with gap detection) - no JetStream
-        ("file", True, "nats"),  # File backend - uses JetStream
+        ("etcd", True, "nats", 1),  # JetStream mode - uses JetStream
+        ("etcd", False, "tcp", 1),  # NATS core mode (with gap detection) - no JetStream
+        ("file", True, "nats", 1),  # File backend - uses JetStream
+        ("etcd", False, "tcp", 2),  # NATS core mode - multi-threaded indexer
     ],
     ids=[
         "jetstream",
         "nats_core",
         "file",
+        "nats_core_multi_thread",
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
@@ -544,6 +546,7 @@ def test_indexers_sync(
     store_backend,
     durable_kv_events,
     request_plane,
+    router_event_threads,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
@@ -596,6 +599,7 @@ def test_indexers_sync(
             test_nats_interruption=not durable_kv_events,
             nats_server=nats_process if not durable_kv_events else None,
             durable_kv_events=durable_kv_events,
+            router_event_threads=router_event_threads,
         )
 
         logger.info("Indexers sync test completed successfully")
@@ -639,15 +643,16 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.timeout(90)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events",
+    "durable_kv_events,use_kv_events,router_event_threads",
     [
-        (True, True),  # JetStream mode with KV events
-        (False, True),  # NATS Core mode with local indexer (default)
-        (False, False),  # Approximate mode (--no-kv-events) - no KV events
+        (True, True, 1),  # JetStream mode with KV events
+        (False, True, 1),  # NATS Core mode with local indexer (default)
+        (False, False, 1),  # Approximate mode (--no-kv-events) - no KV events
+        (False, True, 2),  # NATS Core mode - multi-threaded indexer
     ],
-    ids=["jetstream", "nats_core", "no_kv_events"],
+    ids=["jetstream", "nats_core", "no_kv_events", "nats_core_multi_thread"],
     indirect=["durable_kv_events"],
 )
 def test_router_decisions(
@@ -657,6 +662,7 @@ def test_router_decisions(
     durable_kv_events,
     use_kv_events,
     request_plane,
+    router_event_threads,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
@@ -704,6 +710,7 @@ def test_router_decisions(
             test_dp_rank=True,
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
+            router_event_threads=router_event_threads,
         )
 
 

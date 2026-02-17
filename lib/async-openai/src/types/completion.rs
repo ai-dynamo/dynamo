@@ -162,7 +162,7 @@ pub struct CreateCompletionRequest {
     #[serde(default, deserialize_with = "deserialize_echo_bool")]
     pub echo: Option<bool>,
 
-    ///  Up to 4 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence.
+    ///  Up to 32 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Stop>,
 
