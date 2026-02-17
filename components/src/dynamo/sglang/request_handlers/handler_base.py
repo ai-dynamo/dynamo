@@ -12,7 +12,7 @@ from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 import sglang as sgl
 from sglang.srt.utils import get_local_ip_auto
 
-from dynamo._core import Component, Context
+from dynamo._internal import Component, Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher

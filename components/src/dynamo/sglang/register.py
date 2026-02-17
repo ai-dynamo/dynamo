@@ -11,7 +11,8 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Endpoint
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo._internal import ModelRuntimeConfig
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.sglang.args import DynamoConfig
 
 

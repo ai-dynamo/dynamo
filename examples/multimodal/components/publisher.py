@@ -21,8 +21,8 @@ from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
+from dynamo._internal import Component
 from dynamo.llm import WorkerMetricsPublisher
-from dynamo.runtime import Component
 
 
 class NullStatLogger(StatLoggerBase):

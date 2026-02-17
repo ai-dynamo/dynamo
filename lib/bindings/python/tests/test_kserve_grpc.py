@@ -10,7 +10,8 @@ import pytest
 import tritonclient.grpc.model_config_pb2 as mc
 from tritonclient.utils import InferenceServerException
 
-from dynamo.llm import KserveGrpcService, ModelRuntimeConfig, PythonAsyncEngine
+from dynamo._internal import ModelRuntimeConfig
+from dynamo.llm import KserveGrpcService, PythonAsyncEngine
 
 pytestmark = pytest.mark.pre_merge
 

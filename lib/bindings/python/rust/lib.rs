@@ -151,7 +151,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
     m.add_class::<Namespace>()?;
-    m.add_class::<Component>()?;
+    m.add_class::<Component>()?;  // Available in _core, but only re-exported via _internal (not public API)
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;

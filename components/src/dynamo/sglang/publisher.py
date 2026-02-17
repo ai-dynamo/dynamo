@@ -16,12 +16,13 @@ if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
     from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 
+from dynamo._internal import Component
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
-from dynamo.runtime import Component, Endpoint
+from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
 
 

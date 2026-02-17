@@ -8,7 +8,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._internal import Component, Context
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.publisher import DynamoSglangPublisher

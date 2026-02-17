@@ -12,7 +12,8 @@ import uvloop
 from google.protobuf import text_format
 from tritonclient.utils import triton_to_np_dtype
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo._internal import ModelRuntimeConfig
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
