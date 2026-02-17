@@ -195,7 +195,7 @@ impl<S: MemoryDescriptor + NixlCompatible> NixlRegistered<S> {
 /// A `NixlRegistered` wrapper containing the storage and registration handle.
 pub fn register_with_nixl<S>(
     storage: S,
-    agent: &NixlAgent,
+    agent: &Agent,
     opt: Option<&OptArgs>,
 ) -> std::result::Result<NixlRegistered<S>, S>
 where
@@ -312,7 +312,7 @@ pub trait NixlRegisterExt: MemoryDescriptor + NixlCompatible + Sized {
     /// A `NixlRegistered` wrapper on success, or the original storage on failure.
     fn register(
         self,
-        agent: &NixlAgent,
+        agent: &Agent,
         opt: Option<&OptArgs>,
     ) -> std::result::Result<NixlRegistered<Self>, Self> {
         register_with_nixl(self, agent, opt)
