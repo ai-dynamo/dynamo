@@ -334,6 +334,143 @@ def query_opensearch_test_history(
         return {"total_runs": 0, "passed_count": 0, "failed_count": 0, "error_count": 0}
 
 
+def query_opensearch_run_sequence(
+    test_name: str, test_classname: str, framework: str, limit: int = 20
+) -> List[Dict]:
+    """
+    Fetch the last `limit` individual test-run documents for a test, newest-first.
+
+    Returns:
+        List of dicts {"status": str, "timestamp": str}, newest first.
+        Returns [] on any error so the regression check is simply skipped.
+    """
+    if not OPENSEARCH_ENDPOINT:
+        return []
+
+    try:
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(days=LOOKBACK_DAYS)
+
+        query = {
+            "size": limit,
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"s_test_name": test_name}},
+                        {"term": {"s_test_classname": test_classname}},
+                        {"term": {"s_framework": framework}},
+                        {"term": {"s_branch": "main"}},
+                        {
+                            "range": {
+                                "@timestamp": {
+                                    "gte": start_time.isoformat(),
+                                    "lte": end_time.isoformat(),
+                                }
+                            }
+                        },
+                    ]
+                }
+            },
+            "sort": [{"@timestamp": {"order": "desc"}}],
+            "_source": ["s_test_status", "@timestamp"],
+        }
+
+        search_url = OPENSEARCH_ENDPOINT.rstrip("/") + "/_search"
+        response = requests.post(
+            search_url,
+            json=query,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        hits = data.get("hits", {}).get("hits", [])
+        runs = []
+        for hit in hits:
+            src = hit.get("_source", {})
+            runs.append(
+                {
+                    "status": src.get("s_test_status", "unknown"),
+                    "timestamp": src.get("@timestamp", ""),
+                }
+            )
+        return runs
+
+    except Exception as e:
+        logger.warning(f"query_opensearch_run_sequence failed for {test_name}: {e}")
+        return []
+
+
+def detect_regression(
+    recent_runs: List[Dict], min_streak: int = 3
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Scan recent_runs (newest-first) for a leading streak of failures.
+
+    Returns:
+        (is_regression, streak_start_timestamp, last_pass_timestamp)
+        streak_start_timestamp: timestamp of the oldest failure in the streak (first failure).
+        last_pass_timestamp: timestamp of the most-recent pass before the streak, or None.
+    """
+    streak_len = 0
+    for run in recent_runs:
+        if run["status"] in ("failed", "error"):
+            streak_len += 1
+        else:
+            break
+
+    if streak_len < min_streak:
+        return False, None, None
+
+    streak_start_timestamp = recent_runs[streak_len - 1]["timestamp"]
+
+    last_pass_timestamp = None
+    for run in recent_runs[streak_len:]:
+        if run["status"] not in ("failed", "error"):
+            last_pass_timestamp = run["timestamp"]
+            break
+
+    return True, streak_start_timestamp, last_pass_timestamp
+
+
+def find_breaking_commit(
+    last_pass_timestamp: Optional[str], streak_start_timestamp: Optional[str]
+) -> Optional[str]:
+    """
+    Use git log to find commits that landed between the last pass and first failure.
+
+    Returns a short description string like "abc1234: Commit subject" (with optional
+    " (+N more)" suffix), or None if zero commits or an error occurred.
+    """
+    try:
+        cmd = ["git", "log", "main", "--format=%h %s", "--no-merges"]
+        if last_pass_timestamp:
+            cmd += [f"--after={last_pass_timestamp}"]
+        if streak_start_timestamp:
+            cmd += [f"--before={streak_start_timestamp}"]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            return None
+
+        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+        if not lines:
+            return None
+
+        if len(lines) == 1:
+            return lines[0]
+
+        if len(lines) <= 5:
+            return f"{lines[0]} (+{len(lines) - 1} more)"
+
+        return None
+
+    except Exception as e:
+        logger.warning(f"find_breaking_commit failed: {e}")
+        return None
+
+
 def query_opensearch_daily_failures() -> List[Dict]:
     """
     Query OpenSearch for all unique tests that failed on main in the last 24 hours.
@@ -477,11 +614,24 @@ def categorize_failed_tests(failed_tests: List[Dict]) -> Tuple[List[Dict], List[
                 f"(new_test={is_new_test}, pass_rate={pass_rate:.1%})"
             )
         else:
-            flaky_tests.append(enriched_test)
-            logger.info(
-                f"Categorized {test_name} as FLAKY "
-                f"(pass_rate={pass_rate:.1%}, {passed_count}/{total_runs} runs)"
-            )
+            # Test has high overall pass rate — check for recent failure streak
+            recent_runs = query_opensearch_run_sequence(test_name, test_classname, framework)
+            is_regression, streak_start_ts, last_pass_ts = detect_regression(recent_runs)
+            if is_regression:
+                breaking_commit = find_breaking_commit(last_pass_ts, streak_start_ts)
+                enriched_test["is_regression"] = True
+                enriched_test["breaking_commit"] = breaking_commit
+                legitimate_failures.append(enriched_test)
+                logger.info(
+                    f"Categorized {test_name} as REGRESSION "
+                    f"(pass_rate={pass_rate:.1%} overall, breaking_commit={breaking_commit})"
+                )
+            else:
+                flaky_tests.append(enriched_test)
+                logger.info(
+                    f"Categorized {test_name} as FLAKY "
+                    f"(pass_rate={pass_rate:.1%}, {passed_count}/{total_runs} runs)"
+                )
 
     return flaky_tests, legitimate_failures
 
@@ -602,6 +752,19 @@ def format_test_entry(test: Dict) -> str:
         job_suffix = f" ({jobs_str})"
     else:
         job_suffix = ""
+
+    if test.get("is_regression"):
+        pass_rate = test["pass_rate"]
+        passed_count = test["passed_count"]
+        total_runs = test["total_runs"]
+        breaking = test.get("breaking_commit")
+        commit_str = f" — broken after `{breaking}`" if breaking else ""
+        return (
+            f"• {name_str}{job_suffix} - "
+            f"*regression*{commit_str} "
+            f"({pass_rate:.0%} overall, now failing consistently) - "
+            f"last modified by {author_mention}"
+        )
 
     if test["is_new_test"]:
         return (
