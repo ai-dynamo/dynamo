@@ -192,20 +192,17 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 --set "dynamo-operator.namespaceRestriction.targetNamespace=dynamo-namespace" # optional
 ```
 
-### GPU Discovery for Namespace-Scoped Operators (Optional)
+### GPU Discovery for Namespace-Scoped Operators
 
-By default, namespace-scoped operators lack permissions to access or auto-discover GPU hardware. You can either:
+GPU discovery is **enabled by default** for namespace-scoped operators. The Helm chart automatically provisions a ClusterRole/ClusterRoleBinding granting the operator read-only access to node GPU labels.
 
-**Option 1: Enable GPU Discovery** (read-only node access)
+**To disable GPU discovery** (if your installer lacks ClusterRole creation permissions):
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml
-kubectl create clusterrolebinding dynamo-operator-gpu-discovery \
-  --clusterrole=dynamo-namespace-operator-gpu-discovery \
-  --serviceaccount=${NAMESPACE}:dynamo-operator-controller-manager
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=false
 ```
 
-**Option 2: Manual Hardware Config When Creating DGDRs** (no additional permissions)
+When GPU discovery is disabled, you must provide hardware configuration manually in each DynamoGraphDeploymentRequest:
 
 ```yaml
 spec:
@@ -217,7 +214,7 @@ spec:
         gpuVramMib: 81920
 ```
 
-See [GPU Discovery RBAC docs](../../../deploy/operator/rbac/README.md) for details.
+> **Note**: If GPU discovery is disabled and no hardware config is provided, the DGDR will be rejected at admission time with a clear error message.
 
 → [Verify Installation](#verify-installation)
 

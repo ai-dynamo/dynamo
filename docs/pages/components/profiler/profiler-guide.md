@@ -231,20 +231,21 @@ The operator automatically discovers GPU resources from cluster nodes, providing
 
 **Requirements:**
 - **Cluster-scoped operators**: Have node read permissions by default
-- **Namespace-scoped operators**: Need optional RBAC to enable GPU discovery
+- **Namespace-scoped operators**: GPU discovery is enabled by default when installing via Helm — the chart provisions the required ClusterRole/ClusterRoleBinding automatically
 
-**For namespace-scoped operators**, choose one approach:
+**For namespace-scoped operators**, GPU discovery is controlled by a Helm value:
 
 ```bash
-# Option 1: Enable GPU discovery (read-only node access)
-kubectl apply -f https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml
-kubectl create clusterrolebinding dynamo-operator-gpu-discovery \
-  --clusterrole=dynamo-namespace-operator-gpu-discovery \
-  --serviceaccount=${NAMESPACE}:dynamo-operator-controller-manager
+# GPU discovery enabled (default) — Helm provisions read-only node access automatically
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=true
+
+# GPU discovery disabled — you must provide hardware config manually in each DGDR
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=false
 ```
 
+If GPU discovery is disabled, provide hardware config manually in the DGDR:
+
 ```yaml
-# Option 2: Manual hardware config (no additional permissions)
 spec:
   profilingConfig:
     config:
@@ -254,7 +255,7 @@ spec:
         gpuVramMib: 81920
 ```
 
-See [Installation Guide](../../kubernetes/installation-guide.md#gpu-discovery-for-namespace-scoped-operators-optional) for details.
+If GPU discovery is disabled and no manual hardware config is provided, the DGDR will be rejected at admission time.
 
 ## Configuration
 

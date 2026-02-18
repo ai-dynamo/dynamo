@@ -901,7 +901,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 	// Use the validator for simple validation (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		isClusterWide := r.Config.RestrictedNamespace == ""
-		validator := webhookvalidation.NewDynamoGraphDeploymentRequestValidator(dgdr, isClusterWide)
+		validator := webhookvalidation.NewDynamoGraphDeploymentRequestValidator(dgdr, isClusterWide, r.Config.GPUDiscoveryEnabled)
 		warnings, err := validator.Validate()
 		if err != nil {
 			return err

@@ -44,14 +44,17 @@ func toFloat64(val interface{}) float64 {
 type DynamoGraphDeploymentRequestValidator struct {
 	request               *nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 	isClusterWideOperator bool
+	gpuDiscoveryEnabled   bool
 }
 
 // NewDynamoGraphDeploymentRequestValidator creates a new validator for DynamoGraphDeploymentRequest.
-// The isClusterWide parameter indicates whether the operator is running in cluster-wide or namespace-restricted mode.
-func NewDynamoGraphDeploymentRequestValidator(request *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, isClusterWide bool) *DynamoGraphDeploymentRequestValidator {
+// isClusterWide indicates whether the operator has cluster-wide permissions.
+// gpuDiscoveryEnabled indicates whether Helm provisioned node read access for the operator.
+func NewDynamoGraphDeploymentRequestValidator(request *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, isClusterWide bool, gpuDiscoveryEnabled bool) *DynamoGraphDeploymentRequestValidator {
 	return &DynamoGraphDeploymentRequestValidator{
 		request:               request,
 		isClusterWideOperator: isClusterWide,
+		gpuDiscoveryEnabled:   gpuDiscoveryEnabled,
 	}
 }
 
@@ -111,7 +114,7 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 }
 
 // validateGPUHardwareInfo ensures GPU hardware information will be available for profiling.
-// Returns warnings for namespace-scoped operators without manual config (they need ClusterRole).
+// Returns an error at admission time if GPU discovery is disabled and no manual hardware config is provided.
 func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() (admission.Warnings, error) {
 	// Parse profiling config
 	var config map[string]interface{}
@@ -159,23 +162,17 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() (admis
 		}
 	}
 
-	// If manual config or explicit ranges provided, validation passes
 	if hasManualHardwareConfig || hasExplicitGPURanges {
 		return nil, nil
 	}
 
-	// Neither manual config nor explicit ranges provided
-	// GPU discovery will be attempted at reconcile time
-	//
-	// For namespace-scoped operators, warn that GPU discovery may fail if they don't have
-	// the optional ClusterRole applied
-	if !v.isClusterWideOperator {
-		warning := "GPU hardware configuration not provided. GPU discovery will be attempted but requires node read permissions. For namespace-scoped operators, apply the GPU discovery ClusterRole: https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml or add hardware config. If you have already applied the ClusterRole, you can safely ignore this warning. See: https://github.com/ai-dynamo/dynamo/issues/6257"
-		return admission.Warnings{warning}, nil
+	// No manual hardware config provided. Cluster-wide operators always have GPU discovery via node
+	// permissions. Namespace-scoped operators rely on Helm-provisioned GPU discovery (gpuDiscovery.enabled).
+	if v.isClusterWideOperator || v.gpuDiscoveryEnabled {
+		return nil, nil
 	}
 
-	// Cluster-wide operators have node permissions by default, allow without warning
-	return nil, nil
+	return nil, errors.New("GPU hardware configuration required: GPU discovery is disabled (set dynamo-operator.gpuDiscovery.enabled=true in Helm values, or provide hardware config in spec.profilingConfig.config)")
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeploymentRequest.

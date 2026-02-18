@@ -85,6 +85,10 @@ type Config struct {
 	// When false, controllers perform validation (defense in depth)
 	WebhooksEnabled bool
 
+	// GPUDiscoveryEnabled indicates whether Helm provisioned node read access for the namespace-scoped operator.
+	// Only relevant for namespace-scoped operators (RestrictedNamespace != "").
+	GPUDiscoveryEnabled bool
+
 	// Checkpoint configuration for checkpoint/restore functionality
 	Checkpoint CheckpointConfig
 }

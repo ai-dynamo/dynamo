@@ -35,15 +35,16 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	invalidYAML := `{invalid yaml`
 
 	tests := []struct {
-		name            string
-		request         *nvidiacomv1alpha1.DynamoGraphDeploymentRequest
-		isClusterWide   bool
-		wantErr         bool
-		errMsg          string
-		errContains     bool
-		wantWarnings    bool
-		expectedWarning string
-		warningContains bool
+		name                string
+		request             *nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+		isClusterWide       bool
+		gpuDiscoveryEnabled bool
+		wantErr             bool
+		errMsg              string
+		errContains         bool
+		wantWarnings        bool
+		expectedWarning     string
+		warningContains     bool
 	}{
 		{
 			name: "valid request",
@@ -131,7 +132,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			errMsg:        "spec.profilingConfig.config is required and must not be empty",
 		},
 		{
-			name: "namespace-restricted operator (GPU discovery will fail gracefully)",
+			name: "namespace-scoped operator with manual hardware config (should pass)",
 			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgdr",
@@ -148,11 +149,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			isClusterWide: false,
-			wantErr:       false,
+			isClusterWide:       false,
+			gpuDiscoveryEnabled: false,
+			wantErr:             false,
 		},
 		{
-			name: "namespace-scoped operator without hardware config (should warn)",
+			name: "namespace-scoped operator with GPU discovery enabled (should pass without manual config)",
 			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgdr",
@@ -169,11 +171,33 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			isClusterWide:   false,
-			wantErr:         false,
-			wantWarnings:    true,
-			expectedWarning: "GPU hardware configuration not provided",
-			warningContains: true,
+			isClusterWide:       false,
+			gpuDiscoveryEnabled: true,
+			wantErr:             false,
+		},
+		{
+			name: "namespace-scoped operator with GPU discovery disabled and no hardware config (should error)",
+			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgdr",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: "vllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(minimalConfig),
+						},
+					},
+				},
+			},
+			isClusterWide:       false,
+			gpuDiscoveryEnabled: false,
+			wantErr:             true,
+			errMsg:              "GPU hardware configuration required: GPU discovery is disabled",
+			errContains:         true,
 		},
 		{
 			name: "invalid config YAML",
@@ -271,7 +295,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentRequestValidator(tt.request, tt.isClusterWide)
+			validator := NewDynamoGraphDeploymentRequestValidator(tt.request, tt.isClusterWide, tt.gpuDiscoveryEnabled)
 			warnings, err := validator.Validate()
 
 			if (err != nil) != tt.wantErr {
@@ -384,7 +408,7 @@ func TestDynamoGraphDeploymentRequestValidator_ValidateUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentRequestValidator(tt.newRequest, true)
+			validator := NewDynamoGraphDeploymentRequestValidator(tt.newRequest, true, true)
 			warnings, err := validator.ValidateUpdate(tt.oldRequest)
 
 			if (err != nil) != tt.wantErr {
