@@ -30,13 +30,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
 
         add_argument(
             g,
-            flag_name="--endpoint",
-            env_var="DYN_TRTLLM_ENDPOINT",
-            default="",
-            help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format.",
-        )
-        add_argument(
-            g,
             flag_name="--model",
             env_var="DYN_TRTLLM_MODEL",
             default=DEFAULT_MODEL,
@@ -360,7 +353,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
 class DynamoTrtllmConfig(ConfigBase):
     """Configuration for Dynamo TRT-LLM backend-specific options."""
 
-    endpoint: str
     model: str
     served_model_name: Optional[str] = None
 
