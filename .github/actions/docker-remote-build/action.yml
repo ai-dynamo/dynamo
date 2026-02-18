@@ -152,7 +152,7 @@ runs:
         # Pass AWS credentials as build secrets for sccache S3 access.
         # Dockerfile steps reference these via --mount=type=secret,id=aws-key-id,env=...
         SECRET_ARGS=""
-        if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+        if [ "${{ inputs.use_sccache }}" == "true" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
           SECRET_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
           SECRET_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
         fi
