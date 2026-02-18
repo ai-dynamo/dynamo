@@ -184,7 +184,7 @@ where
             Python::with_gil(|py| {
                 let gil_wait = wait_start.elapsed();
                 let gil_wait_ms = gil_wait.as_secs_f64() * 1000.0;
-                if gil_wait_ms > 1.0 {
+                if gil_wait_ms > 4.0 {
                     tracing::info!(
                         gil_wait_ms = format!("{:.2}", gil_wait_ms),
                         "perf: GIL wait for generator call"
@@ -205,15 +205,6 @@ where
                     // Legacy: No `context` arg
                     generator.call1(py, (py_request,))
                 }?;
-
-                let call_elapsed = wait_start.elapsed();
-                let call_ms = call_elapsed.as_secs_f64() * 1000.0 - gil_wait_ms;
-                if call_ms > 5.0 {
-                    tracing::info!(
-                        call_ms = format!("{:.2}", call_ms),
-                        "perf: Python generator call duration (GIL held)"
-                    );
-                }
 
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
                 pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
