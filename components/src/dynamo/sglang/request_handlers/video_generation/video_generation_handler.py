@@ -56,7 +56,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         self.generator = generator  # DiffGenerator, not Engine
         self._generate_lock = asyncio.Lock()  # Serialize generator access
         self.fs = fs
-        self.fs_url = config.dynamo_args.video_generation_fs_url
+        self.fs_url = config.dynamo_args.media_fs_url
 
         logger.info(
             f"Video generation worker handler initialized with fs_url={self.fs_url}"

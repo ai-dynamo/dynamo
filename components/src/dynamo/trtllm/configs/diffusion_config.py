@@ -41,8 +41,9 @@ class DiffusionConfig:
     # float16 can be used on older GPUs (V100, etc.)
     torch_dtype: str = "bfloat16"
 
-    # Output config
-    output_dir: str = "/tmp/dynamo_videos"
+    # Media storage
+    media_fs_url: str = "file:///tmp/dynamo_media"
+    media_base_url: Optional[str] = None
 
     # Default generation parameters
     default_height: int = 480
@@ -85,7 +86,7 @@ class DiffusionConfig:
             f"endpoint={self.endpoint}, "
             f"model_path={self.model_path}, "
             f"served_model_name={self.served_model_name}, "
-            f"output_dir={self.output_dir}, "
+            f"media_fs_url={self.media_fs_url}, "
             f"default_height={self.default_height}, "
             f"default_width={self.default_width}, "
             f"default_num_frames={self.default_num_frames}, "

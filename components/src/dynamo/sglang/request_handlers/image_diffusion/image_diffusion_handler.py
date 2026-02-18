@@ -52,8 +52,8 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
-        self.fs_url = config.dynamo_args.image_diffusion_fs_url
-        self.base_url = config.dynamo_args.image_diffusion_base_url
+        self.fs_url = config.dynamo_args.media_fs_url
+        self.base_url = config.dynamo_args.media_base_url
 
         logger.info(
             f"Image diffusion worker handler initialized with fs_url={self.fs_url}, url_base={self.base_url}"
