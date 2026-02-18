@@ -35,7 +35,9 @@ COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 
 # Install system dependencies
-RUN dnf install -y almalinux-release-synergy && \
+# Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
+    dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
         # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
@@ -75,8 +77,7 @@ RUN dnf install -y almalinux-release-synergy && \
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
-        zlib-devel && \
-    dnf clean all && rm -rf /var/cache/dnf/
+        zlib-devel
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -361,7 +362,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 # Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        export UV_CACHE_DIR=/root/.cache/uv && \
         source ${VIRTUAL_ENV}/bin/activate && \
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
