@@ -253,6 +253,8 @@ env:
 
 **Recommendation**: Use `get_zcopy` with threshold `0` for KV cache transfers (always large).
 
+> **⚠️ AWS EFA Exception**: Do NOT use `get_zcopy` on AWS with Ubuntu 24.04 + Kernel ≥6.8. See [AWS EFA Configuration](#aws-efa-configuration) for required settings.
+
 #### Memory Registration
 
 ```yaml
@@ -304,7 +306,13 @@ env:
 
 ### AWS EFA Configuration
 
-> **Important: NIXL is migrating from UCX to libfabric for AWS**
+> **⚠️ Critical: Zero-Copy RDMA causes crashes on AWS Kernel 6.8+**
+>
+> On AWS Ubuntu 24.04 with Kernel ≥6.8, using `UCX_RNDV_SCHEME=get_zcopy` triggers a fatal `NIXL_ERR_BACKEND` crash. The EFA provider cannot register CUDA memory due to incomplete DMA-BUF support in `efa_nv_peermem`.
+>
+> **You MUST use the configuration below** — do not copy the standard InfiniBand settings.
+
+> **Note: NIXL is migrating from UCX to libfabric for AWS**
 >
 > The Dynamo team is transitioning NIXL to use **libfabric** instead of UCX for AWS EFA deployments. This change is driven by:
 > - **Better topology awareness**: libfabric provides hierarchical topology awareness similar to NCCL
@@ -312,17 +320,22 @@ env:
 >
 > **Current status**: UCX over EFA works but is not recommended for production. Published AWS examples are functional but not performant. Check with the Dynamo team for libfabric availability timeline.
 
-For AWS with Elastic Fabric Adapter (interim UCX configuration):
+**Required AWS EFA Configuration** (Ubuntu 24.04 + Kernel ≥6.8):
 
 ```yaml
 env:
   - name: UCX_TLS
     value: "srd,cuda_copy,tcp"    # SRD is EFA's RDMA transport
   - name: UCX_RNDV_SCHEME
-    value: "auto"                  # Let UCX decide
+    value: "auto"                  # DO NOT use get_zcopy - causes crashes
   - name: UCX_RNDV_THRESH
-    value: "auto"                  # Let UCX calculate threshold
+    value: "8192"                  # Avoid CUDA zero-copy for large transfers
 ```
+
+**Why these settings are mandatory**:
+- `UCX_RNDV_SCHEME=auto` prevents UCX from forcing zero-copy RDMA on CUDA buffers
+- `UCX_RNDV_THRESH=8192` ensures large KV cache transfers use host-staging instead of GPU-direct (which fails)
+- Using `get_zcopy` or threshold `0` will cause `remote invalid RD request` errors and worker crashes
 
 **Known Limitations**:
 - GPU Direct RDMA is non-functional on AWS EFA with Ubuntu 24.04 + kernel ≥6.8
@@ -502,7 +515,7 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 | Disagg + InfiniBand RDMA | +200-500ms | Optimal disaggregated performance |
 | Disagg + RoCE RDMA | +300-800ms | Slightly higher than InfiniBand |
 | Disagg + Host-staged RDMA | +1-3s | No GPUDirect, CPU bottleneck |
-| Disagg + TCP only | +5-15s | **40x degradation** |
+| Disagg + TCP only | **+90-100s** | **Effectively unusable** - observed ~98s TTFT on p5.48xlarge |
 
 ### When Disaggregated Makes Sense
 
