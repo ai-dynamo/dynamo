@@ -3,7 +3,7 @@
 
 //! System memory storage backed by malloc.
 
-use super::{MemoryDescription, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
+use super::{MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
 use std::any::Any;
 use std::ptr::NonNull;
 
@@ -82,7 +82,7 @@ impl Drop for SystemStorage {
     }
 }
 
-impl MemoryDescription for SystemStorage {
+impl MemoryDescriptor for SystemStorage {
     fn addr(&self) -> usize {
         self.ptr.as_ptr() as usize
     }
@@ -137,5 +137,132 @@ impl actions::Slice for SystemStorage {
         // Caller must ensure no concurrent mutable access per trait contract.
         // SAFETY: The pointer is valid, properly aligned, and points to `self.len` bytes.
         Ok(unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actions::{Memset, Slice};
+
+    #[test]
+    fn test_system_storage_new() {
+        let storage = SystemStorage::new(1024).expect("allocation should succeed");
+        assert_eq!(storage.size(), 1024);
+        assert!(storage.addr() != 0);
+    }
+
+    #[test]
+    fn test_system_storage_zero_size_fails() {
+        let result = SystemStorage::new(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_system_storage_storage_kind() {
+        let storage = SystemStorage::new(1024).unwrap();
+        assert_eq!(storage.storage_kind(), StorageKind::System);
+    }
+
+    #[test]
+    fn test_system_storage_as_any() {
+        let storage = SystemStorage::new(1024).unwrap();
+        let any = storage.as_any();
+        assert!(any.downcast_ref::<SystemStorage>().is_some());
+    }
+
+    #[test]
+    fn test_system_storage_nixl_descriptor() {
+        let storage = SystemStorage::new(1024).unwrap();
+        // Unregistered storage has no NIXL descriptor
+        assert!(storage.nixl_descriptor().is_none());
+    }
+
+    #[test]
+    fn test_system_storage_as_ptr() {
+        let storage = SystemStorage::new(1024).unwrap();
+        unsafe {
+            let ptr = storage.as_ptr();
+            assert!(!ptr.is_null());
+            assert_eq!(ptr as usize, storage.addr());
+        }
+    }
+
+    #[test]
+    fn test_system_storage_as_mut_ptr() {
+        let mut storage = SystemStorage::new(1024).unwrap();
+        unsafe {
+            let ptr = storage.as_mut_ptr();
+            assert!(!ptr.is_null());
+            assert_eq!(ptr as usize, storage.addr());
+
+            // Write and read back to verify the pointer works
+            *ptr = 0xAB;
+            assert_eq!(*ptr, 0xAB);
+        }
+    }
+
+    #[test]
+    fn test_system_storage_zero_initialized() {
+        let storage = SystemStorage::new(1024).unwrap();
+        unsafe {
+            let slice = storage.as_slice().unwrap();
+            // Memory should be zero-initialized
+            assert!(slice.iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
+    fn test_system_storage_memset_and_read() {
+        let mut storage = SystemStorage::new(1024).unwrap();
+        storage.memset(0xCD, 0, 1024).unwrap();
+
+        unsafe {
+            let slice = storage.as_slice().unwrap();
+            assert!(slice.iter().all(|&b| b == 0xCD));
+        }
+    }
+
+    #[test]
+    fn test_system_storage_multiple_allocations_independent() {
+        let storage1 = SystemStorage::new(512).unwrap();
+        let storage2 = SystemStorage::new(512).unwrap();
+
+        // Different allocations should have different addresses
+        assert_ne!(storage1.addr(), storage2.addr());
+    }
+
+    #[test]
+    fn test_system_storage_alignment() {
+        let storage = SystemStorage::new(1024).unwrap();
+        // posix_memalign allocates with 4096-byte alignment
+        assert!(storage.addr().is_multiple_of(4096));
+    }
+
+    #[test]
+    fn test_system_storage_nixl_compatible() {
+        use crate::nixl::NixlCompatible;
+
+        let storage = SystemStorage::new(2048).unwrap();
+        let (ptr, size, mem_type, device_id) = storage.nixl_params();
+
+        assert_eq!(ptr as usize, storage.addr());
+        assert_eq!(size, 2048);
+        assert_eq!(mem_type, nixl_sys::MemType::Dram);
+        assert_eq!(device_id, 0);
+    }
+
+    #[test]
+    fn test_system_storage_large_allocation() {
+        // Allocate 1MB to test larger sizes
+        let storage = SystemStorage::new(1024 * 1024).unwrap();
+        assert_eq!(storage.size(), 1024 * 1024);
+    }
+
+    #[test]
+    fn test_system_storage_debug() {
+        let storage = SystemStorage::new(1024).unwrap();
+        let debug_str = format!("{:?}", storage);
+        assert!(debug_str.contains("SystemStorage"));
     }
 }
