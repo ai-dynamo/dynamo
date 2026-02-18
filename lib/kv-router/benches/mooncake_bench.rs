@@ -103,12 +103,37 @@ impl IndexerArgs {
                 ))
             }
             IndexerArgs::NaiveNestedMap {} => Arc::new(NaiveNestedMap::new()),
-            IndexerArgs::InvertedIndex { num_event_workers } => Arc::new(ThreadPoolIndexer::new(
-                InvertedIndex::new(),
-                num_event_workers,
-                args.block_size,
-            )),
+            IndexerArgs::InvertedIndex { .. } => Arc::new(InvertedIndex::new()),
         }
+    }
+
+    /// Construct an indexer from a short name string, using `args.num_event_workers`.
+    fn from_name(
+        name: &str,
+        args: &Args,
+    ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
+        let nw = args.num_event_workers;
+        let indexer_args = match name {
+            "radix-tree" => IndexerArgs::RadixTree {},
+            "radix-tree-sharded" => IndexerArgs::RadixTreeSharded { num_shards: 4 },
+            "nested-map" => IndexerArgs::NestedMap {
+                jump_size: 8,
+                num_event_workers: nw,
+            },
+            "concurrent-radix-tree" => IndexerArgs::ConcurrentRadixTree {
+                num_event_workers: nw,
+            },
+            "naive-nested-map" => IndexerArgs::NaiveNestedMap {},
+            "inverted-index" => IndexerArgs::InvertedIndex {
+                num_event_workers: 0,
+            },
+            _ => anyhow::bail!(
+                "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \
+                 nested-map, concurrent-radix-tree, naive-nested-map, inverted-index",
+                name
+            ),
+        };
+        Ok(indexer_args.build(args))
     }
 }
 
@@ -126,7 +151,7 @@ struct Args {
 
     /// Number of GPU blocks available in the mock engine's KV cache.
     /// Smaller values force more evictions and produce more remove events.
-    #[clap(long, default_value = "16384")]
+    #[clap(long, default_value = "1048576")]
     num_gpu_blocks: usize,
 
     /// Number of tokens per KV cache block.
@@ -192,6 +217,20 @@ struct Args {
     /// Output path for the sweep plot PNG.
     #[clap(long, default_value = "sweep_plot.png")]
     sweep_output: String,
+
+    /// Comma-separated list of indexer names to benchmark and compare on the
+    /// same plot. Overrides the subcommand indexer when present. Valid names:
+    /// radix-tree, radix-tree-sharded, nested-map, concurrent-radix-tree,
+    /// naive-nested-map, inverted-index.
+    #[clap(long, value_delimiter = ',')]
+    compare: Vec<String>,
+
+    /// Number of OS threads for event processing in compare mode. Applies to
+    /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
+    /// inverted-index). Ignored by radix-tree, radix-tree-sharded, and
+    /// naive-nested-map.
+    #[clap(long, default_value = "16")]
+    num_event_workers: usize,
 
     /// Indexer backend to benchmark (defaults to radix-tree if not specified).
     #[clap(subcommand)]
@@ -381,6 +420,7 @@ fn duplicate_traces(requests: Vec<MooncakeRequest>, factor: usize) -> Vec<Moonca
         for d in 0..factor {
             let offset = offset_base * d as u64;
             out.push(MooncakeRequest {
+                uuid: Uuid::new_v4(),
                 hash_ids: r.hash_ids.iter().map(|&h| h + offset).collect(),
                 ..r.clone()
             });
@@ -747,15 +787,7 @@ async fn run_benchmark(
         )
     }
 
-    println!("Flushing event queue...");
-
-    let request_duration = progress.elapsed();
-
-    let flush_start = Instant::now();
-    let flush_size = indexer.flush().await;
-    let flush_duration = flush_start.elapsed();
-
-    let event_duration = progress.elapsed();
+    let total_duration = progress.elapsed();
 
     let total_events = worker_traces
         .iter()
@@ -772,25 +804,9 @@ async fn run_benchmark(
         * args.inference_worker_duplication_factor
         - total_events;
 
-    let event_queue_flush_percentage = flush_size as f32 / total_events as f32 * 100.0;
-
-    println!("Event queue flush duration: {:?}", flush_duration);
-    println!(
-        "Event queue flush size: {} ({}% of total events)",
-        flush_size, event_queue_flush_percentage
-    );
-
-    if event_queue_flush_percentage > 5.0 {
-        eprintln!(
-            "ERROR: Over 5% of events were unable to be completed within the benchmark duration.
-        Results are invalid. Rerun with a smaller trace or less worker duplication."
-        );
-    }
-
-    let offered_request_throughput =
-        total_requests as f32 / benchmark_duration_ms as f32 * 1000.0;
-    let request_throughput = total_requests as f32 / request_duration.as_millis() as f32 * 1000.0;
-    let event_throughput = total_events as f32 / event_duration.as_millis() as f32 * 1000.0;
+    let offered_request_throughput = total_requests as f32 / benchmark_duration_ms as f32 * 1000.0;
+    let request_throughput = total_requests as f32 / total_duration.as_millis() as f32 * 1000.0;
+    let event_throughput = total_events as f32 / total_duration.as_millis() as f32 * 1000.0;
 
     latencies.sort_unstable();
     let latency_p50_us = latencies[latencies.len() / 2] as f32 / 1000.0;
@@ -816,48 +832,106 @@ async fn run_benchmark(
     })
 }
 
-fn plot_sweep(results: &[(u64, BenchmarkResults)], output_path: &str) -> anyhow::Result<()> {
-    let offered: Vec<f32> = results
-        .iter()
-        .map(|(_, r)| r.offered_request_throughput)
-        .collect();
-    let p99s: Vec<f32> = results.iter().map(|(_, r)| r.latency_p99_us).collect();
+fn plot_sweep(
+    all_results: &[(&str, Vec<(u64, BenchmarkResults)>)],
+    output_path: &str,
+) -> anyhow::Result<()> {
+    use plotters::coord::combinators::IntoLogRange;
+    use plotters::element::DashedPathElement;
+    use plotters::style::ShapeStyle;
 
-    let x_min = offered.iter().cloned().reduce(f32::min).unwrap() * 0.9;
-    let x_max = offered.iter().cloned().reduce(f32::max).unwrap() * 1.1;
-    let y_min = p99s.iter().cloned().reduce(f32::min).unwrap() * 0.9;
-    let y_max = p99s.iter().cloned().reduce(f32::max).unwrap() * 1.1;
+    let colors = [
+        RGBColor(31, 119, 180),
+        RGBColor(255, 127, 14),
+        RGBColor(44, 160, 44),
+        RGBColor(214, 39, 40),
+        RGBColor(148, 103, 189),
+        RGBColor(140, 86, 75),
+    ];
 
-    let root = BitMapBackend::new(output_path, (800, 500)).into_drawing_area();
+    let mut global_min = f64::MAX;
+    let mut global_max = f64::MIN;
+    for (_, results) in all_results {
+        for (_, r) in results {
+            let offered = r.offered_request_throughput as f64;
+            let achieved = r.request_throughput as f64;
+            global_min = global_min.min(offered).min(achieved);
+            global_max = global_max.max(offered).max(achieved);
+        }
+    }
+    let axis_min = global_min * 0.9;
+    let axis_max = global_max * 1.1;
+
+    let root = BitMapBackend::new(output_path, (800, 600)).into_drawing_area();
     root.fill(&WHITE)?;
 
     let mut chart = ChartBuilder::on(&root)
         .caption(
-            "p99 Latency vs Offered Throughput",
+            "Achieved vs Offered Throughput",
             ("sans-serif", 22).into_font(),
         )
         .margin(20)
         .x_label_area_size(40)
         .y_label_area_size(80)
-        .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+        .build_cartesian_2d(
+            (axis_min..axis_max).log_scale(),
+            (axis_min..axis_max).log_scale(),
+        )?;
 
     chart
         .configure_mesh()
         .x_desc("Offered Request Throughput (req/s)")
-        .y_desc("p99 Latency (us)")
+        .y_desc("Achieved Request Throughput (req/s)")
         .draw()?;
 
-    chart.draw_series(LineSeries::new(
-        offered.iter().zip(p99s.iter()).map(|(&x, &y)| (x, y)),
-        &BLUE,
-    ))?;
+    let identity_style = ShapeStyle::from(&BLACK.mix(0.4)).stroke_width(1);
+    chart.draw_series(std::iter::once(DashedPathElement::new(
+        vec![(axis_min, axis_min), (axis_max, axis_max)],
+        5,
+        3,
+        identity_style,
+    )))?;
 
-    chart.draw_series(
-        offered
+    for (i, (name, results)) in all_results.iter().enumerate() {
+        let color = &colors[i % colors.len()];
+
+        let points: Vec<(f64, f64)> = results
             .iter()
-            .zip(p99s.iter())
-            .map(|(&x, &y)| Circle::new((x, y), 4, BLUE.filled())),
-    )?;
+            .map(|(_, r)| {
+                (
+                    r.offered_request_throughput as f64,
+                    r.request_throughput as f64,
+                )
+            })
+            .collect();
+
+        let series_color = *color;
+        chart
+            .draw_series(LineSeries::new(
+                points.iter().map(|&(x, y)| (x, y)),
+                &series_color,
+            ))?
+            .label(*name)
+            .legend(move |(x, y)| {
+                plotters::element::PathElement::new(
+                    vec![(x, y), (x + 20, y)],
+                    series_color.stroke_width(2),
+                )
+            });
+
+        chart.draw_series(
+            points
+                .iter()
+                .map(|&(x, y)| Circle::new((x, y), 4, series_color.filled())),
+        )?;
+    }
+
+    chart
+        .configure_series_labels()
+        .position(SeriesLabelPosition::LowerRight)
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .draw()?;
 
     root.present()?;
     println!("Sweep plot saved to {}", output_path);
@@ -951,6 +1025,20 @@ async fn main() -> anyhow::Result<()> {
     let traces = process_mooncake_trace(&args)?;
     let events = generate_events(&traces, &args).await?;
 
+    let indexer_names: Vec<String> = if args.compare.is_empty() {
+        let name = match args.get_indexer() {
+            IndexerArgs::RadixTree {} => "radix-tree",
+            IndexerArgs::RadixTreeSharded { .. } => "radix-tree-sharded",
+            IndexerArgs::NestedMap { .. } => "nested-map",
+            IndexerArgs::ConcurrentRadixTree { .. } => "concurrent-radix-tree",
+            IndexerArgs::NaiveNestedMap {} => "naive-nested-map",
+            IndexerArgs::InvertedIndex { .. } => "inverted-index",
+        };
+        vec![name.to_string()]
+    } else {
+        args.compare.clone()
+    };
+
     if args.sweep {
         let log_min = (args.sweep_min_ms as f64).ln();
         let log_max = (args.sweep_max_ms as f64).ln();
@@ -962,39 +1050,74 @@ async fn main() -> anyhow::Result<()> {
             })
             .collect();
 
-        let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
+        let mut all_results: Vec<(&str, Vec<(u64, BenchmarkResults)>)> = Vec::new();
 
-        for &dur_ms in &durations {
-            println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
-            let indexer = args.get_indexer().build(&args);
-            let result =
-                run_benchmark(indexer, traces.clone(), events.clone(), &args, dur_ms).await?;
-            results.push((dur_ms, result));
-        }
+        for name in &indexer_names {
+            println!("\n{}", "=".repeat(60));
+            println!("Benchmarking indexer: {}", name);
+            println!("{}", "=".repeat(60));
 
-        println!("\n=== Sweep Summary ===");
-        println!(
-            "{:>12} {:>14} {:>14} {:>14} {:>10} {:>10} {:>10} {:>10}",
-            "duration_ms", "offered_thpt", "req_thpt", "evt_thpt", "p50(us)", "p95(us)", "p99(us)", "max(us)"
-        );
-        for (dur, r) in &results {
+            let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
+
+            for &dur_ms in &durations {
+                println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
+                let indexer = if args.compare.is_empty() {
+                    args.get_indexer().build(&args)
+                } else {
+                    IndexerArgs::from_name(name, &args)?
+                };
+                let result =
+                    run_benchmark(indexer, traces.clone(), events.clone(), &args, dur_ms).await?;
+                results.push((dur_ms, result));
+            }
+
+            println!("\n=== Sweep Summary: {} ===", name);
             println!(
-                "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
-                dur,
-                r.offered_request_throughput,
-                r.request_throughput,
-                r.event_throughput,
-                r.latency_p50_us,
-                r.latency_p95_us,
-                r.latency_p99_us,
-                r.latency_max_us,
+                "{:>12} {:>14} {:>14} {:>14} {:>10} {:>10} {:>10} {:>10}",
+                "duration_ms",
+                "offered_thpt",
+                "req_thpt",
+                "evt_thpt",
+                "p50(us)",
+                "p95(us)",
+                "p99(us)",
+                "max(us)"
             );
+            for (dur, r) in &results {
+                println!(
+                    "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
+                    dur,
+                    r.offered_request_throughput,
+                    r.request_throughput,
+                    r.event_throughput,
+                    r.latency_p50_us,
+                    r.latency_p95_us,
+                    r.latency_p99_us,
+                    r.latency_max_us,
+                );
+            }
+
+            all_results.push((name, results));
         }
 
-        plot_sweep(&results, &args.sweep_output)?;
+        plot_sweep(&all_results, &args.sweep_output)?;
     } else {
-        let indexer = args.get_indexer().build(&args);
-        run_benchmark(indexer, traces, events, &args, args.benchmark_duration_ms).await?;
+        for name in &indexer_names {
+            println!("\nBenchmarking indexer: {}", name);
+            let indexer = if args.compare.is_empty() {
+                args.get_indexer().build(&args)
+            } else {
+                IndexerArgs::from_name(name, &args)?
+            };
+            run_benchmark(
+                indexer,
+                traces.clone(),
+                events.clone(),
+                &args,
+                args.benchmark_duration_ms,
+            )
+            .await?;
+        }
     }
 
     Ok(())
