@@ -13,6 +13,9 @@ on:
 permissions:
   contents: read
 
+env:
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+
 jobs:
   # ============================================================================
   # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -30,7 +33,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: ${{ env.BUILDER_NAME }}
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
@@ -51,7 +54,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: ${{ env.BUILDER_NAME }}
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
@@ -71,7 +74,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: ${{ env.BUILDER_NAME }}
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
