@@ -32,7 +32,8 @@
 //	Spec.Backend            (string)           Spec.Backend              (BackendType)
 //	Spec.AutoApply          (bool)             Spec.AutoApply                  (bool)
 //	Spec.UseMocker          (bool)             Spec.Features.Mocker.Enabled    (bool)
-//	Spec.DeploymentOverrides.WorkersImage      Spec.Image                    (string)
+//	Spec.ProfilingConfig.ProfilerImage         Spec.Image                    (string)
+//	Spec.DeploymentOverrides.WorkersImage      (no v1beta1 equivalent yet — TODO: overrides.dgd)
 //
 // JSON blob → structured fields (parsed/reconstructed on each trip):
 //
@@ -65,7 +66,6 @@
 //	v1alpha1 field                             Annotation key
 //	──────────────────────────────────────────  ──────────────────────────────────────
 //	Spec.EnableGPUDiscovery                    nvidia.com/dgdr-enable-gpu-discovery
-//	Spec.ProfilingConfig.ProfilerImage         nvidia.com/dgdr-profiler-image
 //	Spec.ProfilingConfig.ConfigMapRef          nvidia.com/dgdr-config-map-ref
 //	Spec.ProfilingConfig.OutputPVC             nvidia.com/dgdr-output-pvc
 //	Spec.ProfilingConfig.Config (full blob)    nvidia.com/dgdr-profiling-config
@@ -151,7 +151,6 @@ import (
 
 // Annotation keys used to round-trip v1alpha1 fields that have no v1beta1 equivalent.
 const (
-	annDGDRProfilerImage    = "nvidia.com/dgdr-profiler-image"
 	annDGDRConfigMapRef     = "nvidia.com/dgdr-config-map-ref"
 	annDGDROutputPVC        = "nvidia.com/dgdr-output-pvc"
 	annDGDREnableGPUDisc    = "nvidia.com/dgdr-enable-gpu-discovery"
@@ -197,6 +196,14 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 
 	// Status
 	convertDGDRStatusFrom(&src.Status, &dst.Status, src)
+
+	// ProfilingJobName — no v1alpha1 status field; store as annotation for round-trip
+	if src.Status.ProfilingJobName != "" {
+		if dst.Annotations == nil {
+			dst.Annotations = make(map[string]string)
+		}
+		dst.Annotations[annDGDRProfilingJobName] = src.Status.ProfilingJobName
+	}
 
 	return nil
 }
@@ -303,9 +310,10 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 		setAnnotation(dstObj, annDGDRProfilingConfig, string(src.ProfilingConfig.Config.Raw))
 	}
 
-	// ProfilerImage — no v1beta1 field; store as annotation
+	// ProfilerImage → Image (the profiler runs in the frontend image)
+	// TODO: In a future MR, backend inference images will be managed separately via overrides.dgd.
 	if src.ProfilingConfig.ProfilerImage != "" {
-		setAnnotation(dstObj, annDGDRProfilerImage, src.ProfilingConfig.ProfilerImage)
+		dst.Image = src.ProfilingConfig.ProfilerImage
 	}
 
 	// ConfigMapRef — no v1beta1 field; store as annotation
@@ -462,11 +470,11 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 		}
 	}
 
-	// ProfilerImage from annotation
-	if srcObj.Annotations != nil {
-		if v, ok := srcObj.Annotations[annDGDRProfilerImage]; ok {
-			dst.ProfilingConfig.ProfilerImage = v
-		}
+	// Image → ProfilerImage (round-trip; see ConvertTo for rationale)
+	// TODO: In a future MR, backend images will come from overrides.dgd; worker image
+	//       (v1alpha1 DeploymentOverrides.WorkersImage) has no v1beta1 equivalent yet.
+	if src.Image != "" {
+		dst.ProfilingConfig.ProfilerImage = src.Image
 	}
 
 	// ConfigMapRef from annotation
@@ -520,13 +528,9 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 			}
 		}
 	}
-	if src.Image != "" {
-		if dst.DeploymentOverrides == nil {
-			dst.DeploymentOverrides = &DeploymentOverridesSpec{}
-		}
-		dst.DeploymentOverrides.WorkersImage = src.Image
-	}
+	// WorkersImage has no v1beta1 equivalent yet (will map to overrides.dgd in a future MR).
 }
+
 
 // convertDGDRStatusTo converts the v1alpha1 Status into the v1beta1 Status.
 func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, dstObj *v1beta1.DynamoGraphDeploymentRequest) {
@@ -560,6 +564,11 @@ func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.D
 		if data, err := json.Marshal(src.Deployment); err == nil {
 			setAnnotation(dstObj, annDGDRDeploymentStatus, string(data))
 		}
+	}
+
+	// ProfilingJobName — read from annotation (stored during ConvertFrom for round-trip)
+	if ann, ok := dstObj.Annotations[annDGDRProfilingJobName]; ok && ann != "" {
+		dst.ProfilingJobName = ann
 	}
 }
 
@@ -598,11 +607,12 @@ func convertDGDRStatusFrom(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst 
 			}
 		}
 	}
-	// If no annotation, but we have DGDName, create a minimal deployment status
+	// If no annotation, but we have DGDName, create a minimal deployment status.
+	// Created is left false so the v1alpha1 controller does not skip re-creating the DGD.
 	if dst.Deployment == nil && src.DGDName != "" {
 		dst.Deployment = &DeploymentStatus{
 			Name:    src.DGDName,
-			Created: true,
+			Created: false,
 		}
 	}
 }

@@ -212,11 +212,6 @@ func (in *FeaturesSpec) DeepCopyInto(out *FeaturesSpec) {
 		*out = new(PlannerSpec)
 		(*in).DeepCopyInto(*out)
 	}
-	if in.KVRouter != nil {
-		in, out := &in.KVRouter, &out.KVRouter
-		*out = new(KVRouterSpec)
-		**out = **in
-	}
 	if in.Mocker != nil {
 		in, out := &in.Mocker, &out.Mocker
 		*out = new(MockerSpec)
@@ -249,16 +244,6 @@ func (in *HardwareSpec) DeepCopyInto(out *HardwareSpec) {
 	}
 	if in.NumGPUsPerNode != nil {
 		in, out := &in.NumGPUsPerNode, &out.NumGPUsPerNode
-		*out = new(int32)
-		**out = **in
-	}
-	if in.MinNumGPUsPerEngine != nil {
-		in, out := &in.MinNumGPUsPerEngine, &out.MinNumGPUsPerEngine
-		*out = new(int32)
-		**out = **in
-	}
-	if in.MaxNumGPUsPerEngine != nil {
-		in, out := &in.MaxNumGPUsPerEngine, &out.MaxNumGPUsPerEngine
 		*out = new(int32)
 		**out = **in
 	}

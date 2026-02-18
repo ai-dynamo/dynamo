@@ -1,166 +1,168 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Test script for v1beta1 Pydantic models.
 
 Validates that the generated Pydantic models can be imported and used correctly.
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
+
+def _repo_root() -> Path:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=Path(__file__).parent,
+        )
+        return Path(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return Path(__file__).parent.parent.parent.parent.parent
+
+
 # Add the components src to path so we can import the generated models
-components_src = (
-    Path(__file__).parent.parent.parent.parent.parent / "components" / "src"
+sys.path.insert(0, str(_repo_root() / "components" / "src"))
+
+from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
+    BackendType,
+    DeploymentInfoStatus,
+    DGDRPhase,
+    DynamoGraphDeploymentRequestSpec,
+    DynamoGraphDeploymentRequestStatus,
+    FeaturesSpec,
+    MockerSpec,
+    ModelCacheSpec,
+    OptimizationType,
+    PlannerPreDeploymentSweepMode,
+    PlannerSpec,
+    ProfilingPhase,
+    SearchStrategy,
+    SLASpec,
+    WorkloadSpec,
 )
-sys.path.insert(0, str(components_src))
 
-try:
-    from dynamo.profiler.utils.dgdr_v1beta1_types import (
-        BackendType,
-        DeploymentInfoStatus,
-        DGDRPhase,
-        DynamoGraphDeploymentRequestSpec,
-        DynamoGraphDeploymentRequestStatus,
-        FeaturesSpec,
-        KVRouterSpec,
-        MockerSpec,
-        ModelCacheSpec,
-        OptimizationType,
-        PlannerPreDeploymentSweepMode,
-        PlannerSpec,
-        ProfilingPhase,
-        SearchStrategy,
-        SLASpec,
-        WorkloadSpec,
-    )
-
-    print("✓ Successfully imported all Pydantic models")
-except ImportError as e:
-    print(f"✗ Failed to import Pydantic models: {e}")
-    sys.exit(1)
+print("✓ Successfully imported all Pydantic models")
 
 
 def test_simple_dgdr():
     """Test creating a simple DGDR (minimal spec)"""
-    try:
-        spec = DynamoGraphDeploymentRequestSpec(
-            model="Qwen/Qwen3-32B",
-        )
-        print("✓ Created simple DGDR spec")
+    spec = DynamoGraphDeploymentRequestSpec(
+        model="Qwen/Qwen3-32B",
+    )
+    print("✓ Created simple DGDR spec")
 
-        # Validate fields
-        assert spec.model == "Qwen/Qwen3-32B"
-        assert spec.backend is None  # Optional, defaults to None
-        assert spec.autoApply is None  # Optional
-        print("✓ Simple DGDR spec validation passed")
-    except Exception as e:
-        print(f"✗ Simple DGDR spec test failed: {e}")
-        sys.exit(1)
+    assert spec.model == "Qwen/Qwen3-32B"
+    assert spec.backend == BackendType.Auto  # kubebuilder:default=auto
+    assert spec.autoApply is True  # kubebuilder:default=true
+    print("✓ Simple DGDR spec validation passed")
 
 
 def test_full_dgdr():
     """Test creating a full DGDR with all fields"""
-    try:
-        spec = DynamoGraphDeploymentRequestSpec(
-            model="meta-llama/Llama-3.1-405B",
-            backend=BackendType.VLLM,
-            image="nvcr.io/nvidia/dynamo-runtime:latest",
-            workload=WorkloadSpec(
-                isl=1024,
-                osl=512,
-                concurrency=10.0,
-            ),
-            sla=SLASpec(
-                optimizationType=OptimizationType.Latency,
-                ttft=100.0,
-                itl=10.0,
-            ),
-            modelCache=ModelCacheSpec(
-                pvcName="model-cache",
-                pvcPath="llama-3.1-405b",
-            ),
-            features=FeaturesSpec(
-                planner=PlannerSpec(enabled=True),
-                kvRouter=KVRouterSpec(enabled=True),
-                mocker=MockerSpec(enabled=False),
-            ),
-            searchStrategy=SearchStrategy.Rapid,
-            autoApply=True,
-        )
-        print("✓ Created full DGDR spec")
+    spec = DynamoGraphDeploymentRequestSpec(
+        model="meta-llama/Llama-3.1-405B",
+        backend=BackendType.VLLM,
+        image="nvcr.io/nvidia/dynamo-runtime:latest",
+        workload=WorkloadSpec(
+            isl=1024,
+            osl=512,
+            concurrency=10.0,
+        ),
+        sla=SLASpec(
+            optimizationType=OptimizationType.Latency,
+            ttft=100.0,
+            itl=10.0,
+        ),
+        modelCache=ModelCacheSpec(
+            pvcName="model-cache",
+            pvcModelPath="llama-3.1-405b",
+        ),
+        features=FeaturesSpec(
+            planner=PlannerSpec(enabled=True),
+            mocker=MockerSpec(enabled=False),
+        ),
+        searchStrategy=SearchStrategy.Rapid,
+        autoApply=True,
+    )
+    print("✓ Created full DGDR spec")
 
-        # Validate nested fields
-        assert spec.model == "meta-llama/Llama-3.1-405B"
-        assert spec.backend == BackendType.VLLM
-        assert spec.workload.isl == 1024
-        assert spec.sla.optimizationType == OptimizationType.Latency
-        assert spec.modelCache.pvcName == "model-cache"
-        assert spec.features.planner.enabled is True
-        assert spec.features.kvRouter.enabled is True
-        assert spec.features.mocker.enabled is False
-        print("✓ Full DGDR spec validation passed")
-    except Exception as e:
-        print(f"✗ Full DGDR spec test failed: {e}")
-        sys.exit(1)
+    assert spec.model == "meta-llama/Llama-3.1-405B"
+    assert spec.backend == BackendType.VLLM
+    assert spec.workload.isl == 1024
+    assert spec.sla.optimizationType == OptimizationType.Latency
+    assert spec.modelCache.pvcName == "model-cache"
+    assert spec.modelCache.pvcModelPath == "llama-3.1-405b"
+    assert spec.features.planner.enabled is True
+    assert spec.features.mocker.enabled is False
+    print("✓ Full DGDR spec validation passed")
 
 
 def test_enums():
     """Test enum values"""
-    try:
-        # DGDRPhase uses uppercase names
-        assert DGDRPhase.PENDING == "Pending"
-        assert DGDRPhase.PROFILING == "Profiling"
-        assert DGDRPhase.DEPLOYED == "Deployed"
+    # DGDRPhase — TitleCase suffix from Go const names
+    assert DGDRPhase.Pending == "Pending"
+    assert DGDRPhase.Profiling == "Profiling"
+    assert DGDRPhase.Deployed == "Deployed"
 
-        # ProfilingPhase uses uppercase names
-        assert ProfilingPhase.INITIALIZING == "Initializing"
-        assert ProfilingPhase.SWEEPINGPREFILL == "SweepingPrefill"
+    # ProfilingPhase — TitleCase suffix from Go const names
+    assert ProfilingPhase.Initializing == "Initializing"
+    assert ProfilingPhase.SweepingPrefill == "SweepingPrefill"
 
-        # OptimizationType uses titlecase names from Go
-        assert OptimizationType.Latency == "latency"
-        assert OptimizationType.Throughput == "throughput"
+    # OptimizationType — TitleCase from Go const names
+    assert OptimizationType.Latency == "latency"
+    assert OptimizationType.Throughput == "throughput"
 
-        # SearchStrategy uses titlecase names from Go
-        assert SearchStrategy.Rapid == "rapid"
-        assert SearchStrategy.Thorough == "thorough"
+    # SearchStrategy — TitleCase from Go const names
+    assert SearchStrategy.Rapid == "rapid"
+    assert SearchStrategy.Thorough == "thorough"
 
-        # BackendType uses mixed case names from Go
-        assert BackendType.Auto == "auto"
-        assert BackendType.VLLM == "vllm"
+    # BackendType — mixed case from Go const names
+    assert BackendType.Auto == "auto"
+    assert BackendType.VLLM == "vllm"
 
-        # PlannerPreDeploymentSweepMode (None is reserved, becomes None_)
-        assert PlannerPreDeploymentSweepMode.None_ == "none"
-        assert PlannerPreDeploymentSweepMode.Rapid == "rapid"
+    # PlannerPreDeploymentSweepMode (None → None_ to avoid Python keyword clash)
+    assert PlannerPreDeploymentSweepMode.None_ == "none"
+    assert PlannerPreDeploymentSweepMode.Rapid == "rapid"
 
-        print("✓ All enum values validated")
-    except Exception as e:
-        print(f"✗ Enum validation failed: {e}")
-        sys.exit(1)
+    print("✓ All enum values validated")
 
 
 def test_status_models():
     """Test status model creation"""
-    try:
-        status = DynamoGraphDeploymentRequestStatus(
-            phase=DGDRPhase.PROFILING,
-            profilingPhase=ProfilingPhase.SWEEPINGPREFILL,
-            dgdName="test-dgd",
-            profilingJobName="test-profiling-job",
-            deploymentInfo=DeploymentInfoStatus(
-                replicas=3,
-                availableReplicas=2,
-            ),
-        )
-        print("✓ Created DGDR status")
+    status = DynamoGraphDeploymentRequestStatus(
+        phase=DGDRPhase.Profiling,
+        profilingPhase=ProfilingPhase.SweepingPrefill,
+        dgdName="test-dgd",
+        profilingJobName="test-profiling-job",
+        deploymentInfo=DeploymentInfoStatus(
+            replicas=3,
+            availableReplicas=2,
+        ),
+    )
+    print("✓ Created DGDR status")
 
-        # Validate status fields
-        assert status.phase == DGDRPhase.PROFILING
-        assert status.profilingPhase == ProfilingPhase.SWEEPINGPREFILL
-        assert status.deploymentInfo.replicas == 3
-        print("✓ DGDR status validation passed")
-    except Exception as e:
-        print(f"✗ Status model test failed: {e}")
-        sys.exit(1)
+    assert status.phase == DGDRPhase.Profiling
+    assert status.profilingPhase == ProfilingPhase.SweepingPrefill
+    assert status.deploymentInfo.replicas == 3
+    print("✓ DGDR status validation passed")
 
 
 def main():

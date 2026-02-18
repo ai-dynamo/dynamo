@@ -145,7 +145,8 @@ generate: controller-gen generate-pydantic ## Generate code containing DeepCopy,
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
 
 .PHONY: generate-pydantic
-generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types
+generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (requires Python 3 + pydantic)
+	@python3 -c "import pydantic" 2>/dev/null || { echo "Error: pydantic not found. Install with: pip install pydantic"; exit 1; }
 	@echo "Generating Pydantic models from v1beta1 DGDR types..."
 	@python3 api/scripts/generate_pydantic_from_go.py
 	@echo "Running Pydantic validation tests..."

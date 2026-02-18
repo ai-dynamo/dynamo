@@ -19,6 +19,7 @@ package v1beta1
 
 import (
 	batchv1 "k8s.io/api/batch/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
@@ -261,8 +262,9 @@ type OverridesSpec struct {
 	// +optional
 	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
 
-	// DGD allows providing a full or partial DynamoGraphDeployment to use as the base
-	// for the generated deployment. Fields from profiling results are merged on top.
+	// DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment
+	// to use as the base for the generated deployment. Fields from profiling results
+	// are merged on top. Use this to override backend worker images.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:EmbeddedResource
@@ -320,9 +322,8 @@ type FeaturesSpec struct {
 	// +optional
 	Planner *PlannerSpec `json:"planner,omitempty"`
 
-	// KVRouter configures KV-cache-aware routing in the generated DGD.
-	// +optional
-	KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
+	// TODO: KVRouter support is not yet implemented in the operator.
+	// KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
 
 	// Mocker configures the simulated (mocker) backend for testing without GPUs.
 	// +optional
@@ -348,13 +349,6 @@ type HardwareSpec struct {
 	// +optional
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
 
-	// MinNumGPUsPerEngine is the minimum number of GPUs per engine for profiling search space.
-	// +optional
-	MinNumGPUsPerEngine *int32 `json:"minNumGpusPerEngine,omitempty"`
-
-	// MaxNumGPUsPerEngine is the maximum number of GPUs per engine for profiling search space.
-	// +optional
-	MaxNumGPUsPerEngine *int32 `json:"maxNumGpusPerEngine,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
@@ -372,8 +366,10 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
 	Backend BackendType `json:"backend,omitempty"`
 
-	// Image is the container image reference for the deployment.
+	// Image is the container image reference for the profiling job (frontend image).
 	// Example: "nvcr.io/nvidia/dynamo-runtime:latest"
+	// TODO: In a future MR, the operator will derive the backend inference image from the
+	// backend type automatically; backend images can be overridden via overrides.dgd.
 	// +optional
 	Image string `json:"image,omitempty"`
 
@@ -545,8 +541,8 @@ func init() {
 }
 
 // SetPhase updates the Phase field in the DGDR status.
-func (s *DynamoGraphDeploymentRequest) SetPhase(phase DGDRPhase) {
-	s.Status.Phase = phase
+func (d *DynamoGraphDeploymentRequest) SetPhase(phase DGDRPhase) {
+	d.Status.Phase = phase
 }
 
 // GetPhase returns the current lifecycle phase.
@@ -565,16 +561,7 @@ func (d *DynamoGraphDeploymentRequest) ClearProfilingPhase() {
 }
 
 // AddStatusCondition adds or updates a condition in the status.
-// If a condition with the same type already exists, it replaces it.
-func (s *DynamoGraphDeploymentRequest) AddStatusCondition(condition metav1.Condition) {
-	if s.Status.Conditions == nil {
-		s.Status.Conditions = []metav1.Condition{}
-	}
-	for i, existing := range s.Status.Conditions {
-		if existing.Type == condition.Type {
-			s.Status.Conditions[i] = condition
-			return
-		}
-	}
-	s.Status.Conditions = append(s.Status.Conditions, condition)
+// Uses apimeta.SetStatusCondition to correctly preserve LastTransitionTime.
+func (d *DynamoGraphDeploymentRequest) AddStatusCondition(condition metav1.Condition) {
+	apimeta.SetStatusCondition(&d.Status.Conditions, condition)
 }

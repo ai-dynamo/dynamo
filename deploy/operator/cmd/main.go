@@ -741,6 +741,15 @@ func main() {
 			os.Exit(1)
 		}
 
+		// TODO(future MR): Register the v1alpha1→v1beta1 DGDR conversion webhook here.
+		// The DGDR ConvertTo/ConvertFrom methods are implemented in
+		// api/v1alpha1/dynamographdeploymentrequest_conversion.go, but the conversion
+		// webhook endpoint is not yet wired up. To complete in-cluster conversion:
+		//   1. Call (&v1alpha1.DynamoGraphDeploymentRequest{}).SetupWebhookWithManager(mgr)
+		//   2. Add a conversion.Webhook block to the DGDR CRD manifest pointing at the
+		//      webhook service (port 9443). Until then, the controller reads/writes v1beta1
+		//      directly and v1alpha1 clients rely on the stored v1beta1 representation.
+
 		setupLog.Info("Validation webhooks registered successfully")
 
 		// Register defaulting (mutating) webhook handlers
