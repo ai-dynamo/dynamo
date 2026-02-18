@@ -654,13 +654,11 @@ fn prepare_worker_traces(
 
 /// Results from a single benchmark run.
 struct BenchmarkResults {
-    offered_request_throughput: f32,
-    request_throughput: f32,
-    event_throughput: f32,
-    latency_p50_us: f32,
-    latency_p95_us: f32,
+    offered_ops_throughput: f32,
+    ops_throughput: f32,
+    offered_block_throughput: f32,
+    block_throughput: f32,
     latency_p99_us: f32,
-    latency_max_us: f32,
 }
 
 /// Run the benchmark: replay each worker's merged trace against the indexer,
@@ -804,31 +802,53 @@ async fn run_benchmark(
         * args.inference_worker_duplication_factor
         - total_events;
 
-    let offered_request_throughput = total_requests as f32 / benchmark_duration_ms as f32 * 1000.0;
-    let request_throughput = total_requests as f32 / total_duration.as_millis() as f32 * 1000.0;
-    let event_throughput = total_events as f32 / total_duration.as_millis() as f32 * 1000.0;
+    let total_request_blocks: usize = worker_traces
+        .iter()
+        .flat_map(|t| t.iter())
+        .filter_map(|entry| match &entry.entry {
+            WorkerTraceEntry::Request(hashes) => Some(hashes.len()),
+            _ => None,
+        })
+        .sum::<usize>()
+        * args.inference_worker_duplication_factor;
+
+    let total_event_blocks: usize = worker_traces
+        .iter()
+        .flat_map(|t| t.iter())
+        .filter_map(|entry| match &entry.entry {
+            WorkerTraceEntry::Event(ev) => match &ev.data {
+                KvCacheEventData::Stored(s) => Some(s.blocks.len()),
+                _ => Some(0),
+            },
+            _ => None,
+        })
+        .sum::<usize>()
+        * args.inference_worker_duplication_factor;
+
+    let total_blocks = total_request_blocks + total_event_blocks;
+
+    let total_ops = total_requests + total_events;
+    let offered_ops_throughput = total_ops as f32 / benchmark_duration_ms as f32 * 1000.0;
+    let ops_throughput = total_ops as f32 / total_duration.as_millis() as f32 * 1000.0;
+    let offered_block_throughput = total_blocks as f32 / benchmark_duration_ms as f32 * 1000.0;
+    let block_throughput = total_blocks as f32 / total_duration.as_millis() as f32 * 1000.0;
 
     latencies.sort_unstable();
-    let latency_p50_us = latencies[latencies.len() / 2] as f32 / 1000.0;
-    let latency_p95_us = latencies[latencies.len() * 95 / 100] as f32 / 1000.0;
     let latency_p99_us = latencies[latencies.len() * 99 / 100] as f32 / 1000.0;
-    let latency_max_us = *latencies.last().unwrap() as f32 / 1000.0;
 
-    println!("Request Throughput: {} req/s", request_throughput);
-    println!("Event Throughput: {} events/s", event_throughput);
-    println!("Latency p50: {}us", latency_p50_us);
-    println!("Latency p95: {}us", latency_p95_us);
+    println!(
+        "Ops Throughput: {} ops/s (requests + events)",
+        ops_throughput
+    );
+    println!("Block Throughput: {} block ops/s", block_throughput);
     println!("Latency p99: {}us", latency_p99_us);
-    println!("Latency max: {}us", latency_max_us);
 
     Ok(BenchmarkResults {
-        offered_request_throughput,
-        request_throughput,
-        event_throughput,
-        latency_p50_us,
-        latency_p95_us,
+        offered_ops_throughput,
+        ops_throughput,
+        offered_block_throughput,
+        block_throughput,
         latency_p99_us,
-        latency_max_us,
     })
 }
 
@@ -853,8 +873,8 @@ fn plot_sweep(
     let mut global_max = f64::MIN;
     for (_, results) in all_results {
         for (_, r) in results {
-            let offered = r.offered_request_throughput as f64;
-            let achieved = r.request_throughput as f64;
+            let offered = r.offered_block_throughput as f64;
+            let achieved = r.block_throughput as f64;
             global_min = global_min.min(offered).min(achieved);
             global_max = global_max.max(offered).max(achieved);
         }
@@ -880,8 +900,8 @@ fn plot_sweep(
 
     chart
         .configure_mesh()
-        .x_desc("Offered Request Throughput (req/s)")
-        .y_desc("Achieved Request Throughput (req/s)")
+        .x_desc("Offered Throughput (block ops/s)")
+        .y_desc("Achieved Throughput (block ops/s)")
         .draw()?;
 
     let identity_style = ShapeStyle::from(&BLACK.mix(0.4)).stroke_width(1);
@@ -897,12 +917,7 @@ fn plot_sweep(
 
         let points: Vec<(f64, f64)> = results
             .iter()
-            .map(|(_, r)| {
-                (
-                    r.offered_request_throughput as f64,
-                    r.request_throughput as f64,
-                )
-            })
+            .map(|(_, r)| (r.offered_block_throughput as f64, r.block_throughput as f64))
             .collect();
 
         let series_color = *color;
@@ -1073,27 +1088,18 @@ async fn main() -> anyhow::Result<()> {
 
             println!("\n=== Sweep Summary: {} ===", name);
             println!(
-                "{:>12} {:>14} {:>14} {:>14} {:>10} {:>10} {:>10} {:>10}",
-                "duration_ms",
-                "offered_thpt",
-                "req_thpt",
-                "evt_thpt",
-                "p50(us)",
-                "p95(us)",
-                "p99(us)",
-                "max(us)"
+                "{:>12} {:>14} {:>14} {:>14} {:>14} {:>10}",
+                "duration_ms", "ops/s_off", "ops/s", "blk_ops/s_off", "blk_ops/s", "p99(us)"
             );
             for (dur, r) in &results {
                 println!(
-                    "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
+                    "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>14.1} {:>10.1}",
                     dur,
-                    r.offered_request_throughput,
-                    r.request_throughput,
-                    r.event_throughput,
-                    r.latency_p50_us,
-                    r.latency_p95_us,
+                    r.offered_ops_throughput,
+                    r.ops_throughput,
+                    r.offered_block_throughput,
+                    r.block_throughput,
                     r.latency_p99_us,
-                    r.latency_max_us,
                 );
             }
 

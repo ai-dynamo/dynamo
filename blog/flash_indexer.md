@@ -6,7 +6,7 @@ But here's the problem: which worker has the blocks you need?
 
 Each worker knows about its own cache. Nobody has the global picture. To route a request to the worker with the best prefix overlap, or to orchestrate block transfers between workers, or to schedule distributed prefills---you need a **global index** of every cached block across every worker. And you need it to be *fast*: every microsecond spent in the index is a microsecond not spent generating tokens.
 
-This is the story of how we built that index---the **Flash Indexer**---evolving through six iterations from a Python dictionary to a concurrent, jump-optimized spatial index clocking in at over 10 million operations per second with p99 latency under 1 microsecond.
+This is the story of how we built that index---the **Flash Indexer**---evolving through six iterations from a Python dictionary to a concurrent, jump-optimized spatial index sustaining over 10 million operations per second.
 
 ---
 
@@ -479,9 +479,11 @@ The harness supports all indexer backends (`RadixTree`, `RadixTreeSharded`, `Con
 
 ### What We Measure
 
-The metric we care about most is the **throughput-latency curve**: as we scale up the combined rate of KV events and `find_matches` requests, at what point does the p99 latency jump? That inflection point---the **phase transition** where queueing kicks in---defines the **threshold throughput**: the maximum sustained load the indexer can reliably handle without latency degradation.
+We define **ops throughput** as the combined rate of KV events and `find_matches` requests processed per second. Each event and each request counts as one operation; an event that stores 5 blocks is one op, and a `find_matches` call that scans 70 positions is one op. When we want a finer-grained view, we also report **block throughput**: the total number of individual blocks touched per second (blocks scanned during `find_matches` plus blocks stored via events).
 
-Below the threshold, the indexer is invisible: sub-microsecond p99 latency, and the real bottlenecks are network, tokenization, and hashing. Above it, events start backing up in the channel, latencies spike, and the indexer becomes the constraint. Every optimization in this post was motivated by pushing that threshold higher.
+The metric we care about most is the **achieved-vs-offered throughput curve**. We sweep the offered load by compressing the same trace into progressively shorter benchmark durations, which increases the offered ops/s while keeping the total work constant. For each sweep point, we compare the achieved throughput to the offered throughput. When the indexer can keep up, achieved tracks offered and the curve follows the identity line. When it saturates, achieved flattens or drops---the curve peels away from the diagonal. That inflection point defines the **threshold throughput**: the maximum sustained load the indexer can reliably handle.
+
+Below the threshold, the indexer is invisible: the real bottlenecks are network, tokenization, and hashing. Above it, the indexer becomes the constraint and offered load piles up faster than it can be drained. Every optimization in this post was motivated by pushing that threshold higher.
 
 ---
 
@@ -510,6 +512,6 @@ The journey from a Python dictionary to the Flash Indexer spans six iterations, 
 5. **Concurrent radix tree** --- `Arc<RwLock<>>` + `DashMap`; reads bypass the actor entirely; sticky routing serializes writes per worker with zero contention.
 6. **Positional indexer with jump search** --- spatial indexing with `(position, local_hash)` compound keys; O(1) random-position access enables jump optimization; lazy hash computation skips work in the common case.
 
-The result: a combined throughput of over **10 million events + requests per second** with **p99 latency under 1 microsecond**.
+The result: a sustained ops throughput of over **10 million operations per second**---events and requests combined---with achieved throughput tracking offered throughput all the way to the limit.
 
 And this is just the indexer. Block transfer orchestration, distributed scheduling, and cross-worker cache coordination are next. Stay tuned.
