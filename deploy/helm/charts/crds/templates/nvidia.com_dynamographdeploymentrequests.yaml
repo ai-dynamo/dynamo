@@ -416,10 +416,18 @@ spec:
                       description: Namespace is the namespace of the created DynamoGraphDeployment.
                       type: string
                     state:
+                      default: initializing
                       description: |-
                         State is the current state of the DynamoGraphDeployment.
                         This value is mirrored from the DGD's status.state field.
+                      enum:
+                        - initializing
+                        - pending
+                        - successful
+                        - failed
                       type: string
+                  required:
+                    - state
                   type: object
                 generatedDeployment:
                   description: |-
