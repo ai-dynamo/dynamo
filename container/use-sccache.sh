@@ -93,7 +93,7 @@ setup_env() {
     # successfully. The server needs working S3 credentials (mounted via
     # --mount=type=secret); if they're missing or invalid, we skip sccache
     # entirely so the build continues with normal compilers.
-    echo 'if sccache --start-server 2>/dev/null; then'
+    echo 'if sccache --start-server; then'
     echo '  export SCCACHE_IDLE_TIMEOUT=0;'
     echo '  export RUSTC_WRAPPER="sccache";'
 
