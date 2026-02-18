@@ -373,7 +373,7 @@ spec:
 
 | Setting | Purpose | Notes |
 |---------|---------|-------|
-| `IPC_LOCK` capability | Pin memory for RDMA | Required by UCX |
+| `IPC_LOCK` capability | Pin memory for RDMA | Bypasses RLIMIT_MEMLOCK; required for `ibv_reg_mr()` to pin GPU/host buffers |
 | `rdma/ib` resources | RDMA NIC access | Provided by RDMA device plugin |
 | `sharedMemory.size` | IPC between processes | 16Gi for vLLM, 80Gi for TRT-LLM |
 
