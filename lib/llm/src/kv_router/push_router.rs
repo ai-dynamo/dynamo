@@ -426,10 +426,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let tracker = request.tracker.clone();
 
         // Extract cache_control TTL before consuming the request
-        let cache_control_ttl = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.cache_control_ttl);
+        let cache_control_ttl = request.routing.as_ref().and_then(|r| r.cache_control_ttl);
         let token_ids_for_pin = cache_control_ttl.map(|_| request.token_ids.clone());
         let cc_client = cache_control_ttl.and_then(|_| self.cache_control_client.clone());
 

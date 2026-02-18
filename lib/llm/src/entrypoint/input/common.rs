@@ -9,7 +9,9 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, create_cache_control_client},
+    kv_router::{
+        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, create_cache_control_client,
+    },
     migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
@@ -284,11 +286,10 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let cc_client = if chooser
-                .kv_router_config()
-                .router_enable_cache_control
-            {
-                tracing::info!("Cache control enabled: cache_control client created for PIN operations");
+            let cc_client = if chooser.kv_router_config().router_enable_cache_control {
+                tracing::info!(
+                    "Cache control enabled: cache_control client created for PIN operations"
+                );
                 let component = chooser.client().endpoint.component().clone();
                 Some(create_cache_control_client(&component).await?)
             } else {
