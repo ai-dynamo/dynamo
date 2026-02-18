@@ -27,7 +27,7 @@ The `--output-modalities` flag determines which endpoint(s) the worker registers
 | Modality | Models |
 |---|---|
 | Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
-| Text-to-Image | `Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
+| Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
 | Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
 
 To run a non-default model, pass `--model` to any launch script:
@@ -64,7 +64,7 @@ This script uses a custom stage config (`stage_configs/single_stage_llm.yaml`) t
 
 ## Text-to-Image
 
-Launch using the provided script with `Qwen-Image`:
+Launch using the provided script with `Qwen/Qwen-Image`:
 
 ```bash
 bash examples/backends/vllm/launch/agg_omni_image.sh
@@ -76,7 +76,7 @@ bash examples/backends/vllm/launch/agg_omni_image.sh
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen-Image",
+    "model": "Qwen/Qwen-Image",
     "messages": [{"role": "user", "content": "A cat sitting on a windowsill"}],
     "stream": false
   }'
@@ -102,7 +102,7 @@ The response includes base64-encoded images inline:
 curl -s http://localhost:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen-Image",
+    "model": "Qwen/Qwen-Image",
     "prompt": "A cat sitting on a windowsill",
     "size": "1024x1024",
     "response_format": "url"
