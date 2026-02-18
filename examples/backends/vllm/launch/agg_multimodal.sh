@@ -15,7 +15,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # Default values
-MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 
 # Parse command line arguments
 # Extra arguments are passed through to the vLLM worker
@@ -53,7 +53,7 @@ export DYN_REQUEST_PLANE=tcp
 python -m dynamo.frontend &
 
 # Configure GPU memory optimization for specific models (if no extra args override)
-MODEL_SPECIFIC_ARGS=""
+MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 16384"
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
     MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
@@ -67,6 +67,7 @@ fi
 # --enforce-eager: Quick deployment (remove for production)
 # --connector none: No KV transfer needed for aggregated serving
 # Extra args from command line come last to allow overrides
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
 
