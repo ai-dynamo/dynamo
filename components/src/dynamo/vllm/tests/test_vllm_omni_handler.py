@@ -9,7 +9,6 @@ from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
 from dynamo.common.utils.output_modalities import RequestType
 
-# TODO: Install vLLM omni dependencies in CI container so this skip is no longer needed.
 try:
     from dynamo.vllm.omni.omni_handler import (
         EngineInputs,
