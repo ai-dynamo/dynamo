@@ -15,7 +15,7 @@ concurrency:
     # then the group name uses the run_id to ensure a unique group for
     # 'main' pushes. Otherwise, the group name is the ref_name, so that
     # workflows on the same PR/branch have the same group name for cancelling.
-    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
+    group: dynamo-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
     cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
