@@ -8,7 +8,6 @@ import os
 
 import yaml
 
-from deploy.utils.gpu_inventory import get_gpu_summary
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.model_info import ModelInfo, get_model_info
 
@@ -103,66 +102,79 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
     )
     args.model_info = model_info
 
-    # now determine the search space
-    if args.enable_gpu_discovery:
-        if (
-            args.min_num_gpus_per_engine == 0
-            or args.max_num_gpus_per_engine == 0
-            or args.num_gpus_per_node == 0
-        ):
+    # Determine the search space for profiling
+    # User-provided min/max values take precedence; auto-calculate missing bounds
+    # based on GPU hardware info and model size
+    user_specified_ranges = (
+        args.min_num_gpus_per_engine != 0 and args.max_num_gpus_per_engine != 0
+    )
+
+    if user_specified_ranges:
+        logger.info(
+            f"Using user-specified GPU search space: {args.min_num_gpus_per_engine} to {args.max_num_gpus_per_engine}"
+        )
+        # Ensure num_gpus_per_node is set (needed for multi-node configs)
+        if args.num_gpus_per_node == 0:
+            logger.warning("num_gpus_per_node not specified, setting to 8")
+            args.num_gpus_per_node = 8
+    else:
+        # Auto-calculate search space (honor partial user overrides)
+        # NOTE: will be handled in AIC
+        if args.num_gpus_per_node != 0 and args.gpu_vram_mib != 0:
+            # Have GPU hardware info - calculate based on model size
             if not args.model:
-                # TODO: get model info provided DGD config
-                error_msg = "No model provided, cannot auto-generate GPU search space. Please provide `--model` or GPU info"
+                error_msg = "No model provided, cannot auto-generate GPU search space. Please provide --model"
                 logger.error(error_msg)
                 raise RuntimeError(error_msg)
 
-            logger.info("Getting GPU info from k8s cluster...")
-            gpu_info = get_gpu_summary()
-            logger.info(
-                f"Cluster has {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node with {gpu_info['vram']} VRAM"
-            )
-
-            # model_info should be set by now (checked above), but mypy needs explicit verification
             assert (
                 model_info is not None
             ), "model_info must be set when model is provided"
 
-            vram_mib = int(gpu_info["vram"])  # type: ignore[call-overload]
-            gpus_per_node = int(gpu_info["gpus_per_node"])  # type: ignore[call-overload]
-
-            min_gpu = math.ceil(
-                model_info.model_size / MODEL_GPU_MEM_FRAC_MAX / vram_mib
+            logger.info(
+                f"Auto-generating search space: {args.num_gpus_per_node}x {args.gpu_model} GPUs with {args.gpu_vram_mib} MiB VRAM per GPU"
             )
+            if args.system:
+                logger.info(f"Hardware system: {args.system}")
+
+            # Calculate minimum GPUs needed for model
+            min_gpu = math.ceil(
+                model_info.model_size / MODEL_GPU_MEM_FRAC_MAX / args.gpu_vram_mib
+            )
+
+            # Calculate maximum GPUs to profile
             if not model_info.is_moe:
-                max_gpu = gpus_per_node
+                max_gpu = args.num_gpus_per_node
             else:
-                max_gpu = max(min_gpu * MOE_MODEL_MAX_NUM_GPU_FACTOR, gpus_per_node)
-            if min_gpu > max_gpu:
-                error_msg = f"No valid GPU configuration found for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node"
+                # MoE models can benefit from more GPUs
+                max_gpu = max(
+                    min_gpu * MOE_MODEL_MAX_NUM_GPU_FACTOR, args.num_gpus_per_node
+                )
+
+            # Honor partial user overrides
+            final_min = args.min_num_gpus_per_engine or min_gpu
+            final_max = args.max_num_gpus_per_engine or max_gpu
+
+            # Validate final_min <= final_max
+            if final_min > final_max:
+                error_msg = f"Invalid GPU range: min_num_gpus_per_engine ({final_min}) > max_num_gpus_per_engine ({final_max})"
                 logger.error(error_msg)
                 raise RuntimeError(error_msg)
 
+            # Clamp to valid range [1, args.num_gpus_per_node]
+            final_min = max(1, min(final_min, args.num_gpus_per_node))
+            final_max = max(1, min(final_max, args.num_gpus_per_node))
+
+            logger.info(f"Auto-generated search space: {final_min} to {final_max} GPUs")
+            args.min_num_gpus_per_engine = final_min
+            args.max_num_gpus_per_engine = final_max
+        else:
+            # No GPU info available - use defaults
+            logger.warning("GPU hardware info not available, using default values")
+            args.min_num_gpus_per_engine = args.min_num_gpus_per_engine or 1
+            args.max_num_gpus_per_engine = args.max_num_gpus_per_engine or 4
+            args.num_gpus_per_node = args.num_gpus_per_node or 8
             logger.info(
-                f"Auto-generated search space for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node: {min_gpu} to {max_gpu}"
+                f"Default search space: {args.min_num_gpus_per_engine} to {args.max_num_gpus_per_engine} GPUs, {args.num_gpus_per_node} GPUs per node"
             )
-            args.min_num_gpus_per_engine = min_gpu
-            args.max_num_gpus_per_engine = max_gpu
-            args.num_gpus_per_node = gpus_per_node  # type: ignore[assignment]
-    else:
-        # use default values for GPUs
-        if args.min_num_gpus_per_engine == 0:
-            logger.warning(
-                "GPU discover is disabled and min_num_gpus_per_engine is not specified, setting to 1"
-            )
-            args.min_num_gpus_per_engine = 1
-        if args.max_num_gpus_per_engine == 0:
-            logger.warning(
-                "GPU discover is disabled and max_num_gpus_per_engine is not specified, setting to 4"
-            )
-            args.max_num_gpus_per_engine = 4
-        if args.num_gpus_per_node == 0:
-            logger.warning(
-                "GPU discover is disabled and num_gpus_per_node is not specified, setting to 8"
-            )
-            args.num_gpus_per_node = 8
     return

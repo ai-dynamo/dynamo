@@ -154,7 +154,7 @@ class BaseConfigModifier:
         Raises:
             ValueError: If neither --served-model-name nor model path arg is found
         """
-        model_name = None
+        model_name = ""
         # Check for --served-model-name first (API model name)
         for i, arg in enumerate(args):
             if arg == cls.WORKER_SERVED_MODEL_NAME_ARG and i + 1 < len(args):
@@ -162,14 +162,14 @@ class BaseConfigModifier:
                 break
 
         # Check for backend-specific path argument
-        model_path = None
+        model_path = ""
         for i, arg in enumerate(args):
             if arg == cls.WORKER_MODEL_PATH_ARG and i + 1 < len(args):
                 model_path = args[i + 1]
                 break
 
         # Require at least one to be specified
-        if model_name is None and model_path is None:
+        if not model_name and not model_path:
             raise ValueError(
                 f"Cannot determine model: neither {cls.WORKER_MODEL_PATH_ARG} nor "
                 f"{cls.WORKER_SERVED_MODEL_NAME_ARG} found in worker configuration. "
@@ -177,9 +177,9 @@ class BaseConfigModifier:
             )
 
         # If only one is specified, use it for both
-        if model_path is None:
+        if not model_path:
             model_path = model_name
-        elif model_name is None:
+        elif not model_name:
             model_name = model_path
 
         return model_name, model_path
@@ -303,19 +303,10 @@ class BaseConfigModifier:
         - update_model()
         - update_model_from_pvc()
         """
-        # Update workers (prefill + decode) if present.
-        for sct in (SubComponentType.PREFILL, SubComponentType.DECODE):
-            try:
-                svc_name = get_service_name_by_type(cfg, cls.BACKEND, sct)
-            except Exception:
-                continue
-            if svc_name not in cfg.spec.services:
-                continue
 
-            service = cfg.spec.services[svc_name]
+        def _patch_service(service: Any) -> None:
             if not service.extraPodSpec or not service.extraPodSpec.mainContainer:
-                continue
-
+                return
             c = service.extraPodSpec.mainContainer
 
             def _patch(tokens: list[str]) -> list[str]:
@@ -328,6 +319,26 @@ class BaseConfigModifier:
                 return tokens
 
             cls._update_container_args_preserving_shell_form(c, _patch)
+
+        # Update workers (prefill + decode) if present.
+        patched_services: set[str] = set()
+        for sct in (SubComponentType.PREFILL, SubComponentType.DECODE):
+            try:
+                svc_name = get_service_name_by_type(cfg, cls.BACKEND, sct)
+            except Exception:
+                continue
+            if svc_name not in cfg.spec.services:
+                continue
+            _patch_service(cfg.spec.services[svc_name])
+            patched_services.add(svc_name)
+
+        # Fallback for agg mode: if no worker was patched via subComponentType
+        # lookup, patch any non-Frontend/Planner worker service.
+        if not patched_services:
+            for name, service in cfg.spec.services.items():
+                if name not in cls._NON_WORKER_SERVICES:
+                    _patch_service(service)
+                    patched_services.add(name)
 
         if patch_frontend:
             cls._update_frontend_cli(cfg, model_name=model_name, model_path=model_path)
@@ -598,8 +609,20 @@ class BaseConfigModifier:
         agg_replicas: int,
         agg_gpus: int,
     ) -> None:
-        """Apply CLI args, replicas, and GPU resources to the agg worker service."""
+        """Apply CLI args, replicas, and GPU resources to the agg worker service.
+
+        In agg mode, the default config template may use a generic worker
+        service name (e.g. ``TRTLLMWorker``) that does not match the disagg
+        naming convention (``TRTLLMDecodeWorker``).  We first try the standard
+        DECODE lookup, then fall back to any non-Frontend/Planner service.
+        """
         svc_name = cls._resolve_service_name(cfg, SubComponentType.DECODE)
+        if svc_name is None or svc_name not in cfg.spec.services:
+            # Fallback: find any worker service in the config
+            for name in cfg.spec.services:
+                if name not in cls._NON_WORKER_SERVICES:
+                    svc_name = name
+                    break
         if svc_name is None or svc_name not in cfg.spec.services:
             logger.warning("Could not find worker service for agg mode")
             return

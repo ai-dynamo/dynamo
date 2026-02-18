@@ -813,7 +813,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -826,6 +826,9 @@ impl KvRouter {
         worker_id: Option<WorkerId>,
         dp_rank: Option<DpRank>,
         extra_args: Option<PyObject>,
+        block_mm_infos: Option<PyObject>,
+        multi_modal_data: Option<PyObject>,
+        mm_routing_info: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
@@ -859,6 +862,32 @@ impl KvRouter {
             None
         };
 
+        let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> = if let Some(obj) = block_mm_infos
+        {
+            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+        } else {
+            None
+        };
+
+        let multi_modal_data: Option<llm_rs::protocols::common::preprocessor::MultimodalDataMap> =
+            if let Some(obj) = multi_modal_data {
+                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+            } else {
+                None
+            };
+
+        let mm_routing_info: Option<llm_rs::protocols::common::preprocessor::MmRoutingInfo> =
+            if let Some(obj) = mm_routing_info {
+                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+            } else {
+                block_mm_infos.map(
+                    |infos| llm_rs::protocols::common::preprocessor::MmRoutingInfo {
+                        routing_token_ids: token_ids.clone(),
+                        block_mm_infos: infos,
+                    },
+                )
+            };
+
         // Create tracker to capture worker routing info from KvRouter
         let tracker = Arc::new(RequestTracker::new());
 
@@ -872,6 +901,8 @@ impl KvRouter {
             .sampling_options(sampling_options)
             .output_options(output_options)
             .router_config_override(router_config_override)
+            .multi_modal_data(multi_modal_data)
+            .mm_routing_info(mm_routing_info)
             .extra_args(extra_args)
             .tracker(Some(tracker.clone()));
 
@@ -914,18 +945,26 @@ impl KvRouter {
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
         router_config_override: Option<PyObject>,
         request_id: Option<String>,
+        block_mm_infos: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: llm_rs::kv_router::RouterConfigOverride =
                 depythonize(obj.bind(py)).map_err(to_pyerr)?;
             Some(override_config)
+        } else {
+            None
+        };
+
+        let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> = if let Some(obj) = block_mm_infos
+        {
+            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
         } else {
             None
         };
@@ -938,6 +977,7 @@ impl KvRouter {
                 .find_best_match(
                     request_id.as_deref(),
                     &token_ids,
+                    block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
                     None, // lora_name not exposed in Python API yet

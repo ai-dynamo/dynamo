@@ -82,11 +82,11 @@ docker compose -f deploy/docker-compose.yml up -d
 apt-get update && apt-get -y install git git-lfs
 
 # On an x86 machine:
-python container/render.py --framework=trtllm --target=runtime --output-short-filename
+python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
 docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 
 # On an ARM machine:
-python container/render.py --framework=trtllm --target=runtime --platform=arm64 --output-short-filename
+python container/render.py --framework=trtllm --target=runtime --platform=arm64 --output-short-filename --cuda-version=13.1
 docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 ```
 
