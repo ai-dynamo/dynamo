@@ -143,6 +143,7 @@ class Processor(ProcessMixIn):
             engine_prompt=engine_prompt,
             sampling_params=sampling_params,
             request_id=request_id,
+            model=raw_request.model,
             multimodal_input=multimodal_input,
         )
 

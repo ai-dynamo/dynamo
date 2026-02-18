@@ -140,6 +140,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ),
             sampling_params=sampling_params,
             request_id=request_id,
+            model=raw_request.get("model"),
             multimodal_inputs=multimodal_groups,
         )
 
