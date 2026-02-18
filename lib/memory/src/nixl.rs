@@ -312,11 +312,7 @@ pub trait NixlRegisterExt: MemoryDescriptor + NixlCompatible + Sized {
     /// A `NixlRegistered` wrapper on success, or the original storage on failure.
     fn register(
         self,
-<<<<<<< ryan/memory-dedup
-        agent: &Agent,
-=======
         agent: &NixlAgent,
->>>>>>> main
         opt: Option<&OptArgs>,
     ) -> std::result::Result<NixlRegistered<Self>, Self> {
         register_with_nixl(self, agent, opt)
