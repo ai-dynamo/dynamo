@@ -14,6 +14,7 @@ import torch
 from PIL import Image
 
 from dynamo._core import Component, Context
+from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse, NvExt
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -225,10 +226,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # Per-user storage path
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
 
-        # send image to filesystem
-        await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
-
-        return f"{self.base_url}/{storage_path}"
+        return await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""

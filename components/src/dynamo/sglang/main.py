@@ -584,11 +584,11 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     )
 
     # Initialize fsspec filesystems for image storage
-    fs_url = dynamo_args.image_diffusion_fs_url
+    fs_url = dynamo_args.media_fs_url
 
     # Initialize primary filesystem
     if not fs_url:
-        raise ValueError("--image-diffusion-fs-url is required for diffusion workers")
+        raise ValueError("--media-fs-url is required for diffusion workers")
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
@@ -668,13 +668,11 @@ async def init_video_generation(runtime: DistributedRuntime, config: Config):
     )
 
     # Initialize fsspec filesystems for video storage
-    fs_url = dynamo_args.video_generation_fs_url
+    fs_url = dynamo_args.media_fs_url
 
     # Initialize primary filesystem
     if not fs_url:
-        raise ValueError(
-            "--video-generation-fs-url is required for video generation workers"
-        )
+        raise ValueError("--media-fs-url is required for video generation workers")
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
