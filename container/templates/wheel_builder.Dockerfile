@@ -334,6 +334,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env cmake); \
     fi && \
+    mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
