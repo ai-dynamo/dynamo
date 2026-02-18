@@ -153,12 +153,11 @@ def update_dynamo_config_with_engine(
         dynamo_config.served_model_name = None
 
     # TODO: move to "disaggregation_mode" as the other engines.
-    if dynamo_config.multimodal_processor or dynamo_config.ec_processor:
+    if dynamo_config.route_to_encoder:
         dynamo_config.component = "processor"
         dynamo_config.endpoint = "generate"
     elif (
-        dynamo_config.vllm_native_encoder_worker
-        or dynamo_config.multimodal_encode_worker
+        dynamo_config.multimodal_encode_worker
         or dynamo_config.multimodal_encode_prefill_worker
     ):
         dynamo_config.component = "encoder"

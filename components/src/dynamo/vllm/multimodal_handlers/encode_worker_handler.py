@@ -4,27 +4,21 @@
 import asyncio
 import logging
 import os
-import shutil
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import AsyncGenerator, AsyncIterator
+from typing import AsyncIterator
 
 import safetensors
 import torch
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.inputs import TokensPrompt
-from vllm.multimodal.hasher import MultiModalHasher
-from vllm.sampling_params import SamplingParams
 
 import dynamo.nixl_connect as connect
-from dynamo.runtime import Client, DistributedRuntime
+from dynamo.runtime import DistributedRuntime
 
 from ..multimodal_utils import (
     ImageLoader,
-    VLLMNativeEncoderRequest,
-    VLLMNativeEncoderResponse,
     encode_image_embeddings,
     get_encoder_components,
     load_vision_model,
@@ -51,9 +45,7 @@ class EncodeWorkerHandler:
     def __init__(
         self,
         engine_args: AsyncEngineArgs,
-        pd_worker_client: Client,
     ) -> None:
-        self.pd_worker_client = pd_worker_client
         self.engine_args = engine_args
         self.model = self.engine_args.model
 
@@ -266,148 +258,3 @@ class EncodeWorkerHandler:
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
             raise
-
-
-class VLLMEncodeWorkerHandler:
-    """
-    Handler for vLLM-native encoder worker using ECConnector.
-    """
-
-    def __init__(self, runtime, component, engine_client, config):
-        """
-        Initialize the handler.
-
-        Args:
-            runtime: Dynamo distributed runtime
-            component: Dynamo component instance
-            engine_client: vLLM AsyncLLM instance
-            config: Dynamo Config object with CLI arguments
-        """
-        self.runtime = runtime
-        self.component = component
-        self.engine_client = engine_client
-        self.config = config
-        self.temp_dirs = []
-        self.image_loader = ImageLoader()
-
-        logger.info(
-            f"VLLMNativeEncoderWorkerHandler initialized with "
-            f"backend={config.ec_connector_backend}, "
-            f"storage_path={config.ec_storage_path}"
-        )
-
-    def add_temp_dir(self, temp_dir):
-        """Add temporary directory for cleanup."""
-        if temp_dir:
-            self.temp_dirs.append(temp_dir)
-
-    async def generate(self, request, context) -> AsyncGenerator[str, None]:
-        """
-        Process encoder request and trigger vLLM encoder execution.
-
-        Args:
-            request: VLLMNativeEncoderRequest with multimodal_inputs (list of MultiModalGroup)
-            context: Request context from Dynamo runtime
-
-        Yields:
-            JSON-encoded VLLMNativeEncoderResponse for each processed item
-        """
-        # Parse request
-        if not isinstance(request, VLLMNativeEncoderRequest):
-            if isinstance(request, str):
-                request = VLLMNativeEncoderRequest.model_validate_json(request)
-            else:
-                request = VLLMNativeEncoderRequest.model_validate(request)
-
-        if not request.multimodal_inputs:
-            raise ValueError("No multimodal inputs provided in request")
-
-        logger.info(
-            f"Processing {len(request.multimodal_inputs)} multimodal item(s) "
-            f"for request_id={request.request_id}"
-        )
-
-        # Load all images
-        # TODO: support video and audio encoding later
-        media_list = []
-        modality = "image"
-        for idx, mm_group in enumerate(request.multimodal_inputs):
-            mm_input = mm_group.multimodal_input
-            if mm_input.image_url:
-                media = await self.image_loader.load_image(mm_input.image_url)
-                media_list.append(media)
-            elif mm_input.video_url:
-                raise NotImplementedError("Video encoding not yet supported")
-            else:
-                raise ValueError(
-                    f"No media URL provided in multimodal_input[{idx}]. "
-                    "Specify image_url or video_url."
-                )
-
-        # Process all images in one vLLM request
-        prompt_dict = TokensPrompt(
-            prompt_token_ids=request.token_ids,
-            multi_modal_data={"image": media_list},
-        )
-
-        try:
-            gen = self.engine_client.generate(
-                prompt=prompt_dict,
-                sampling_params=SamplingParams(max_tokens=1, min_tokens=0),
-                request_id=request.request_id,
-            )
-
-            # Consume generator to trigger encoder execution
-            async for _ in gen:
-                pass
-
-            logger.info(
-                f"[{request.request_id}] Encoder execution completed for all {len(media_list)} image(s)"
-            )
-
-        except Exception as e:
-            logger.error(f"[{request.request_id}] Encoder execution failed: {e}")
-            raise
-
-        # Compute mm_hash for each image and yield responses
-        for idx, media in enumerate(media_list):
-            item_request_id = f"{request.request_id}_mm_{idx}"
-
-            try:
-                mm_hash = MultiModalHasher.hash_kwargs(
-                    model_id=self.config.model, image=media
-                )
-                logger.debug(f"[{item_request_id}] Computed mm_hash: {mm_hash}")
-            except Exception as e:
-                logger.error(f"[{item_request_id}] Failed to compute mm_hash: {e}")
-                raise
-
-            response = VLLMNativeEncoderResponse(
-                request_id=item_request_id,
-                mm_hash=mm_hash,
-                modality=modality,
-                connector_metadata={
-                    "ec_connector": self.config.ec_connector_backend,
-                    "storage_path": self.config.ec_storage_path,
-                },
-            )
-
-            logger.debug(f"[{item_request_id}] Returning response: {response}")
-            yield response.model_dump_json()
-
-        logger.info(
-            f"All {len(request.multimodal_inputs)} multimodal items processed "
-            f"for request_id={request.request_id}"
-        )
-
-    def cleanup(self):
-        """Cleanup resources."""
-        logger.info("Cleaning up VLLMNativeEncoderWorkerHandler")
-
-        # Clean up temporary directories
-        for temp_dir in self.temp_dirs:
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                logger.debug(f"Cleaned up temp directory: {temp_dir}")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup {temp_dir}: {e}")
