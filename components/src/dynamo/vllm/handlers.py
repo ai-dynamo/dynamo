@@ -1188,6 +1188,7 @@ class BaseWorkerHandler(ABC):
         lora_request=None,
         embedding_sequence_length=None,
         trace_headers=None,
+        priority=0,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -1203,6 +1204,7 @@ class BaseWorkerHandler(ABC):
                 lora_request=lora_request,
                 data_parallel_rank=data_parallel_rank,
                 trace_headers=trace_headers,
+                priority=priority,
             )
 
             num_output_tokens_so_far = 0
@@ -1362,7 +1364,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             logger.debug(
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
-        dp_rank = request.get("routing", {}).get("dp_rank")
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+        priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
 
@@ -1376,6 +1380,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     lora_request=lora_request,
                     embedding_sequence_length=embedding_sequence_length,
                     trace_headers=trace_headers,
+                    priority=priority,
                 ):
                     if prefill_result is not None and "completion_usage" in tok:
                         tok["completion_usage"][
@@ -1406,7 +1411,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params
         )
 
-        dp_rank = request.get("routing", {}).get("dp_rank")
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+        priority = routing.get("priority", 0)
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1420,6 +1427,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
+                    priority=priority,
                 )
 
                 async for res in gen:
@@ -1574,7 +1582,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
             )
 
-        dp_rank = request.get("routing", {}).get("dp_rank")
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+        priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
 
@@ -1587,6 +1597,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    priority=priority,
                 )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")

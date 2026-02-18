@@ -160,7 +160,8 @@ class StreamProcessor:
         try:
             async for res in stream_source:
                 try:
-                    output_ids = res["output_ids"]
+                    output_ids = res.get("output_ids", [])
+                    finish_reason = res.get("meta_info", {}).get("finish_reason")
 
                     # Handle token slicing based on stream_output setting
                     if stream_output:
@@ -169,6 +170,11 @@ class StreamProcessor:
                         token_ids = output_ids[num_output_tokens_so_far:]
                         num_output_tokens_so_far = len(output_ids)
 
+                    # Empty, non-final chunks can happen during scheduler idle ticks.
+                    # Keep waiting for the next chunk.
+                    if not output_ids and not finish_reason:
+                        continue
+
                     output = {
                         "token_ids": token_ids,
                         "text": res.get("text", ""),
@@ -176,7 +182,6 @@ class StreamProcessor:
                     }
 
                     # Check for finish reason
-                    finish_reason = res.get("meta_info", {}).get("finish_reason")
                     if finish_reason:
                         output.update(
                             {
