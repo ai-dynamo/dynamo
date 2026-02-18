@@ -24,13 +24,11 @@
 //!   per worker allows per-worker write concurrency.
 //! - Deadlock prevention: always lock parent before child, hand-over-hand locking
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
-};
+use std::{collections::VecDeque, sync::Arc};
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::indexer::SyncIndexer;
 use crate::protocols::*;
@@ -42,9 +40,9 @@ type SharedBlock = Arc<RwLock<Block>>;
 #[derive(Debug)]
 struct Block {
     /// A map of child blocks, keyed by their local block hash.
-    children: HashMap<LocalBlockHash, SharedBlock>,
+    children: FxHashMap<LocalBlockHash, SharedBlock>,
     /// The set of workers that have this block cached.
-    workers: HashSet<WorkerWithDpRank>,
+    workers: FxHashSet<WorkerWithDpRank>,
     /// The external sequence block hash for this block (None for root).
     block_hash: Option<ExternalSequenceBlockHash>,
     // NOTE: No recent_uses field.
@@ -55,8 +53,8 @@ impl Block {
     /// Create a new `Block` (used for root node).
     fn new() -> Self {
         Self {
-            children: HashMap::new(),
-            workers: HashSet::new(),
+            children: FxHashMap::default(),
+            workers: FxHashSet::default(),
             block_hash: None,
         }
     }
@@ -64,8 +62,8 @@ impl Block {
     /// Create a new `Block` with a specific block hash.
     fn with_hash(block_hash: ExternalSequenceBlockHash) -> Self {
         Self {
-            children: HashMap::new(),
-            workers: HashSet::new(),
+            children: FxHashMap::default(),
+            workers: FxHashSet::default(),
             block_hash: Some(block_hash),
         }
     }
@@ -99,7 +97,11 @@ pub struct ConcurrentRadixTree {
     /// Per-worker lookup table for O(1) block access.
     /// Outer `DashMap` distributes lock contention across shards; inner `RwLock`
     /// per worker protects that worker's block-hash map.
-    lookup: DashMap<WorkerWithDpRank, RwLock<HashMap<ExternalSequenceBlockHash, SharedBlock>>>,
+    lookup: DashMap<
+        WorkerWithDpRank,
+        RwLock<FxHashMap<ExternalSequenceBlockHash, SharedBlock>>,
+        FxBuildHasher,
+    >,
 }
 
 impl Default for ConcurrentRadixTree {
@@ -146,7 +148,7 @@ impl ConcurrentRadixTree {
     pub fn new() -> Self {
         Self {
             root: Arc::new(RwLock::new(Block::new())),
-            lookup: DashMap::new(),
+            lookup: DashMap::with_hasher(FxBuildHasher),
         }
     }
 
@@ -333,7 +335,7 @@ impl ConcurrentRadixTree {
         if !self.lookup.contains_key(&worker) {
             self.lookup
                 .entry(worker)
-                .or_insert_with(|| RwLock::new(HashMap::new()));
+                .or_insert_with(|| RwLock::new(FxHashMap::default()));
         }
 
         let inner_ref = self.lookup.get(&worker).unwrap();
@@ -488,7 +490,8 @@ impl ConcurrentRadixTree {
                 }
 
                 if keep_worker {
-                    self.lookup.insert(worker, RwLock::new(HashMap::new()));
+                    self.lookup
+                        .insert(worker, RwLock::new(FxHashMap::default()));
                 }
             }
         }
@@ -511,7 +514,7 @@ impl ConcurrentRadixTree {
             .lookup
             .iter()
             .map(|entry| entry.key().worker_id)
-            .collect::<HashSet<_>>()
+            .collect::<FxHashSet<_>>()
             .into_iter()
             .collect();
         worker_ids.sort_unstable();
