@@ -38,7 +38,8 @@ bitflags! {
         const TensorBased = 1 << 3;
         const Prefill = 1 << 4;
         const Images = 1 << 5;
-        const Videos = 1 << 6;
+        const Audios = 1 << 6;
+        const Videos = 1 << 7;
     }
 }
 
@@ -65,6 +66,9 @@ impl ModelType {
     pub fn supports_images(&self) -> bool {
         self.contains(ModelType::Images)
     }
+    pub fn supports_audios(&self) -> bool {
+        self.contains(ModelType::Audios)
+    }
     pub fn supports_videos(&self) -> bool {
         self.contains(ModelType::Videos)
     }
@@ -88,6 +92,9 @@ impl ModelType {
         }
         if self.supports_images() {
             result.push("images");
+        }
+        if self.supports_audios() {
+            result.push("audios");
         }
         if self.supports_videos() {
             result.push("videos");
@@ -116,6 +123,9 @@ impl ModelType {
         }
         if self.supports_images() {
             result.push(ModelType::Images);
+        }
+        if self.supports_audios() {
+            result.push(ModelType::Audios);
         }
         if self.supports_videos() {
             result.push(ModelType::Videos);
@@ -147,7 +157,9 @@ impl ModelType {
         // Images models support both chat and completions endpoints
         if self.contains(Self::Images) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Images);
-            endpoint_types.push(crate::endpoint_type::EndpointType::Chat);
+        }
+        if self.contains(Self::Audios) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Audios);
         }
         if self.contains(Self::Videos) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Videos);

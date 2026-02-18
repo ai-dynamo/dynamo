@@ -60,6 +60,8 @@ impl StateFlags {
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
+            // TODO: add audios_endpoints_enabled flag
+            EndpointType::Audios => false,
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
@@ -84,6 +86,8 @@ impl StateFlags {
             EndpointType::Videos => self
                 .videos_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            // TODO: add audios_endpoints_enabled flag
+            EndpointType::Audios => {}
             EndpointType::Responses => self
                 .responses_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
