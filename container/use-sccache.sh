@@ -93,6 +93,10 @@ setup_env() {
     # successfully. The server needs working S3 credentials (mounted via
     # --mount=type=secret); if they're missing or invalid, we skip sccache
     # entirely so the build continues with normal compilers.
+    #
+    # Use a per-step Unix domain socket so concurrent builds on the same
+    # buildkit worker don't collide on the default TCP port 4226.
+    echo 'export SCCACHE_SERVER_UDS="/tmp/sccache-$(mktemp -u XXXXXX).sock";'
     echo 'if sccache --start-server; then'
     echo '  export SCCACHE_IDLE_TIMEOUT=0;'
     echo '  export RUSTC_WRAPPER="sccache";'
