@@ -360,7 +360,14 @@ class TrtllmConfigModifier(BaseConfigModifier):
             if "moe_config" not in override_dict:
                 override_dict["moe_config"] = {}
             override_dict["moe_config"]["backend"] = "WIDEEP"
-            override_dict["moe_config"]["max_num_tokens"] = dep_size * 256
+            # moe_config.max_num_tokens bounds the DeepGemmMoEOp workspace per
+            # EP rank. Derive it from the base config's max_num_tokens (e.g.
+            # decode.yaml sets max_num_tokens=256 for disagg decode) so this
+            # works for any model rather than hardcoding 256.
+            base_max_num_tokens = override_dict.get("max_num_tokens", 256)
+            override_dict["moe_config"]["max_num_tokens"] = (
+                dep_size * base_max_num_tokens
+            )
 
             # Add required environment variables for WIDEEP
             container = worker_service.extraPodSpec.mainContainer
