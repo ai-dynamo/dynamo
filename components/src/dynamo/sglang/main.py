@@ -702,6 +702,7 @@ async def init_image_diffusion(
                 generator,
                 generate_endpoint,
                 server_args,
+                output_modalities=dynamo_args.output_modalities,
                 readiness_gate=ready_event,
             ),
         )

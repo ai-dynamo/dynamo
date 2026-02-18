@@ -81,6 +81,7 @@ class FrontendConfig(ConfigBase):
     request_plane: str
     event_plane: str
     chat_processor: str
+    enable_anthropic_api: bool
     exp_python_factory: bool
 
     def validate(self) -> None:
@@ -491,6 +492,16 @@ class FrontendArgGroup(ArgGroup):
             default="nats",
             help="Determines how events are published [nats|zmq]",
             choices=["nats", "zmq"],
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-anthropic-api",
+            env_var="DYN_ENABLE_ANTHROPIC_API",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable Anthropic Messages API endpoint (/v1/messages). "
+                "This feature is experimental and may change."
+            ),
         )
         add_argument(
             g,

@@ -19,6 +19,7 @@ from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
+from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
@@ -1127,9 +1128,13 @@ async def init_omni(
     shutdown_endpoints[:] = [generate_endpoint]
 
     # TODO: extend for multi-stage pipelines
+    model_type = get_output_modalities(config.output_modalities, config.model)
+    if model_type is None:
+        # Default to Images
+        model_type = ModelType.Images
     await register_model(
         ModelInput.Text,
-        ModelType.Images,
+        model_type,
         generate_endpoint,
         config.model,
         config.served_model_name,
