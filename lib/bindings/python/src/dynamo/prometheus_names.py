@@ -191,6 +191,26 @@ class name_prefix:
     FRONTEND = "dynamo_frontend"
 
 
+class router:
+    """Router request metrics (component-scoped aggregate histograms + counter)
+
+    These constants are the suffix portions of full metric names, combined with
+    name_prefix.COMPONENT to form the complete name, e.g.
+    dynamo_component_router_requests_total.
+    """
+
+    # Total number of requests processed by the router
+    REQUESTS_TOTAL = "router_requests_total"
+    # Time to first token observed at the router (seconds)
+    TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
+    # Average inter-token latency observed at the router (seconds)
+    INTER_TOKEN_LATENCY_SECONDS = "router_inter_token_latency_seconds"
+    # Input sequence length in tokens observed at the router
+    INPUT_SEQUENCE_TOKENS = "router_input_sequence_tokens"
+    # Output sequence length in tokens observed at the router
+    OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
+
+
 class task_tracker:
     """Task tracker Prometheus metric name suffixes"""
 
