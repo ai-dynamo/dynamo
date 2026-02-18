@@ -78,6 +78,7 @@ core:
   - 'container/templates/args.Dockerfile'
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
+  - 'container/test.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - '.cargo/config.toml'
