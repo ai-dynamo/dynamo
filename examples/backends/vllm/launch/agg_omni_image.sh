@@ -5,7 +5,7 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
-MODEL="Qwen-Image"
+MODEL="Qwen/Qwen-Image"
 
 # Parse command line arguments
 EXTRA_ARGS=()
