@@ -89,19 +89,31 @@ WRAPPER
 setup_env() {
     local mode="${1:-default}"
 
-    echo "export RUSTC_WRAPPER=\"sccache\";"
+    # Output a conditional block: only configure sccache if the server starts
+    # successfully. The server needs working S3 credentials (mounted via
+    # --mount=type=secret); if they're missing or invalid, we skip sccache
+    # entirely so the build continues with normal compilers.
+    echo 'if sccache --start-server 2>/dev/null; then'
+    echo '  export SCCACHE_IDLE_TIMEOUT=0;'
+    echo '  export RUSTC_WRAPPER="sccache";'
 
     if [ "$mode" = "cmake" ]; then
-        # CMake has native launcher support for sccache.
-        echo "export CMAKE_C_COMPILER_LAUNCHER=\"sccache\";"
-        echo "export CMAKE_CXX_COMPILER_LAUNCHER=\"sccache\";"
-        echo "export CMAKE_CUDA_COMPILER_LAUNCHER=\"sccache\";"
+        echo '  export CMAKE_C_COMPILER_LAUNCHER="sccache";'
+        echo '  export CMAKE_CXX_COMPILER_LAUNCHER="sccache";'
+        echo '  export CMAKE_CUDA_COMPILER_LAUNCHER="sccache";'
+    else
+        # Wrapper scripts (installed during sccache install) route only pure
+        # compilations (-c flag) through sccache; linking goes directly to
+        # the real compiler so autoconf's link tests pass.
+        echo '  export SCCACHE_CC_REAL="${CC:-gcc}";'
+        echo '  export SCCACHE_CXX_REAL="${CXX:-g++}";'
+        echo '  export CC="/usr/local/bin/sccache-cc";'
+        echo '  export CXX="/usr/local/bin/sccache-cxx";'
     fi
-    # Autotools/Meson C/C++ compilation is not wrapped with sccache.
-    # sccache's server daemon has compatibility issues with gcc-toolset-14
-    # inside Docker's secret-mounted environment, and these builds are fast
-    # enough (~30-60s) that the caching ROI is low. The major wins come from
-    # RUSTC_WRAPPER (Dynamo Rust compilation) and CMAKE_*_COMPILER_LAUNCHER.
+
+    echo 'else'
+    echo '  echo "WARNING: sccache server failed to start, building without cache";'
+    echo 'fi'
 }
 
 show_stats() {
