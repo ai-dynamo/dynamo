@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! NUMA worker pool for memory allocation with first-touch policy
+//! NUMA worker pool for memory allocation with first-touch policy.
 //!
-//! This module provides dedicated worker threads that are pinned to specific NUMA nodes..
+//! This module provides dedicated worker threads that are pinned to specific NUMA nodes.
 //!
 //! ## Architecture
 //!
@@ -13,10 +13,11 @@
 //! - First-touch page allocation ensures correct NUMA placement
 
 use super::get_current_cpu_numa_node;
-use crate::block_manager::storage::cuda::Cuda;
+use cudarc::driver::CudaContext;
 use cudarc::driver::result::malloc_host;
-use cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED;
+use cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP;
 use nix::libc;
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -24,7 +25,26 @@ use std::time::Duration;
 
 use super::{NumaNode, get_device_numa_node};
 
-/// Wrapper for raw pointer that can be sent between threads
+/// Get or create a CUDA context for the given device.
+fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>, String> {
+    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
+    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
+
+    if let Some(existing) = map.get(&device_id) {
+        return Ok(existing.clone());
+    }
+
+    let ctx = CudaContext::new(device_id as usize).map_err(|e| {
+        format!(
+            "Failed to create CUDA context for device {}: {:?}",
+            device_id, e
+        )
+    })?;
+    map.insert(device_id, ctx.clone());
+    Ok(ctx)
+}
+
+/// Wrapper for raw pointer that can be sent between threads.
 ///
 /// # Safety
 ///
@@ -39,18 +59,22 @@ struct SendPtr(*mut u8);
 // The worker never accesses the pointer after sending it.
 unsafe impl Send for SendPtr {}
 
-/// Request to allocate CUDA pinned memory
+/// Request to allocate CUDA pinned memory on a specific NUMA node.
 struct AllocRequest {
+    /// Number of bytes to allocate.
     size: usize,
+    /// Target NUMA node for allocation.
     node: NumaNode,
+    /// CUDA device ID (for context binding).
     gpu_id: u32,
+    /// Channel for sending back the allocation result.
     response: Sender<AllocResult>,
 }
 
-/// Result of allocation
+/// Result of allocation.
 type AllocResult = Result<SendPtr, String>;
 
-/// A dedicated worker thread pinned to a specific NUMA node
+/// A dedicated worker thread pinned to a specific NUMA node.
 struct NumaWorker {
     node: NumaNode,
     request_tx: Option<Sender<AllocRequest>>,
@@ -58,7 +82,7 @@ struct NumaWorker {
 }
 
 impl NumaWorker {
-    /// Spawn a new worker thread pinned to the specified NUMA node
+    /// Spawn a new worker thread pinned to the specified NUMA node.
     fn spawn(node: NumaNode) -> Result<Self, String> {
         let (request_tx, request_rx) = channel();
 
@@ -76,7 +100,11 @@ impl NumaWorker {
         })
     }
 
-    /// Worker thread main loop
+    /// Worker thread main loop that processes allocation requests.
+    ///
+    /// On startup, the worker pins itself to the target NUMA node using
+    /// `sched_setaffinity`. It then processes allocation requests in a loop
+    /// until the channel is closed.
     fn worker_loop(node: NumaNode, requests: Receiver<AllocRequest>) {
         // First thing: pin this thread to the target NUMA node
         tracing::trace!("Pinning worker thread to node {}", node.0);
@@ -152,7 +180,7 @@ impl NumaWorker {
         }
     }
 
-    /// Perform CUDA pinned memory allocation
+    /// Perform CUDA pinned memory allocation.
     fn do_cuda_pinned_allocation(size: usize, node: NumaNode, gpu_id: u32) -> AllocResult {
         if size == 0 {
             return Err("Cannot allocate zero bytes".to_string());
@@ -169,8 +197,7 @@ impl NumaWorker {
         }
 
         // Get or create CUDA context for this GPU
-        let ctx = Cuda::device_or_create(gpu_id as usize)
-            .map_err(|e| format!("Failed to get CUDA context for GPU {}: {:?}", gpu_id, e))?;
+        let ctx = cuda_context(gpu_id)?;
 
         unsafe {
             // Bind CUDA context to this worker thread before allocation
@@ -191,7 +218,7 @@ impl NumaWorker {
             // Allocate CUDA pinned memory
             // This is called from the pinned worker thread, so pages will be
             // allocated on the correct NUMA node via first-touch
-            let ptr = malloc_host(size, CU_MEMHOSTALLOC_WRITECOMBINED)
+            let ptr = malloc_host(size, CU_MEMHOSTALLOC_DEVICEMAP)
                 .map_err(|e| format!("malloc_host failed: {:?}", e))?;
 
             let ptr = ptr as *mut u8;
@@ -212,7 +239,10 @@ impl NumaWorker {
 
             // Touch one byte per page to trigger first-touch policy efficiently
             // This is much faster than zeroing the entire region for large allocations
-            let page_size = (libc::sysconf(libc::_SC_PAGESIZE) as usize).max(4096);
+            let page_size = match libc::sysconf(libc::_SC_PAGESIZE) {
+                n if n > 0 => n as usize,
+                _ => 4096,
+            };
             let mut offset = 0usize;
             while offset < size {
                 std::ptr::write_volatile(ptr.add(offset), 0);
@@ -242,7 +272,7 @@ impl NumaWorker {
         }
     }
 
-    /// Request an allocation from this worker
+    /// Request an allocation from this worker.
     fn allocate(&self, size: usize, gpu_id: u32) -> AllocResult {
         let (response_tx, response_rx) = channel();
 
@@ -295,7 +325,11 @@ impl Drop for NumaWorker {
     }
 }
 
-/// Pool of NUMA workers, one per node
+/// Pool of NUMA workers, one per node.
+///
+/// This pool manages dedicated worker threads that are pinned to specific NUMA nodes.
+/// When you request an allocation for a GPU, the pool automatically determines the
+/// GPU's NUMA node and routes the request to the appropriate worker.
 pub struct NumaWorkerPool {
     workers: Mutex<std::collections::HashMap<u32, Arc<NumaWorker>>>,
 }
@@ -307,13 +341,15 @@ impl NumaWorkerPool {
         }
     }
 
-    /// Get the global worker pool
+    /// Get the global worker pool.
+    ///
+    /// The pool is created lazily on first access and lives for the entire process lifetime.
     pub fn global() -> &'static Self {
         static POOL: OnceLock<NumaWorkerPool> = OnceLock::new();
         POOL.get_or_init(NumaWorkerPool::new)
     }
 
-    /// Get or create a worker for a NUMA node
+    /// Get or create a worker for a NUMA node.
     fn get_or_spawn_worker(&self, node: NumaNode) -> Result<Arc<NumaWorker>, String> {
         let mut workers = self.workers.lock().unwrap();
 
@@ -331,7 +367,20 @@ impl NumaWorkerPool {
         Ok(worker)
     }
 
-    /// Allocate CUDA pinned memory for a specific GPU (auto-detects NUMA node)
+    /// Allocate CUDA pinned memory for a specific GPU (auto-detects NUMA node).
+    ///
+    /// This method:
+    /// 1. Determines the GPU's NUMA node via nvidia-smi
+    /// 2. Routes the allocation to a worker pinned to that node
+    /// 3. The worker allocates and touches pages to ensure first-touch placement
+    ///
+    /// # Arguments
+    /// * `size` - Number of bytes to allocate
+    /// * `gpu_id` - CUDA device ID
+    ///
+    /// # Returns
+    /// Raw pointer to the allocated memory. Caller is responsible for freeing via
+    /// `cudarc::driver::result::free_host`.
     pub fn allocate_pinned_for_gpu(&self, size: usize, gpu_id: u32) -> Result<*mut u8, String> {
         let node = get_device_numa_node(gpu_id);
 
@@ -350,9 +399,9 @@ impl NumaWorkerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_manager::numa_allocator::{get_current_cpu_numa_node, get_device_numa_node};
+    use crate::numa::{get_current_cpu_numa_node, get_device_numa_node};
 
-    /// Check if CUDA is available for testing
+    /// Check if CUDA is available for testing.
     fn is_cuda_available() -> bool {
         // Check if nvidia-smi is available
         if std::process::Command::new("nvidia-smi")
@@ -365,8 +414,7 @@ mod tests {
         }
 
         // Try to initialize CUDA context for device 0
-        use crate::block_manager::storage::cuda::Cuda;
-        Cuda::device_or_create(0).is_ok()
+        cuda_context(0).is_ok()
     }
 
     #[test]
@@ -455,24 +503,6 @@ mod tests {
         let result = pool.allocate_pinned_for_gpu(0, 0);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("zero"));
-    }
-
-    #[test]
-    fn test_dynamic_timeout_scaling() {
-        // Test that timeout scales with allocation size
-        let pool = NumaWorkerPool::new();
-
-        // We can't easily test the actual timeout behavior without sleeping,
-        // but we can verify that allocations of different sizes work
-        // The timeout calculation is: 10s + (size_in_GB) seconds, capped at 300s
-
-        // Just verify a small allocation works (timeout calculation is internal)
-        unsafe {
-            if let Ok(ptr) = pool.allocate_pinned_for_gpu(1024, 0) {
-                assert!(!ptr.is_null());
-                cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
-            }
-        }
     }
 
     #[test]

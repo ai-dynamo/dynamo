@@ -62,17 +62,10 @@ class DynamoVllmArgGroup(ArgGroup):
         # Multimodal
         add_negatable_bool_argument(
             g,
-            flag_name="--multimodal-processor",
-            env_var="DYN_VLLM_MULTIMODAL_PROCESSOR",
+            flag_name="--route-to-encoder",
+            env_var="DYN_VLLM_ROUTE_TO_ENCODER",
             default=False,
-            help="Run as multimodal processor component for handling multimodal requests.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--ec-processor",
-            env_var="DYN_VLLM_EC_PROCESSOR",
-            default=False,
-            help="Run as ECConnector processor (routes multimodal requests to encoder then PD workers).",
+            help="Enable routing to separate encoder workers for multimodal processing.",
         )
         add_negatable_bool_argument(
             g,
@@ -136,43 +129,6 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
-        # vLLM-native encoder (ECConnector)
-        add_negatable_bool_argument(
-            g,
-            flag_name="--vllm-native-encoder-worker",
-            env_var="DYN_VLLM_NATIVE_ENCODER_WORKER",
-            default=False,
-            help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
-        )
-        add_argument(
-            g,
-            flag_name="--ec-connector-backend",
-            env_var="DYN_VLLM_EC_CONNECTOR_BACKEND",
-            default="ECExampleConnector",
-            help="ECConnector implementation class for encoder disaggregation.",
-        )
-        add_argument(
-            g,
-            flag_name="--ec-storage-path",
-            env_var="DYN_VLLM_EC_STORAGE_PATH",
-            default=None,
-            help="Storage path for ECConnector (required for ECExampleConnector, optional for other backends).",
-        )
-        add_argument(
-            g,
-            flag_name="--ec-extra-config",
-            env_var="DYN_VLLM_EC_EXTRA_CONFIG",
-            default=None,
-            help="Additional ECConnector configuration as JSON string.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--ec-consumer-mode",
-            env_var="DYN_VLLM_EC_CONSUMER_MODE",
-            default=False,
-            help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers).",
-        )
-
         # vLLM-Omni
         add_negatable_bool_argument(
             g,
@@ -210,8 +166,7 @@ class DynamoVllmConfig(ConfigBase):
     sleep_mode_level: int
 
     # Multimodal
-    multimodal_processor: bool
-    ec_processor: bool
+    route_to_encoder: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
     multimodal_decode_worker: bool
@@ -219,13 +174,6 @@ class DynamoVllmConfig(ConfigBase):
     enable_multimodal: bool
     mm_prompt_template: str
     frontend_decoding: bool
-
-    # vLLM-native encoder (ECConnector)
-    vllm_native_encoder_worker: bool
-    ec_connector_backend: str
-    ec_storage_path: Optional[str] = None
-    ec_extra_config: Optional[str] = None
-    ec_consumer_mode: bool
 
     # vLLM-Omni
     omni: bool
@@ -239,7 +187,6 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_prefill_decode_exclusive()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
-        self._validate_ec_connector_storage()
         self._validate_omni_stage_config()
 
     def _validate_prefill_decode_exclusive(self) -> None:
@@ -250,16 +197,16 @@ class DynamoVllmConfig(ConfigBase):
             )
 
     def _count_multimodal_roles(self) -> int:
-        """Return the number of multimodal roles set (0 or 1 allowed)."""
+        """Return the number of multimodal worker roles set (0 or 1 allowed).
+
+        Note: --route-to-encoder is a modifier flag, not a worker type.
+        """
         return sum(
             [
-                bool(self.multimodal_processor),
-                bool(self.ec_processor),
                 bool(self.multimodal_encode_worker),
                 bool(self.multimodal_worker),
                 bool(self.multimodal_decode_worker),
                 bool(self.multimodal_encode_prefill_worker),
-                bool(self.vllm_native_encoder_worker),
             ]
         )
 
@@ -267,10 +214,8 @@ class DynamoVllmConfig(ConfigBase):
         """Ensure only one multimodal role is set at a time."""
         if self._count_multimodal_roles() > 1:
             raise ValueError(
-                "Only one multimodal role can be set at a time: "
-                "multimodal-processor, ec-processor, multimodal-encode-worker, "
-                "multimodal-worker, multimodal-decode-worker, "
-                "multimodal-encode-prefill-worker, vllm-native-encoder-worker"
+                "Use only one of --multimodal-encode-worker, --multimodal-worker, "
+                "--multimodal-decode-worker, --multimodal-encode-prefill-worker"
             )
 
     def _validate_multimodal_requires_flag(self) -> None:
@@ -279,18 +224,6 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError(
                 "Use --enable-multimodal when enabling any multimodal component"
             )
-
-    def _validate_ec_connector_storage(self) -> None:
-        """Require ec_storage_path when using ECExampleConnector backend."""
-        if self.vllm_native_encoder_worker:
-            if (
-                self.ec_connector_backend == "ECExampleConnector"
-                and not self.ec_storage_path
-            ):
-                raise ValueError(
-                    "--ec-storage-path is required when using ECExampleConnector backend. "
-                    "Specify a shared storage path for encoder cache."
-                )
 
     def _validate_omni_stage_config(self) -> None:
         """Require stage_configs_path when using --omni."""
