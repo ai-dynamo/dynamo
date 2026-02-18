@@ -156,7 +156,7 @@ class HandlerBase(BaseGenerativeHandler):
                 selected_logprob = token_logprobs_dict[actual_token_id]
                 log_probs.append(float(selected_logprob.logprob))
             else:
-                # instead of picking a random neighbor.
+                # Token not in top-K logprobs; append sentinel to signal effectively zero probability.
                 log_probs.append(-9999.0)
 
             # Build top_logprobs list for this token position
@@ -177,9 +177,8 @@ class HandlerBase(BaseGenerativeHandler):
                         "logprob": float(logprob_info.logprob),
                     }
                 )
-            # If ranks were missing (0), we calculate them by sorting by logprob descending
-            # This handles cases where engine backend omits rank information
-            if token_top_logprobs and any(
+            # If ranks are missing (0), sort by logprob (descending) and assign ranks manually.
+            if token_top_logprobs and all(
                 item["rank"] == 0 for item in token_top_logprobs
             ):
                 token_top_logprobs.sort(key=lambda x: x["logprob"], reverse=True)
