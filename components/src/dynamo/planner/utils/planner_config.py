@@ -16,6 +16,7 @@
 import json
 import logging
 import os
+from enum import Enum
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -27,12 +28,23 @@ from dynamo.planner.defaults import SLAPlannerDefaults
 logger = logging.getLogger(__name__)
 
 
+class PlannerPreDeploymentSweepMode(str, Enum):
+    None_ = "none"
+    Rapid = "rapid"
+    Thorough = "thorough"
+
+
 class PlannerConfig(BaseModel):
     """Pydantic configuration for the Dynamo Planner.
 
     Replaces the argparse-based CLI. All fields mirror the former CLI flags
     with defaults sourced from SLAPlannerDefaults.
     """
+
+    plannerPreDeploymentSweeping: Optional[PlannerPreDeploymentSweepMode] = Field(
+        default=PlannerPreDeploymentSweepMode.Rapid,
+        description='PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
+    )
 
     environment: Literal[
         "kubernetes", "virtual", "global-planner"
