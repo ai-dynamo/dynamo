@@ -145,7 +145,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                priority=priority,
+                **self._priority_kwargs(priority),
             )
 
             if self.skip_tokenizer_init:
@@ -184,7 +184,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                priority=priority,
+                **self._priority_kwargs(priority),
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):

@@ -131,7 +131,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
-            priority=priority,
+            **self._priority_kwargs(priority),
         )
 
         task = asyncio.create_task(self._consume_results(results, context))
