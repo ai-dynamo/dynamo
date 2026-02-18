@@ -16,6 +16,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  CUDA_VERSION: '12.9'
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
@@ -82,7 +83,8 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          IMAGE_TAG_SUFFIX="${{ github.sha }}-dynamo-dev-cuda12-amd64"
+          CUDA_MAJOR=${CUDA_VERSION%%.*}
+          IMAGE_TAG_SUFFIX="${{ github.sha }}-dynamo-dev-cuda${CUDA_MAJOR}-amd64"
           echo "image_tag_suffix=${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
           echo "remote_tag=${ECR_HOSTNAME}/ai-dynamo/dynamo:${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
       - name: Generate Dockerfile
@@ -93,7 +95,7 @@ jobs:
               --target=dev \
               --framework=dynamo \
               --platform=amd64 \
-              --cuda-version=12.9 \
+              --cuda-version=${{ env.CUDA_VERSION }} \
               --show-result \
               --output-short-filename
       - name: Build and Push Container
@@ -103,7 +105,7 @@ jobs:
           framework: dynamo
           target: dev
           platform: amd64
-          cuda_version: '12.9'
+          cuda_version: ${{ env.CUDA_VERSION }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
