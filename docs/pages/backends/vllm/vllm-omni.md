@@ -22,6 +22,21 @@ This guide assumes familiarity with deploying Dynamo with vLLM as described in t
 
 The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`.
 
+## Tested Models
+
+| Modality | Models |
+|---|---|
+| Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
+| Text-to-Image | `Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
+| Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
+
+To run a non-default model, pass `--model` to any launch script:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_image.sh --model AIDC-AI/Ovis-Image-7B
+bash examples/backends/vllm/launch/agg_omni_video.sh --model Wan-AI/Wan2.2-T2V-A14B-Diffusers
+```
+
 ## Text-to-Text
 
 Launch an aggregated deployment (frontend + omni worker):
