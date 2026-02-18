@@ -135,20 +135,3 @@ package-lock.json
 # macOS
 .DS_Store
 **/.DS_Store
-
-# Claude Code sandbox creates these shell/config dotfiles
-.bash_profile
-.bashrc
-.gitconfig
-.gitmodules
-.mcp.json
-.profile
-.ripgreprc
-.zprofile
-.zshrc
-.vscode
-HEAD
-config
-hooks
-objects
-refs
