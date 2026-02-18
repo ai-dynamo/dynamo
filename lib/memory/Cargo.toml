@@ -37,4 +37,5 @@ nix = { version = "0.30", features = ["fs"] }
 offset-allocator = "0.2"
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = "3"
