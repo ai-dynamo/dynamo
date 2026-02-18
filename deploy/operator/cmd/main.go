@@ -59,6 +59,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -658,10 +659,11 @@ func main() {
 	}
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:      mgr.GetClient(),
-		Recorder:    mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		Config:      ctrlConfig,
-		RBACManager: rbacManager,
+		Client:            mgr.GetClient(),
+		Recorder:          mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Config:            ctrlConfig,
+		GPUDiscoveryCache: gpu.NewGPUDiscoveryCache(),
+		RBACManager:       rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
 		os.Exit(1)

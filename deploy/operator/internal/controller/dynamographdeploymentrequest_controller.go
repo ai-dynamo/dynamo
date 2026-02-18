@@ -308,9 +308,9 @@ echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
-	Config   commonController.Config
-
+	Recorder          record.EventRecorder
+	Config            commonController.Config
+	GPUDiscoveryCache *gpu.GPUDiscoveryCache
 	// RBACMgr handles RBAC setup for profiling jobs
 	RBACManager RBACManager
 }
@@ -1034,7 +1034,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		return nil
 	}
 
-	_, err := gpu.DiscoverGPUs(ctx, r.Client)
+	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
 	if err == nil {
 		// GPU discovery is available, validation passes
 		return nil
@@ -1102,7 +1102,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	// Run GPU discovery before creating job (cluster-wide and namespace-restricted operators if they have node read permissions)
 	var gpuInfo *gpu.GPUInfo
 	logger.Info("Attempting GPU discovery for profiling job")
-	discoveredInfo, err := gpu.DiscoverGPUs(ctx, r.Client)
+	discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
 	if err != nil {
 		// This path is expected for namespace-restricted operators without node read permissions
 		logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
