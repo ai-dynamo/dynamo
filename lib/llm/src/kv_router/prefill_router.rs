@@ -495,6 +495,7 @@ impl PrefillRouter {
                         update_states,
                         lora_name,
                         priority_jump,
+                        None,
                     )
                     .await?;
                 Ok((worker.worker_id, worker.dp_rank))

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use dynamo_llm::kv_router::{protocols::*, publisher::KvEventPublisher};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_runtime::discovery::DiscoveryQuery;
+use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
 
 use dynamo_runtime::Runtime;
@@ -23,6 +23,8 @@ use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
 use dynamo_runtime::pipeline::RouterMode;
+
+use std::collections::HashSet;
 
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
@@ -434,6 +436,9 @@ impl RouterHandles {
     /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_weight=0
     /// (since KV cache is being transferred from prefill, not reused).
     ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered.
+    /// This does NOT overwrite the router's internal worker state — it only filters this decision.
+    ///
     /// Note: The C bindings are query-only and must not mutate router state during worker
     /// selection. State updates require a `context_id` (request id) and are managed via the
     /// explicit bookkeeping APIs (`add_request`, `mark_prefill_complete`, `free_request`).
@@ -442,6 +447,7 @@ impl RouterHandles {
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
         // For decode phase in disaggregated mode, use overlap_score_weight=0
         // This matches prefill_router.rs
@@ -455,7 +461,7 @@ impl RouterHandles {
         };
 
         self.decode_router
-            .find_best_match(None, tokens, config_override.as_ref(), false, None, 0.0)
+            .find_best_match(None, tokens, config_override.as_ref(), false, None, 0.0, allowed_worker_ids)
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");
@@ -985,13 +991,39 @@ pub unsafe extern "C" fn route_request(
 
     let handles = unsafe { &*handle };
 
-    // Parse pods JSON if provided (nullable — when null, routing uses discovery as before)
-    let _pods: Option<Vec<serde_json::Value>> = if !pods_json.is_null() {
+    // Parse pods JSON if provided (nullable — when null, routing uses discovery as before).
+    // Extract pod names and hash them to worker IDs using the same hash_pod_name function
+    // that workers use during registration. This creates a filter set that restricts the
+    // routing decision to only the pods that EPP considers eligible, without overwriting
+    // the router's internal worker state.
+    let allowed_worker_ids: Option<HashSet<WorkerId>> = if !pods_json.is_null() {
         match unsafe { CStr::from_ptr(pods_json) }.to_str() {
             Ok(s) if !s.is_empty() => match serde_json::from_str::<Vec<serde_json::Value>>(s) {
                 Ok(pods) => {
-                    tracing::info!(pod_count = pods.len(), "Received pods from EPP plugin");
-                    Some(pods)
+                    let mut worker_ids = HashSet::new();
+                    for pod in &pods {
+                        // Extract pod name: try pod.podName first, then pod.pod.podName
+                        let pod_name = pod
+                            .get("pod")
+                            .and_then(|p| p.get("podName"))
+                            .or_else(|| pod.get("podName"))
+                            .and_then(|v| v.as_str());
+                        if let Some(name) = pod_name {
+                            let worker_id = hash_pod_name(name);
+                            tracing::debug!(
+                                pod_name = name,
+                                worker_id = format!("{:x}", worker_id),
+                                "Mapped EPP pod to worker_id"
+                            );
+                            worker_ids.insert(worker_id);
+                        }
+                    }
+                    tracing::info!(
+                        pod_count = pods.len(),
+                        unique_worker_ids = worker_ids.len(),
+                        "Parsed EPP pods into allowed_worker_ids filter"
+                    );
+                    if worker_ids.is_empty() { None } else { Some(worker_ids) }
                 }
                 Err(e) => {
                     tracing::error!(error = ?e, "Failed to parse pods JSON");
@@ -1051,7 +1083,7 @@ pub unsafe extern "C" fn route_request(
     let token_count = tokens.len();
     let is_disaggregated = handles.prefill_router.is_activated();
 
-    // Query workers
+    // Query workers, applying the EPP pod filter if provided
     let result = handles.runtime.secondary().block_on(async {
         let prefill_worker_id = if is_disaggregated {
             handles
@@ -1062,7 +1094,7 @@ pub unsafe extern "C" fn route_request(
         };
 
         let (decode_worker, _overlap_blocks) = handles
-            .query_decode_worker(tokens, is_disaggregated)
+            .query_decode_worker(tokens, is_disaggregated, allowed_worker_ids)
             .await?;
 
         tracing::info!(

@@ -18,31 +18,31 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
       eppConfig:
-        # This configuration uses Dynamo's KV-aware scorer for intelligent routing
+        # This configuration uses Dynamo's KV-aware scorer for intelligent routing.
+        # In disaggregated mode, the kv-aware-scorer handles both prefill and decode
+        # worker selection internally via the Dynamo FFI router. The EPP selects
+        # the decode pod; prefill is coordinated by the Dynamo router.
         config:
           # Plugins define the behavior of EPP
           plugins:
-            - type: label-filter
-            - type: dyn-kv-prefill
-            - type: dyn-kv
-            - type: max-score-picker
-            - type: pd-profile-handler
+            # Required: tells EPP which profile to use (even if you only have one)
+            - type: single-profile-handler
+            # Label filter: restricts pods to decode workers only.
+            # Prefill worker selection is handled internally by the Dynamo router.
+            - name: decode-filter
+              type: label-filter
+            # Picker: chooses the final endpoint after scoring
+            - name: picker
+              type: max-score-picker
+            # Dynamo KV-aware Scorer: calls Dynamo router FFI for worker selection.
+            # Handles both aggregated and disaggregated routing internally.
+            - name: dyn-kv
+              type: kv-aware-scorer
           # Scheduling profiles configure which plugins are used and their weights
           schedulingProfiles:
-          - name: prefill
+          - name: default
             plugins:
-            - pluginRef: label-filter
-              parameters:
-                label: "nvidia.com/dynamo-sub-component-type"
-                validValues:
-                  - "prefill"
-                allowsNoLabel: false
-            - pluginRef: dyn-kv-prefill
-              weight: 1.0
-            - pluginRef: picker  
-          - name: decode
-            plugins:
-            - pluginRef: label-filter
+            - pluginRef: decode-filter
               parameters:
                 label: "nvidia.com/dynamo-sub-component-type"
                 validValues:
@@ -50,7 +50,7 @@ spec:
                 allowsNoLabel: false
             - pluginRef: dyn-kv
               weight: 1.0
-            - pluginRef: picker  
+            - pluginRef: picker
     Frontend:
       componentType: frontend
       volumeMounts:

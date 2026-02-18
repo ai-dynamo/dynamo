@@ -59,6 +59,7 @@ query_router_result_t create_routers(const char *namespace_c_str,
 
 query_router_result_t route_request(RouterHandles *handle,
                                          const char *request_json,
+                                         const char *pods_json,
                                          CRoutingResult *out_result);
 
 query_router_result_t add_request(RouterHandles *handle,
@@ -87,6 +88,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
@@ -432,6 +434,83 @@ func (k *KVAwareScorer) ResponseComplete(
 		"requestID", requestID)
 }
 
+// --------------------------- pod serialization ---------------------------
+
+// podInfoJSON is the JSON-serializable representation of a backend.Pod (datalayer.PodInfo).
+type podInfoJSON struct {
+	Name        string            `json:"name"`
+	Namespace   string            `json:"namespace"`
+	PodName     string            `json:"podName"`
+	Address     string            `json:"address"`
+	Port        string            `json:"port"`
+	MetricsHost string            `json:"metricsHost"`
+	Labels      map[string]string `json:"labels"`
+}
+
+// metricsJSON is the JSON-serializable representation of backendmetrics.MetricsState (datalayer.Metrics).
+type metricsJSON struct {
+	ActiveModels            map[string]int `json:"activeModels"`
+	WaitingModels           map[string]int `json:"waitingModels"`
+	MaxActiveModels         int            `json:"maxActiveModels"`
+	RunningQueueSize        int            `json:"runningQueueSize"`
+	WaitingQueueSize        int            `json:"waitingQueueSize"`
+	KVCacheUsagePercent     float64        `json:"kvCacheUsagePercent"`
+	KvCacheMaxTokenCapacity int            `json:"kvCacheMaxTokenCapacity"`
+	CacheBlockSize          int            `json:"cacheBlockSize"`
+	CacheNumGPUBlocks       int            `json:"cacheNumGPUBlocks"`
+	UpdateTime              time.Time      `json:"updateTime"`
+}
+
+// podJSON is the JSON-serializable representation of a schedtypes.Pod passed across the FFI boundary.
+type podJSON struct {
+	Pod     *podInfoJSON `json:"pod"`
+	Metrics *metricsJSON `json:"metrics"`
+}
+
+// serializePodsToJSON converts a slice of schedtypes.Pod into a JSON string
+// suitable for passing across the C FFI boundary to the Rust router.
+func serializePodsToJSON(pods []schedtypes.Pod) (string, error) {
+	out := make([]podJSON, 0, len(pods))
+	for _, p := range pods {
+		entry := podJSON{}
+
+		if podInfo := p.GetPod(); podInfo != nil {
+			entry.Pod = &podInfoJSON{
+				Name:        podInfo.NamespacedName.Name,
+				Namespace:   podInfo.NamespacedName.Namespace,
+				PodName:     podInfo.PodName,
+				Address:     podInfo.Address,
+				Port:        podInfo.Port,
+				MetricsHost: podInfo.MetricsHost,
+				Labels:      podInfo.Labels,
+			}
+		}
+
+		if m := p.GetMetrics(); m != nil {
+			entry.Metrics = &metricsJSON{
+				ActiveModels:            m.ActiveModels,
+				WaitingModels:           m.WaitingModels,
+				MaxActiveModels:         m.MaxActiveModels,
+				RunningQueueSize:        m.RunningQueueSize,
+				WaitingQueueSize:        m.WaitingQueueSize,
+				KVCacheUsagePercent:     m.KVCacheUsagePercent,
+				KvCacheMaxTokenCapacity: m.KvCacheMaxTokenCapacity,
+				CacheBlockSize:          m.CacheBlockSize,
+				CacheNumGPUBlocks:       m.CacheNumGPUBlocks,
+				UpdateTime:              m.UpdateTime,
+			}
+		}
+
+		out = append(out, entry)
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize pods: %w", err)
+	}
+	return string(data), nil
+}
+
 // --------------------------- router call ---------------------------
 
 func (k *KVAwareScorer) callDynamoRouter(
@@ -472,8 +551,20 @@ func (k *KVAwareScorer) callDynamoRouter(
 	cRequestJSON := C.CString(string(requestJSON))
 	defer C.free(unsafe.Pointer(cRequestJSON))
 
+	// Serialize pods (PodInfo + Metrics) to JSON for the Rust router
+	var cPodsJSON *C.char
+	if len(pods) > 0 {
+		podsJSONStr, podsErr := serializePodsToJSON(pods)
+		if podsErr != nil {
+			logger.V(logutil.DEFAULT).Error(podsErr, "Failed to serialize pods to JSON")
+			return "", "", nil, fmt.Errorf("serialize pods: %w", podsErr)
+		}
+		cPodsJSON = C.CString(podsJSONStr)
+		defer C.free(unsafe.Pointer(cPodsJSON))
+	}
+
 	var result C.CRoutingResult
-	rc := C.route_request(router, cRequestJSON, pods, &result)
+	rc := C.route_request(router, cRequestJSON, cPodsJSON, &result)
 	if rc != C.QUERY_ROUTER_OK {
 		return "", "", nil, fmt.Errorf("route_request failed with code %d", rc)
 	}

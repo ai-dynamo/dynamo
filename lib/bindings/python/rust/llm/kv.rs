@@ -942,6 +942,7 @@ impl KvRouter {
                     update_states,
                     None, // lora_name not exposed in Python API yet
                     0.0,
+                    None, // allowed_worker_ids not exposed in Python API yet
                 )
                 .await
                 .map_err(to_pyerr)?;
