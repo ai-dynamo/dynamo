@@ -114,8 +114,6 @@ pub enum RouterRequest {
     #[serde(rename = "new")]
     New {
         tokens: Vec<Token>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     },
     MarkPrefill,
     MarkFree,
@@ -123,10 +121,7 @@ pub enum RouterRequest {
 
 impl Default for RouterRequest {
     fn default() -> Self {
-        RouterRequest::New {
-            tokens: vec![],
-            block_mm_infos: None,
-        }
+        RouterRequest::New { tokens: vec![] }
     }
 }
 

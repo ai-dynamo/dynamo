@@ -591,10 +591,6 @@ impl Discovery for KVStoreDiscovery {
         };
         Ok(Box::pin(stream))
     }
-
-    fn shutdown(&self) {
-        self.store.shutdown();
-    }
 }
 
 #[cfg(test)]

@@ -12,36 +12,8 @@ from typing import Optional
 from pydantic import BaseModel
 
 
-class VideoNvExt(BaseModel):
-    """NVIDIA extensions for video generation requests.
-
-    Matches Rust NvExt in lib/llm/src/protocols/openai/videos/nvext.rs.
-    """
-
-    annotations: Optional[list[str]] = None
-    """Annotations for SSE stream events."""
-
-    fps: Optional[int] = None
-    """Frames per second (default: 24)."""
-
-    num_frames: Optional[int] = None
-    """Number of frames to generate (overrides fps * seconds if set)."""
-
-    negative_prompt: Optional[str] = None
-    """Optional negative prompt."""
-
-    num_inference_steps: Optional[int] = None
-    """Number of denoising steps (default: 50)."""
-
-    guidance_scale: Optional[float] = None
-    """CFG guidance scale (default: 5.0)."""
-
-    seed: Optional[int] = None
-    """Random seed for reproducibility."""
-
-
 class NvCreateVideoRequest(BaseModel):
-    """Request for video generation (/v1/videos endpoint).
+    """Request for video generation (/v1/videos/generations endpoint).
 
     Matches Rust NvCreateVideoRequest in lib/llm/src/protocols/openai/videos.rs.
     """
@@ -55,22 +27,37 @@ class NvCreateVideoRequest(BaseModel):
 
     # Optional fields
     input_reference: Optional[str] = None
-    """Optional image reference that guides generation (for I2V)."""
+    """Optional input reference for I2V (image path/url)."""
 
     seconds: Optional[int] = None
-    """Clip duration in seconds."""
+    """Duration in seconds (default: 4)."""
+
+    fps: Optional[int] = None
+    """Frames per second (default: 24)."""
+
+    num_frames: Optional[int] = None
+    """Number of frames to generate (overrides fps * seconds if set)."""
 
     size: Optional[str] = None
     """Video size in WxH format (default: '832x480')."""
+
+    num_inference_steps: Optional[int] = None
+    """Number of denoising steps (default: 50)."""
+
+    guidance_scale: Optional[float] = None
+    """CFG guidance scale (default: 5.0)."""
+
+    negative_prompt: Optional[str] = None
+    """Optional negative prompt."""
+
+    seed: Optional[int] = None
+    """Random seed for reproducibility."""
 
     user: Optional[str] = None
     """Optional user identifier."""
 
     response_format: Optional[str] = None
     """Response format: 'url' or 'b64_json' (default: 'url')."""
-
-    nvext: Optional[VideoNvExt] = None
-    """NVIDIA extensions."""
 
 
 class VideoData(BaseModel):

@@ -57,9 +57,6 @@ spec:
   - interval: 5s
     path: /metrics
     port: system
-  - interval: 5s
-    path: /metrics
-    port: nixl
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: worker

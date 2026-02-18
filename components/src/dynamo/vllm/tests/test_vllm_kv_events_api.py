@@ -49,7 +49,6 @@ class TestVllmKvEventsApi:
         5. lora_id
         6. medium
         7. lora_name (added in vLLM 0.14.0)
-        8. extra_keys (contains MM info, cache_salt, etc.)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -61,7 +60,6 @@ class TestVllmKvEventsApi:
             "lora_id",
             "medium",
             "lora_name",
-            "extra_keys",
         )
 
         actual_fields = BlockStored.__struct_fields__
@@ -148,7 +146,6 @@ class TestVllmKvEventsApi:
             lora_id=None,
             medium="GPU",
             lora_name=None,
-            extra_keys=None,
         )
 
         encoded = msgspec.msgpack.encode(event)
@@ -160,9 +157,9 @@ class TestVllmKvEventsApi:
             decoded[0] == "BlockStored"
         ), f"Expected tag 'BlockStored', got {decoded[0]}"
 
-        # Verify field count (tag + 8 fields = 9 elements)
-        assert len(decoded) == 9, (
-            f"Expected 9 elements (tag + 8 fields), got {len(decoded)}.\n"
+        # Verify field count (tag + 7 fields = 8 elements)
+        assert len(decoded) == 8, (
+            f"Expected 8 elements (tag + 7 fields), got {len(decoded)}.\n"
             f"Decoded: {decoded}\n"
             f"If field count changed, update Rust deserializers."
         )
@@ -175,4 +172,3 @@ class TestVllmKvEventsApi:
         assert decoded[5] is None, f"lora_id at wrong position: {decoded[5]}"
         assert decoded[6] == "GPU", f"medium at wrong position: {decoded[6]}"
         assert decoded[7] is None, f"lora_name at wrong position: {decoded[7]}"
-        assert decoded[8] is None, f"extra_keys at wrong position: {decoded[8]}"

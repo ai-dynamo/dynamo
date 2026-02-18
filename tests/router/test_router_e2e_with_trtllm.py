@@ -121,11 +121,6 @@ class TRTLLMProcess:
         self.worker_processes = []
         self.store_backend = store_backend
 
-        # Dynamically allocate unique system ports (one per worker) to avoid
-        # conflicts when tests run in parallel via pytest-xdist.
-        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        request.addfinalizer(lambda: deallocate_ports(self._system_ports))
-
         if trtllm_args is None:
             trtllm_args = {}
 
@@ -187,8 +182,8 @@ class TRTLLMProcess:
                 command.append("--enable-attention-dp")
 
             # Each TRT-LLM worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
-            # Ports are dynamically allocated for xdist-safe parallel execution.
-            system_port = self._system_ports[worker_idx]
+            # See examples/backends/trtllm/launch/disagg_same_gpu.sh for reference.
+            system_port = 8081 + worker_idx
 
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
@@ -196,6 +191,7 @@ class TRTLLMProcess:
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
+                # Set unique system port for each worker to avoid port conflicts
                 "DYN_SYSTEM_PORT": str(system_port),
             }
 

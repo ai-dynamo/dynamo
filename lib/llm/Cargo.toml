@@ -206,7 +206,6 @@ insta = { version = "1.41", features = [
 
 lazy_static = "1.4"
 mockito = "1.7.0"
-dynamo-bench = { path = "../bench" }
 
 [[bin]]
 name = "generate-frontend-openapi"

@@ -117,7 +117,7 @@ def _build_mocker_command(
         MODEL_NAME,
         "--endpoint",
         endpoint,
-        "--discovery-backend",
+        "--store-kv",
         store_backend,
         "--num-workers",
         str(num_workers),
@@ -479,15 +479,15 @@ def test_mocker_kv_router_overload_503(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
 )  # Use NATS Core (local indexer)
-def test_kv_router_bindings(
+def test_kv_push_router_bindings(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     request_plane,
     durable_kv_events,
 ):
-    """Test KvRouter Python bindings with mocker engines."""
-    logger.info("Starting KvRouter bindings test")
+    """Test KvPushRouter Python bindings with mocker engines."""
+    logger.info("Starting KvPushRouter bindings test")
     # Use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,

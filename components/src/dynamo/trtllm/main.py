@@ -31,7 +31,7 @@ async def worker():
 
     shutdown_event = asyncio.Event()
     runtime, _ = create_runtime(
-        discovery_backend=config.discovery_backend,
+        store_kv=config.store_kv,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
         use_kv_events=config.use_kv_events,

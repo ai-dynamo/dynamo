@@ -28,7 +28,6 @@ import (
 
 func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	validConfig := `{"engine": {"backend": "vllm"}, "deployment": {"model": "test-model"}}`
-	validConfigWithHardware := `{"engine": {"backend": "vllm"}, "deployment": {"model": "test-model"}, "hardware": {"numGpusPerNode": 8, "gpuModel": "H100-SXM5-80GB", "gpuVramMib": 81920}}`
 	configWithDifferentBackend := `{"engine": {"backend": "sglang"}}`
 	configWithDifferentModel := `{"deployment": {"model": "different-model"}}`
 	invalidYAML := `{invalid yaml`
@@ -129,19 +128,65 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			errMsg:        "spec.profilingConfig.config is required and must not be empty",
 		},
 		{
-			name: "namespace-restricted operator (GPU discovery will fail gracefully)",
+			name: "enableGpuDiscovery true for cluster-wide operator",
 			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgdr",
 					Namespace: "default",
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					Model:   "llama-3-8b",
-					Backend: "vllm",
+					Model:              "llama-3-8b",
+					Backend:            "vllm",
+					EnableGpuDiscovery: true,
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						ProfilerImage: "profiler:latest",
 						Config: &apiextensionsv1.JSON{
-							Raw: []byte(validConfigWithHardware),
+							Raw: []byte(validConfig),
+						},
+					},
+				},
+			},
+			isClusterWide: true,
+			wantErr:       false,
+		},
+		{
+			name: "enableGpuDiscovery true for namespace-restricted operator",
+			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgdr",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:              "llama-3-8b",
+					Backend:            "vllm",
+					EnableGpuDiscovery: true,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(validConfig),
+						},
+					},
+				},
+			},
+			isClusterWide: false,
+			wantErr:       true,
+			errMsg:        "spec.enableGpuDiscovery can only be set to true for cluster-wide operators. Namespace-restricted operators cannot access cluster nodes for GPU discovery. Please set enableGpuDiscovery to false and provide hardware configuration (hardware.min_num_gpus_per_engine, hardware.max_num_gpus_per_engine, hardware.num_gpus_per_node) in spec.profilingConfig.config",
+		},
+		{
+			name: "enableGpuDiscovery false for namespace-restricted operator",
+			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgdr",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:              "llama-3-8b",
+					Backend:            "vllm",
+					EnableGpuDiscovery: false,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(validConfig),
 						},
 					},
 				},
@@ -218,15 +263,16 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			expectedWarning: "spec.profilingConfig.config.deployment.model (different-model) will be overwritten by spec.model (llama-3-8b)",
 		},
 		{
-			name: "multiple errors (missing profiler image and missing config)",
+			name: "multiple errors (missing profiler image, missing config, and enableGpuDiscovery for namespace-restricted)",
 			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgdr",
 					Namespace: "default",
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					Model:   "llama-3-8b",
-					Backend: "vllm",
+					Model:              "llama-3-8b",
+					Backend:            "vllm",
+					EnableGpuDiscovery: true,
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						ProfilerImage: "",
 						Config:        nil,
@@ -235,12 +281,9 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 			isClusterWide: false,
 			wantErr:       true,
-			errMsg:        "spec.profilingConfig.profilerImage is required\nspec.profilingConfig.config is required and must not be empty",
+			errMsg:        "spec.profilingConfig.profilerImage is required\nspec.profilingConfig.config is required and must not be empty\nspec.enableGpuDiscovery can only be set to true for cluster-wide operators",
 			errContains:   true,
 		},
-		// TODO: Add test for invalid GPU range (min > max) validation
-		// The validation logic is in place (lines 148-152 of dynamographdeploymentrequest.go)
-		// but needs proper test coverage
 	}
 
 	for _, tt := range tests {

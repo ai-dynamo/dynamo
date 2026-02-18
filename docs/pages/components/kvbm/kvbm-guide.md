@@ -49,11 +49,10 @@ To build KVBM from source, see the detailed instructions in the [KVBM bindings R
 docker compose -f deploy/docker-compose.yml up -d
 
 # Build a dynamo vLLM container (KVBM is built in by default)
-python container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+./container/build.sh --framework vllm
 
 # Launch the container
-container/run.sh --image dynamo:latest-vllm-runtime -it --mount-workspace --use-nixl-gds
+./container/run.sh --framework vllm -it --mount-workspace --use-nixl-gds
 ```
 
 ### Aggregated Serving
@@ -100,11 +99,10 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 docker compose -f deploy/docker-compose.yml up -d
 
 # Build a dynamo TRTLLM container (KVBM is built in by default)
-python container/render.py --framework trtllm --target runtime --output-short-filename
-docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
+./container/build.sh --framework trtllm
 
 # Launch the container
-container/run.sh --image dynamo:latest-trtllm-runtime -it --mount-workspace --use-nixl-gds
+./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
 ```
 
 ### Aggregated Serving

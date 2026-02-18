@@ -14,10 +14,9 @@
 //!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- stress --help
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use dynamo_bench::common::LatencyStats;
 use dynamo_kv_router::{
     ConcurrentRadixTree,
-    bench_utils::{SequenceData, generate_sequences},
+    bench_utils::{LatencyStats, SequenceData, generate_sequences},
     indexer::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ThreadPoolIndexer,
     },
@@ -416,7 +415,7 @@ async fn bench_store<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(&durations).unwrap()
+    LatencyStats::from_durations(durations).unwrap()
 }
 
 /// Benchmark find_matches operation (hit case)
@@ -443,7 +442,7 @@ async fn bench_find_matches_hit<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(&durations).unwrap()
+    LatencyStats::from_durations(durations).unwrap()
 }
 
 /// Benchmark find_matches operation (miss case)
@@ -471,7 +470,7 @@ async fn bench_find_matches_miss<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(&durations).unwrap()
+    LatencyStats::from_durations(durations).unwrap()
 }
 
 /// Benchmark apply_event (remove) operation
@@ -502,7 +501,7 @@ async fn bench_remove<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(&durations).unwrap()
+    LatencyStats::from_durations(durations).unwrap()
 }
 
 /// Run all microbenchmarks for an indexer
@@ -855,7 +854,7 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
         let _ = indexer.find_matches(seq.local_hashes.clone()).await;
         baseline_durations.push(start.elapsed());
     }
-    let stats = LatencyStats::from_durations(&baseline_durations).unwrap();
+    let stats = LatencyStats::from_durations(baseline_durations.clone()).unwrap();
     let baseline_service_time = stats.p50;
     let theoretical_max = stats.throughput_ops_sec;
 
@@ -1042,7 +1041,7 @@ fn print_stress_results(args: &StressArgs, results: &StressResults) {
         println!("    Achieved: {:.1} req/sec", achieved_throughput);
         println!();
 
-        if let Some(stats) = LatencyStats::from_durations(&results.latencies) {
+        if let Some(stats) = LatencyStats::from_durations(results.latencies.clone()) {
             println!("  Latency (end-to-end, includes queue wait):");
             println!("    min:  {:>12?}", stats.min);
             println!("    p50:  {:>12?}", stats.p50);
@@ -1164,7 +1163,7 @@ fn print_stress_comparison(results: &[StressResults], args: &StressArgs) {
     // Latency p50
     let mut row = format!("{:<35}", "Latency p50 (us)");
     for result in results {
-        if let Some(stats) = LatencyStats::from_durations(&result.latencies) {
+        if let Some(stats) = LatencyStats::from_durations(result.latencies.clone()) {
             row.push_str(&format!(" {:>18.2}", stats.p50.as_nanos() as f64 / 1000.0));
         } else {
             row.push_str(&format!(" {:>18}", "-"));
@@ -1175,7 +1174,7 @@ fn print_stress_comparison(results: &[StressResults], args: &StressArgs) {
     // Latency p99
     let mut row = format!("{:<35}", "Latency p99 (us)");
     for result in results {
-        if let Some(stats) = LatencyStats::from_durations(&result.latencies) {
+        if let Some(stats) = LatencyStats::from_durations(result.latencies.clone()) {
             row.push_str(&format!(" {:>18.2}", stats.p99.as_nanos() as f64 / 1000.0));
         } else {
             row.push_str(&format!(" {:>18}", "-"));

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiohttp
 import nats
 
-from dynamo._core import DistributedRuntime, KvRouter, KvRouterConfig
+from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
 from tests.utils.managed_process import ManagedProcess
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ class KVRouterProcess(ManagedProcess):
             "kv",
             "--http-port",
             str(frontend_port),
-            "--discovery-backend",
+            "--store-kv",
             store_backend,
             "--namespace",
             namespace,
@@ -188,7 +188,7 @@ async def wait_for_frontend_ready(
         2. Sends a test POST to /v1/chat/completions to verify the request pipeline is functional
 
     Use this when testing through the HTTP frontend server (dynamo.frontend).
-    For direct Python API testing with KvRouter, use wait_for_workers_ready() instead.
+    For direct Python API testing with KvPushRouter, use wait_for_workers_ready() instead.
 
     Args:
         frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
@@ -276,7 +276,7 @@ async def wait_for_frontend_ready(
 
 async def wait_for_workers_ready(
     endpoint,
-    router: KvRouter,
+    router: KvPushRouter,
     expected_num_workers: int,
     model_name: str,
 ) -> list[int]:
@@ -289,7 +289,7 @@ async def wait_for_workers_ready(
 
     Args:
         endpoint: The endpoint object to get the client from
-        router: The KvRouter to use for sending warmup requests
+        router: The KvPushRouter to use for sending warmup requests
         expected_num_workers: Number of workers to wait for
 
     Returns:
@@ -493,7 +493,7 @@ async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
 
 
 async def send_request_via_python_kv_router(
-    kv_python_router: KvRouter,
+    kv_python_router: KvPushRouter,
     model_name: str,
     token_ids: list,
     initial_wait: float,
@@ -609,7 +609,7 @@ async def send_request_via_python_kv_router(
         )
 
         logger.debug(
-            f"Successfully verified {max_tokens} tokens generated as expected via KvRouter with ignore_eos=True"
+            f"Successfully verified {max_tokens} tokens generated as expected via KvPushRouter with ignore_eos=True"
         )
 
     if return_worker_ids:
@@ -883,9 +883,9 @@ def _test_python_router_bindings(
     model_name: str,
     num_workers: int,
 ):
-    """Test KvRouter Python bindings with token streaming and config overrides.
+    """Test KvPushRouter Python bindings with token streaming and config overrides.
 
-    Assumes engine_workers are already initialized. This test creates a KvRouter
+    Assumes engine_workers are already initialized. This test creates a KvPushRouter
     Python object and sends three test requests to verify:
     1. Token streaming with full router config overrides (overlap_score_weight, router_temperature)
     2. Token streaming without any overrides (uses default config)
@@ -906,17 +906,19 @@ def _test_python_router_bindings(
     # Create KvRouterConfig with default settings
     kv_router_config = KvRouterConfig()
 
-    # Create KvRouter Python object
-    kv_router = KvRouter(
+    # Create KvPushRouter Python object
+    kv_push_router = KvPushRouter(
         endpoint=endpoint,
         block_size=block_size,
         kv_router_config=kv_router_config,
     )
 
-    logger.info("Created KvRouter Python object")
+    logger.info("Created KvPushRouter Python object")
 
     # Wait for workers to be ready
-    asyncio.run(wait_for_workers_ready(endpoint, kv_router, num_workers, model_name))
+    asyncio.run(
+        wait_for_workers_ready(endpoint, kv_push_router, num_workers, model_name)
+    )
 
     # Generate random token IDs (100 to 200 tokens)
     num_input_tokens = random.randint(100, 200)
@@ -934,7 +936,7 @@ def _test_python_router_bindings(
     logger.info(f"Testing with full router config overrides: {router_config_override}")
     asyncio.run(
         send_request_via_python_kv_router(
-            kv_python_router=kv_router,
+            kv_python_router=kv_push_router,
             model_name=model_name,
             token_ids=token_ids,
             initial_wait=1.0,
@@ -956,7 +958,7 @@ def _test_python_router_bindings(
     logger.info("Testing without router config overrides")
     asyncio.run(
         send_request_via_python_kv_router(
-            kv_python_router=kv_router,
+            kv_python_router=kv_push_router,
             model_name=model_name,
             token_ids=token_ids[:50],  # Use fewer tokens for second test,
             initial_wait=1.0,
@@ -979,7 +981,7 @@ def _test_python_router_bindings(
     logger.info(f"Testing with partial router config overrides: {partial_override}")
     asyncio.run(
         send_request_via_python_kv_router(
-            kv_python_router=kv_router,
+            kv_python_router=kv_push_router,
             model_name=model_name,
             token_ids=token_ids[:30],  # Use fewer tokens for third test,
             initial_wait=1.0,
@@ -997,7 +999,7 @@ def _test_python_router_bindings(
         )
     )
 
-    logger.info("KvRouter bindings test completed successfully")
+    logger.info("KvPushRouter bindings test completed successfully")
 
 
 def _test_router_query_instance_id(
@@ -1308,8 +1310,8 @@ def _test_router_indexers_sync(
     """Test that two KV routers have synchronized indexer states after processing requests.
 
     Assumes engine_workers are already initialized. This test:
-    1. Creates first KvRouter (with its own runtime) and sends 25 requests (triggers snapshot at threshold=20)
-    2. Creates second KvRouter (with its own runtime, should sync from NATS snapshot)
+    1. Creates first KvPushRouter (with its own runtime) and sends 25 requests (triggers snapshot at threshold=20)
+    2. Creates second KvPushRouter (with its own runtime, should sync from NATS snapshot)
     3. Sends 25 requests to second router
     4. Verifies NATS object store contains the snapshot
     5. Dumps states from both routers and compares them (should be identical)
@@ -1393,21 +1395,23 @@ def _test_router_indexers_sync(
         component1 = namespace1.component(engine_workers.component_name)
         endpoint1 = component1.endpoint("generate")
 
-        kv_router1 = KvRouter(
+        kv_push_router1 = KvPushRouter(
             endpoint=endpoint1,
             block_size=block_size,
             kv_router_config=kv_router_config,
         )
 
         # Wait for workers to be ready
-        await wait_for_workers_ready(endpoint1, kv_router1, num_workers, model_name)
+        await wait_for_workers_ready(
+            endpoint1, kv_push_router1, num_workers, model_name
+        )
 
         # Send 25 requests to first router
         logger.info("Sending 25 requests to first router")
 
         # Send requests to first router
         successful1 = await send_requests_to_router(
-            kv_router1, 25, "Router 1", endpoint1
+            kv_push_router1, 25, "Router 1", endpoint1
         )
         assert (
             successful1 == 25
@@ -1424,7 +1428,7 @@ def _test_router_indexers_sync(
 
             logger.info("Sending 10 requests while NATS is down (via TCP)")
             successful_offline1 = await send_requests_to_router(
-                kv_router1, 10, "Router 1 (NATS down)", endpoint1
+                kv_push_router1, 10, "Router 1 (NATS down)", endpoint1
             )
             assert (
                 successful_offline1 == 10
@@ -1446,7 +1450,7 @@ def _test_router_indexers_sync(
         component2 = namespace2.component(engine_workers.component_name)
         endpoint2 = component2.endpoint("generate")
 
-        kv_router2 = KvRouter(
+        kv_push_router2 = KvPushRouter(
             endpoint=endpoint2,
             block_size=block_size,
             kv_router_config=kv_router_config,
@@ -1455,7 +1459,7 @@ def _test_router_indexers_sync(
         # Send 25 requests to second router with initial retry loop
         logger.info("Sending 25 requests to second router")
         successful2 = await send_requests_to_router(
-            kv_router2, 25, "Router 2", endpoint2
+            kv_push_router2, 25, "Router 2", endpoint2
         )
         assert (
             successful2 == 25
@@ -1472,7 +1476,7 @@ def _test_router_indexers_sync(
 
             logger.info("Sending 10 requests while NATS is down (via TCP)")
             successful_offline2 = await send_requests_to_router(
-                kv_router2, 10, "Router 2 (NATS down)", endpoint2
+                kv_push_router2, 10, "Router 2 (NATS down)", endpoint2
             )
             assert (
                 successful_offline2 == 10
@@ -1484,7 +1488,7 @@ def _test_router_indexers_sync(
 
             logger.info("Sending 5 more requests after NATS recovery")
             successful_recovery = await send_requests_to_router(
-                kv_router1, 5, "Router 1 (post-recovery)", endpoint1
+                kv_push_router1, 5, "Router 1 (post-recovery)", endpoint1
             )
             assert (
                 successful_recovery == 5
@@ -1547,8 +1551,8 @@ def _test_router_indexers_sync(
 
         # Dump states from both routers
         logger.info("Dumping states from both routers")
-        state1_json = await kv_router1.dump_events()
-        state2_json = await kv_router2.dump_events()
+        state1_json = await kv_push_router1.dump_events()
+        state2_json = await kv_push_router2.dump_events()
 
         # Parse JSON strings for comparison
         state1 = json.loads(state1_json)
@@ -1912,7 +1916,7 @@ def _test_router_decisions(
         durable_kv_events=durable_kv_events,
         router_event_threads=router_event_threads,
     )
-    kv_router = KvRouter(
+    kv_push_router = KvPushRouter(
         endpoint=endpoint,
         block_size=block_size,
         kv_router_config=kv_router_config,
@@ -1926,7 +1930,7 @@ def _test_router_decisions(
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
             endpoint,
-            kv_router,
+            kv_push_router,
             expected_num_workers=expected_num_instances,
             model_name=model_name,
         )
@@ -1972,7 +1976,7 @@ def _test_router_decisions(
             logger.info(log_msg)
 
             result = await send_request_via_python_kv_router(
-                kv_python_router=kv_router,
+                kv_python_router=kv_push_router,
                 model_name=model_name,
                 token_ids=request,
                 initial_wait=1.0,
@@ -2000,7 +2004,7 @@ def _test_router_decisions(
             await asyncio.sleep(1)
 
         # Dump events from the router
-        events_json = await kv_router.dump_events()
+        events_json = await kv_push_router.dump_events()
         return events_json, forced_worker_id, forced_dp_rank, response_worker_ids
 
     # Run the async test

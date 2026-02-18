@@ -1,0 +1,13 @@
+{
+  "slurm_job_id": "1694609",
+  "server_node": "prenyx0026",
+  "client_node": "prenyx0115",
+  "sqsh": "/lustre/fsw/core_dlfw_ci/kprashanth/dynamo_vllm_bench.sqsh",
+  "model": "Qwen/Qwen3-0.6B",
+  "isl": 1024,
+  "osl": 1024,
+  "concurrencies": "1",
+  "scenarios": "1,2,3",
+  "dry_run": true,
+  "timestamp": "20260213_073744"
+}

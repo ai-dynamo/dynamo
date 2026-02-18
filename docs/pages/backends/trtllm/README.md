@@ -71,7 +71,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 > [!NOTE]
-> - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
 > - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
 > - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
@@ -82,11 +82,11 @@ docker compose -f deploy/docker-compose.yml up -d
 apt-get update && apt-get -y install git git-lfs
 
 # On an x86 machine:
-python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
+python container/render.py --framework=trtllm --target=runtime --output-short-filename
 docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 
 # On an ARM machine:
-python container/render.py --framework=trtllm --target=runtime --platform=arm64 --output-short-filename --cuda-version=13.1
+python container/render.py --framework=trtllm --target=runtime --platform=arm64 --output-short-filename
 docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 ```
 
@@ -243,19 +243,17 @@ python -m dynamo.trtllm \
 
 ### API Endpoint
 
-Video generation uses the `/v1/videos` endpoint:
+Video generation uses the `/v1/videos/generations` endpoint:
 
 ```bash
-curl -X POST http://localhost:8000/v1/videos \
+curl -X POST http://localhost:8000/v1/videos/generations \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "A cat playing piano",
     "model": "wan_t2v",
-    "seconds": 4,
     "size": "832x480",
-    "nvext": {
-      "fps": 24
-    }
+    "seconds": 4,
+    "fps": 24
   }'
 ```
 

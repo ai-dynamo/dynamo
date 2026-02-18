@@ -204,7 +204,7 @@ impl PerfModel {
         };
         // Ensure non-negative timing
         let result = time.max(0.0);
-        tracing::trace!("Prefill time prediction: new_tokens={new_tokens}, time={result:.2}ms");
+        tracing::debug!("Prefill time prediction: new_tokens={new_tokens}, time={result:.2}ms");
         result
     }
 
@@ -229,7 +229,7 @@ impl PerfModel {
         };
         // Ensure non-negative timing
         let result = time.max(0.0);
-        tracing::trace!(
+        tracing::debug!(
             "Decode time prediction: active_kv_tokens={active_kv_tokens}, context_length={context_length}, time={result:.2}ms"
         );
         result

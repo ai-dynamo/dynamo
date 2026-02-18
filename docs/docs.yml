@@ -24,16 +24,10 @@ title: NVIDIA Dynamo Documentation
 products:
   - display-name: Dynamo
     slug: /
-    path: ./versions/dev.yml
+    path: ./versions/next.yml
     versions:
-      - display-name: dev
-        path: ./versions/dev.yml
-
-redirects:
-  - source: "/dynamo/index.html"
-    destination: "/dynamo/"
-  - source: "/dynamo/latest/index.html"
-    destination: "/dynamo/"
+      - display-name: Next
+        path: ./versions/next.yml
 
 # GitHub repository link in navbar
 navbar-links:

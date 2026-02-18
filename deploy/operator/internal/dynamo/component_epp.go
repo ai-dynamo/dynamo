@@ -88,6 +88,10 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	// EPP-specific environment variables
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
+			Name:  "DYN_KV_BLOCK_SIZE",
+			Value: "16",
+		},
+		{
 			Name:  "USE_STREAMING",
 			Value: "true",
 		},

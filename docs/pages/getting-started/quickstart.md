@@ -99,13 +99,13 @@ Start the frontend, then start a worker for your chosen backend.
 
 <Tip>
 To run in a single terminal (useful in containers), append `> logfile.log 2>&1 &`
-to run processes in background. Example: `python3 -m dynamo.frontend --discovery-backend file > dynamo.frontend.log 2>&1 &`
+to run processes in background. Example: `python3 -m dynamo.frontend --store-kv file > dynamo.frontend.log 2>&1 &`
 </Tip>
 
 ```bash
 # Start the OpenAI compatible frontend (default port is 8000)
-# --discovery-backend file avoids needing etcd (frontend and workers must share a disk)
-python3 -m dynamo.frontend --discovery-backend file
+# --store-kv file avoids needing etcd (frontend and workers must share a disk)
+python3 -m dynamo.frontend --store-kv file
 ```
 
 In another terminal (or same terminal if using background mode), start a worker:
@@ -113,19 +113,19 @@ In another terminal (or same terminal if using background mode), start a worker:
 **SGLang**
 
 ```bash
-python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --store-kv file
 ```
 
 **TensorRT-LLM**
 
 ```bash
-python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
+python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --store-kv file
 ```
 
 **vLLM**
 
 ```bash
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --store-kv file \
   --kv-events-config '{"enable_kv_cache_events": false}'
 ```
 
