@@ -149,9 +149,13 @@ def resolve_tokenizer(args):
         args.tokenizer = args.model
 
 
-def get_common_aiperf_flags():
-    """Return common aiperf flags used across benchmarks."""
-    return [
+def get_common_aiperf_flags(collect_gpu_sku: bool = False):
+    """Return common aiperf flags used across benchmarks.
+
+    When collect_gpu_sku is True, enables GPU telemetry via pynvml so the run
+    exports GPU model name (SKU) in profile_export_aiperf.json / gpu_telemetry_export.jsonl.
+    """
+    flags = [
         "--endpoint-type",
         "chat",
         "--endpoint",
@@ -159,12 +163,16 @@ def get_common_aiperf_flags():
         "--streaming",
         "--extra-inputs",
         "ignore_eos:true",
-        "--no-gpu-telemetry",
         "-H",
         "Authorization: Bearer NOT USED",
         "-H",
         "Accept: text/event-stream",
     ]
+    if collect_gpu_sku:
+        flags.extend(["--gpu-telemetry", "pynvml"])
+    else:
+        flags.append("--no-gpu-telemetry")
+    return flags
 
 
 def get_aiperf_cmd_for_trace(

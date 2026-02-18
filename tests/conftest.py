@@ -53,6 +53,7 @@ def pytest_configure(config):
         "h100: marks tests to run on H100",
         "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
         "router: marks tests for router component",
+        "router_benchmark: marks router benchmark tests (production models, benchmark profile)",
         "planner: marks tests for planner component",
         "kvbm: marks tests for KV behavior and model determinism",
         "kvbm_v2: marks tests using KVBM V2",
@@ -233,10 +234,13 @@ def predownload_tokenizers(pytestconfig):
 
 @pytest.fixture(autouse=True)
 def logger(request):
-    log_path = os.path.join(request.node.name, "test.log.txt")
+    # Use temp dir so logs work when cwd is read-only (e.g. /workspace in CI)
+    safe_name = request.node.name.replace("/", "_").replace("\\", "_")
+    log_dir = os.path.join(tempfile.gettempdir(), "dynamo_test_logs", safe_name)
+    log_path = os.path.join(log_dir, "test.log.txt")
     logger = logging.getLogger()
-    shutil.rmtree(request.node.name, ignore_errors=True)
-    os.makedirs(request.node.name, exist_ok=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+    os.makedirs(log_dir, exist_ok=True)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)

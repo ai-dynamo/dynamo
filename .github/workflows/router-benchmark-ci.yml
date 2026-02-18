@@ -1,0 +1,172 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Router benchmark only — for quick feedback while developing.
+# Runs the same e2e router benchmark test as nightly, without the full pipeline.
+# Pulls the latest main branch image from Azure ACR (CUDA 12 by default; CUDA 13 if requested).
+#
+# Triggers:
+#   - Pull request: runs when PR touches this workflow or the router benchmark test paths.
+#   - Push: runs on push to any branch when those paths change.
+#   - Manual: Actions → "Router Benchmark CI" → Run workflow (optional: "Use CUDA 13 image").
+#
+# To use CUDA 13 image by default (e.g. cluster has driver 580 / CUDA 13): set repository
+# variable ROUTER_BENCHMARK_USE_CUDA13 to "true".
+
+name: Router Benchmark CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      use_cuda13:
+        description: 'Use CUDA 13 image (for clusters with driver 580 / CUDA 13)'
+        required: false
+        type: boolean
+        default: false
+  push:
+    paths:
+      - '.github/workflows/router-benchmark-ci.yml'
+      - 'tests/router/test_router_benchmark_vllm.py'
+      - 'tests/router/common.py'
+  pull_request:
+    paths:
+      - '.github/workflows/router-benchmark-ci.yml'
+      - 'tests/router/test_router_benchmark_vllm.py'
+      - 'tests/router/common.py'
+
+# Cancel in-progress runs when the same PR is updated.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('router-benchmark-{0}', github.event.pull_request.number) || format('router-benchmark-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY_IMAGE: ai-dynamo/dynamo
+
+jobs:
+  router-benchmark:
+    name: Router benchmark (4 GPU)
+    runs-on: prod-tester-gb200-4-v1
+    timeout-minutes: 60
+    outputs:
+      platform_arch: ${{ steps.image-tag.outputs.platform_arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false  # Runner may not have git-lfs; benchmark does not need LFS
+      - name: Make workspace writable
+        run: chmod -R u+w .
+      - name: Set image tag by runner architecture
+        id: image-tag
+        env:
+          USE_CUDA13: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.use_cuda13 == 'true' || vars.ROUTER_BENCHMARK_USE_CUDA13 }}
+        run: |
+          ARCH=$(uname -m)
+          USE_CUDA13="${USE_CUDA13:-false}"
+          if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+            if [ "$USE_CUDA13" = "true" ]; then
+              echo "IMAGE_TAG=main-vllm-cuda13-amd64" >> $GITHUB_ENV
+            else
+              echo "IMAGE_TAG=main-vllm-amd64" >> $GITHUB_ENV
+            fi
+            echo "platform_arch=amd64" >> $GITHUB_OUTPUT
+          else
+            if [ "$USE_CUDA13" = "true" ]; then
+              echo "IMAGE_TAG=main-vllm-cuda13-arm64" >> $GITHUB_ENV
+            else
+              echo "IMAGE_TAG=main-vllm-arm64" >> $GITHUB_ENV
+            fi
+            echo "platform_arch=arm64" >> $GITHUB_OUTPUT
+          fi
+          echo "Using image tag: $IMAGE_TAG (runner arch: $ARCH, CUDA 13: $USE_CUDA13)"
+      - name: Login to Azure ACR
+        uses: ./.github/actions/docker-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull image
+        shell: bash
+        env:
+          ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        run: |
+          docker pull "${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_TAG }}"
+          docker tag "${ACR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_TAG }}" "${{ env.IMAGE_TAG }}"
+      - name: Run E2E Router Benchmark Tests (gpu_4)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.IMAGE_TAG }}
+          pytest_marks: "vllm and e2e and router_benchmark and nightly and gpu_4"
+          pytest_path: tests/router/test_router_benchmark_vllm.py
+          framework: vllm
+          test_type: e2e-router-benchmark
+          platform_arch: ${{ steps.image-tag.outputs.platform_arch }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          # Run tests from checkout; restrict path to avoid collection errors from components/ (different env)
+          mount_workspace: true
+
+      - name: Upload router benchmark results
+        if: always() && hashFiles('test-results/router_benchmark_results.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: router-benchmark-results-${{ steps.image-tag.outputs.platform_arch }}-${{ github.run_id }}
+          path: test-results/router_benchmark_results.json
+          retention-days: 7
+
+  # Record benchmark result to history for trend visualization.
+  # Push to the same branch that triggered the run (PR branch, main, or workflow_dispatch branch).
+  record-benchmark-history:
+    name: Record benchmark history
+    needs: router-benchmark
+    if: |
+      always() &&
+      needs.router-benchmark.result == 'success' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+    runs-on: ubuntu-latest
+    continue-on-error: true  # Do not fail workflow if artifact is missing (e.g. no results file)
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull latest
+        run: |
+          BRANCH="${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}"
+          git pull origin "$BRANCH" --rebase || true
+      - name: Download benchmark results artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: router-benchmark-results-${{ needs.router-benchmark.outputs.platform_arch }}-${{ github.run_id }}
+      - name: Append result to benchmark history
+        env:
+          RUN_ID: ${{ github.run_id }}
+          TIMESTAMP: ${{ github.event.repository.updated_at }}
+          REF: ${{ github.ref }}
+          BRANCH: ${{ github.ref_name }}
+          ARCH: ${{ needs.router-benchmark.outputs.platform_arch }}
+          COMMIT: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 .github/scripts/append_benchmark_history.py \
+            --artifact "$(find . -name 'router_benchmark_results.json' | head -1)" \
+            --history benchmarks/router/history/benchmark_history.json \
+            --run-id "$RUN_ID" \
+            --timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --ref "$REF" \
+            --branch "$BRANCH" \
+            --arch "$ARCH" \
+            --commit "$COMMIT" \
+            --run-url "$RUN_URL" \
+            --max-entries 200
+      - name: Commit and push benchmark history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add benchmarks/router/history/benchmark_history.json
+          git diff --staged --quiet || git commit -m "ci(router-benchmark): record benchmark history [skip ci]"
+          BRANCH="${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}"
+          git push origin "HEAD:$BRANCH"

@@ -125,7 +125,7 @@ jobs:
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --mypy --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ env.PYTEST_MARKS }}\" "
+            bash -c "pytest --mypy --basetemp=/tmp/pytest_basetemp --junitxml=${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ env.PYTEST_MARKS }}\" "
       - name: Copy test report from test Container
         if: always()
         run: |
