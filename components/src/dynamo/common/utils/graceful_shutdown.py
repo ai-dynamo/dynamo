@@ -95,8 +95,27 @@ def install_signal_handlers(
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
 ) -> None:
+    shutdown_task: Optional[asyncio.Task[None]] = None
+
+    def _on_shutdown_done(task: asyncio.Task[None]) -> None:
+        nonlocal shutdown_task
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.info("Graceful shutdown task cancelled")
+        except Exception:
+            logger.exception("Graceful shutdown task failed")
+        finally:
+            if shutdown_task is task:
+                shutdown_task = None
+
     def signal_handler() -> None:
-        asyncio.create_task(
+        nonlocal shutdown_task
+        if shutdown_task is not None and not shutdown_task.done():
+            logger.debug("Shutdown already in progress; ignoring duplicate signal")
+            return
+
+        shutdown_task = asyncio.create_task(
             graceful_shutdown_with_discovery(
                 runtime,
                 endpoints,
@@ -104,6 +123,7 @@ def install_signal_handlers(
                 grace_period_s=grace_period_s,
             )
         )
+        shutdown_task.add_done_callback(_on_shutdown_done)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
