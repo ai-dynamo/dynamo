@@ -190,7 +190,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if r.isRollingUpdateInProgress(dynamoDeployment) || r.shouldTriggerRollingUpdate(dynamoDeployment) {
 			if err = r.reconcileRollingUpdate(ctx, dynamoDeployment); err != nil {
 				logger.Error(err, "Failed to reconcile rolling update")
-				state = DGDStateFailed
+				state = nvidiacomv1alpha1.DGDStateFailed
 				reason = Reason("RollingUpdateFailed")
 				message = Message(err.Error())
 				return ctrl.Result{}, err
@@ -235,8 +235,8 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			// Keep the reconcileResult state (should be Ready if resources are ready)
 		case nvidiacomv1alpha1.RollingUpdatePhasePending, nvidiacomv1alpha1.RollingUpdatePhaseInProgress:
 			// Rolling update in progress - resources are being transitioned
-			if state != DGDStateFailed {
-				state = DGDStatePending
+			if state != nvidiacomv1alpha1.DGDStateFailed {
+				state = nvidiacomv1alpha1.DGDStatePending
 				reason = "rolling_update_in_progress"
 				message = "Rolling update in progress"
 			}
