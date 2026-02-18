@@ -28,7 +28,7 @@ import (
 
 // toFloat64 converts a numeric value (int or float64) to float64.
 // Returns 0 if the value is neither int nor float64.
-func toFloat64(val interface{}) float64 {
+func toFloat64(val any) float64 {
 	switch v := val.(type) {
 	case float64:
 		return v
@@ -84,17 +84,17 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 
 	// Parse config to validate structure (only if config is present)
 	if v.request.Spec.ProfilingConfig.Config != nil && len(v.request.Spec.ProfilingConfig.Config.Raw) > 0 {
-		var config map[string]interface{}
+		var config map[string]any
 		if parseErr := yaml.Unmarshal(v.request.Spec.ProfilingConfig.Config.Raw, &config); parseErr != nil {
 			err = errors.Join(err, fmt.Errorf("failed to parse spec.profilingConfig.config: %w", parseErr))
 		} else {
 			// Warn if deployment.model or engine.backend are specified in config (they will be overwritten by spec fields)
-			if engineConfig, ok := config["engine"].(map[string]interface{}); ok {
+			if engineConfig, ok := config["engine"].(map[string]any); ok {
 				if backend, ok := engineConfig["backend"].(string); ok && backend != "" && backend != v.request.Spec.Backend {
 					warnings = append(warnings, fmt.Sprintf("spec.profilingConfig.config.engine.backend (%s) will be overwritten by spec.backend (%s)", backend, v.request.Spec.Backend))
 				}
 			}
-			if deployment, ok := config["deployment"].(map[string]interface{}); ok {
+			if deployment, ok := config["deployment"].(map[string]any); ok {
 				if model, ok := deployment["model"].(string); ok && model != "" && model != v.request.Spec.Model {
 					warnings = append(warnings, fmt.Sprintf("spec.profilingConfig.config.deployment.model (%s) will be overwritten by spec.model (%s)", model, v.request.Spec.Model))
 				}
@@ -117,21 +117,21 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 // Returns an error at admission time if GPU discovery is disabled and no manual hardware config is provided.
 func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() (admission.Warnings, error) {
 	// Parse profiling config
-	var config map[string]interface{}
+	var config map[string]any
 	if v.request.Spec.ProfilingConfig.Config != nil {
 		if err := yaml.Unmarshal(v.request.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
 			// Config parse errors will be caught by other validators
 			return nil, nil
 		}
 	} else {
-		config = make(map[string]interface{})
+		config = make(map[string]any)
 	}
 
 	// Check if manual hardware config is provided
 	hardwareVal, hasHardware := config["hardware"]
 	var hasManualHardwareConfig bool
 	if hasHardware && hardwareVal != nil {
-		if hardwareConfig, ok := hardwareVal.(map[string]interface{}); ok {
+		if hardwareConfig, ok := hardwareVal.(map[string]any); ok {
 			// Check if essential hardware fields are provided
 			_, hasGPUModel := hardwareConfig["gpuModel"]
 			_, hasGPUVram := hardwareConfig["gpuVramMib"]
@@ -143,7 +143,7 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() (admis
 	// Check if explicit GPU ranges are provided
 	var hasExplicitGPURanges bool
 	if engineVal, hasEngine := config["engine"]; hasEngine && engineVal != nil {
-		if engineConfig, ok := engineVal.(map[string]interface{}); ok {
+		if engineConfig, ok := engineVal.(map[string]any); ok {
 			minGPUs, hasMin := engineConfig["minNumGpusPerEngine"]
 			maxGPUs, hasMax := engineConfig["maxNumGpusPerEngine"]
 			// Validate explicit GPU ranges

@@ -192,7 +192,7 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 --set "dynamo-operator.namespaceRestriction.targetNamespace=dynamo-namespace" # optional
 ```
 
-### GPU Discovery for Namespace-Scoped Operators
+### GPU Discovery for DynamoGraphDeploymentRequests with Namespace-Scoped Operators
 
 GPU discovery is **enabled by default** for namespace-scoped operators. The Helm chart automatically provisions a ClusterRole/ClusterRoleBinding granting the operator read-only access to node GPU labels.
 

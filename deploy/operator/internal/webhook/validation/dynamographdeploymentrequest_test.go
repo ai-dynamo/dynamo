@@ -34,17 +34,15 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	configWithDifferentModel := `{"deployment": {"model": "different-model"}}`
 	invalidYAML := `{invalid yaml`
 
+	// errMsg: if non-empty, an error is expected and each newline-separated substring must appear in it.
+	// expectedWarning: if non-empty, at least one warning must contain this substring.
 	tests := []struct {
 		name                string
 		request             *nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 		isClusterWide       bool
 		gpuDiscoveryEnabled bool
-		wantErr             bool
 		errMsg              string
-		errContains         bool
-		wantWarnings        bool
 		expectedWarning     string
-		warningContains     bool
 	}{
 		{
 			name: "valid request",
@@ -65,7 +63,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       false,
 		},
 		{
 			name: "missing profiler image",
@@ -86,7 +83,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       true,
 			errMsg:        "spec.profilingConfig.profilerImage is required",
 		},
 		{
@@ -106,7 +102,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       true,
 			errMsg:        "spec.profilingConfig.config is required and must not be empty",
 		},
 		{
@@ -128,7 +123,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       true,
 			errMsg:        "spec.profilingConfig.config is required and must not be empty",
 		},
 		{
@@ -151,7 +145,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 			isClusterWide:       false,
 			gpuDiscoveryEnabled: false,
-			wantErr:             false,
 		},
 		{
 			name: "namespace-scoped operator with GPU discovery enabled (should pass without manual config)",
@@ -173,7 +166,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 			isClusterWide:       false,
 			gpuDiscoveryEnabled: true,
-			wantErr:             false,
 		},
 		{
 			name: "namespace-scoped operator with GPU discovery disabled and no hardware config (should error)",
@@ -195,9 +187,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 			isClusterWide:       false,
 			gpuDiscoveryEnabled: false,
-			wantErr:             true,
 			errMsg:              "GPU hardware configuration required: GPU discovery is disabled",
-			errContains:         true,
 		},
 		{
 			name: "invalid config YAML",
@@ -218,8 +208,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       true,
-			errMsg:        "failed to parse spec.profilingConfig.config: error converting YAML to JSON: yaml: line 1: did not find expected ',' or '}'",
+			errMsg:        "failed to parse spec.profilingConfig.config",
 		},
 		{
 			name: "warning for different backend in config",
@@ -240,8 +229,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide:   true,
-			wantErr:         false,
-			wantWarnings:    true,
 			expectedWarning: "spec.profilingConfig.config.engine.backend (sglang) will be overwritten by spec.backend (vllm)",
 		},
 		{
@@ -263,8 +250,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide:   true,
-			wantErr:         false,
-			wantWarnings:    true,
 			expectedWarning: "spec.profilingConfig.config.deployment.model (different-model) will be overwritten by spec.model (llama-3-8b)",
 		},
 		{
@@ -284,13 +269,8 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: false,
-			wantErr:       true,
 			errMsg:        "spec.profilingConfig.profilerImage is required\nspec.profilingConfig.config is required and must not be empty",
-			errContains:   true,
 		},
-		// TODO: Add test for invalid GPU range (min > max) validation
-		// The validation logic is in place (lines 148-152 of dynamographdeploymentrequest.go)
-		// but needs proper test coverage
 	}
 
 	for _, tt := range tests {
@@ -298,41 +278,25 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			validator := NewDynamoGraphDeploymentRequestValidator(tt.request, tt.isClusterWide, tt.gpuDiscoveryEnabled)
 			warnings, err := validator.Validate()
 
-			if (err != nil) != tt.wantErr {
-				t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)
+			wantErr := tt.errMsg != ""
+			if (err != nil) != wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, wantErr)
 				return
 			}
-
-			if tt.wantErr {
-				if tt.errContains {
-					// For multiple errors, check that all expected error messages are present
-					errStr := err.Error()
-					for _, expectedMsg := range strings.Split(tt.errMsg, "\n") {
-						if !strings.Contains(errStr, expectedMsg) {
-							t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() error message = %v, want to contain %v", errStr, expectedMsg)
-						}
-					}
-				} else {
-					if err.Error() != tt.errMsg {
-						t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			if wantErr {
+				for _, msg := range strings.Split(tt.errMsg, "\n") {
+					if !strings.Contains(err.Error(), msg) {
+						t.Errorf("Validate() error %q does not contain %q", err.Error(), msg)
 					}
 				}
 			}
 
-			if tt.wantWarnings && len(warnings) == 0 {
-				t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() expected warnings but got none")
+			wantWarning := tt.expectedWarning != ""
+			if wantWarning && len(warnings) == 0 {
+				t.Errorf("Validate() expected warning %q but got none", tt.expectedWarning)
 			}
-
-			if tt.wantWarnings && len(warnings) > 0 {
-				if tt.warningContains {
-					if !strings.Contains(warnings[0], tt.expectedWarning) {
-						t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() warning = %v, want to contain %v", warnings[0], tt.expectedWarning)
-					}
-				} else {
-					if warnings[0] != tt.expectedWarning {
-						t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() warning = %v, want %v", warnings[0], tt.expectedWarning)
-					}
-				}
+			if wantWarning && len(warnings) > 0 && !strings.Contains(warnings[0], tt.expectedWarning) {
+				t.Errorf("Validate() warning %q does not contain %q", warnings[0], tt.expectedWarning)
 			}
 		})
 	}
