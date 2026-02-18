@@ -56,26 +56,45 @@ install_sccache() {
     mv "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl/sccache" /usr/local/bin/
     # Cleanup
     rm -rf sccache*
+
+    # Create compiler wrapper scripts for autotools/Meson compatibility.
+    # Autoconf breaks with CC="sccache gcc" (multi-word value), so we provide
+    # single-binary wrappers that autoconf sees as a regular compiler.
+    # The real compiler path is passed at runtime via SCCACHE_CC_REAL / SCCACHE_CXX_REAL.
+    cat > /usr/local/bin/sccache-cc <<'WRAPPER'
+#!/bin/sh
+exec sccache "${SCCACHE_CC_REAL:-gcc}" "$@"
+WRAPPER
+    chmod +x /usr/local/bin/sccache-cc
+
+    cat > /usr/local/bin/sccache-cxx <<'WRAPPER'
+#!/bin/sh
+exec sccache "${SCCACHE_CXX_REAL:-g++}" "$@"
+WRAPPER
+    chmod +x /usr/local/bin/sccache-cxx
+
     echo "sccache installed successfully"
 }
 
 setup_env() {
     local mode="${1:-default}"
 
-    # Wrap CC/CXX with sccache — works for autotools (make), Meson (>= 0.54
-    # recognizes sccache as a known compiler launcher), and is harmless for CMake
-    # (CMake uses its own CMAKE_*_COMPILER_LAUNCHER mechanism).
-    echo "export CC=\"sccache \${CC:-gcc}\";"
-    echo "export CXX=\"sccache \${CXX:-g++}\";"
     echo "export RUSTC_WRAPPER=\"sccache\";"
 
-    # CMake-specific launcher variables — only set in cmake mode.
-    # CMAKE_CUDA_COMPILER_LAUNCHER must NOT be set for Meson builds because
-    # Meson picks it up and tries to use "sccache nvcc" as the compiler path.
     if [ "$mode" = "cmake" ]; then
+        # CMake has its own launcher mechanism — no need to wrap CC/CXX.
         echo "export CMAKE_C_COMPILER_LAUNCHER=\"sccache\";"
         echo "export CMAKE_CXX_COMPILER_LAUNCHER=\"sccache\";"
         echo "export CMAKE_CUDA_COMPILER_LAUNCHER=\"sccache\";"
+    else
+        # For autotools and Meson: redirect CC/CXX to single-binary wrapper
+        # scripts created during install. Autoconf breaks with multi-word
+        # CC="sccache gcc", but handles CC="/usr/local/bin/sccache-cc" fine.
+        # The wrappers read SCCACHE_CC_REAL / SCCACHE_CXX_REAL at runtime.
+        echo "export SCCACHE_CC_REAL=\"\${CC:-gcc}\";"
+        echo "export SCCACHE_CXX_REAL=\"\${CXX:-g++}\";"
+        echo "export CC=\"/usr/local/bin/sccache-cc\";"
+        echo "export CXX=\"/usr/local/bin/sccache-cxx\";"
     fi
 }
 
