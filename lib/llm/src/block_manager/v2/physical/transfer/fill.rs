@@ -203,7 +203,7 @@ mod tests {
     unsafe fn descriptor_as_slice(
         desc: &crate::block_manager::v2::memory::MemoryDescriptor,
     ) -> &[u8] {
-        std::slice::from_raw_parts(desc.addr as *const u8, desc.size)
+        unsafe { std::slice::from_raw_parts(desc.addr as *const u8, desc.size) }
     }
 
     #[test]
@@ -264,10 +264,14 @@ mod tests {
         fill_layers(&physical, &[1], 0..1, FillPattern::Constant(100)).unwrap();
         fill_layers(&physical, &[1], 1..2, FillPattern::Constant(101)).unwrap();
 
-        let mr_00 = unsafe { descriptor_as_slice(&physical.memory_region(0, 0, 0).unwrap()) }[0];
-        let mr_01 = unsafe { descriptor_as_slice(&physical.memory_region(0, 1, 0).unwrap()) }[0];
-        let mr_10 = unsafe { descriptor_as_slice(&physical.memory_region(1, 0, 0).unwrap()) }[0];
-        let mr_11 = unsafe { descriptor_as_slice(&physical.memory_region(1, 1, 0).unwrap()) }[0];
+        let desc = physical.memory_region(0, 0, 0).unwrap();
+        let mr_00 = unsafe { descriptor_as_slice(&desc) }[0];
+        let desc = physical.memory_region(0, 1, 0).unwrap();
+        let mr_01 = unsafe { descriptor_as_slice(&desc) }[0];
+        let desc = physical.memory_region(1, 0, 0).unwrap();
+        let mr_10 = unsafe { descriptor_as_slice(&desc) }[0];
+        let desc = physical.memory_region(1, 1, 0).unwrap();
+        let mr_11 = unsafe { descriptor_as_slice(&desc) }[0];
         assert_eq!(mr_00, 0);
         assert_eq!(mr_01, 1);
         assert_eq!(mr_10, 100);
