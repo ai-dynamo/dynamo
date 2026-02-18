@@ -160,7 +160,9 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/disagg_multimodal_epd.sh --model llava-hf/llava-1.5-7b-hf
 ```
 
-> [!NOTE] Disaggregation is currently only confirmed to work with LLaVA. Qwen2.5-VL is not confirmed to be supported.
+<Note>
+Disaggregation is currently only confirmed to work with LLaVA. Qwen2.5-VL is not confirmed to be supported.
+</Note>
 
 ## ECConnector Serving
 
