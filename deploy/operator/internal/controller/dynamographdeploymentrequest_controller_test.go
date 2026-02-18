@@ -753,7 +753,7 @@ spec:
 				Name:      "test-dgd-to-delete",
 				Namespace: namespace,
 				Created:   true,
-				State:     DGDRStateReady,
+				State:     nvidiacomv1alpha1.DGDStateSuccessful,
 			}
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
