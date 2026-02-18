@@ -10,5 +10,6 @@ mod scheduled;
 
 pub use request::RequestSequence;
 pub use scheduled::{
-    ApplyError, DecodeOutcome, SchedulableSequence, ScheduleError, SequenceEvent, SequenceState,
+    ApplyError, DecodeOutcome, SchedulableSequence, ScheduleError, SequenceDelegate, SequenceEvent,
+    SequenceState,
 };
