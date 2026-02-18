@@ -93,6 +93,9 @@ class PlannerConfig(BaseModel):
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
+    throughput_metrics_source: Literal["frontend", "router"] = (
+        SLAPlannerDefaults.throughput_metrics_source
+    )
 
     no_correction: bool = SLAPlannerDefaults.no_correction
     model_name: Optional[str] = None

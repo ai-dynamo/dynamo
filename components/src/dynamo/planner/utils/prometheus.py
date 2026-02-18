@@ -91,9 +91,36 @@ class FrontendMetricContainer(BaseModel):
 
 
 class PrometheusAPIClient:
-    def __init__(self, url: str, dynamo_namespace: str):
+    def __init__(
+        self, url: str, dynamo_namespace: str, metrics_source: str = "frontend"
+    ):
         self.prom = PrometheusConnect(url=url, disable_ssl=True)
         self.dynamo_namespace = dynamo_namespace
+        self.metrics_source = metrics_source  # "frontend" | "router"
+
+    def _get_router_average_histogram(
+        self, base_name: str, interval: str, operation_name: str
+    ) -> float:
+        """Query router histogram average: sum(increase(base_name_sum[interval])) /
+        sum(increase(base_name_count[interval])), filtered by dynamo_namespace.
+        """
+        try:
+            ns_filter = f'dynamo_namespace="{self.dynamo_namespace}"'
+            query = (
+                f"sum(increase({base_name}_sum{{{ns_filter}}}[{interval}])) / "
+                f"sum(increase({base_name}_count{{{ns_filter}}}[{interval}]))"
+            )
+            result = self.prom.custom_query(query=query)
+            if not result:
+                logger.warning(
+                    f"No prometheus metric data available for {base_name}, use 0 instead"
+                )
+                return 0
+            value = float(result[0]["value"][1])
+            return 0 if math.isnan(value) else value
+        except Exception as e:
+            logger.error(f"Error getting {operation_name}: {e}")
+            return 0
 
     def _get_average_metric(
         self, full_metric_name: str, interval: str, operation_name: str, model_name: str
@@ -148,6 +175,12 @@ class PrometheusAPIClient:
             return 0
 
     def get_avg_inter_token_latency(self, interval: str, model_name: str):
+        if self.metrics_source == "router":
+            return self._get_router_average_histogram(
+                f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.INTER_TOKEN_LATENCY_SECONDS}",
+                interval,
+                "avg inter token latency",
+            )
         return self._get_average_metric(
             prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS,
             interval,
@@ -156,6 +189,12 @@ class PrometheusAPIClient:
         )
 
     def get_avg_time_to_first_token(self, interval: str, model_name: str):
+        if self.metrics_source == "router":
+            return self._get_router_average_histogram(
+                f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.TIME_TO_FIRST_TOKEN_SECONDS}",
+                interval,
+                "avg time to first token",
+            )
         return self._get_average_metric(
             prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS,
             interval,
@@ -164,6 +203,12 @@ class PrometheusAPIClient:
         )
 
     def get_avg_request_duration(self, interval: str, model_name: str):
+        if self.metrics_source == "router":
+            return self._get_router_average_histogram(
+                f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.work_handler.REQUEST_DURATION_SECONDS}",
+                interval,
+                "avg request duration",
+            )
         return self._get_average_metric(
             prometheus_names.frontend_service.REQUEST_DURATION_SECONDS,
             interval,
@@ -172,6 +217,25 @@ class PrometheusAPIClient:
         )
 
     def get_avg_request_count(self, interval: str, model_name: str):
+        if self.metrics_source == "router":
+            try:
+                ns_filter = f'dynamo_namespace="{self.dynamo_namespace}"'
+                router_req_total = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
+                query = (
+                    f"sum(increase({router_req_total}" f"{{{ns_filter}}}[{interval}]))"
+                )
+                result = self.prom.custom_query(query=query)
+                if not result:
+                    logger.warning(
+                        f"No prometheus metric data available for "
+                        f"{router_req_total}, use 0 instead"
+                    )
+                    return 0
+                value = float(result[0]["value"][1])
+                return 0 if math.isnan(value) else value
+            except Exception as e:
+                logger.error(f"Error getting avg request count: {e}")
+                return 0
         # This function follows a different query pattern than the other metrics
         try:
             requests_total_metric = prometheus_names.frontend_service.REQUESTS_TOTAL
@@ -201,6 +265,12 @@ class PrometheusAPIClient:
             return 0
 
     def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
+        if self.metrics_source == "router":
+            return self._get_router_average_histogram(
+                f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.INPUT_SEQUENCE_TOKENS}",
+                interval,
+                "avg input sequence tokens",
+            )
         return self._get_average_metric(
             prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS,
             interval,
@@ -209,6 +279,12 @@ class PrometheusAPIClient:
         )
 
     def get_avg_output_sequence_tokens(self, interval: str, model_name: str):
+        if self.metrics_source == "router":
+            return self._get_router_average_histogram(
+                f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.OUTPUT_SEQUENCE_TOKENS}",
+                interval,
+                "avg output sequence tokens",
+            )
         return self._get_average_metric(
             prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS,
             interval,
