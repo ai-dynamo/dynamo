@@ -6,7 +6,7 @@ title: NVIDIA Request Extensions (nvext)
 
 # NVIDIA Request Extensions (`nvext`)
 
-`nvext` is a top-level JSON object on the request body that provides NVIDIA-specific extensions to the OpenAI-compatible API. Unlike [`extra_args`](extra-args.md), which is an opaque pass-through to backend workers, `nvext` fields are consumed by the Dynamo frontend, preprocessor, and router to control routing, preprocessing, response metadata, and scheduling behavior.
+`nvext` is a top-level JSON object on the request body that provides NVIDIA-specific extensions to the OpenAI-compatible API. `nvext` fields are consumed by the Dynamo frontend, preprocessor, router, and backend workers to control routing, preprocessing, response metadata, scheduling, and engine-level priority.
 
 ## Usage
 
@@ -21,7 +21,8 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
         "extra_fields": ["worker_id", "timing"],
         "agent_hints": {
             "latency_sensitivity": 5.0,
-            "osl": 1024
+            "osl": 1024,
+            "priority": 5
         }
     }
 }
@@ -60,6 +61,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 | `latency_sensitivity` | `f64` | `None` | Priority scheduling hint in seconds. Shifts the request's effective arrival time earlier in the router queue. Requires `--router-queue-threshold`. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
+| `priority` | `i32` | `None` | Backend engine scheduling priority. Forwarded to the engine's generate call for queue ordering, preemption, and KV cache eviction. |
 
 ### `latency_sensitivity`
 
@@ -113,6 +115,27 @@ How it works:
 }
 ```
 
+### `priority`
+
+Backend engine scheduling priority forwarded to the engine's `generate` call. Influences queue ordering, KV cache eviction under memory pressure, and preemption of running requests.
+
+The semantics of the priority value differ between backends:
+
+- **vLLM**: Smaller values = higher priority. A request with `priority: 0` is scheduled before `priority: 10`. Ties are broken by arrival time. Requires `--scheduling-policy priority` on the engine.
+- **SGLang**: By default, larger values = higher priority. This can be inverted with `--schedule-low-priority-values-first` to match vLLM's convention. Requires `--enable-priority-scheduling` on the engine.
+
+When omitted, vLLM defaults to `0`; SGLang defaults to `None` (engine default). TensorRT-LLM does not currently support per-request priority.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "priority": 5
+        }
+    }
+}
+```
+
 ## Response Extensions
 
 When the client requests response metadata via `extra_fields`, the response includes an `nvext` object with the requested fields:
@@ -146,6 +169,5 @@ When the client requests response metadata via `extra_fields`, the response incl
 
 | Document | Description |
 |----------|-------------|
-| [Custom Request Arguments (`extra_args`)](extra-args.md) | Opaque pass-through arguments for backend workers |
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Router Guide](../router/router-guide.md) | Full router configuration and CLI arguments |
