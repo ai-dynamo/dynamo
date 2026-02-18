@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: |
           echo "Generating Dockerfile for target: dev and framework: dynamo"
-          python ./container/render.py \
+          python3 ./container/render.py \
               --target=dev \
               --framework=dynamo \
               --platform=amd64 \
