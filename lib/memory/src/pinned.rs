@@ -68,8 +68,6 @@ impl PinnedStorage {
     /// - CUDA context creation fails
     /// - Memory allocation fails
     pub fn new_for_device(len: usize, device_id: Option<u32>) -> Result<Self> {
-        use super::numa;
-
         if len == 0 {
             return Err(StorageError::AllocationFailed(
                 "zero-sized allocations are not supported".into(),
@@ -80,19 +78,18 @@ impl PinnedStorage {
         let ctx = cuda_context(gpu_id)?;
 
         let ptr = match device_id {
-            Some(gpu_id) if numa::is_numa_enabled() => {
-                // NUMA-aware allocation via worker pool
+            #[cfg(target_os = "linux")]
+            Some(gpu_id) if super::numa::is_numa_enabled() => {
                 tracing::debug!(
                     "Using NUMA-aware allocation for {} bytes on GPU {}",
                     len,
                     gpu_id
                 );
-                numa::worker_pool::NumaWorkerPool::global()
+                super::numa::worker_pool::NumaWorkerPool::global()
                     .allocate_pinned_for_gpu(len, gpu_id)
                     .map_err(StorageError::AllocationFailed)? as usize
             }
             _ => {
-                // Direct allocation (no NUMA or device_id not specified)
                 unsafe {
                     ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
