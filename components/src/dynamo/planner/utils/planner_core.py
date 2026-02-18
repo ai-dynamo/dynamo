@@ -31,6 +31,7 @@ from dynamo.planner.utils.prometheus import (
     DirectRouterMetricsClient,
     Metrics,
     PrometheusAPIClient,
+    RouterTrafficSnapshot,
 )
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 from dynamo.runtime import DistributedRuntime
@@ -291,13 +292,15 @@ class BasePlanner:
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
-            self.prometheus_traffic_client = (
-                prometheus_traffic_client
-                or PrometheusAPIClient(
+            if prometheus_traffic_client is not None:
+                self.prometheus_traffic_client = prometheus_traffic_client
+            elif getattr(args, "metric_pulling_prometheus_endpoint", None):
+                self.prometheus_traffic_client = PrometheusAPIClient(
                     args.metric_pulling_prometheus_endpoint,
                     args.namespace,
                 )
-            )
+            else:
+                self.prometheus_traffic_client = None
 
         predictor_cls = LOAD_PREDICTORS[args.load_predictor]
         # Predictors read configuration from `args` directly.
@@ -414,30 +417,41 @@ class BasePlanner:
         else:
             self.no_correction = args.no_correction
 
-        if self.enable_loadbased:
-            if prometheus_engine_client is not None:
-                self.prometheus_engine_client = prometheus_engine_client
+        # Auto-discover router metrics URL (Kubernetes mode only, load-based only)
+        # Explicit URL is preferred; auto-discovery is a K8s-only fallback.
+        if self.enable_loadbased and not args.loadbased_router_metrics_url and isinstance(
+            getattr(self, "connector", None), KubernetesConnector
+        ):
+            args.loadbased_router_metrics_url = (
+                self.connector.get_frontend_metrics_url()
+            )
+            if not args.loadbased_router_metrics_url:
+                raise ValueError(
+                    "Could not auto-discover frontend metrics URL from DGD. "
+                    "No service with componentType 'frontend' found. "
+                    "Please provide --loadbased-router-metrics-url explicitly."
+                )
             else:
-                # Auto-discover frontend metrics URL in Kubernetes mode
-                if not args.loadbased_router_metrics_url and isinstance(
-                    getattr(self, "connector", None), KubernetesConnector
-                ):
-                    args.loadbased_router_metrics_url = (
-                        self.connector.get_frontend_metrics_url()
-                    )
-                    if not args.loadbased_router_metrics_url:
-                        raise ValueError(
-                            "Could not auto-discover frontend metrics URL from DGD. "
-                            "No service with componentType 'frontend' found. "
-                            "Please provide --loadbased-router-metrics-url explicitly."
-                        )
-                    else:
-                        logger.info(
-                            f"Auto-discovered frontend metrics URL: {args.loadbased_router_metrics_url}"
-                        )
+                logger.info(
+                    f"Auto-discovered frontend metrics URL: {args.loadbased_router_metrics_url}"
+                )
 
-                self.prometheus_engine_client = DirectRouterMetricsClient(
-                    args.loadbased_router_metrics_url, args.namespace
+        # Create DirectRouterMetricsClient whenever a URL is known (explicit or auto-discovered).
+        # This enables router-based traffic metrics even in throughput-only mode.
+        if prometheus_engine_client is not None:
+            self.prometheus_engine_client = prometheus_engine_client
+        elif args.loadbased_router_metrics_url:
+            self.prometheus_engine_client = DirectRouterMetricsClient(
+                args.loadbased_router_metrics_url, args.namespace
+            )
+        else:
+            self.prometheus_engine_client = None
+
+        if self.enable_loadbased:
+            if self.prometheus_engine_client is None:
+                raise ValueError(
+                    "Load-based scaling is enabled but no router metrics URL is available. "
+                    "Please provide --loadbased-router-metrics-url."
                 )
             self.cached_load_metrics = CachedLoadMetrics()
 
@@ -595,65 +609,100 @@ class BasePlanner:
                 self.shared_state.cumulative_gpu_hours
             )
 
-        # Prometheus returns seconds, convert to milliseconds
-        self.last_metrics.ttft = (
-            self.prometheus_traffic_client.get_avg_time_to_first_token(
-                f"{self.args.adjustment_interval}s",
-                self.model_name,
-            )
-            * 1000
-        )
-        self.last_metrics.itl = (
-            self.prometheus_traffic_client.get_avg_inter_token_latency(
-                f"{self.args.adjustment_interval}s",
-                self.model_name,
-            )
-            * 1000
-        )
-        self.last_metrics.num_req = (
-            self.prometheus_traffic_client.get_avg_request_count(
-                f"{self.args.adjustment_interval}s",
-                self.model_name,
-            )
-        )
-        self.last_metrics.request_duration = (
-            self.prometheus_traffic_client.get_avg_request_duration(
-                f"{self.args.adjustment_interval}s",
-                self.model_name,
-            )
-        )
-        self.last_metrics.isl = (
-            self.prometheus_traffic_client.get_avg_input_sequence_tokens(
-                f"{self.args.adjustment_interval}s",
-                self.model_name,
-            )
-        )
-        self.last_metrics.osl = (
-            self.prometheus_traffic_client.get_avg_output_sequence_tokens(
-                f"{self.args.adjustment_interval}s",
-                self.model_name,
-            )
-        )
+        if self.prometheus_engine_client is not None:
+            snapshot = await self.prometheus_engine_client.fetch_router_traffic_snapshot()
+        else:
+            snapshot = None
 
+        if snapshot is not None:
+            self.last_metrics.ttft = snapshot.ttft_ms
+            self.last_metrics.itl = snapshot.itl_ms
+            self.last_metrics.isl = snapshot.isl
+            self.last_metrics.osl = snapshot.osl
+            self.last_metrics.num_req = snapshot.request_count or 0.0
+            # Derive request_duration from TTFT + OSL * ITL (used by correction factor)
+            if snapshot.ttft_ms and snapshot.itl_ms and snapshot.osl:
+                self.last_metrics.request_duration = (
+                    snapshot.ttft_ms + max(snapshot.osl - 1, 0) * snapshot.itl_ms
+                ) / 1000.0
+        elif self.prometheus_traffic_client is not None:
+            # Fallback: Prometheus-based collection (existing behavior, kept for backwards compat)
+            # Prometheus returns seconds, convert to milliseconds
+            self.last_metrics.ttft = (
+                self.prometheus_traffic_client.get_avg_time_to_first_token(
+                    f"{self.args.adjustment_interval}s",
+                    self.model_name,
+                )
+                * 1000
+            )
+            self.last_metrics.itl = (
+                self.prometheus_traffic_client.get_avg_inter_token_latency(
+                    f"{self.args.adjustment_interval}s",
+                    self.model_name,
+                )
+                * 1000
+            )
+            self.last_metrics.num_req = (
+                self.prometheus_traffic_client.get_avg_request_count(
+                    f"{self.args.adjustment_interval}s",
+                    self.model_name,
+                )
+            )
+            self.last_metrics.request_duration = (
+                self.prometheus_traffic_client.get_avg_request_duration(
+                    f"{self.args.adjustment_interval}s",
+                    self.model_name,
+                )
+            )
+            self.last_metrics.isl = (
+                self.prometheus_traffic_client.get_avg_input_sequence_tokens(
+                    f"{self.args.adjustment_interval}s",
+                    self.model_name,
+                )
+            )
+            self.last_metrics.osl = (
+                self.prometheus_traffic_client.get_avg_output_sequence_tokens(
+                    f"{self.args.adjustment_interval}s",
+                    self.model_name,
+                )
+            )
+        else:
+            logger.warning(
+                "No traffic metrics source available (no router URL and no Prometheus endpoint). "
+                "Skipping traffic stats collection."
+            )
+
+        num_req = self.last_metrics.num_req
+        isl = self.last_metrics.isl
+        osl = self.last_metrics.osl
+        ttft = self.last_metrics.ttft
+        itl = self.last_metrics.itl
         logger.info(
-            f"Observed num_req: {self.last_metrics.num_req:.2f} isl: {self.last_metrics.isl:.2f} osl: {self.last_metrics.osl:.2f}"
+            f"Observed num_req: {num_req:.2f} isl: {(isl or 0):.2f} osl: {(osl or 0):.2f}"
+            if num_req is not None else "Observed metrics: no requests in this interval"
         )
         logger.info(
-            f"Observed ttft: {self.last_metrics.ttft:.2f}ms itl: {self.last_metrics.itl:.2f}ms"
+            f"Observed ttft: {(ttft or 0):.2f}ms itl: {(itl or 0):.2f}ms"
         )
 
         # Update observed metrics in Prometheus
         if self.prometheus_port != 0 and self.prometheus_metrics is not None:
-            self.prometheus_metrics.observed_ttft.set(self.last_metrics.ttft)
-            self.prometheus_metrics.observed_itl.set(self.last_metrics.itl)
-            self.prometheus_metrics.observed_request_rate.set(
-                self.last_metrics.num_req / self.args.adjustment_interval
-            )
-            self.prometheus_metrics.observed_request_duration.set(
-                self.last_metrics.request_duration
-            )
-            self.prometheus_metrics.observed_isl.set(self.last_metrics.isl)
-            self.prometheus_metrics.observed_osl.set(self.last_metrics.osl)
+            if ttft is not None:
+                self.prometheus_metrics.observed_ttft.set(ttft)
+            if itl is not None:
+                self.prometheus_metrics.observed_itl.set(itl)
+            if num_req is not None:
+                self.prometheus_metrics.observed_request_rate.set(
+                    num_req / self.args.adjustment_interval
+                )
+            if self.last_metrics.request_duration is not None:
+                self.prometheus_metrics.observed_request_duration.set(
+                    self.last_metrics.request_duration
+                )
+            if isl is not None:
+                self.prometheus_metrics.observed_isl.set(isl)
+            if osl is not None:
+                self.prometheus_metrics.observed_osl.set(osl)
 
         self.update_predictors_from_metrics(self.last_metrics)
 
@@ -960,6 +1009,9 @@ class BasePlanner:
             loops.append(self._throughput_loop(require_prefill, require_decode))
         if self.enable_loadbased:
             loops.append(self._load_loop(require_prefill, require_decode))
+        # Start the per-worker gauge sampling loop whenever the router client exists,
+        # even in throughput-only mode (needed for fetch_router_traffic_snapshot too).
+        if self.prometheus_engine_client is not None:
             loops.append(
                 self.prometheus_engine_client.run_sampling_loop(
                     self.args.loadbased_metric_samples,

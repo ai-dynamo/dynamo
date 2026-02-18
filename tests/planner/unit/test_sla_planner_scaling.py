@@ -5,7 +5,7 @@ import argparse
 import asyncio
 import math
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -13,6 +13,7 @@ from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.exceptions import DeploymentValidationError
 from dynamo.planner.utils.planner_core import PlannerSharedState, _initialize_gpu_counts
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
+from dynamo.planner.utils.prometheus import RouterTrafficSnapshot
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -42,7 +43,7 @@ def _build_args():
     args.backend = "vllm"
     args.no_operation = True
     args.no_correction = True
-    args.metric_pulling_prometheus_endpoint = "http://localhost:9090"
+    args.metric_pulling_prometheus_endpoint = None
     args.metric_reporting_prometheus_port = 0
     args.load_predictor = "constant"
     args.load_predictor_warmup_trace = None
@@ -413,3 +414,90 @@ class TestDryrunGpuDefaults:
 
         assert args.prefill_engine_num_gpu == 2
         assert args.decode_engine_num_gpu == 4
+
+
+class TestObserveTrafficStatsRouterSnapshot:
+    """Tests for observe_traffic_stats using the router snapshot path."""
+
+    def _build_planner_with_router_client(self):
+        """Build a PrefillPlanner with a mocked prometheus_engine_client."""
+        args = _build_args()
+        shared_state = PlannerSharedState()
+        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner.model_name = "test-model"
+
+        async def mock_get_workers_info(require_prefill=True, require_decode=True):
+            return (1 if require_prefill else 0, 1 if require_decode else 0, True)
+
+        planner.get_workers_info = mock_get_workers_info
+        return planner, shared_state
+
+    def test_observe_traffic_stats_uses_router_snapshot(self):
+        """observe_traffic_stats populates last_metrics from RouterTrafficSnapshot."""
+        planner, shared_state = self._build_planner_with_router_client()
+
+        snapshot = RouterTrafficSnapshot(
+            ttft_ms=250.0,
+            itl_ms=20.0,
+            isl=2048.0,
+            osl=100.0,
+            request_count=30.0,
+        )
+
+        mock_engine_client = Mock()
+        mock_engine_client.fetch_router_traffic_snapshot = AsyncMock(return_value=snapshot)
+        planner.prometheus_engine_client = mock_engine_client
+
+        asyncio.run(
+            planner.observe_traffic_stats(require_prefill=True, require_decode=True)
+        )
+
+        assert planner.last_metrics.ttft == pytest.approx(250.0)
+        assert planner.last_metrics.itl == pytest.approx(20.0)
+        assert planner.last_metrics.isl == pytest.approx(2048.0)
+        assert planner.last_metrics.osl == pytest.approx(100.0)
+        assert planner.last_metrics.num_req == pytest.approx(30.0)
+        # request_duration = (ttft_ms + (osl-1)*itl_ms) / 1000
+        expected_duration = (250.0 + (100.0 - 1) * 20.0) / 1000.0
+        assert planner.last_metrics.request_duration == pytest.approx(expected_duration)
+
+    def test_observe_traffic_stats_router_snapshot_none_falls_back_to_prometheus(self):
+        """When router snapshot returns None, falls back to prometheus_traffic_client."""
+        planner, shared_state = self._build_planner_with_router_client()
+
+        mock_engine_client = Mock()
+        mock_engine_client.fetch_router_traffic_snapshot = AsyncMock(return_value=None)
+        planner.prometheus_engine_client = mock_engine_client
+
+        mock_traffic_client = Mock()
+        mock_traffic_client.get_avg_time_to_first_token.return_value = 0.3  # seconds
+        mock_traffic_client.get_avg_inter_token_latency.return_value = 0.02
+        mock_traffic_client.get_avg_request_count.return_value = 15.0
+        mock_traffic_client.get_avg_request_duration.return_value = 5.0
+        mock_traffic_client.get_avg_input_sequence_tokens.return_value = 1024.0
+        mock_traffic_client.get_avg_output_sequence_tokens.return_value = 80.0
+        planner.prometheus_traffic_client = mock_traffic_client
+
+        asyncio.run(
+            planner.observe_traffic_stats(require_prefill=True, require_decode=True)
+        )
+
+        assert planner.last_metrics.ttft == pytest.approx(300.0)   # 0.3 * 1000
+        assert planner.last_metrics.itl == pytest.approx(20.0)     # 0.02 * 1000
+        assert planner.last_metrics.num_req == pytest.approx(15.0)
+        assert planner.last_metrics.isl == pytest.approx(1024.0)
+        assert planner.last_metrics.osl == pytest.approx(80.0)
+
+    def test_observe_traffic_stats_no_sources_logs_warning(self):
+        """When both router client and prometheus client are absent, logs a warning."""
+        planner, shared_state = self._build_planner_with_router_client()
+        planner.prometheus_engine_client = None
+        planner.prometheus_traffic_client = None
+
+        # Should not raise; last_metrics stays at initial None values
+        asyncio.run(
+            planner.observe_traffic_stats(require_prefill=True, require_decode=True)
+        )
+
+        assert planner.last_metrics.ttft is None
+        assert planner.last_metrics.itl is None

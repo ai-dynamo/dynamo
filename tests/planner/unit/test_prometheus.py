@@ -13,15 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import math
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from dynamo.planner.utils.prometheus import (
+    DirectRouterMetricsClient,
     FrontendMetric,
     FrontendMetricContainer,
     PrometheusAPIClient,
+    RouterTrafficSnapshot,
 )
 
 pytestmark = [
@@ -255,3 +258,146 @@ def test_get_average_metric_multiple_matching_containers(mock_prometheus_result)
         # Average of 42.7, 35.5, and 15.5 (using value[1] from each container)
         expected = (42.7 + 35.5 + 15.5) / 3
         assert result == expected
+
+
+# ---------------------------------------------------------------------------
+# DirectRouterMetricsClient — router histogram + counter parsing tests
+# ---------------------------------------------------------------------------
+
+_PROM_ROUTER_TEXT = """\
+# HELP dynamo_component_router_time_to_first_token_seconds TTFT histogram
+# TYPE dynamo_component_router_time_to_first_token_seconds histogram
+dynamo_component_router_time_to_first_token_seconds_bucket{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate",le="0.1"}} 0
+dynamo_component_router_time_to_first_token_seconds_sum{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate"}} 3.0
+dynamo_component_router_time_to_first_token_seconds_count{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate"}} 6
+# HELP dynamo_component_router_inter_token_latency_seconds ITL histogram
+# TYPE dynamo_component_router_inter_token_latency_seconds histogram
+dynamo_component_router_inter_token_latency_seconds_sum{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate"}} 0.5
+dynamo_component_router_inter_token_latency_seconds_count{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate"}} 10
+# HELP dynamo_component_router_input_sequence_tokens ISL histogram
+# TYPE dynamo_component_router_input_sequence_tokens histogram
+dynamo_component_router_input_sequence_tokens_sum{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate"}} 9000.0
+dynamo_component_router_input_sequence_tokens_count{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate"}} 3
+# HELP dynamo_component_router_output_sequence_tokens OSL histogram
+# TYPE dynamo_component_router_output_sequence_tokens histogram
+dynamo_component_router_output_sequence_tokens_sum{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate"}} 450.0
+dynamo_component_router_output_sequence_tokens_count{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate"}} 3
+# HELP dynamo_component_router_requests_total Total requests
+# TYPE dynamo_component_router_requests_total counter
+dynamo_component_router_requests_total{{dynamo_namespace="test-ns",dynamo_component="router",dynamo_endpoint="generate"}} 42.0
+"""
+
+_PROM_ROUTER_TEXT_OTHER_NS = """\
+# HELP dynamo_component_router_time_to_first_token_seconds TTFT histogram
+# TYPE dynamo_component_router_time_to_first_token_seconds histogram
+dynamo_component_router_time_to_first_token_seconds_sum{{dynamo_namespace="other-ns",dynamo_component="router",dynamo_endpoint="generate"}} 999.0
+dynamo_component_router_time_to_first_token_seconds_count{{dynamo_namespace="other-ns",dynamo_component="router",dynamo_endpoint="generate"}} 100
+# HELP dynamo_component_router_requests_total Total requests
+# TYPE dynamo_component_router_requests_total counter
+dynamo_component_router_requests_total{{dynamo_namespace="other-ns",dynamo_component="router",dynamo_endpoint="generate"}} 999.0
+"""
+
+
+def test_parse_router_histograms_from_text():
+    """_parse_router_metrics correctly extracts sum/count from histogram and counter text."""
+    client = DirectRouterMetricsClient("http://router:8080/metrics", "test-ns")
+    result = client._parse_router_metrics(_PROM_ROUTER_TEXT)
+
+    assert result["ttft_s_sum"] == pytest.approx(3.0)
+    assert result["ttft_s_count"] == pytest.approx(6.0)
+    assert result["itl_s_sum"] == pytest.approx(0.5)
+    assert result["itl_s_count"] == pytest.approx(10.0)
+    assert result["isl_sum"] == pytest.approx(9000.0)
+    assert result["isl_count"] == pytest.approx(3.0)
+    assert result["osl_sum"] == pytest.approx(450.0)
+    assert result["osl_count"] == pytest.approx(3.0)
+    assert result["requests_total"] == pytest.approx(42.0)
+
+
+def test_namespace_filtering():
+    """_parse_router_metrics excludes metrics from a different namespace."""
+    client = DirectRouterMetricsClient("http://router:8080/metrics", "test-ns")
+    result = client._parse_router_metrics(_PROM_ROUTER_TEXT_OTHER_NS)
+
+    # No matching namespace → sums/counts should be 0 and requests_total 0 or absent
+    ttft_sum = result.get("ttft_s_sum", 0.0)
+    requests = result.get("requests_total", 0.0)
+    assert ttft_sum == pytest.approx(0.0)
+    assert requests == pytest.approx(0.0)
+
+
+def test_fetch_router_traffic_snapshot_returns_none_on_first_call():
+    """First call to fetch_router_traffic_snapshot returns None (establishes baseline)."""
+    client = DirectRouterMetricsClient("http://router:8080/metrics", "test-ns")
+
+    with patch.object(
+        client,
+        "_parse_router_metrics",
+        return_value={
+            "ttft_s_sum": 3.0, "ttft_s_count": 6.0,
+            "itl_s_sum": 0.5, "itl_s_count": 10.0,
+            "isl_sum": 9000.0, "isl_count": 3.0,
+            "osl_sum": 450.0, "osl_count": 3.0,
+            "requests_total": 42.0,
+        },
+    ):
+        with patch("aiohttp.ClientSession") as mock_session_cls:
+            mock_response = AsyncMock()
+            mock_response.text = AsyncMock(return_value=_PROM_ROUTER_TEXT)
+            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_response.__aexit__ = AsyncMock(return_value=False)
+            mock_session = AsyncMock()
+            mock_session.get = AsyncMock(return_value=mock_response)
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value = mock_session
+
+            result = asyncio.run(client.fetch_router_traffic_snapshot())
+
+    assert result is None
+    assert client._prev_router_metrics is not None
+
+
+def test_fetch_router_traffic_snapshot_computes_delta():
+    """Second call computes correct interval-averaged values from metric deltas."""
+    client = DirectRouterMetricsClient("http://router:8080/metrics", "test-ns")
+
+    baseline = {
+        "ttft_s_sum": 1.0, "ttft_s_count": 2.0,
+        "itl_s_sum": 0.1, "itl_s_count": 5.0,
+        "isl_sum": 3000.0, "isl_count": 1.0,
+        "osl_sum": 150.0, "osl_count": 1.0,
+        "requests_total": 10.0,
+    }
+    second = {
+        "ttft_s_sum": 4.0, "ttft_s_count": 5.0,   # delta sum=3.0, count=3 → avg=1.0s → 1000ms
+        "itl_s_sum": 0.6, "itl_s_count": 10.0,    # delta sum=0.5, count=5  → avg=0.1s → 100ms
+        "isl_sum": 12000.0, "isl_count": 4.0,     # delta sum=9000, count=3  → avg=3000
+        "osl_sum": 600.0, "osl_count": 4.0,       # delta sum=450, count=3   → avg=150
+        "requests_total": 22.0,                    # delta = 12
+    }
+
+    # Manually set the baseline as _prev_router_metrics (simulate first call already done)
+    client._prev_router_metrics = baseline
+
+    with patch.object(client, "_parse_router_metrics", return_value=second):
+        with patch("aiohttp.ClientSession") as mock_session_cls:
+            mock_response = AsyncMock()
+            mock_response.text = AsyncMock(return_value="")
+            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_response.__aexit__ = AsyncMock(return_value=False)
+            mock_session = AsyncMock()
+            mock_session.get = AsyncMock(return_value=mock_response)
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=False)
+            mock_session_cls.return_value = mock_session
+
+            snapshot = asyncio.run(client.fetch_router_traffic_snapshot())
+
+    assert snapshot is not None
+    assert isinstance(snapshot, RouterTrafficSnapshot)
+    assert snapshot.ttft_ms == pytest.approx(1000.0)   # (3.0/3) * 1000
+    assert snapshot.itl_ms == pytest.approx(100.0)    # (0.5/5) * 1000
+    assert snapshot.isl == pytest.approx(3000.0)      # 9000/3
+    assert snapshot.osl == pytest.approx(150.0)       # 450/3
+    assert snapshot.request_count == pytest.approx(12.0)

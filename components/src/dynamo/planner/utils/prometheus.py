@@ -57,6 +57,15 @@ class Metrics:
 
 
 @dataclass
+class RouterTrafficSnapshot:
+    ttft_ms: Optional[float] = None        # avg TTFT over interval (ms)
+    itl_ms: Optional[float] = None         # avg ITL over interval (ms)
+    isl: Optional[float] = None            # avg input sequence length (tokens)
+    osl: Optional[float] = None            # avg output sequence length (tokens)
+    request_count: Optional[float] = None  # total requests in interval
+
+
+@dataclass
 class CachedLoadMetrics:
     """Container for load metrics used by load-based scaling.
 
@@ -239,6 +248,16 @@ _WORKER_METRIC_NAMES = {
     "last_itl": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS}",
 }
 
+# Router-level aggregate metrics (component-scoped histograms + counter)
+_ROUTER_METRIC_NAMES = {
+    "ttft_s":         f"{prometheus_names.name_prefix.COMPONENT}_router_time_to_first_token_seconds",
+    "itl_s":          f"{prometheus_names.name_prefix.COMPONENT}_router_inter_token_latency_seconds",
+    "isl":            f"{prometheus_names.name_prefix.COMPONENT}_router_input_sequence_tokens",
+    "osl":            f"{prometheus_names.name_prefix.COMPONENT}_router_output_sequence_tokens",
+    "requests_total": f"{prometheus_names.name_prefix.COMPONENT}_router_requests_total",
+}
+_ROUTER_HISTOGRAM_KEYS = {"ttft_s", "itl_s", "isl", "osl"}
+
 
 class DirectRouterMetricsClient:
     """Query router's /metrics endpoint directly for real-time per-worker metrics.
@@ -253,6 +272,7 @@ class DirectRouterMetricsClient:
         self.dynamo_namespace = dynamo_namespace
         self._sample_buffer: list[dict[str, dict[str, dict[str, float]]]] = []
         self._num_samples: int = 10
+        self._prev_router_metrics: Optional[dict[str, float]] = None
 
     def _parse_prometheus_text(
         self, text: str
@@ -306,6 +326,86 @@ class DirectRouterMetricsClient:
         except Exception as e:
             logger.warning(f"Failed to fetch router metrics: {e}")
             return {}
+
+    def _parse_router_metrics(self, text: str) -> dict[str, float]:
+        """Parse Prometheus text and extract router aggregate histogram and counter metrics.
+
+        Filters samples by self.dynamo_namespace label. Returns a flat dict of cumulative
+        values: {"ttft_s_sum": float, "ttft_s_count": float, ..., "requests_total": float}.
+        """
+        result: dict[str, float] = {}
+
+        for family in text_string_to_metric_families(text):
+            matched_key = None
+            for key, full_name in _ROUTER_METRIC_NAMES.items():
+                if family.name == full_name:
+                    matched_key = key
+                    break
+            if matched_key is None:
+                continue
+
+            if matched_key in _ROUTER_HISTOGRAM_KEYS:
+                s_sum = 0.0
+                s_count = 0.0
+                for sample in family.samples:
+                    if sample.labels.get("dynamo_namespace") != self.dynamo_namespace:
+                        continue
+                    if sample.name.endswith("_sum"):
+                        s_sum += sample.value
+                    elif sample.name.endswith("_count"):
+                        s_count += sample.value
+                result[f"{matched_key}_sum"] = s_sum
+                result[f"{matched_key}_count"] = s_count
+            else:
+                # Counter (requests_total)
+                total = 0.0
+                for sample in family.samples:
+                    if sample.labels.get("dynamo_namespace") != self.dynamo_namespace:
+                        continue
+                    total += sample.value
+                result["requests_total"] = total
+
+        return result
+
+    async def fetch_router_traffic_snapshot(self) -> Optional[RouterTrafficSnapshot]:
+        """Fetch router aggregate metrics and return interval-averaged snapshot.
+
+        Returns None on first call (establishes baseline) or on fetch failure.
+        Computes deltas between successive calls so values reflect the interval.
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.router_metrics_url, timeout=aiohttp.ClientTimeout(total=2)
+                ) as response:
+                    text = await response.text()
+        except Exception as e:
+            logger.warning(f"Failed to fetch router metrics: {e}")
+            return None
+
+        current = self._parse_router_metrics(text)
+        prev = self._prev_router_metrics
+        self._prev_router_metrics = current
+
+        if prev is None:
+            return None  # First call: baseline established
+
+        ttft_count = current.get("ttft_s_count", 0) - prev.get("ttft_s_count", 0)
+        itl_count  = current.get("itl_s_count",  0) - prev.get("itl_s_count",  0)
+        isl_count  = current.get("isl_count",    0) - prev.get("isl_count",    0)
+        osl_count  = current.get("osl_count",    0) - prev.get("osl_count",    0)
+
+        return RouterTrafficSnapshot(
+            ttft_ms=((current.get("ttft_s_sum", 0) - prev.get("ttft_s_sum", 0)) / ttft_count * 1000)
+                    if ttft_count > 0 else None,
+            itl_ms= ((current.get("itl_s_sum",  0) - prev.get("itl_s_sum",  0)) / itl_count  * 1000)
+                    if itl_count  > 0 else None,
+            isl=    ((current.get("isl_sum",    0) - prev.get("isl_sum",    0)) / isl_count)
+                    if isl_count  > 0 else None,
+            osl=    ((current.get("osl_sum",    0) - prev.get("osl_sum",    0)) / osl_count)
+                    if osl_count  > 0 else None,
+            request_count=current.get("requests_total", 0) - prev.get("requests_total", 0),
+        )
 
     async def run_sampling_loop(self, num_samples: int, interval: float) -> None:
         """Background coroutine: continuously sample at evenly-spaced intervals.

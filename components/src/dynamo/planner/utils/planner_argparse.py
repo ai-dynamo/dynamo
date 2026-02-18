@@ -156,8 +156,9 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--metric-pulling-prometheus-endpoint",
         type=str,
-        default=SLAPlannerDefaults.metric_pulling_prometheus_endpoint,
-        help="Prometheus endpoint URL for pulling dynamo deployment metrics",
+        default=None,
+        help="Prometheus endpoint URL for pulling dynamo deployment metrics (optional; "
+             "used as fallback when --loadbased-router-metrics-url is not set)",
     )
     parser.add_argument(
         "--metric-reporting-prometheus-port",
