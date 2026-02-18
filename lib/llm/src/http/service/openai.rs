@@ -67,7 +67,7 @@ const VALIDATION_PREFIX: &str = "Validation: ";
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
-/// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
+/// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
 fn get_body_limit() -> usize {
     std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
         .ok()

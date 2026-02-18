@@ -174,8 +174,8 @@ pub mod kvbm {
     /// KVBM metrics endpoint port
     pub const DYN_KVBM_METRICS_PORT: &str = "DYN_KVBM_METRICS_PORT";
 
-    /// Enable KVBM recording for debugging
-    pub const ENABLE_KVBM_RECORD: &str = "ENABLE_KVBM_RECORD";
+    /// Enable KVBM recording for debugging.
+    pub const DYN_KVBM_ENABLE_RECORD: &str = "DYN_KVBM_ENABLE_RECORD";
 
     /// Disable disk offload filter
     pub const DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER: &str = "DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER";
@@ -340,11 +340,11 @@ pub mod zmq_broker {
 
 /// CUDA and GPU environment variables
 pub mod cuda {
-    /// Path to custom CUDA fatbin file
+    /// Path to custom CUDA fatbin file.
     ///
     /// Note: build.rs files cannot import this constant at build time,
     /// so they must define local constants with the same value.
-    pub const DYNAMO_FATBIN_PATH: &str = "DYNAMO_FATBIN_PATH";
+    pub const DYN_FATBIN_PATH: &str = "DYN_FATBIN_PATH";
 }
 
 /// Build-time environment variables
@@ -432,7 +432,7 @@ mod tests {
             // KVBM
             kvbm::DYN_KVBM_METRICS,
             kvbm::DYN_KVBM_METRICS_PORT,
-            kvbm::ENABLE_KVBM_RECORD,
+            kvbm::DYN_KVBM_ENABLE_RECORD,
             kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
             kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_GB,
             kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
@@ -464,7 +464,7 @@ mod tests {
             zmq_broker::ZMQ_BROKER_XPUB_BIND,
             zmq_broker::ZMQ_BROKER_NAMESPACE,
             // CUDA
-            cuda::DYNAMO_FATBIN_PATH,
+            cuda::DYN_FATBIN_PATH,
             // Build
             build::OUT_DIR,
             // Mocker
@@ -480,6 +480,101 @@ mod tests {
             if !seen.insert(var) {
                 panic!("Duplicate environment variable name: {}", var);
             }
+        }
+    }
+
+    /// Allowlist of env var name prefixes/values that are third-party, build, or ecosystem
+    /// and are not required to use the DYN_ prefix.
+    fn allowed_non_dyn_prefix(name: &str) -> bool {
+        name.starts_with("NATS_")
+            || name.starts_with("ETCD_")
+            || name.starts_with("OTEL_")
+            || name.starts_with("MODEL_EXPRESS_")
+            || name.starts_with("HF_")
+            || name.starts_with("HF_HUB_")
+            || name.starts_with("ZMQ_BROKER_")
+            || name == build::OUT_DIR
+    }
+
+    #[test]
+    fn test_all_dynamo_vars_use_dyn_prefix_or_allowlist() {
+        let vars = [
+            logging::DYN_LOG,
+            logging::DYN_LOGGING_CONFIG_PATH,
+            logging::DYN_LOGGING_JSONL,
+            logging::DYN_SDK_DISABLE_ANSI_LOGGING,
+            logging::DYN_LOG_USE_LOCAL_TZ,
+            logging::DYN_LOGGING_SPAN_EVENTS,
+            logging::otlp::OTEL_EXPORT_ENABLED,
+            logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+            logging::otlp::OTEL_SERVICE_NAME,
+            runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
+            runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
+            runtime::system::DYN_SYSTEM_ENABLED,
+            runtime::system::DYN_SYSTEM_HOST,
+            runtime::system::DYN_SYSTEM_PORT,
+            runtime::system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
+            runtime::system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
+            runtime::system::DYN_SYSTEM_HEALTH_PATH,
+            runtime::system::DYN_SYSTEM_LIVE_PATH,
+            runtime::canary::DYN_CANARY_WAIT_TIME,
+            worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+            nats::NATS_SERVER,
+            nats::auth::NATS_AUTH_USERNAME,
+            nats::auth::NATS_AUTH_PASSWORD,
+            nats::auth::NATS_AUTH_TOKEN,
+            nats::auth::NATS_AUTH_NKEY,
+            nats::auth::NATS_AUTH_CREDENTIALS_FILE,
+            nats::stream::DYN_NATS_STREAM_MAX_AGE,
+            etcd::ETCD_ENDPOINTS,
+            etcd::auth::ETCD_AUTH_USERNAME,
+            etcd::auth::ETCD_AUTH_PASSWORD,
+            etcd::auth::ETCD_AUTH_CA,
+            etcd::auth::ETCD_AUTH_CLIENT_CERT,
+            etcd::auth::ETCD_AUTH_CLIENT_KEY,
+            kvbm::DYN_KVBM_METRICS,
+            kvbm::DYN_KVBM_METRICS_PORT,
+            kvbm::DYN_KVBM_ENABLE_RECORD,
+            kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
+            kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_GB,
+            kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
+            kvbm::disk_cache::DYN_KVBM_DISK_CACHE_GB,
+            kvbm::disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
+            kvbm::leader::DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS,
+            kvbm::leader::DYN_KVBM_LEADER_ZMQ_HOST,
+            kvbm::leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
+            kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
+            llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_LORA_ENABLED,
+            llm::DYN_LORA_PATH,
+            llm::metrics::DYN_METRICS_PREFIX,
+            model::model_express::MODEL_EXPRESS_URL,
+            model::model_express::MODEL_EXPRESS_CACHE_PATH,
+            model::huggingface::HF_TOKEN,
+            model::huggingface::HF_HUB_CACHE,
+            model::huggingface::HF_HOME,
+            model::huggingface::HF_HUB_OFFLINE,
+            event_plane::DYN_EVENT_PLANE,
+            event_plane::DYN_EVENT_PLANE_CODEC,
+            zmq_broker::DYN_ZMQ_BROKER_URL,
+            zmq_broker::DYN_ZMQ_BROKER_ENABLED,
+            zmq_broker::ZMQ_BROKER_XSUB_BIND,
+            zmq_broker::ZMQ_BROKER_XPUB_BIND,
+            zmq_broker::ZMQ_BROKER_NAMESPACE,
+            cuda::DYN_FATBIN_PATH,
+            build::OUT_DIR,
+            mocker::DYN_MOCKER_KV_CACHE_TRACE,
+            mocker::DYN_MOCKER_SYNC_DIRECT,
+            testing::DYN_QUEUED_UP_PROCESSING,
+            testing::DYN_SOAK_RUN_DURATION,
+            testing::DYN_SOAK_BATCH_LOAD,
+        ];
+        for var in &vars {
+            assert!(
+                var.starts_with("DYN_") || allowed_non_dyn_prefix(var),
+                "Env var {} must start with DYN_ or be in the third-party/build allowlist",
+                var
+            );
         }
     }
 
