@@ -342,7 +342,9 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         if not token_ids:
             return {"status": "error", "message": "token_ids required"}
         try:
-            result = await self.engine.tokenizer_manager.pin_prefix(token_ids, ttl_seconds)
+            result = await self.engine.tokenizer_manager.pin_prefix(
+                token_ids, ttl_seconds
+            )
             return {
                 "status": "ok" if result.success else "error",
                 "pinned_count": result.pinned_count,
