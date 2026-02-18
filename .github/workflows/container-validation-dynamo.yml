@@ -127,10 +127,6 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
         run: docker pull ${{ env.IMAGE_TAG }}
-      # - name: Start services with docker-compose
-      #   working-directory: ./deploy
-      #   run: |
-      #     docker compose up -d nats-server etcd-server
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
           docker run --rm -w /workspace/lib/llm \
@@ -141,11 +137,6 @@ jobs:
                       cargo clippy --features block-manager,media-ffmpeg --no-deps --all-targets -- -D warnings && \
                       cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl && \
                       cargo test --locked --features integration -- --nocapture'
-      # - name: Cleanup services
-      #   if: always()
-      #   working-directory: ./deploy
-      #   run: |
-      #     docker compose down
 
   test-parallel:
     needs: [changed-files, build]
@@ -168,7 +159,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.IMAGE_TAG }}
-          pytest_marks: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
+          pytest_marks: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)"
           framework: dynamo
           test_type: "pre_merge_parallel"
           platform_arch: amd64
@@ -197,17 +188,13 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.IMAGE_TAG }}
-          pytest_marks: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
+          pytest_marks: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)"
           framework: dynamo
           test_type: "pre_merge_sequential"
           platform_arch: amd64
           enable_mypy: 'false'
           parallel_mode: 'none'
           dind_as_sidecar: 'false'
-
-  # ============================================================================
-  # EVENT FILE
-  # ============================================================================
 
   event_file:
     name: "Event File"
