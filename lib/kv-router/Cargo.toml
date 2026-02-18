@@ -42,6 +42,7 @@ parking_lot = { workspace = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
 uuid = { workspace = true, optional = true }
+rustc-hash = "2.1.1"
 
 [dev-dependencies]
 dynamo-bench = { path = "../bench" }
@@ -53,6 +54,7 @@ dynamo-mocker = { workspace = true }
 dynamo-tokens = { workspace = true }
 minstant = "0.1.7"
 futures = "0.3"
+plotters = "0.3"
 
 
 [[bench]]

@@ -184,11 +184,7 @@ impl Indexer {
         match self {
             Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
             Indexer::Concurrent(tpi) => tpi.find_matches(sequence).await,
-            Indexer::None => Ok(OverlapScores {
-                scores: HashMap::new(),
-                frequencies: Vec::new(),
-                tree_sizes: HashMap::new(),
-            }),
+            Indexer::None => Ok(OverlapScores::new()),
         }
     }
 
