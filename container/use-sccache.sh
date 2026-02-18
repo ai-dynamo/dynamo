@@ -92,20 +92,16 @@ setup_env() {
     echo "export RUSTC_WRAPPER=\"sccache\";"
 
     if [ "$mode" = "cmake" ]; then
-        # CMake has its own launcher mechanism — no need to wrap CC/CXX.
+        # CMake has native launcher support for sccache.
         echo "export CMAKE_C_COMPILER_LAUNCHER=\"sccache\";"
         echo "export CMAKE_CXX_COMPILER_LAUNCHER=\"sccache\";"
         echo "export CMAKE_CUDA_COMPILER_LAUNCHER=\"sccache\";"
-    else
-        # For autotools and Meson: redirect CC/CXX to single-binary wrapper
-        # scripts created during install. Autoconf breaks with multi-word
-        # CC="sccache gcc", but handles CC="/usr/local/bin/sccache-cc" fine.
-        # The wrappers read SCCACHE_CC_REAL / SCCACHE_CXX_REAL at runtime.
-        echo "export SCCACHE_CC_REAL=\"\${CC:-gcc}\";"
-        echo "export SCCACHE_CXX_REAL=\"\${CXX:-g++}\";"
-        echo "export CC=\"/usr/local/bin/sccache-cc\";"
-        echo "export CXX=\"/usr/local/bin/sccache-cxx\";"
     fi
+    # Autotools/Meson C/C++ compilation is not wrapped with sccache.
+    # sccache's server daemon has compatibility issues with gcc-toolset-14
+    # inside Docker's secret-mounted environment, and these builds are fast
+    # enough (~30-60s) that the caching ROI is low. The major wins come from
+    # RUSTC_WRAPPER (Dynamo Rust compilation) and CMAKE_*_COMPILER_LAUNCHER.
 }
 
 show_stats() {
