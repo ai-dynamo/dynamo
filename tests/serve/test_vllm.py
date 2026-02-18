@@ -514,7 +514,6 @@ vllm_configs = {
     ),
     # Audio multimodal tests for nightly CI pipeline
     # These tests validate audio inference capabilities with Qwen2-Audio model
-    # Reference: Linear OPS-3013
     "multimodal_audio_agg": VLLMConfig(
         name="multimodal_audio_agg",
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
