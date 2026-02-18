@@ -19,7 +19,8 @@ use dynamo_kv_router::{
     ConcurrentRadixTree, OverlapScores, PositionalIndexer, RadixTree, RouterEvent, SyncIndexer,
     bench_utils::{SequenceData, generate_sequences},
     compute_block_hash_for_seq,
-    protocols::LocalBlockHash,
+    protocols::{ExternalSequenceBlockHash, LocalBlockHash},
+    nested_map::LevelIndex,
 };
 use std::time::{Duration, Instant};
 
@@ -32,7 +33,7 @@ use std::time::{Duration, Instant};
 enum KvIndex {
     Tree(RadixTree),
     Concurrent(ConcurrentRadixTree),
-    Nested(PositionalIndexer),
+    Nested(PositionalIndexer, FxHashMap<ExternalSequenceBlockHash, LevelIndex>),
 }
 
 impl KvIndex {
@@ -40,7 +41,7 @@ impl KvIndex {
         match self {
             KvIndex::Tree(_) => "RadixTree",
             KvIndex::Concurrent(_) => "ConcurrentRadixTree",
-            KvIndex::Nested(_) => "PositionalIndexer",
+            KvIndex::Nested(_, _) => "PositionalIndexer",
         }
     }
 
@@ -52,8 +53,8 @@ impl KvIndex {
             KvIndex::Concurrent(tree) => {
                 let _ = tree.apply_event(event);
             }
-            KvIndex::Nested(map) => {
-                let _ = map.apply_event(event).ok();
+            KvIndex::Nested(map, index) => {
+                let _ = map.apply_event(index, event).ok();
             }
         }
     }
@@ -64,7 +65,7 @@ impl KvIndex {
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(local_hashes, early_exit),
             KvIndex::Concurrent(tree) => tree.find_matches_impl(&local_hashes, early_exit),
-            KvIndex::Nested(map) => map.find_matches(&local_hashes, early_exit),
+            KvIndex::Nested(map, _) => map.find_matches(&local_hashes, early_exit),
         };
         start.elapsed()
     }
