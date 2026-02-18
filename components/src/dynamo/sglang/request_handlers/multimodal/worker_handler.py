@@ -154,14 +154,21 @@ class StreamProcessor:
             async for res in stream_source:
                 try:
                     # With stream_output=True, output_ids contains only new tokens (disjoint)
+                    output_ids = res.get("output_ids", [])
+                    finish_reason = res.get("meta_info", {}).get("finish_reason")
+
+                    # Empty, non-final chunks can happen during scheduler idle ticks.
+                    # Keep waiting for the next chunk.
+                    if not output_ids and not finish_reason:
+                        continue
+
                     output = {
-                        "token_ids": res["output_ids"],
+                        "token_ids": output_ids,
                         "text": res.get("text", ""),
                         "finished": False,
                     }
 
                     # Check for finish reason
-                    finish_reason = res.get("meta_info", {}).get("finish_reason")
                     if finish_reason:
                         output.update(
                             {
