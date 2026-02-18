@@ -174,6 +174,11 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
       run: |
 
+        # If explicit AWS credentials were not provided, unset the empty env vars so
+        # the AWS CLI falls through to ambient auth (e.g. IRSA on EKS runners).
+        [ -z "$AWS_ACCESS_KEY_ID" ] && unset AWS_ACCESS_KEY_ID
+        [ -z "$AWS_SECRET_ACCESS_KEY" ] && unset AWS_SECRET_ACCESS_KEY
+
         # Create metrics directory
         mkdir -p build-metrics
 
