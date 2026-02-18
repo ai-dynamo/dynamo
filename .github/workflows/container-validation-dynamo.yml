@@ -51,7 +51,7 @@ jobs:
   build-test:
     needs: changed-files
     if: needs.changed-files.outputs.core == 'true'
-    runs-on: prod-default-v2
+    runs-on: prod-builder-v3
     name: Build and Test - dynamo
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_dynamo
@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: |
           echo "Generating Dockerfile for target: dev and framework: dynamo"
-          python3 ./container/render.py \
+          python ./container/render.py \
               --target=dev \
               --framework=dynamo \
               --platform=amd64 \
