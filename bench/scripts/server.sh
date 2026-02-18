@@ -189,7 +189,7 @@ echo "[server.sh] Log dir: $LOG_DIR"
 # ---------------------------------------------------------------------------
 echo "[server.sh] Installing mounted dynamo from /workspace ..."
 (
-    cd /workspace/lib/bindings/python && maturin develop --uv
+    cd /workspace/lib/bindings/python && maturin develop --release --uv
     cd /workspace && uv pip install -e .
 )
 echo "[server.sh] Dynamo install complete."
