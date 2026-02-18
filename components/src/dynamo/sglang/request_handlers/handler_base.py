@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import logging
 import random
 import socket
@@ -138,6 +139,15 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             if not self.skip_tokenizer_init
             else None
         )
+
+        self._engine_supports_priority = (
+            "priority" in inspect.signature(engine.async_generate).parameters
+        )
+
+    def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
+        if priority is not None and self._engine_supports_priority:
+            return {"priority": priority}
+        return {}
 
     async def release_memory_occupation(self, body: dict) -> dict:
         """Release GPU memory occupation and unregister from discovery.

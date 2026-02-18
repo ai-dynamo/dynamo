@@ -180,6 +180,14 @@ pub struct AgentHints {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speculative_prefill: Option<bool>,
+
+    /// Backend engine scheduling priority.
+    /// Forwarded to the engine's generate call for queue ordering, KV cache eviction,
+    /// and preemption decisions. Interpretation is backend-specific:
+    /// vLLM uses lower-is-higher, SGLang uses higher-is-higher (configurable).
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 impl Default for NvExt {
