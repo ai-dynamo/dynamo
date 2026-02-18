@@ -262,9 +262,14 @@ type DynamoGraphDeploymentRequestStatus struct {
 // The spec becomes immutable once profiling starts. Users must delete and recreate
 // the DGDR to modify configuration after this point.
 //
+// DEPRECATION NOTICE: v1alpha1 DynamoGraphDeploymentRequest is deprecated.
+// Please migrate to nvidia.com/v1beta1 DynamoGraphDeploymentRequest.
+// v1alpha1 will be removed in a future release.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgdr
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeploymentRequest is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentRequest"
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.status.backend`
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`

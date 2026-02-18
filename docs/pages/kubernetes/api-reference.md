@@ -432,6 +432,10 @@ Lifecycle:
 The spec becomes immutable once profiling starts. Users must delete and recreate
 the DGDR to modify configuration after this point.
 
+DEPRECATION NOTICE: v1alpha1 DynamoGraphDeploymentRequest is deprecated.
+Please migrate to nvidia.com/v1beta1 DynamoGraphDeploymentRequest.
+v1alpha1 will be removed in a future release.
+
 
 
 
@@ -1325,7 +1329,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `planner` _[PlannerSpec](#plannerspec)_ | Planner configures the SLA planner for autoscaling in the generated DGD. |  | Optional: \{\} <br /> |
-| `kvRouter` _boolean_ | KVRouter enables KV-cache-aware routing in the generated DGD. |  | Optional: \{\} <br /> |
+| `kvRouter` _[KVRouterSpec](#kvrouterspec)_ | KVRouter configures KV-cache-aware routing in the generated DGD. |  | Optional: \{\} <br /> |
 | `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
 
 
@@ -1349,6 +1353,22 @@ _Appears in:_
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
 | `minNumGpusPerEngine` _integer_ | MinNumGPUsPerEngine is the minimum number of GPUs per engine for profiling search space. |  | Optional: \{\} <br /> |
 | `maxNumGpusPerEngine` _integer_ | MaxNumGPUsPerEngine is the maximum number of GPUs per engine for profiling search space. |  | Optional: \{\} <br /> |
+
+
+#### KVRouterSpec
+
+
+
+KVRouterSpec configures KV-cache-aware routing.
+
+
+
+_Appears in:_
+- [FeaturesSpec](#featuresspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.<br />KV routing optimizes request scheduling based on KV cache locality. |  | Optional: \{\} <br /> |
 
 
 #### MockerSpec

@@ -48,6 +48,8 @@ spec:
         - jsonPath: .metadata.creationTimestamp
           name: Age
           type: date
+      deprecated: true
+      deprecationWarning: nvidia.com/v1alpha1 DynamoGraphDeploymentRequest is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentRequest
       name: v1alpha1
       schema:
         openAPIV3Schema:
@@ -66,6 +68,10 @@ spec:
 
             The spec becomes immutable once profiling starts. Users must delete and recreate
             the DGDR to modify configuration after this point.
+
+            DEPRECATION NOTICE: v1alpha1 DynamoGraphDeploymentRequest is deprecated.
+            Please migrate to nvidia.com/v1beta1 DynamoGraphDeploymentRequest.
+            v1alpha1 will be removed in a future release.
           properties:
             apiVersion:
               description: |-
@@ -544,8 +550,14 @@ spec:
                   description: Features controls optional Dynamo platform features in the generated deployment.
                   properties:
                     kvRouter:
-                      description: KVRouter enables KV-cache-aware routing in the generated DGD.
-                      type: boolean
+                      description: KVRouter configures KV-cache-aware routing in the generated DGD.
+                      properties:
+                        enabled:
+                          description: |-
+                            Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.
+                            KV routing optimizes request scheduling based on KV cache locality.
+                          type: boolean
+                      type: object
                     mocker:
                       description: Mocker configures the simulated (mocker) backend for testing without GPUs.
                       properties:

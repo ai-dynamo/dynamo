@@ -28,11 +28,11 @@
 //
 //	v1alpha1                                   v1beta1
 //	──────────────────────────────────────────  ──────────────────────────────────────
-//	Spec.Model              (string)           Spec.Model.ModelName          (string)
-//	Spec.Backend            (string)           Spec.Backend.Backend      (BackendType)
+//	Spec.Model              (string)           Spec.Model                    (string)
+//	Spec.Backend            (string)           Spec.Backend              (BackendType)
 //	Spec.AutoApply          (bool)             Spec.AutoApply                  (bool)
 //	Spec.UseMocker          (bool)             Spec.Features.Mocker.Enabled    (bool)
-//	Spec.DeploymentOverrides.WorkersImage      Spec.Backend.DynamoImage      (string)
+//	Spec.DeploymentOverrides.WorkersImage      Spec.Image                    (string)
 //
 // JSON blob → structured fields (parsed/reconstructed on each trip):
 //
@@ -42,9 +42,9 @@
 //	sla.itl                                    Spec.SLA.ITL              (*float64)
 //	sla.isl                                    Spec.Workload.ISL           (*int32)
 //	sla.osl                                    Spec.Workload.OSL           (*int32)
-//	deployment.modelCache.pvcName              Spec.Model.ModelCache.PVCName
-//	deployment.modelCache.modelPathInPvc       Spec.Model.ModelCache.ModelPathInPVC
-//	deployment.modelCache.pvcMountPath         Spec.Model.ModelCache.PVCMountPath
+//	deployment.modelCache.pvcName              Spec.ModelCache.PVCName       (string)
+//	deployment.modelCache.modelPathInPvc       Spec.ModelCache.PVCModelPath  (string)
+//	deployment.modelCache.pvcMountPath         Spec.ModelCache.PVCMountPath  (string)
 //
 // The full JSON blob is also preserved as the annotation
 // nvidia.com/dgdr-profiling-config so that unknown keys survive the round-trip.
@@ -64,7 +64,7 @@
 //
 //	v1alpha1 field                             Annotation key
 //	──────────────────────────────────────────  ──────────────────────────────────────
-//	Spec.EnableGpuDiscovery                    nvidia.com/dgdr-enable-gpu-discovery
+//	Spec.EnableGPUDiscovery                    nvidia.com/dgdr-enable-gpu-discovery
 //	Spec.ProfilingConfig.ProfilerImage         nvidia.com/dgdr-profiler-image
 //	Spec.ProfilingConfig.ConfigMapRef          nvidia.com/dgdr-config-map-ref
 //	Spec.ProfilingConfig.OutputPVC             nvidia.com/dgdr-output-pvc
@@ -212,22 +212,17 @@ func setAnnotation(obj *v1beta1.DynamoGraphDeploymentRequest, key, value string)
 // convertDGDRSpecTo converts the v1alpha1 Spec into the v1beta1 Spec.
 func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, dstObj *v1beta1.DynamoGraphDeploymentRequest) {
 	// --- Simple fields ---
-	dst.Model.ModelName = src.Model
+	dst.Model = src.Model
 	dst.AutoApply = src.AutoApply
 
 	// Backend
 	if src.Backend != "" {
-		dst.Backend = &v1beta1.BackendSpec{
-			Backend: v1beta1.BackendType(src.Backend),
-		}
+		dst.Backend = v1beta1.BackendType(src.Backend)
 	}
 
-	// WorkersImage → Backend.DynamoImage
+	// WorkersImage → Image
 	if src.DeploymentOverrides != nil && src.DeploymentOverrides.WorkersImage != "" {
-		if dst.Backend == nil {
-			dst.Backend = &v1beta1.BackendSpec{}
-		}
-		dst.Backend.DynamoImage = src.DeploymentOverrides.WorkersImage
+		dst.Image = src.DeploymentOverrides.WorkersImage
 	}
 
 	// UseMocker → Features.Mocker.Enabled
@@ -238,8 +233,8 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 		dst.Features.Mocker = &v1beta1.MockerSpec{Enabled: true}
 	}
 
-	// EnableGpuDiscovery — no v1beta1 field; store as annotation
-	if src.EnableGpuDiscovery {
+	// EnableGPUDiscovery — no v1beta1 field; store as annotation
+	if src.EnableGPUDiscovery != nil && *src.EnableGPUDiscovery {
 		setAnnotation(dstObj, annDGDREnableGPUDisc, "true")
 	}
 
@@ -292,12 +287,12 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 								mc.PVCName = v
 							}
 							if v, ok := mcMap["modelPathInPvc"].(string); ok {
-								mc.ModelPathInPVC = v
+								mc.PVCModelPath = v
 							}
 							if v, ok := mcMap["pvcMountPath"].(string); ok {
 								mc.PVCMountPath = v
 							}
-							dst.Model.ModelCache = mc
+							dst.ModelCache = mc
 						}
 					}
 				}
@@ -377,12 +372,12 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 // convertDGDRSpecFrom converts the v1beta1 Spec back into the v1alpha1 Spec.
 func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec, srcObj *v1beta1.DynamoGraphDeploymentRequest) {
 	// --- Simple fields ---
-	dst.Model = src.Model.ModelName
+	dst.Model = src.Model
 	dst.AutoApply = src.AutoApply
 
 	// Backend
-	if src.Backend != nil {
-		dst.Backend = string(src.Backend.Backend)
+	if src.Backend != "" {
+		dst.Backend = string(src.Backend)
 	}
 
 	// UseMocker
@@ -390,10 +385,11 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 		dst.UseMocker = src.Features.Mocker.Enabled
 	}
 
-	// EnableGpuDiscovery from annotation
+	// EnableGPUDiscovery from annotation
 	if srcObj.Annotations != nil {
 		if v, ok := srcObj.Annotations[annDGDREnableGPUDisc]; ok && v == "true" {
-			dst.EnableGpuDiscovery = true
+			trueVal := true
+			dst.EnableGPUDiscovery = &trueVal
 		}
 	}
 
@@ -435,7 +431,7 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 	}
 
 	// ModelCache into blob.deployment.modelCache
-	if src.Model.ModelCache != nil {
+	if src.ModelCache != nil {
 		if blob == nil {
 			blob = make(map[string]interface{})
 		}
@@ -444,14 +440,14 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 			deployMap = make(map[string]interface{})
 		}
 		mcMap := make(map[string]interface{})
-		if src.Model.ModelCache.PVCName != "" {
-			mcMap["pvcName"] = src.Model.ModelCache.PVCName
+		if src.ModelCache.PVCName != "" {
+			mcMap["pvcName"] = src.ModelCache.PVCName
 		}
-		if src.Model.ModelCache.ModelPathInPVC != "" {
-			mcMap["modelPathInPvc"] = src.Model.ModelCache.ModelPathInPVC
+		if src.ModelCache.PVCModelPath != "" {
+			mcMap["modelPathInPvc"] = src.ModelCache.PVCModelPath
 		}
-		if src.Model.ModelCache.PVCMountPath != "" {
-			mcMap["pvcMountPath"] = src.Model.ModelCache.PVCMountPath
+		if src.ModelCache.PVCMountPath != "" {
+			mcMap["pvcMountPath"] = src.ModelCache.PVCMountPath
 		}
 		if len(mcMap) > 0 {
 			deployMap["modelCache"] = mcMap
@@ -504,7 +500,7 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 		}
 	}
 
-	// DeploymentOverrides from annotation + Backend.DynamoImage
+	// DeploymentOverrides from annotation + Image
 	if srcObj.Annotations != nil {
 		if v, ok := srcObj.Annotations[annDGDRDeployOverrides]; ok && v != "" {
 			var overrides struct {
@@ -524,11 +520,11 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 			}
 		}
 	}
-	if src.Backend != nil && src.Backend.DynamoImage != "" {
+	if src.Image != "" {
 		if dst.DeploymentOverrides == nil {
 			dst.DeploymentOverrides = &DeploymentOverridesSpec{}
 		}
-		dst.DeploymentOverrides.WorkersImage = src.Backend.DynamoImage
+		dst.DeploymentOverrides.WorkersImage = src.Image
 	}
 }
 
