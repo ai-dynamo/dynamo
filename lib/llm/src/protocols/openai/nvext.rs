@@ -201,7 +201,7 @@ pub struct AgentHints {
 pub struct CacheControl {
     #[serde(rename = "type")]
     pub control_type: CacheControlType,
-    /// TTL string: "5m", "30m", "1h". Default 300s (5m) when None.
+    /// TTL string: "5m" or "1h". Default 300s (5m) when None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
 }
@@ -215,29 +215,16 @@ pub enum CacheControlType {
 
 impl CacheControl {
     /// Parse TTL string to seconds.
-    /// - None   -> 300  (5 minutes, Anthropic default)
-    /// - "5m"   -> 300
-    /// - "30m"  -> 1800
-    /// - "1h"   -> 3600
-    /// - "<N>s" -> N
+    /// - None  -> 300 (5 minutes, Anthropic default)
+    /// - "5m"  -> 300
+    /// - "1h"  -> 3600
     pub fn ttl_seconds(&self) -> u64 {
         match self.ttl.as_deref() {
-            None => 300,
-            Some("5m") => 300,
-            Some("30m") => 1800,
+            None | Some("5m") => 300,
             Some("1h") => 3600,
             Some(other) => {
-                // Try parsing "<N>s" format
-                if let Some(s) = other.strip_suffix('s') {
-                    s.parse::<u64>().unwrap_or(300)
-                } else if let Some(m) = other.strip_suffix('m') {
-                    m.parse::<u64>().map(|v| v * 60).unwrap_or(300)
-                } else if let Some(h) = other.strip_suffix('h') {
-                    h.parse::<u64>().map(|v| v * 3600).unwrap_or(300)
-                } else {
-                    tracing::warn!("Unrecognized TTL format '{}', defaulting to 300s", other);
-                    300
-                }
+                tracing::warn!("Unrecognized TTL '{}', defaulting to 300s", other);
+                300
             }
         }
     }
@@ -309,23 +296,11 @@ mod tests {
         };
         assert_eq!(cc_5m.ttl_seconds(), 300);
 
-        let cc_30m = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("30m".to_string()),
-        };
-        assert_eq!(cc_30m.ttl_seconds(), 1800);
-
         let cc_1h = CacheControl {
             control_type: CacheControlType::Ephemeral,
             ttl: Some("1h".to_string()),
         };
         assert_eq!(cc_1h.ttl_seconds(), 3600);
-
-        let cc_60s = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("60s".to_string()),
-        };
-        assert_eq!(cc_60s.ttl_seconds(), 60);
 
         // Serde roundtrip
         let json = serde_json::to_string(&cc_5m).unwrap();
@@ -333,9 +308,9 @@ mod tests {
         assert_eq!(deser, cc_5m);
 
         // Deserialize from API-style JSON
-        let api_json = r#"{"type": "ephemeral", "ttl": "30m"}"#;
+        let api_json = r#"{"type": "ephemeral", "ttl": "1h"}"#;
         let from_api: CacheControl = serde_json::from_str(api_json).unwrap();
-        assert_eq!(from_api.ttl_seconds(), 1800);
+        assert_eq!(from_api.ttl_seconds(), 3600);
 
         // NvExt with cache_control
         let nvext_json = r#"{"cache_control": {"type": "ephemeral", "ttl": "5m"}}"#;

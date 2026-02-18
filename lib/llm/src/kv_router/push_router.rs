@@ -63,6 +63,15 @@ struct RequestGuard {
     isl_tokens: usize,
     block_size: usize,
     expected_output_tokens: Option<u32>,
+    // PIN state: set when cache_control TTL is present and a cc_client exists
+    pin_state: Option<PinState>,
+}
+
+struct PinState {
+    token_ids: Vec<u32>,
+    cc_client: CacheControlClient,
+    instance_id: u64,
+    ttl_seconds: u64,
 }
 
 impl RequestGuard {
@@ -139,6 +148,16 @@ impl RequestGuard {
             tracing::warn!("Failed to free request {}: {e}", self.context_id);
         }
         self.freed = true;
+
+        if let Some(ref pin) = self.pin_state {
+            spawn_pin_prefix(
+                Some(&pin.cc_client),
+                &pin.token_ids,
+                pin.instance_id,
+                &self.context_id,
+                pin.ttl_seconds,
+            );
+        }
     }
 
     fn record_metrics(&mut self) {
@@ -425,10 +444,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
-        // Extract cache_control TTL before consuming the request
-        let cache_control_ttl = request.routing.as_ref().and_then(|r| r.cache_control_ttl);
-        let token_ids_for_pin = cache_control_ttl.map(|_| request.token_ids.clone());
-        let cc_client = cache_control_ttl.and_then(|_| self.cache_control_client.clone());
+        // Extract pin state: only clone token_ids when both TTL and client exist
+        let pin_state = match (
+            request.routing.as_ref().and_then(|r| r.cache_control_ttl),
+            &self.cache_control_client,
+        ) {
+            (Some(ttl), Some(client)) => Some(PinState {
+                token_ids: request.token_ids.clone(),
+                cc_client: client.clone(),
+                instance_id,
+                ttl_seconds: ttl,
+            }),
+            _ => None,
+        };
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
@@ -471,6 +499,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 isl_tokens,
                 block_size,
                 expected_output_tokens,
+                pin_state,
             };
 
             loop {
@@ -493,18 +522,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
 
             guard.finish().await;
-
-            // After stream completion, if pin hint was set, fire-and-forget pin_prefix
-            // to the worker. This runs after all response tokens have been yielded.
-            // TODO: Track whether the stream ended naturally vs via cancellation
-            // (context_for_monitoring.stopped()). Pinning after cancellation is wrong
-            // because the prefix may be incomplete on the worker. Add a
-            // `generation_completed` bool, set it on natural stream end, and gate
-            // the PIN call on it.
-            if let Some(ref token_ids) = token_ids_for_pin {
-                spawn_pin_prefix(cc_client.as_ref(), token_ids, instance_id, &context_id,
-                                 cache_control_ttl.unwrap_or(300));
-            }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }

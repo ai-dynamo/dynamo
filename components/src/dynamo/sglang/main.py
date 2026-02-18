@@ -291,7 +291,14 @@ async def init(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    # Only register cache_control endpoint when HiCache is enabled
+    # Gate cache_control endpoint: requires HiCache and aggregated mode.
+    # In disaggregated P/D, decode workers use ChunkCache (no prefix tree) and
+    # prefill workers need the router to address them directly for PIN -- not yet
+    # supported. TODO: Add disaggregated cache_control support in a follow-up PR.
+    enable_cache_control = (
+        server_args.enable_hierarchical_cache
+        and config.serving_mode == DisaggregationMode.AGGREGATED
+    )
     serve_tasks = [
         generate_endpoint.serve_endpoint(
             handler.generate,
@@ -300,7 +307,7 @@ async def init(
             health_check_payload=health_check_payload,
         ),
     ]
-    if server_args.enable_hierarchical_cache:
+    if enable_cache_control:
         cache_control_endpoint = component.endpoint("cache_control")
         serve_tasks.append(
             cache_control_endpoint.serve_endpoint(
@@ -382,7 +389,9 @@ async def init_prefill(
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    # Only register cache_control endpoint when HiCache is enabled
+    # TODO: cache_control not yet supported in disaggregated mode.
+    # The prefill worker has HiRadixCache but the router currently PINs the
+    # decode worker (which it routes to). Follow-up PR will address this.
     serve_tasks = [
         generate_endpoint.serve_endpoint(
             handler.generate,
@@ -391,15 +400,6 @@ async def init_prefill(
             health_check_payload=health_check_payload,
         ),
     ]
-    if server_args.enable_hierarchical_cache:
-        cache_control_endpoint = component.endpoint("cache_control")
-        serve_tasks.append(
-            cache_control_endpoint.serve_endpoint(
-                handler.cache_control,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-            )
-        )
 
     try:
         # Start endpoint immediately and register model concurrently
