@@ -232,9 +232,9 @@ def _initialize_gpu_counts(
     # Use CLI flags (virtual mode, or K8s fallback when DGD lacks GPU resources)
     errors = []
     if require_prefill and config.prefill_engine_num_gpu is None:
-        errors.append("Missing --prefill-engine-num-gpu flag")
+        errors.append("Missing prefill_engine_num_gpu in config")
     if require_decode and config.decode_engine_num_gpu is None:
-        errors.append("Missing --decode-engine-num-gpu flag")
+        errors.append("Missing decode_engine_num_gpu in config")
     if errors:
         raise DeploymentValidationError(errors)
     logger.info(
@@ -432,7 +432,7 @@ class BasePlanner:
                         raise ValueError(
                             "Could not auto-discover frontend metrics URL from DGD. "
                             "No service with componentType 'frontend' found. "
-                            "Please provide --loadbased-router-metrics-url explicitly."
+                            "Please set loadbased_router_metrics_url in the config."
                         )
                     else:
                         logger.info(
@@ -952,7 +952,7 @@ class BasePlanner:
             if not model_name:
                 raise ValueError(
                     "Model name is required in no-operation mode. "
-                    "Please provide --model-name."
+                    "Please set model_name in the config."
                 )
             self.model_name = model_name.lower()
 

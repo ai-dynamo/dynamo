@@ -49,10 +49,12 @@ class AggPlanner:
         if config.enable_throughput_scaling:
             raise ValueError(
                 "Aggregated planner only supports load-based scaling. "
-                "Please use --disable-throughput-scaling or do not set --enable-throughput-scaling."
+                "Set enable_throughput_scaling to false in the config."
             )
         if not config.enable_loadbased_scaling:
-            raise ValueError("Aggregated planner requires --enable-loadbased-scaling.")
+            raise ValueError(
+                "Aggregated planner requires enable_loadbased_scaling to be true."
+            )
 
         prometheus_metrics = PlannerPrometheusMetrics()
 
@@ -116,7 +118,7 @@ class AggPlanner:
             if not model_name:
                 raise ValueError(
                     "Model name is required in no-operation mode. "
-                    "Please provide --model-name."
+                    "Please set model_name in the config."
                 )
             self.planner.model_name = model_name.lower()
 

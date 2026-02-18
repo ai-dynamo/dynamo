@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 from typing import Literal, Optional
 
+import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from dynamo.planner.defaults import SLAPlannerDefaults
@@ -183,13 +184,6 @@ class PlannerConfig(BaseModel):
         text = path.read_text()
 
         if suffix in (".yaml", ".yml"):
-            try:
-                import yaml
-            except ImportError as e:
-                raise ImportError(
-                    "PyYAML is required to load YAML config files. "
-                    "Install it with: pip install pyyaml"
-                ) from e
             data = yaml.safe_load(text)
         elif suffix == ".json":
             data = json.loads(text)
@@ -199,8 +193,6 @@ class PlannerConfig(BaseModel):
                 data = json.loads(text)
             except json.JSONDecodeError:
                 try:
-                    import yaml
-
                     data = yaml.safe_load(text)
                 except ImportError:
                     raise ValueError(

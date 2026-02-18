@@ -93,7 +93,7 @@ class DisaggPlanner:
             if not model_name:
                 raise ValueError(
                     "Model name is required in no-operation mode. "
-                    "Please provide --model-name."
+                    "Please set model_name in the config."
                 )
             model_name = model_name.lower()
         self.prefill_planner.model_name = model_name
