@@ -21,7 +21,7 @@
 //! `KvIndexerInterface` with sticky event routing and worker threads, wrap it
 //! in a `ThreadPoolIndexer`.
 use dashmap::DashMap;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::RwLock;
 
 use crate::indexer::SyncIndexer;
@@ -37,15 +37,15 @@ use crate::protocols::{
 #[derive(Debug, Clone)]
 enum SeqEntry {
     /// Single seq_hash -> workers mapping (common case, no HashMap allocation)
-    Single(ExternalSequenceBlockHash, HashSet<WorkerWithDpRank>),
+    Single(ExternalSequenceBlockHash, FxHashSet<WorkerWithDpRank>),
     /// Multiple seq_hash -> workers mappings (rare case, different prefixes)
-    Multi(HashMap<ExternalSequenceBlockHash, HashSet<WorkerWithDpRank>>),
+    Multi(FxHashMap<ExternalSequenceBlockHash, FxHashSet<WorkerWithDpRank>>),
 }
 
 impl SeqEntry {
     /// Create a new entry with a single worker.
     fn new(seq_hash: ExternalSequenceBlockHash, worker: WorkerWithDpRank) -> Self {
-        let mut workers = HashSet::new();
+        let mut workers = FxHashSet::default();
         workers.insert(worker);
         Self::Single(seq_hash, workers)
     }
@@ -58,7 +58,7 @@ impl SeqEntry {
             }
             Self::Single(existing_hash, existing_workers) => {
                 // Upgrade to Multi
-                let mut map = HashMap::with_capacity(2);
+                let mut map = FxHashMap::with_capacity_and_hasher(2, FxBuildHasher);
                 map.insert(*existing_hash, std::mem::take(existing_workers));
                 map.entry(seq_hash).or_default().insert(worker);
                 *self = Self::Multi(map);
@@ -91,7 +91,7 @@ impl SeqEntry {
     }
 
     /// Get workers for a specific seq_hash.
-    fn get(&self, seq_hash: ExternalSequenceBlockHash) -> Option<&HashSet<WorkerWithDpRank>> {
+    fn get(&self, seq_hash: ExternalSequenceBlockHash) -> Option<&FxHashSet<WorkerWithDpRank>> {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => Some(workers),
             Self::Single(_, _) => None,
@@ -100,17 +100,17 @@ impl SeqEntry {
     }
 }
 
-type LevelIndex = RwLock<HashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>>;
+type LevelIndex = RwLock<FxHashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>>;
 
 /// Positional HashMap-based KV cache index.
 ///
 /// Implements [`SyncIndexer`] for use with [`ThreadPoolIndexer`](crate::indexer::ThreadPoolIndexer).
 /// All methods are synchronous and thread-safe.
 pub struct PositionalIndexer {
-    index: DashMap<(usize, LocalBlockHash), SeqEntry>,
+    index: DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
     /// Per-worker reverse lookup: worker -> seq_hash -> (position, local_hash)
     /// Enables efficient remove operations without global flat reverse map.
-    worker_blocks: DashMap<WorkerWithDpRank, LevelIndex>,
+    worker_blocks: DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
 
     jump_size: usize,
 }
@@ -126,8 +126,8 @@ impl PositionalIndexer {
         assert!(jump_size > 0, "jump_size must be greater than 0");
 
         Self {
-            index: DashMap::new(),
-            worker_blocks: DashMap::new(),
+            index: DashMap::with_hasher(FxBuildHasher),
+            worker_blocks: DashMap::with_hasher(FxBuildHasher),
             jump_size,
         }
     }
@@ -172,7 +172,8 @@ impl SyncIndexer for PositionalIndexer {
             blocks.sort_unstable_by_key(|(pos, _, _)| *pos);
 
             // Track one valid seq_hash per position for parent_hash synthesis.
-            let mut last_at_position: HashMap<usize, ExternalSequenceBlockHash> = HashMap::new();
+            let mut last_at_position: FxHashMap<usize, ExternalSequenceBlockHash> =
+                FxHashMap::default();
 
             for (pos, local_hash, seq_hash) in blocks {
                 let parent_hash = if pos == 0 {
@@ -224,8 +225,8 @@ impl PositionalIndexer {
     /// Process an event using the provided index and worker_blocks.
     /// This is called from worker threads.
     fn apply_event_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         event: RouterEvent,
     ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
@@ -263,8 +264,8 @@ impl PositionalIndexer {
     }
 
     fn store_blocks_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         worker: WorkerWithDpRank,
         store_data: KvCacheStoreData,
         event_id: u64,
@@ -302,7 +303,7 @@ impl PositionalIndexer {
         };
 
         if !worker_blocks.contains_key(&worker) {
-            worker_blocks.insert(worker, RwLock::new(HashMap::new()));
+            worker_blocks.insert(worker, RwLock::new(FxHashMap::default()));
         }
 
         let worker_blocks_entry = worker_blocks.get(&worker).unwrap();
@@ -326,8 +327,8 @@ impl PositionalIndexer {
     }
 
     fn remove_blocks_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         worker: WorkerWithDpRank,
         seq_hashes: &Vec<ExternalSequenceBlockHash>,
         event_id: u64,
@@ -369,8 +370,8 @@ impl PositionalIndexer {
     /// Clear all blocks for a specific worker_id (all dp_ranks), but keep worker tracked.
     /// Static version for use in worker threads.
     fn clear_worker_blocks_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         worker_id: WorkerId,
     ) {
         Self::remove_or_clear_worker_blocks_impl(index, worker_blocks, worker_id, true);
@@ -399,8 +400,8 @@ impl PositionalIndexer {
     /// If `keep_worker` is true, the worker remains tracked with empty blocks.
     /// If `keep_worker` is false, the worker is completely removed.
     fn remove_or_clear_worker_blocks_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry>,
-        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex>,
+        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         worker_id: WorkerId,
         keep_worker: bool,
     ) {
@@ -426,7 +427,7 @@ impl PositionalIndexer {
 
             if keep_worker {
                 // Re-insert worker with empty map to keep it tracked
-                worker_blocks.insert(worker, RwLock::new(HashMap::new()));
+                worker_blocks.insert(worker, RwLock::new(FxHashMap::default()));
             }
         }
     }
@@ -481,7 +482,7 @@ impl PositionalIndexer {
         local_hash: LocalBlockHash,
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
         sequence: &[LocalBlockHash],
-    ) -> Option<HashSet<WorkerWithDpRank>> {
+    ) -> Option<FxHashSet<WorkerWithDpRank>> {
         let entry = self.index.get(&(position, local_hash))?;
 
         // Always compute and verify seq_hash to handle divergent queries correctly.
@@ -517,13 +518,13 @@ impl PositionalIndexer {
     /// Scan positions sequentially, updating active set and recording drain scores.
     ///
     /// Inlines the DashMap lookup so the guard lives for each iteration,
-    /// avoiding a per-position `HashSet` clone.
+    /// avoiding a per-position `FxHashSet` clone.
     #[allow(clippy::too_many_arguments)]
     fn linear_scan_drain(
         &self,
         sequence: &[LocalBlockHash],
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
-        active: &mut HashSet<WorkerWithDpRank>,
+        active: &mut FxHashSet<WorkerWithDpRank>,
         scores: &mut OverlapScores,
         lo: usize,
         hi: usize,
