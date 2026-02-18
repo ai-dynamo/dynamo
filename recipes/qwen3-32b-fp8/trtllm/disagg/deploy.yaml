@@ -230,6 +230,7 @@ spec:
       sharedMemory:
         size: 80Gi
       extraPodSpec:
+        hostIPC: true
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -290,6 +291,7 @@ spec:
       sharedMemory:
         size: 80Gi
       extraPodSpec:
+        hostIPC: true
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:

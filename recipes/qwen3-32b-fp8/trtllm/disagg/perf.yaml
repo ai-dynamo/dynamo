@@ -23,6 +23,10 @@ spec:
                     values:
                       - qwen3-32b-fp8-disagg
               topologyKey: kubernetes.io/hostname
+      tolerations:
+      - key: "dynamo/testing"
+        operator: "Exists"
+        effect: "NoSchedule"
       containers:
       - command:
         - /bin/sh
@@ -149,5 +153,4 @@ spec:
       restartPolicy: Never
       volumes:
       - name: model-cache
-        persistentVolumeClaim:
-          claimName: model-cache
+        emptyDir: {}
