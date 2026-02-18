@@ -149,7 +149,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY . /workspace/
 
 # Copy attribution files
-COPY ATTRIBUTION* LICENSE /workspace/
+COPY ATTRIBUTIONS/ /workspace/ATTRIBUTIONS/
+COPY LICENSE /workspace/
 
 # Setup entrypoint
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

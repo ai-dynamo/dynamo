@@ -37,8 +37,7 @@ CODEOWNERS @ai-dynamo/Devops
 /recipes/ @ai-dynamo/python-codeowners @ai-dynamo/Devops @ai-dynamo/dynamo-deploy-codeowners
 
 # Legal
-/ATTRIBUTIONS-Rust.md @ai-dynamo/Devops
-/ATTRIBUTIONS.md @ai-dynamo/Devops
+/ATTRIBUTIONS/ @ai-dynamo/Devops
 /CODE_OF_CONDUCT.md @ai-dynamo/Devops
 /CONTRIBUTING.md @ai-dynamo/Devops
 /LICENSE @ai-dynamo/Devops

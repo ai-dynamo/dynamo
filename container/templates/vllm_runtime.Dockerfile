@@ -177,7 +177,8 @@ $LD_LIBRARY_PATH
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
 # Copy attribution files
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo:0 ATTRIBUTIONS/ /workspace/ATTRIBUTIONS/
+COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 

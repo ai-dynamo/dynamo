@@ -55,7 +55,8 @@ COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: components/ /workspace/components/
 COPY --chown=dynamo: recipes/ /workspace/recipes/
 # Copy attribution files with correct ownership
-COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+COPY --chown=dynamo: ATTRIBUTIONS/ /workspace/ATTRIBUTIONS/
+COPY --chown=dynamo: LICENSE /workspace/
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="/opt/dynamo/venv/bin:$PATH"
