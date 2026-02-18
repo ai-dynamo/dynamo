@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import os
 from unittest.mock import Mock, patch
 
@@ -9,7 +8,7 @@ import pytest
 
 from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.load_based_regression import LoadBasedRegressionModel
-from dynamo.planner.utils.planner_argparse import validate_sla_planner_args
+from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import PlannerSharedState
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.planner.utils.prometheus import CachedLoadMetrics, DirectRouterMetricsClient
@@ -228,42 +227,41 @@ def mock_prometheus_metrics():
         yield
 
 
-def _build_loadbased_args():
-    args = argparse.Namespace()
-    args.adjustment_interval = 60
-    args.prefill_engine_num_gpu = 1
-    args.decode_engine_num_gpu = 1
-    args.min_endpoint = 1
-    args.max_gpu_budget = -1
-    args.ttft = 500.0
-    args.itl = 50.0
-    args.backend = "vllm"
-    args.no_operation = True
-    args.no_correction = True
-    args.metric_pulling_prometheus_endpoint = "http://localhost:9090"
-    args.metric_reporting_prometheus_port = 0
-    args.load_predictor = "constant"
-    args.load_predictor_warmup_trace = None
-    args.profile_results_dir = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "profiling_results",
-        "H200_TP1P_TP1D",
+def _build_loadbased_config(**overrides) -> PlannerConfig:
+    defaults = dict(
+        throughput_adjustment_interval=60,
+        prefill_engine_num_gpu=1,
+        decode_engine_num_gpu=1,
+        min_endpoint=1,
+        max_gpu_budget=-1,
+        ttft=500.0,
+        itl=50.0,
+        backend="vllm",
+        no_operation=True,
+        no_correction=True,
+        metric_pulling_prometheus_endpoint="http://localhost:9090",
+        metric_reporting_prometheus_port=0,
+        load_predictor="constant",
+        profile_results_dir=os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "profiling_results",
+            "H200_TP1P_TP1D",
+        ),
+        environment="kubernetes",
+        namespace="test-namespace",
+        mode="disagg",
+        enable_loadbased_scaling=True,
+        enable_throughput_scaling=True,
+        loadbased_router_metrics_url="http://router:8000/metrics",
+        loadbased_adjustment_interval=5,
+        loadbased_learning_window=50,
+        loadbased_scaling_down_sensitivity=80,
+        loadbased_metric_samples=10,
+        loadbased_min_observations=5,
     )
-    args.environment = "kubernetes"
-    args.namespace = "test-namespace"
-    args.mode = "disagg"
-    # Load-based scaling config
-    args.enable_loadbased_scaling = True
-    args.enable_throughput_scaling = True
-    args.disable_throughput_scaling = False
-    args.loadbased_router_metrics_url = "http://router:8000/metrics"
-    args.loadbased_adjustment_interval = 5
-    args.loadbased_learning_window = 50
-    args.loadbased_scaling_down_sensitivity = 80
-    args.loadbased_metric_samples = 10
-    args.loadbased_min_observations = 5
-    return args
+    defaults.update(overrides)
+    return PlannerConfig.model_construct(**defaults)
 
 
 def _avg(per_worker: dict[str, dict[str, float]]) -> dict[str, float]:
@@ -280,11 +278,11 @@ def _avg(per_worker: dict[str, dict[str, float]]) -> dict[str, float]:
 class TestPrefillLoadBasedScaling:
     def test_scale_up_all_workers_above_target(self):
         """When all workers have active_prefill_tokens above the regression target, scale up."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         shared_state.num_p_workers = 2
 
-        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         # Feed regression data: TTFT = 0.1 * (active_prefill_tokens + ISL) + 100
@@ -317,12 +315,11 @@ class TestPrefillLoadBasedScaling:
 
     def test_scale_down_all_workers_below_boundary(self):
         """When all workers are below the scale-down boundary, scale down."""
-        args = _build_loadbased_args()
-        args.loadbased_scaling_down_sensitivity = 100  # max sensitivity
+        config = _build_loadbased_config(loadbased_scaling_down_sensitivity=100)
         shared_state = PlannerSharedState()
         shared_state.num_p_workers = 3
 
-        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         # Feed regression: TTFT = 0.1 * x + 100
@@ -360,11 +357,11 @@ class TestPrefillLoadBasedScaling:
 
     def test_no_change_mixed_workers(self):
         """When workers are mixed (some above, some below), no scaling."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         shared_state.num_p_workers = 2
 
-        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         for i in range(10):
@@ -394,11 +391,11 @@ class TestPrefillLoadBasedScaling:
 
     def test_cold_start_returns_none(self):
         """With insufficient data, loadbased_plan_adjustment returns None."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         shared_state.num_p_workers = 2
 
-        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         # Only 2 observations (min is 5)
@@ -423,11 +420,11 @@ class TestPrefillLoadBasedScaling:
 class TestDecodeLoadBasedScaling:
     def test_scale_up_all_workers_above_target(self):
         """When all workers have active_decode_blocks above x_sla, scale up."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         shared_state.num_d_workers = 2
 
-        planner = DecodePlanner(None, args, shared_state=shared_state)
+        planner = DecodePlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         # Feed regression: ITL = 0.5 * active_decode_blocks + 10
@@ -451,12 +448,11 @@ class TestDecodeLoadBasedScaling:
 
     def test_scale_down_all_workers_below_boundary(self):
         """When all decode workers are below boundary, scale down."""
-        args = _build_loadbased_args()
-        args.loadbased_scaling_down_sensitivity = 100
+        config = _build_loadbased_config(loadbased_scaling_down_sensitivity=100)
         shared_state = PlannerSharedState()
         shared_state.num_d_workers = 3
 
-        planner = DecodePlanner(None, args, shared_state=shared_state)
+        planner = DecodePlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         # ITL = 0.5 * x + 10, x_sla = (50-10)/0.5 = 80
@@ -481,11 +477,11 @@ class TestDecodeLoadBasedScaling:
 
     def test_cold_start_returns_none(self):
         """Decode cold start also returns None."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         shared_state.num_d_workers = 2
 
-        planner = DecodePlanner(None, args, shared_state=shared_state)
+        planner = DecodePlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         planner.itl_regression.add_observation(10.0, 15.0)
@@ -504,13 +500,13 @@ class TestDecodeLoadBasedScaling:
 class TestLowerBoundEnforcement:
     def test_throughput_lower_bound_respected(self):
         """Load-based scaling should never go below throughput lower bound."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         shared_state.num_p_workers = 5
         # Throughput says we need at least 4 prefill workers
         shared_state.throughput_lower_bound_p = 4
 
-        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         # Regression says we should scale down to 4 (from 5)
@@ -541,12 +537,11 @@ class TestLowerBoundEnforcement:
 
     def test_scaling_down_sensitivity_zero_never_scales_down(self):
         """With sensitivity=0, scale-down boundary is 0 so never scale down."""
-        args = _build_loadbased_args()
-        args.loadbased_scaling_down_sensitivity = 0
+        config = _build_loadbased_config(loadbased_scaling_down_sensitivity=0)
         shared_state = PlannerSharedState()
         shared_state.num_p_workers = 3
 
-        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         for i in range(10):
@@ -579,25 +574,32 @@ class TestLowerBoundEnforcement:
 class TestCorrectionFactorAutoDisable:
     def test_correction_factor_disabled_when_loadbased_enabled(self):
         """Correction factor should be auto-disabled when load-based scaling is on."""
-        args = _build_loadbased_args()
-        args.no_correction = False  # user didn't explicitly disable
-        validate_sla_planner_args(args)
-        assert args.no_correction is True
+        config = PlannerConfig(
+            enable_loadbased_scaling=True,
+            enable_throughput_scaling=True,
+            no_correction=False,
+            loadbased_router_metrics_url="http://router:8000/metrics",
+        )
+        assert config.no_correction is True
 
     def test_correction_factor_stays_disabled_if_already_set(self):
-        """If user already set --no-correction, no extra warning needed."""
-        args = _build_loadbased_args()
-        args.no_correction = True  # user explicitly set
-        validate_sla_planner_args(args)
-        assert args.no_correction is True
+        """If user already set no_correction, it stays True."""
+        config = PlannerConfig(
+            enable_loadbased_scaling=True,
+            enable_throughput_scaling=True,
+            no_correction=True,
+            loadbased_router_metrics_url="http://router:8000/metrics",
+        )
+        assert config.no_correction is True
 
     def test_correction_factor_not_disabled_without_loadbased(self):
         """Without load-based scaling, correction factor should respect user setting."""
-        args = _build_loadbased_args()
-        args.enable_loadbased_scaling = False
-        args.no_correction = False
-        validate_sla_planner_args(args)
-        assert args.no_correction is False
+        config = PlannerConfig(
+            enable_loadbased_scaling=False,
+            enable_throughput_scaling=True,
+            no_correction=False,
+        )
+        assert config.no_correction is False
 
 
 # ── DGD worker count reconciliation tests ────────────────────────────
@@ -606,11 +608,11 @@ class TestCorrectionFactorAutoDisable:
 class TestWorkerCountReconciliation:
     async def test_prefill_observe_gets_only_prefill_workers(self):
         """observe_engine_load_stats for prefill queries get_recent_and_averaged_metrics('prefill')."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         shared_state.num_p_workers = 1
 
-        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         # get_recent_and_averaged_metrics("prefill") returns (recent, per_worker_avg, cluster_avg)
@@ -638,11 +640,11 @@ class TestWorkerCountReconciliation:
 
     async def test_decode_observe_gets_only_decode_workers(self):
         """observe_engine_load_stats for decode queries get_recent_and_averaged_metrics('decode')."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         shared_state.num_d_workers = 1
 
-        planner = DecodePlanner(None, args, shared_state=shared_state)
+        planner = DecodePlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         decode_metrics = {
@@ -665,12 +667,12 @@ class TestWorkerCountReconciliation:
 
     def test_worker_count_mismatch_detected(self):
         """When DGD and Prometheus worker counts differ, the mismatch should be detectable."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         # DGD says 3 prefill workers
         shared_state.num_p_workers = 3
 
-        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         # But router only reports 2 prefill workers
@@ -699,11 +701,11 @@ class TestWorkerCountReconciliation:
 
     def test_worker_count_match_allows_scaling(self):
         """When DGD and Prometheus counts match, scaling proceeds normally."""
-        args = _build_loadbased_args()
+        config = _build_loadbased_config()
         shared_state = PlannerSharedState()
         shared_state.num_p_workers = 2
 
-        planner = PrefillPlanner(None, args, shared_state=shared_state)
+        planner = PrefillPlanner(None, config, shared_state=shared_state)
         planner.model_name = "test-model"
 
         metrics = {
