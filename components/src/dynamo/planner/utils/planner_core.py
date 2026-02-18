@@ -312,7 +312,7 @@ class BasePlanner:
             warmup_trace = config.load_predictor_warmup_trace
             try:
                 metrics = extract_metrics_from_mooncake(
-                    warmup_trace, config.adjustment_interval
+                    warmup_trace, config.throughput_adjustment_interval
                 )
                 for m in metrics:
                     self.num_req_predictor.add_data_point(float(m["request_count"]))
@@ -590,7 +590,7 @@ class BasePlanner:
                     num_p_workers * (self.config.prefill_engine_num_gpu or 0)
                     + num_d_workers * (self.config.decode_engine_num_gpu or 0)
                 )
-                * self.config.adjustment_interval
+                * self.config.throughput_adjustment_interval
                 / 3600
             )
             self.shared_state.cumulative_gpu_hours += interval_gpu_hours
@@ -601,39 +601,39 @@ class BasePlanner:
         # Prometheus returns seconds, convert to milliseconds
         self.last_metrics.ttft = (
             self.prometheus_traffic_client.get_avg_time_to_first_token(
-                f"{self.config.adjustment_interval}s",
+                f"{self.config.throughput_adjustment_interval}s",
                 self.model_name,
             )
             * 1000
         )
         self.last_metrics.itl = (
             self.prometheus_traffic_client.get_avg_inter_token_latency(
-                f"{self.config.adjustment_interval}s",
+                f"{self.config.throughput_adjustment_interval}s",
                 self.model_name,
             )
             * 1000
         )
         self.last_metrics.num_req = (
             self.prometheus_traffic_client.get_avg_request_count(
-                f"{self.config.adjustment_interval}s",
+                f"{self.config.throughput_adjustment_interval}s",
                 self.model_name,
             )
         )
         self.last_metrics.request_duration = (
             self.prometheus_traffic_client.get_avg_request_duration(
-                f"{self.config.adjustment_interval}s",
+                f"{self.config.throughput_adjustment_interval}s",
                 self.model_name,
             )
         )
         self.last_metrics.isl = (
             self.prometheus_traffic_client.get_avg_input_sequence_tokens(
-                f"{self.config.adjustment_interval}s",
+                f"{self.config.throughput_adjustment_interval}s",
                 self.model_name,
             )
         )
         self.last_metrics.osl = (
             self.prometheus_traffic_client.get_avg_output_sequence_tokens(
-                f"{self.config.adjustment_interval}s",
+                f"{self.config.throughput_adjustment_interval}s",
                 self.model_name,
             )
         )
@@ -650,7 +650,7 @@ class BasePlanner:
             self.prometheus_metrics.observed_ttft.set(self.last_metrics.ttft)
             self.prometheus_metrics.observed_itl.set(self.last_metrics.itl)
             self.prometheus_metrics.observed_request_rate.set(
-                self.last_metrics.num_req / self.config.adjustment_interval
+                self.last_metrics.num_req / self.config.throughput_adjustment_interval
             )
             self.prometheus_metrics.observed_request_duration.set(
                 self.last_metrics.request_duration
@@ -709,7 +709,7 @@ class BasePlanner:
         # Update predicted load metrics in Prometheus
         if self.prometheus_port != 0 and self.prometheus_metrics is not None:
             self.prometheus_metrics.predicted_request_rate.set(
-                next_num_req / self.config.adjustment_interval
+                next_num_req / self.config.throughput_adjustment_interval
             )
             self.prometheus_metrics.predicted_isl.set(next_isl)
             self.prometheus_metrics.predicted_osl.set(next_osl)
@@ -832,7 +832,7 @@ class BasePlanner:
 
             if (
                 current_time - self.shared_state.last_adjustment_time
-                >= self.config.adjustment_interval
+                >= self.config.throughput_adjustment_interval
             ):
                 self.shared_state.last_adjustment_time = time.time()
                 logger.info("New throughput adjustment interval started!")
@@ -863,7 +863,7 @@ class BasePlanner:
                         # and predicts the load, not relying on the current status of the engine.
                         await self._apply_scaling(desired_replicas)
 
-            await asyncio.sleep(self.config.adjustment_interval / 10)
+            await asyncio.sleep(self.config.throughput_adjustment_interval / 10)
 
     async def _load_loop(self, require_prefill: bool, require_decode: bool) -> None:
         """Load-based scaling loop at shorter interval."""

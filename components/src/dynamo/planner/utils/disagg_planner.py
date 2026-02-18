@@ -124,7 +124,7 @@ class DisaggPlanner:
 
             if (
                 current_time - self.shared_state.last_adjustment_time
-                >= self.config.adjustment_interval
+                >= self.config.throughput_adjustment_interval
             ):
                 self.shared_state.last_adjustment_time = time.time()
                 logger.info("New throughput adjustment interval started!")
@@ -138,7 +138,7 @@ class DisaggPlanner:
                 next_num_p = self.prefill_planner.plan_adjustment()
                 next_num_d = self.decode_planner.plan_adjustment()
                 if next_num_p is None or next_num_d is None:
-                    await asyncio.sleep(self.config.adjustment_interval / 10)
+                    await asyncio.sleep(self.config.throughput_adjustment_interval / 10)
                     continue
 
                 if self.enable_loadbased:
@@ -173,7 +173,7 @@ class DisaggPlanner:
                             target_replicas, blocking=False
                         )
 
-            await asyncio.sleep(self.config.adjustment_interval / 10)
+            await asyncio.sleep(self.config.throughput_adjustment_interval / 10)
 
     async def _load_loop(self) -> None:
         """Load-based scaling loop for disagg mode at shorter interval."""

@@ -252,7 +252,7 @@ class ProphetPredictor(BasePredictor):
         self._use_log1p = config.load_predictor_log1p
         self.window_size = config.prophet_window_size
         self.curr_step = 0
-        self.step_size = config.adjustment_interval
+        self.step_size = config.throughput_adjustment_interval
         self.start_date = datetime(2024, 1, 1)  # Base date for generating timestamps
         self.data_buffer = []  # Override to store dicts instead of values
         self._seen_nonzero_since_idle_reset = False

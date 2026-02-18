@@ -44,7 +44,9 @@ class PlannerConfig(BaseModel):
 
     no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
-    adjustment_interval: int = SLAPlannerDefaults.adjustment_interval
+    throughput_adjustment_interval: int = (
+        SLAPlannerDefaults.throughput_adjustment_interval
+    )
     max_gpu_budget: int = SLAPlannerDefaults.max_gpu_budget
     min_endpoint: int = SLAPlannerDefaults.min_endpoint
 
@@ -132,10 +134,13 @@ class PlannerConfig(BaseModel):
 
             # Load-based interval must be shorter than throughput interval
             if self.enable_throughput_scaling:
-                if self.loadbased_adjustment_interval >= self.adjustment_interval:
+                if (
+                    self.loadbased_adjustment_interval
+                    >= self.throughput_adjustment_interval
+                ):
                     raise ValueError(
                         f"loadbased_adjustment_interval ({self.loadbased_adjustment_interval}s) "
-                        f"must be shorter than adjustment_interval ({self.adjustment_interval}s). "
+                        f"must be shorter than throughput_adjustment_interval ({self.throughput_adjustment_interval}s). "
                         "Load-based scaling is the fast reactive loop; throughput-based is the "
                         "slow predictive loop."
                     )

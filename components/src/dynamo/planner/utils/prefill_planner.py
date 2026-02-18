@@ -100,7 +100,7 @@ class PrefillPlanner(BasePlanner):
         pred_prefill_throughput = (
             next_num_req
             * next_isl
-            / self.config.adjustment_interval
+            / self.config.throughput_adjustment_interval
             * min(1, self.p_correction_factor)
         )
         p_thpt_per_gpu = self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)

@@ -87,7 +87,7 @@ class DecodePlanner(BasePlanner):
             concurrency=self.last_metrics.num_req  # type: ignore
             / self.shared_state.num_d_workers
             * self.last_metrics.request_duration  # type: ignore
-            / self.config.adjustment_interval,
+            / self.config.throughput_adjustment_interval,
             context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
         )
         self.d_correction_factor = self.last_metrics.itl / expect_itl
@@ -120,7 +120,7 @@ class DecodePlanner(BasePlanner):
             )
             return self.config.min_endpoint
         pred_decode_throughput = (
-            next_num_req * next_osl / self.config.adjustment_interval
+            next_num_req * next_osl / self.config.throughput_adjustment_interval
         )
         next_num_d = math.ceil(
             pred_decode_throughput
