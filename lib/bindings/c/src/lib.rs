@@ -691,7 +691,6 @@ pub unsafe extern "C" fn create_routers(
                 tracing::info!("Prefill worker found, running in disaggregated mode");
                 let mut prefill_config = kv_router_config;
                 prefill_config.router_track_active_blocks = false;
-                prefill_config.router_enable_cache_control = false;
 
                 // Create immediately-resolved channel to activate router
                 let (tx, rx) = tokio::sync::oneshot::channel();

@@ -13,6 +13,7 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde_json::json;
+use tokio::sync::OnceCell;
 use tracing::Instrument;
 
 use crate::{
@@ -32,7 +33,8 @@ use crate::{
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
-    cache_control_client: Option<CacheControlClient>,
+    /// Lazily initialized on first PIN request. `None` when cache_control is disabled.
+    cache_control_cell: Option<OnceCell<CacheControlClient>>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -196,24 +198,21 @@ impl Drop for RequestGuard {
 }
 
 impl KvPushRouter {
-    pub async fn new(
+    pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
-    ) -> Result<Self> {
-        let cache_control_client = if chooser.kv_router_config().router_enable_cache_control {
-            tracing::info!(
-                "Cache control enabled: cache_control client created for PIN operations"
-            );
-            let component = chooser.client().endpoint.component().clone();
-            Some(create_cache_control_client(&component).await?)
+    ) -> Self {
+        let cache_control_cell = if chooser.kv_router_config().router_enable_cache_control {
+            tracing::info!("Cache control enabled for PIN operations (lazy init)");
+            Some(OnceCell::new())
         } else {
             None
         };
-        Ok(KvPushRouter {
+        KvPushRouter {
             inner,
             chooser,
-            cache_control_client,
-        })
+            cache_control_cell,
+        }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -452,19 +451,32 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
-        // Extract pin state: only clone token_ids when both TTL and client exist
-        let pin_state = match (
-            request.routing.as_ref().and_then(|r| r.cache_control_ttl),
-            &self.cache_control_client,
-        ) {
-            (Some(ttl), Some(client)) => Some(PinState {
-                token_ids: request.token_ids.clone(),
-                cc_client: client.clone(),
-                instance_id,
-                ttl_seconds: ttl,
-            }),
-            _ => None,
-        };
+        // Extract pin state: lazily init cache_control client on first PIN request
+        let pin_state =
+            if let Some(ttl) = request.routing.as_ref().and_then(|r| r.cache_control_ttl) {
+                if let Some(cell) = &self.cache_control_cell {
+                    let component = self.chooser.client().endpoint.component().clone();
+                    match cell
+                        .get_or_try_init(|| create_cache_control_client(&component))
+                        .await
+                    {
+                        Ok(client) => Some(PinState {
+                            token_ids: request.token_ids.clone(),
+                            cc_client: client.clone(),
+                            instance_id,
+                            ttl_seconds: ttl,
+                        }),
+                        Err(e) => {
+                            tracing::warn!("Failed to create cache_control client: {e}");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
