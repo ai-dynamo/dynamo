@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
 
 	// Dynamo plugins
+	"github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/disagg"
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 	labelfilter "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/label_filter"
 )
@@ -55,6 +56,14 @@ func main() {
 
 	// - label-filter: Filters pods by a configured label key/value pair
 	plugins.Register("label-filter", labelfilter.LabelFilterFactory)
+
+	// Disaggregated serving plugins (prefill/decode split):
+	// - disagg-profile-handler: Orchestrates prefill→decode profile execution
+	plugins.Register(disagg.DisaggProfileHandlerType, disagg.DisaggProfileHandlerFactory)
+	// - dyn-prefill-scorer: Selects prefill workers via Dynamo FFI
+	plugins.Register(disagg.DynPrefillScorerType, disagg.DynPrefillScorerFactory)
+	// - dyn-decode-scorer: Selects decode workers via Dynamo FFI, handles request lifecycle
+	plugins.Register(disagg.DynDecodeScorerType, disagg.DynDecodeScorerFactory)
 
 	// Run using standard GAIE runner (it registers built-in plugins automatically)
 	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {

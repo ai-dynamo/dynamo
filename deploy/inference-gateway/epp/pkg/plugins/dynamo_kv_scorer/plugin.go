@@ -62,6 +62,17 @@ query_router_result_t route_request(RouterHandles *handle,
                                          const char *pods_json,
                                          CRoutingResult *out_result);
 
+query_router_result_t route_prefill_request(RouterHandles *handle,
+                                            const char *request_json,
+                                            const char *pods_json,
+                                            CRoutingResult *out_result);
+
+query_router_result_t route_decode_request(RouterHandles *handle,
+                                           const char *request_json,
+                                           const char *pods_json,
+                                           bool is_disaggregated,
+                                           CRoutingResult *out_result);
+
 query_router_result_t add_request(RouterHandles *handle,
                                   const char *request_id,
                                   const uint32_t *token_ids,
@@ -467,9 +478,10 @@ type podJSON struct {
 	Metrics *metricsJSON `json:"metrics"`
 }
 
-// serializePodsToJSON converts a slice of schedtypes.Pod into a JSON string
+// SerializePodsToJSON converts a slice of schedtypes.Pod into a JSON string
 // suitable for passing across the C FFI boundary to the Rust router.
-func serializePodsToJSON(pods []schedtypes.Pod) (string, error) {
+// Exported for use by the disagg plugin package.
+func SerializePodsToJSON(pods []schedtypes.Pod) (string, error) {
 	out := make([]podJSON, 0, len(pods))
 	for _, p := range pods {
 		entry := podJSON{}
@@ -537,7 +549,7 @@ func (k *KVAwareScorer) callDynamoRouter(
 	}
 
 	// Build OpenAI-compatible JSON request from the GAIE LLMRequest structure
-	requestBody, err := buildOpenAIRequest(req)
+	requestBody, err := BuildOpenAIRequest(req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Info("Invalid/empty request body for router; refusing to route",
 			"err", err.Error())
@@ -554,7 +566,7 @@ func (k *KVAwareScorer) callDynamoRouter(
 	// Serialize pods (PodInfo + Metrics) to JSON for the Rust router
 	var cPodsJSON *C.char
 	if len(pods) > 0 {
-		podsJSONStr, podsErr := serializePodsToJSON(pods)
+		podsJSONStr, podsErr := SerializePodsToJSON(pods)
 		if podsErr != nil {
 			logger.V(logutil.DEFAULT).Error(podsErr, "Failed to serialize pods to JSON")
 			return "", "", nil, fmt.Errorf("serialize pods: %w", podsErr)
@@ -601,9 +613,10 @@ func (k *KVAwareScorer) callDynamoRouter(
 	return workerIDStr, prefillWorkerIDStr, tokens64, nil
 }
 
-// buildOpenAIRequest constructs an OpenAI-compatible request from the GAIE LLMRequest structure.
+// BuildOpenAIRequest constructs an OpenAI-compatible request from the GAIE LLMRequest structure.
 // Preserves message roles for correct chat template application and tokenization.
-func buildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
+// Exported for use by the disagg plugin package.
+func BuildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 	requestBody := make(map[string]any)
 
 	// Preserve the original message structure for correct chat template application
@@ -717,6 +730,12 @@ func CallMarkPrefillComplete(requestID string) error {
 	return nil
 }
 
+// CallFreeRequest cleans up router state for a completed/cancelled request.
+// Exported for use by the disagg plugin package.
+func CallFreeRequest(requestID string) error {
+	return callFreeRequestInternal(requestID)
+}
+
 // callFreeRequestInternal cleans up router state for a completed/cancelled request.
 func callFreeRequestInternal(requestID string) error {
 	if !routerInitialized {
@@ -739,6 +758,113 @@ func callFreeRequestInternal(requestID string) error {
 		return fmt.Errorf("free_request failed with code %d", rc)
 	}
 	return nil
+}
+
+// --------------------------- disaggregated FFI wrappers ---------------------------
+
+// RoutingResult holds the result of a prefill or decode routing call.
+// Exported for use by the disagg plugin package.
+type RoutingResult struct {
+	WorkerID  uint64
+	TokenData []int64
+}
+
+// CallRoutePrefillRequest routes a request to the best prefill worker.
+// It tokenizes the request and queries only the prefill router.
+func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResult, error) {
+	if !routerInitialized {
+		return nil, fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return nil, fmt.Errorf("dynamo router handles not created")
+	}
+
+	cRequestJSON := C.CString(requestJSON)
+	defer C.free(unsafe.Pointer(cRequestJSON))
+
+	var cPodsJSON *C.char
+	if podsJSON != "" {
+		cPodsJSON = C.CString(podsJSON)
+		defer C.free(unsafe.Pointer(cPodsJSON))
+	}
+
+	var result C.CRoutingResult
+	rc := C.route_prefill_request(router, cRequestJSON, cPodsJSON, &result)
+	if rc != C.QUERY_ROUTER_OK {
+		return nil, fmt.Errorf("route_prefill_request failed with code %d", rc)
+	}
+
+	// Copy token IDs into Go memory
+	count := int(result.token_count)
+	var tokens64 []int64
+	if count > 0 && result.token_ids != nil {
+		src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
+		tokens64 = make([]int64, count)
+		for i := 0; i < count; i++ {
+			tokens64[i] = int64(src[i])
+		}
+	}
+
+	workerID := uint64(result.prefill_worker_id)
+	C.free_routing_result(&result)
+
+	return &RoutingResult{WorkerID: workerID, TokenData: tokens64}, nil
+}
+
+// CallRouteDecodeRequest routes a request to the best decode worker.
+// When isDisaggregated is true, overlap_score_weight=0 is used (KV cache transferred from prefill).
+func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated bool) (*RoutingResult, error) {
+	if !routerInitialized {
+		return nil, fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return nil, fmt.Errorf("dynamo router handles not created")
+	}
+
+	cRequestJSON := C.CString(requestJSON)
+	defer C.free(unsafe.Pointer(cRequestJSON))
+
+	var cPodsJSON *C.char
+	if podsJSON != "" {
+		cPodsJSON = C.CString(podsJSON)
+		defer C.free(unsafe.Pointer(cPodsJSON))
+	}
+
+	var result C.CRoutingResult
+	rc := C.route_decode_request(router, cRequestJSON, cPodsJSON, C.bool(isDisaggregated), &result)
+	if rc != C.QUERY_ROUTER_OK {
+		return nil, fmt.Errorf("route_decode_request failed with code %d", rc)
+	}
+
+	// Copy token IDs into Go memory
+	count := int(result.token_count)
+	var tokens64 []int64
+	if count > 0 && result.token_ids != nil {
+		src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
+		tokens64 = make([]int64, count)
+		for i := 0; i < count; i++ {
+			tokens64[i] = int64(src[i])
+		}
+	}
+
+	workerID := uint64(result.decode_worker_id)
+	C.free_routing_result(&result)
+
+	return &RoutingResult{WorkerID: workerID, TokenData: tokens64}, nil
+}
+
+// InitFFI exposes the FFI initialization for use by the disagg plugin package.
+// It is idempotent — safe to call multiple times.
+func InitFFI() error {
+	return initFFI()
 }
 
 // --------------------------- shutdown ---------------------------
