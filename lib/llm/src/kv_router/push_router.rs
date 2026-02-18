@@ -18,7 +18,7 @@ use tracing::Instrument;
 use crate::{
     kv_router::{
         CacheControlClient, KvRouter,
-        cache_control::spawn_pin_prefix,
+        cache_control::{create_cache_control_client, spawn_pin_prefix},
         metrics::RouterRequestMetrics,
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
@@ -196,16 +196,25 @@ impl Drop for RequestGuard {
 }
 
 impl KvPushRouter {
-    pub fn new(
+    pub async fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
-        cache_control_client: Option<CacheControlClient>,
-    ) -> Self {
-        KvPushRouter {
+    ) -> Result<Self> {
+        let cache_control_client =
+            if chooser.kv_router_config().router_enable_cache_control {
+                tracing::info!(
+                    "Cache control enabled: cache_control client created for PIN operations"
+                );
+                let component = chooser.client().endpoint.component().clone();
+                Some(create_cache_control_client(&component).await?)
+            } else {
+                None
+            };
+        Ok(KvPushRouter {
             inner,
             chooser,
             cache_control_client,
-        }
+        })
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.

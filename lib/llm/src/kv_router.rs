@@ -41,7 +41,7 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
-pub use cache_control::{CacheControlClient, create_cache_control_client, spawn_pin_prefix};
+pub use cache_control::{CacheControlClient, spawn_pin_prefix};
 pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};

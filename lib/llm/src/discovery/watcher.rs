@@ -482,6 +482,7 @@ impl ModelWatcher {
                     // Create prefill-specific config with track_active_blocks disabled
                     let mut prefill_config = self.router_config.kv_router_config;
                     prefill_config.router_track_active_blocks = false;
+                    prefill_config.router_enable_cache_control = false;
 
                     PrefillRouter::new(
                         rx,

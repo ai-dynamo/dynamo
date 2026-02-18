@@ -10,7 +10,7 @@ use crate::{
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{
-        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, create_cache_control_client,
+        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter,
     },
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -286,16 +286,7 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let cc_client = if chooser.kv_router_config().router_enable_cache_control {
-                tracing::info!(
-                    "Cache control enabled: cache_control client created for PIN operations"
-                );
-                let component = chooser.client().endpoint.component().clone();
-                Some(create_cache_control_client(&component).await?)
-            } else {
-                None
-            };
-            let kv_push_router = KvPushRouter::new(router, chooser, cc_client);
+            let kv_push_router = KvPushRouter::new(router, chooser).await?;
             ServiceBackend::from_engine(Arc::new(kv_push_router))
         }
     };
