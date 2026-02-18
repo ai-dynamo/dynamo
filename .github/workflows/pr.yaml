@@ -184,9 +184,11 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_multi_gpu_tests: true
-      test_gpu_timeout_minutes: 35
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
+      single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
+      single_gpu_test_timeout_minutes: 35
+      multi_gpu_test_markers: 'pre_merge and vllm and (gpu_2 or gpu_4)'
     secrets: inherit
 
   # ============================================================================
@@ -205,8 +207,10 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_multi_gpu_tests: true
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
+      single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
+      multi_gpu_test_markers: 'pre_merge and sglang and (gpu_2 or gpu_4)'
     secrets: inherit
 
   # ============================================================================
@@ -225,8 +229,10 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_multi_gpu_tests: true
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
+      single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
+      multi_gpu_test_markers: 'pre_merge and trtllm and (gpu_2 or gpu_4)'
     secrets: inherit
 
 
