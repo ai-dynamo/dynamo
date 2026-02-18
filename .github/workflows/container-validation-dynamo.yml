@@ -148,9 +148,8 @@ jobs:
                       eval $(/workspace/container/use-sccache.sh setup-env) && \
                       rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
-                      cargo clippy --features block-manager,media-ffmpeg --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl && \
-                      cargo test --locked --features integration -- --nocapture && \
+                      cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings && \
+                      cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture && \
                       /workspace/container/use-sccache.sh show-stats "Rust Checks"'
 
   test-parallel:
