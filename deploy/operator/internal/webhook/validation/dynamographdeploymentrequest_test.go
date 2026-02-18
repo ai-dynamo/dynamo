@@ -40,9 +40,10 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		isClusterWide   bool
 		wantErr         bool
 		errMsg          string
+		errContains     bool
 		wantWarnings    bool
 		expectedWarning string
-		errContains     bool
+		warningContains bool
 	}{
 		{
 			name: "valid request",
@@ -172,7 +173,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			wantErr:         false,
 			wantWarnings:    true,
 			expectedWarning: "GPU hardware configuration not provided",
-			errContains:     true, // Check if warning contains this substring
+			warningContains: true,
 		},
 		{
 			name: "invalid config YAML",
@@ -299,13 +300,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}
 
 			if tt.wantWarnings && len(warnings) > 0 {
-				if tt.errContains {
-					// Check if warning contains the expected substring
+				if tt.warningContains {
 					if !strings.Contains(warnings[0], tt.expectedWarning) {
 						t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() warning = %v, want to contain %v", warnings[0], tt.expectedWarning)
 					}
 				} else {
-					// Check for exact match
 					if warnings[0] != tt.expectedWarning {
 						t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() warning = %v, want %v", warnings[0], tt.expectedWarning)
 					}

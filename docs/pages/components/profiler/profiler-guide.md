@@ -240,7 +240,7 @@ The operator automatically discovers GPU resources from cluster nodes, providing
 kubectl apply -f https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml
 kubectl create clusterrolebinding dynamo-operator-gpu-discovery \
   --clusterrole=dynamo-namespace-operator-gpu-discovery \
-  --serviceaccount=dynamo-system:dynamo-operator-controller-manager
+  --serviceaccount=${NAMESPACE}:dynamo-operator-controller-manager
 ```
 
 ```yaml

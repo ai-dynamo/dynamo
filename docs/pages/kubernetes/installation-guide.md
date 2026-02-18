@@ -217,7 +217,7 @@ spec:
         gpuVramMib: 81920
 ```
 
-See [GPU Discovery RBAC docs](../../operator/rbac/README.md) for details.
+See [GPU Discovery RBAC docs](../../../deploy/operator/rbac/README.md) for details.
 
 → [Verify Installation](#verify-installation)
 

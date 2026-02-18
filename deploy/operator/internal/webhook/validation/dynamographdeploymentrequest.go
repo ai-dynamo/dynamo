@@ -170,7 +170,7 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() (admis
 	// For namespace-scoped operators, warn that GPU discovery may fail if they don't have
 	// the optional ClusterRole applied
 	if !v.isClusterWideOperator {
-		warning := "GPU hardware configuration not provided. GPU discovery will be attempted but requires node read permissions. For namespace-scoped operators, apply the GPU discovery ClusterRole: https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml or add hardware config. See: https://github.com/ai-dynamo/dynamo/issues/6257"
+		warning := "GPU hardware configuration not provided. GPU discovery will be attempted but requires node read permissions. For namespace-scoped operators, apply the GPU discovery ClusterRole: https://raw.githubusercontent.com/ai-dynamo/dynamo/main/deploy/operator/rbac/namespace-operator-gpu-discovery.yaml or add hardware config. If you have already applied the ClusterRole, you can safely ignore this warning. See: https://github.com/ai-dynamo/dynamo/issues/6257"
 		return admission.Warnings{warning}, nil
 	}
 
