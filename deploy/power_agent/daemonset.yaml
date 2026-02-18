@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Power Agent DaemonSet - Node-local GPU power limit enforcement
+#
+# This DaemonSet deploys the Power Agent on all GPU nodes.
+# The agent watches for pod annotations and applies power limits via NVML.
+#
+# Prerequisites:
+# - Kubernetes 1.25+
+# - NVIDIA GPU Operator installed
+# - DCGM Exporter running
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dynamo-system
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: power-agent-sa
+  namespace: dynamo-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: power-agent-role
+rules:
+  # Need to list/watch pods to get annotations
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: power-agent-binding
+subjects:
+  - kind: ServiceAccount
+    name: power-agent-sa
+    namespace: dynamo-system
+roleRef:
+  kind: ClusterRole
+  name: power-agent-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: power-agent
+  namespace: dynamo-system
+  labels:
+    app: power-agent
+spec:
+  selector:
+    matchLabels:
+      app: power-agent
+  template:
+    metadata:
+      labels:
+        app: power-agent
+    spec:
+      serviceAccountName: power-agent-sa
+      hostPID: true  # CRITICAL: Allows reading /proc/{pid}/cgroup of host processes
+      nodeSelector:
+        nvidia.com/gpu.present: "true"  # Only deploy on GPU nodes
+      containers:
+        - name: agent
+          image: dynamo/power-agent:v1.0.0
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true  # CRITICAL: Allows NVML to change power limits
+            capabilities:
+              add:
+                - SYS_ADMIN  # Explicitly add SYS_ADMIN for GPU management
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: LD_LIBRARY_PATH
+              value: "/usr/local/lib:/usr/lib/x86_64-linux-gnu:/usr/lib:/host/lib/x86_64-linux-gnu"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: nvidia-driver
+              mountPath: /host/lib/x86_64-linux-gnu
+              readOnly: true
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-proc
+          hostPath:
+            path: /host/proc  # In Minikube with --mount-string="/proc:/host/proc"
+            type: DirectoryOrCreate  # Creates empty dir on real K8s (won't be used)
+        - name: nvidia-driver
+          hostPath:
+            path: /lib/x86_64-linux-gnu
+            type: Directory
+

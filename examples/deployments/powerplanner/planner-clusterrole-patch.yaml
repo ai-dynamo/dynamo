@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ClusterRole patch for power-aware planner
+# Adds permissions to list and patch pods for setting power limit annotations
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dynamo-platform-dynamo-operator-planner
+rules:
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamocomponentdeployments
+  - dynamographdeployments
+  - dynamoworkermetadatas
+  - dynamographdeploymentscalingadapters
+  - dynamographdeploymentscalingadapters/scale
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - patch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+
