@@ -138,10 +138,10 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
         /tmp/use-sccache.sh install; \
     fi
 
-# Set SCCACHE environment variables
+# Set SCCACHE environment variables (RUSTC_WRAPPER is set dynamically by
+# setup-env only when the sccache server starts successfully)
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
 # Build FFmpeg from source
 # Do not delete the source tarball for legal reasons
