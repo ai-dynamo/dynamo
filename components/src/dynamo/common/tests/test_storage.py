@@ -3,7 +3,6 @@
 
 """Unit tests for dynamo.common.storage module."""
 
-import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,24 +43,29 @@ class TestGetFs:
 
     def test_s3_url_protocol(self):
         """Test s3:// URL extracts correct protocol and bucket path."""
-        with patch("dynamo.common.storage.fsspec.filesystem") as mock_fsspec, \
-             patch("dynamo.common.storage.DirFileSystem") as mock_dirfs:
+        with patch("dynamo.common.storage.fsspec.filesystem") as mock_fsspec, patch(
+            "dynamo.common.storage.DirFileSystem"
+        ) as mock_dirfs:
             mock_inner_fs = MagicMock(protocol="s3")
             mock_fsspec.return_value = mock_inner_fs
             get_fs("s3://my-bucket/prefix")
             mock_fsspec.assert_called_once_with("s3")
-            mock_dirfs.assert_called_once_with(fs=mock_inner_fs, path="my-bucket/prefix")
+            mock_dirfs.assert_called_once_with(
+                fs=mock_inner_fs, path="my-bucket/prefix"
+            )
 
     def test_gs_url_protocol(self):
         """Test gs:// URL extracts correct protocol and path."""
-        with patch("dynamo.common.storage.fsspec.filesystem") as mock_fsspec, \
-             patch("dynamo.common.storage.DirFileSystem") as mock_dirfs:
+        with patch("dynamo.common.storage.fsspec.filesystem") as mock_fsspec, patch(
+            "dynamo.common.storage.DirFileSystem"
+        ) as mock_dirfs:
             mock_inner_fs = MagicMock(protocol="gs")
             mock_fsspec.return_value = mock_inner_fs
             get_fs("gs://my-gcs-bucket/data")
             mock_fsspec.assert_called_once_with("gs")
-            mock_dirfs.assert_called_once_with(fs=mock_inner_fs, path="my-gcs-bucket/data")
-
+            mock_dirfs.assert_called_once_with(
+                fs=mock_inner_fs, path="my-gcs-bucket/data"
+            )
 
 
 class TestGetMediaUrl:
@@ -77,7 +81,9 @@ class TestGetMediaUrl:
     def test_base_url_rewrite(self):
         """Test that base_url takes precedence over protocol fallback."""
         fs = self._make_fs(protocol="file", path="/tmp/media")
-        url = get_media_url(fs, "videos/req-123.mp4", base_url="https://cdn.example.com/media")
+        url = get_media_url(
+            fs, "videos/req-123.mp4", base_url="https://cdn.example.com/media"
+        )
         assert url == "https://cdn.example.com/media/videos/req-123.mp4"
 
     def test_base_url_trailing_slash_stripped(self):
@@ -125,7 +131,6 @@ class TestGetMediaUrl:
         fs = self._make_fs(protocol="file", path="/tmp/media")
         url = get_media_url(fs, "test.png", base_url="")
         assert url == "file:///tmp/media/test.png"
-
 
 
 class TestUploadToFs:
