@@ -62,7 +62,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.core == 'true'
     runs-on: prod-builder-v3
-    name: Build - dynamo
+    name: Build
     outputs:
       # Only pass the non-secret tag suffix between jobs (GitHub blanks outputs containing secrets)
       image_tag_suffix: ${{ steps.define_image_tag.outputs.image_tag_suffix }}
@@ -126,8 +126,8 @@ jobs:
   rust-checks:
     needs: [changed-files, build]
     if: needs.changed-files.outputs.core == 'true'
-    runs-on: prod-builder-v3
-    name: Rust Checks - dynamo
+    runs-on: prod-default-v2
+    name: Rust Checks
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
       IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
@@ -164,8 +164,8 @@ jobs:
   test-parallel:
     needs: [changed-files, build]
     if: needs.changed-files.outputs.core == 'true'
-    runs-on: prod-builder-v3
-    name: Pytest Parallel - dynamo
+    runs-on: prod-default-v2
+    name: Pytest (parallel)
     env:
       IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
     steps:
@@ -193,8 +193,8 @@ jobs:
   test-sequential:
     needs: [changed-files, build]
     if: needs.changed-files.outputs.core == 'true'
-    runs-on: prod-builder-v3
-    name: Pytest Sequential - dynamo
+    runs-on: prod-default-v2
+    name: Pytest (sequential)
     env:
       IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
     steps:
