@@ -136,8 +136,7 @@ package-lock.json
 .DS_Store
 **/.DS_Store
 
-# Claude Code sandbox creates these shell/config dotfiles and git internals
-# in the repo root (they should live in ~/.* or .git/ instead)
+# Claude Code sandbox creates these shell/config dotfiles
 .bash_profile
 .bashrc
 .gitconfig
@@ -147,6 +146,7 @@ package-lock.json
 .ripgreprc
 .zprofile
 .zshrc
+.vscode
 HEAD
 config
 hooks
