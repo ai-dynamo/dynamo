@@ -523,7 +523,7 @@ vllm_configs = {
         model="Qwen/Qwen2-Audio-7B-Instruct",
         delayed_start=60,  # Audio models require longer loading time
         script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        timeout=900,  # 15 minutes for audio processing overhead
+        timeout=600,  # 10 minutes for audio processing overhead
         request_payloads=[
             chat_payload(
                 [
@@ -550,7 +550,7 @@ vllm_configs = {
         model="Qwen/Qwen2-Audio-7B-Instruct",
         delayed_start=60,  # Audio models require longer loading time
         script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        timeout=900,  # 15 minutes for audio processing overhead
+        timeout=600,  # 10 minutes for audio processing overhead
         request_payloads=[
             chat_payload(
                 [
