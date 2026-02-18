@@ -370,8 +370,6 @@ impl KvRouter {
     /// Now also takes optional context_id for request tracking.
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
-    /// This is used by EPP to restrict routing to pods that passed upstream filtering.
-    /// The filter does NOT modify the router's internal state - it only affects this decision.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
         &self,
@@ -402,8 +400,6 @@ impl KvRouter {
             .await?;
         let find_matches_elapsed = start.elapsed();
 
-        // Filter overlap scores to only include allowed workers if a filter is provided.
-        // This ensures the scheduler only sees scores for pods that EPP considers eligible.
         if let Some(ref allowed_ids) = allowed_worker_ids {
             overlap_scores
                 .scores

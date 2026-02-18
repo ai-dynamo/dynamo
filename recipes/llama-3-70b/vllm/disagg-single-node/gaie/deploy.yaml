@@ -18,14 +18,9 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
       eppConfig:
-        # This configuration uses Dynamo's KV-aware scorer for intelligent routing.
-        # In disaggregated mode, the kv-aware-scorer handles both prefill and decode
-        # worker selection internally via the Dynamo FFI router. The EPP selects
-        # the decode pod; prefill is coordinated by the Dynamo router.
         config:
           # Plugins define the behavior of EPP
           plugins:
-            # Required: tells EPP which profile to use (even if you only have one)
             - type: single-profile-handler
             # Label filter: restricts pods to decode workers only.
             # Prefill worker selection is handled internally by the Dynamo router.
