@@ -718,8 +718,9 @@ impl KvRouter {
             )
             .await?;
 
-            let kv_push_router =
-                RsKvPushRouter::new(push_router, kv_router).await.map_err(to_pyerr)?;
+            let kv_push_router = RsKvPushRouter::new(push_router, kv_router)
+                .await
+                .map_err(to_pyerr)?;
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),
