@@ -119,20 +119,20 @@ _Underlying type:_ _string_
 
 
 _Validation:_
-- Enum: [initializing pending profiling deploying ready deployment_deleted failed]
+- Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed]
 
 _Appears in:_
 - [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)
 
 | Field | Description |
 | --- | --- |
-| `initializing` |  |
-| `pending` |  |
-| `profiling` |  |
-| `deploying` |  |
-| `ready` |  |
-| `deployment_deleted` |  |
-| `failed` |  |
+| `Initializing` |  |
+| `Pending` |  |
+| `Profiling` |  |
+| `Deploying` |  |
+| `Ready` |  |
+| `DeploymentDeleted` |  |
+| `Failed` |  |
 
 
 #### DGDState
@@ -465,12 +465,12 @@ It serves as the primary interface for users to request model deployments with
 specific performance and resource constraints, enabling SLA-driven deployments.
 
 Lifecycle:
- 1. initializing → pending: Validates spec and prepares for profiling
- 2. pending → profiling: Creates and runs profiling job (online or AIC)
- 3. profiling → ready/deploying: Generates DGD spec after profiling completes
- 4. deploying → ready: When autoApply=true, monitors DGD until Ready
- 5. ready: Terminal state when DGD is operational or spec is available
- 6. deployment_deleted: Terminal state when auto-created DGD is manually deleted
+ 1. Initializing → Pending: Validates spec and prepares for profiling
+ 2. Pending → Profiling: Creates and runs profiling job (online or AIC)
+ 3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
+ 4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
+ 5. Ready: Terminal state when DGD is operational or spec is available
+ 6. DeploymentDeleted: Terminal state when auto-created DGD is manually deleted
 
 The spec becomes immutable once profiling starts. Users must delete and recreate
 the DGDR to modify configuration after this point.
@@ -526,7 +526,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `state` _[DGDRState](#dgdrstate)_ | State is a high-level textual status of the deployment request lifecycle. | initializing | Enum: [initializing pending profiling deploying ready deployment_deleted failed] <br /> |
+| `state` _[DGDRState](#dgdrstate)_ | State is a high-level textual status of the deployment request lifecycle. | Initializing | Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed] <br /> |
 | `backend` _string_ | Backend is extracted from profilingConfig.config.engine.backend for display purposes.<br />This field is populated by the controller and shown in kubectl output. |  | Optional: \{\} <br /> |
 | `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |

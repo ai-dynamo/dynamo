@@ -95,17 +95,17 @@ type ProfilingConfigSpec struct {
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=initializing;pending;profiling;deploying;ready;deployment_deleted;failed
+// +kubebuilder:validation:Enum=Initializing;Pending;Profiling;Deploying;Ready;DeploymentDeleted;Failed
 type DGDRState string
 
 const (
-	DGDRStateInitializing       DGDRState = "initializing"
-	DGDRStatePending            DGDRState = "pending"
-	DGDRStateProfiling          DGDRState = "profiling"
-	DGDRStateDeploying          DGDRState = "deploying"
-	DGDRStateReady              DGDRState = "ready"
-	DGDRStateDeploymentDeleted  DGDRState = "deployment_deleted"
-	DGDRStateFailed             DGDRState = "failed"
+	DGDRStateInitializing      DGDRState = "Initializing"
+	DGDRStatePending           DGDRState = "Pending"
+	DGDRStateProfiling         DGDRState = "Profiling"
+	DGDRStateDeploying         DGDRState = "Deploying"
+	DGDRStateReady             DGDRState = "Ready"
+	DGDRStateDeploymentDeleted DGDRState = "DeploymentDeleted"
+	DGDRStateFailed            DGDRState = "Failed"
 )
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
@@ -221,7 +221,7 @@ type DeploymentStatus struct {
 // The controller updates this status as the DGDR progresses through its lifecycle.
 type DynamoGraphDeploymentRequestStatus struct {
 	// State is a high-level textual status of the deployment request lifecycle.
-	// +kubebuilder:default=initializing
+	// +kubebuilder:default=Initializing
 	State DGDRState `json:"state"`
 
 	// Backend is extracted from profilingConfig.config.engine.backend for display purposes.
@@ -264,12 +264,12 @@ type DynamoGraphDeploymentRequestStatus struct {
 // specific performance and resource constraints, enabling SLA-driven deployments.
 //
 // Lifecycle:
-//  1. initializing → pending: Validates spec and prepares for profiling
-//  2. pending → profiling: Creates and runs profiling job (online or AIC)
-//  3. profiling → ready/deploying: Generates DGD spec after profiling completes
-//  4. deploying → ready: When autoApply=true, monitors DGD until Ready
-//  5. ready: Terminal state when DGD is operational or spec is available
-//  6. deployment_deleted: Terminal state when auto-created DGD is manually deleted
+//  1. Initializing → Pending: Validates spec and prepares for profiling
+//  2. Pending → Profiling: Creates and runs profiling job (online or AIC)
+//  3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
+//  4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
+//  5. Ready: Terminal state when DGD is operational or spec is available
+//  6. DeploymentDeleted: Terminal state when auto-created DGD is manually deleted
 //
 // The spec becomes immutable once profiling starts. Users must delete and recreate
 // the DGDR to modify configuration after this point.
