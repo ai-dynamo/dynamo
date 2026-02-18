@@ -139,17 +139,19 @@ jobs:
         run: |
           docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
-            -e RUSTC_WRAPPER=sccache \
             -e SCCACHE_BUCKET=${{ secrets.SCCACHE_S3_BUCKET }} \
             -e SCCACHE_REGION=${{ secrets.AWS_DEFAULT_REGION }} \
             -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
             -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
             ${{ env.IMAGE_TAG }} \
-            bash -ec 'rustup component add rustfmt clippy && \
+            bash -ec 'ARCH_ALT=x86_64 /workspace/container/use-sccache.sh install && \
+                      eval $(/workspace/container/use-sccache.sh setup-env) && \
+                      rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
                       cargo clippy --features block-manager,media-ffmpeg --no-deps --all-targets -- -D warnings && \
                       cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl && \
-                      cargo test --locked --features integration -- --nocapture'
+                      cargo test --locked --features integration -- --nocapture && \
+                      /workspace/container/use-sccache.sh show-stats "Rust Checks"'
 
   test-parallel:
     needs: [changed-files, build]
