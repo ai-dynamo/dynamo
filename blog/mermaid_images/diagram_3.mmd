@@ -1,0 +1,14 @@
+flowchart LR
+    subgraph reads ["Read Path — inline on caller thread"]
+        FM["find_matches()"] -->|read locks| TREE["Arc ConcurrentRadixTree"]
+    end
+
+    subgraph writes ["Write Path — sticky-routed"]
+        EV[KV Events] --> D{sticky router}
+        D -->|W0, W3| T0["Thread 0"]
+        D -->|W1, W4| T1["Thread 1"]
+        D -->|W2, W5| T2["Thread 2"]
+        T0 -->|write locks| TREE
+        T1 -->|write locks| TREE
+        T2 -->|write locks| TREE
+    end
