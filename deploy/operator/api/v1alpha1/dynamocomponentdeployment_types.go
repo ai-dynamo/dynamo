@@ -135,6 +135,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
 	// +optional
 	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
+
+	// TopologyConstraint for this service. When both this and spec.topologyConstraint
+	// are set, this must be narrower than or equal to the spec-level constraint.
+	// +optional
+	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
 }
 
 type MultinodeSpec struct {

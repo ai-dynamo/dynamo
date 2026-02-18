@@ -233,6 +233,7 @@ Key customization points include:
 - **[GitOps Deployment with FluxCD](fluxcd.md)** - For advanced users
 - **[Logging](observability/logging.md)** - For logging setup
 - **[Multinode Deployment](deployment/multinode-deployment.md)** - For multinode deployment
+- **[Topology Aware Scheduling](topology-aware-scheduling.md)** - Configure topology-aware workload placement
 - **[Grove](grove.md)** - For grove details and custom installation
 - **[Monitoring](observability/metrics.md)** - For monitoring setup
 - **[Model Caching with Fluid](model-caching-with-fluid.md)** - For model caching with Fluid

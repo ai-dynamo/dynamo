@@ -239,6 +239,17 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	return true, "", serviceStatus
 }
 
+// toGroveTopologyConstraint converts a Dynamo TopologyConstraint to a Grove TopologyConstraint.
+// The domain names are the same strings in both APIs.
+func toGroveTopologyConstraint(tc *v1alpha1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
+	if tc == nil {
+		return nil
+	}
+	return &grovev1alpha1.TopologyConstraint{
+		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	}
+}
+
 // resolveKaiSchedulerQueueName extracts the queue name from annotations or returns default
 // This is the shared logic between DetermineKaiSchedulerQueue and ResolveKaiSchedulerQueue
 func resolveKaiSchedulerQueueName(annotations map[string]string) string {

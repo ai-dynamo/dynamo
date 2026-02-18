@@ -396,6 +396,7 @@ _Appears in:_
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
+| `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. When both this and spec.topologyConstraint<br />are set, this must be narrower than or equal to the spec-level constraint. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -436,6 +437,7 @@ _Appears in:_
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
+| `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. When both this and spec.topologyConstraint<br />are set, this must be narrower than or equal to the spec-level constraint. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -635,6 +637,7 @@ _Appears in:_
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
+| `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint is the deployment-level topology constraint.<br />When set, applies a broad topology constraint across the whole deployment.<br />Services without their own topologyConstraint inherit this value. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus
@@ -1190,6 +1193,50 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `disabled` _boolean_ |  |  |  |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  |  |
+
+
+#### TopologyConstraint
+
+
+
+TopologyConstraint defines topology placement requirements for a deployment or service.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | PackDomain specifies the topology domain for grouping replicas.<br />Must be one of: region, zone, datacenter, block, rack, host, numa |  | Enum: [region zone datacenter block rack host numa] <br /> |
+
+
+#### TopologyDomain
+
+_Underlying type:_ _string_
+
+TopologyDomain represents a level in the topology hierarchy.
+These are Dynamo's own abstract vocabulary — they align with Grove today
+because both use natural, user-friendly topology terms. For non-Grove
+backends, a translation layer maps these to framework-specific values.
+
+_Validation:_
+- Enum: [region zone datacenter block rack host numa]
+
+_Appears in:_
+- [TopologyConstraint](#topologyconstraint)
+
+| Field | Description |
+| --- | --- |
+| `region` | TopologyDomainRegion represents the region level (broadest).<br /> |
+| `zone` | TopologyDomainZone represents the zone level.<br /> |
+| `datacenter` | TopologyDomainDataCenter represents the datacenter level.<br /> |
+| `block` | TopologyDomainBlock represents the block level.<br /> |
+| `rack` | TopologyDomainRack represents the rack level.<br /> |
+| `host` | TopologyDomainHost represents the host level.<br /> |
+| `numa` | TopologyDomainNuma represents the numa level (narrowest).<br /> |
 
 
 #### VolumeMount

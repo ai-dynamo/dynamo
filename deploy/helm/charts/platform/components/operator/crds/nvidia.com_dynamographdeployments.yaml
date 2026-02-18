@@ -11249,6 +11249,27 @@ spec:
                       subComponentType:
                         description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                         type: string
+                      topologyConstraint:
+                        description: |-
+                          TopologyConstraint for this service. When both this and spec.topologyConstraint
+                          are set, this must be narrower than or equal to the spec-level constraint.
+                        properties:
+                          packDomain:
+                            description: |-
+                              PackDomain specifies the topology domain for grouping replicas.
+                              Must be one of: region, zone, datacenter, block, rack, host, numa
+                            enum:
+                              - region
+                              - zone
+                              - datacenter
+                              - block
+                              - rack
+                              - host
+                              - numa
+                            type: string
+                        required:
+                          - packDomain
+                        type: object
                       volumeMounts:
                         description: VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
                         items:
@@ -11276,6 +11297,28 @@ spec:
                     type: object
                   description: Services are the services to deploy as part of this deployment.
                   maxProperties: 25
+                  type: object
+                topologyConstraint:
+                  description: |-
+                    TopologyConstraint is the deployment-level topology constraint.
+                    When set, applies a broad topology constraint across the whole deployment.
+                    Services without their own topologyConstraint inherit this value.
+                  properties:
+                    packDomain:
+                      description: |-
+                        PackDomain specifies the topology domain for grouping replicas.
+                        Must be one of: region, zone, datacenter, block, rack, host, numa
+                      enum:
+                        - region
+                        - zone
+                        - datacenter
+                        - block
+                        - rack
+                        - host
+                        - numa
+                      type: string
+                  required:
+                    - packDomain
                   type: object
               type: object
             status:

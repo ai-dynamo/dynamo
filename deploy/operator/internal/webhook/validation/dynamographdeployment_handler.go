@@ -89,10 +89,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 		return nil, err
 	}
 
-	// Create validator with manager for API group detection and perform validation
+	// Create validator with manager for API group detection and perform validation.
 	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr)
-
-	// Validate stateless rules
 	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err
