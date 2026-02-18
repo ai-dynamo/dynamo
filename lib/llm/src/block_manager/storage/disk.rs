@@ -27,6 +27,8 @@ pub struct DiskStorage {
     size: usize,
     handles: RegistrationHandles,
     unlinked: bool,
+    /// When true, the file is NOT unlinked on drop (for persistent storage use cases)
+    persist: bool,
 }
 
 impl Local for DiskStorage {}
@@ -323,6 +325,89 @@ impl DiskStorage {
             size,
             handles: RegistrationHandles::new(),
             unlinked: false,
+            persist: false, // Temp files are auto-cleaned
+        })
+    }
+
+    /// Create or open a DiskStorage at a specific path.
+    ///
+    /// This is used for remote disk transfers where the path is specified by the
+    /// transfer descriptor (e.g., from RemoteBlockDescriptor's DiskKey).
+    ///
+    /// # Arguments
+    /// * `path` - Full path to the file
+    /// * `size` - Size of the storage in bytes
+    /// * `create` - If true, create the file (O_CREAT). If false, file must exist.
+    /// * `persist` - If true, the file is NOT unlinked when DiskStorage is dropped.
+    ///               Use `true` for files that should outlive the DiskStorage instance.
+    pub fn new_at_path(
+        path: &str,
+        size: usize,
+        create: bool,
+        persist: bool,
+    ) -> Result<Self, StorageError> {
+        use nix::fcntl::{OFlag, open};
+        use nix::sys::stat::Mode;
+
+        // Ensure parent directory exists
+        if let Some(parent) = Path::new(path).parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    StorageError::AllocationFailed(format!(
+                        "Failed to create parent directory for {}: {}",
+                        path, e
+                    ))
+                })?;
+            }
+        }
+
+        // Build open flags
+        let mut flags = OFlag::O_RDWR | OFlag::O_CLOEXEC;
+        if create {
+            flags |= OFlag::O_CREAT;
+        }
+
+        // Optionally add O_DIRECT
+        let disable_o_direct = std::env::var(DISK_DISABLE_O_DIRECT_KEY).is_ok();
+        if !disable_o_direct {
+            flags |= OFlag::O_DIRECT;
+        }
+
+        // Open/create the file
+        let mode = Mode::from_bits_truncate(0o644);
+        let raw_fd = open(path, flags, mode).map_err(|e| {
+            StorageError::AllocationFailed(format!(
+                "Failed to {} file {}: {}",
+                if create { "create" } else { "open" },
+                path,
+                e
+            ))
+        })?;
+
+        // Allocate space if creating
+        if create {
+            allocate_file(raw_fd, size as u64).map_err(|e| {
+                unsafe { nix::libc::close(raw_fd) };
+                StorageError::AllocationFailed(format!("Failed to allocate file {}: {}", path, e))
+            })?;
+        }
+
+        tracing::info!(
+            "DiskStorage {} at path: fd={}, file={}, size={} bytes, persist={}",
+            if create { "created" } else { "opened" },
+            raw_fd,
+            path,
+            size,
+            persist
+        );
+
+        Ok(Self {
+            fd: raw_fd as u64,
+            file_name: path.to_string(),
+            size,
+            handles: RegistrationHandles::new(),
+            unlinked: false,
+            persist,
         })
     }
 
@@ -361,25 +446,35 @@ impl DiskStorage {
     pub fn unlinked(&self) -> bool {
         self.unlinked
     }
+
+    pub fn persist(&self) -> bool {
+        self.persist
+    }
 }
 
 impl Drop for DiskStorage {
     fn drop(&mut self) {
         tracing::warn!(
-            "DiskStorage being dropped: fd={}, file={}, size={} bytes, already_unlinked={}",
+            "DiskStorage being dropped: fd={}, file={}, size={} bytes, already_unlinked={}, persist={}",
             self.fd,
             self.file_name,
             self.size,
-            self.unlinked
+            self.unlinked,
+            self.persist
         );
 
         self.handles.release();
-        let _ = self.unlink();
+
+        // Only unlink if this is a temporary file (not persisted)
+        if !self.persist {
+            let _ = self.unlink();
+        }
 
         tracing::info!(
-            "DiskStorage dropped and cleaned up: fd={}, file={}",
+            "DiskStorage dropped and cleaned up: fd={}, file={}, persist={}",
             self.fd,
-            self.file_name
+            self.file_name,
+            self.persist
         );
     }
 }
