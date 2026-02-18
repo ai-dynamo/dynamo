@@ -128,6 +128,13 @@ impl<U, S, A> BlockStore<U, S, A> {
         self.staged.shift_remove_index(0)
     }
 
+    // -- LIFO Pop -------------------------------------------------------------
+
+    /// Removes and returns the last unassigned entry (LIFO).
+    pub fn pop_unassigned(&mut self) -> Option<(BlockId, U)> {
+        self.unassigned.pop()
+    }
+
     // -- Insert ---------------------------------------------------------------
 
     /// Inserts into the assigned collection.

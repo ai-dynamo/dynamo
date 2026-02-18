@@ -231,6 +231,11 @@ impl<T: BlockMetadata> LogicalBlockAssignments<T> {
         count
     }
 
+    /// LIFO-removes the last unassigned block.
+    pub(crate) fn pop_last_unassigned(&mut self) -> Option<(BlockId, MutableBlock<T>)> {
+        self.store.pop_unassigned()
+    }
+
     /// Drops all guards across all three collections (RAII returns blocks to pools).
     pub fn clear(&mut self) {
         self.store.clear();

@@ -12,6 +12,7 @@
 
 pub mod blocks;
 pub mod events;
+pub mod integrations;
 pub mod manager;
 pub mod metrics;
 pub mod pools;
@@ -29,6 +30,10 @@ use serde::{Deserialize, Serialize};
 // Re-export common types and traits
 pub use blocks::{
     BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, WeakBlock,
+};
+pub use integrations::{
+    ApplyError, DecodeOutcome, RequestSequence, SchedulableSequence, ScheduleError, SequenceEvent,
+    SequenceState,
 };
 pub use manager::BlockManager;
 pub use registry::BlockRegistry;
