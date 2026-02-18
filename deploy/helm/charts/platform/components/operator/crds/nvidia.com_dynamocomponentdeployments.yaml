@@ -11217,6 +11217,28 @@ spec:
                 subComponentType:
                   description: SubComponentType indicates the sub-role of this component (for example, "prefill").
                   type: string
+                topologyConstraint:
+                  description: |-
+                    TopologyConstraint for this service. topologyProfile is inherited from
+                    spec.topologyConstraint and must not be set here. packDomain is required.
+                    When both this and spec.topologyConstraint.packDomain are set, packDomain
+                    must be narrower than or equal to the spec-level packDomain.
+                  properties:
+                    packDomain:
+                      description: |-
+                        PackDomain is the topology domain to pack pods within. Must match a
+                        domain defined in the referenced ClusterTopology CR.
+                        Optional at spec level (when only providing the profile for service-level
+                        constraints); required at service level.
+                      pattern: ^[a-z0-9]+[a-z0-9-]*$
+                      type: string
+                    topologyProfile:
+                      description: |-
+                        TopologyProfile is the name of the ClusterTopology CR that defines the
+                        topology hierarchy for this deployment. Required at spec level when any
+                        topology constraint is set. Must not be set at service level (inherited).
+                      type: string
+                  type: object
                 volumeMounts:
                   description: VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
                   items:
