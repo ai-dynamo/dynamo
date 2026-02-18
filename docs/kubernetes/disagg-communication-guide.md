@@ -22,7 +22,7 @@ This guide explains how prefill and decode workers communicate in Dynamo's disag
 
 ### Communication Stack
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         Dynamo Disaggregated Serving                     │
 ├─────────────────────────────────────────────────────────────────────────┤
@@ -82,7 +82,7 @@ NVLink is a **direct GPU-to-GPU interconnect** that operates at the hardware lev
 
 **Kubernetes pods violate all three requirements:**
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        Physical Node (8× H100 GPUs)                      │
 │                                                                          │
@@ -148,7 +148,7 @@ VLLMDecodeWorker:
 
 When prefill and decode workers are on the **same physical node**:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                             Same Node                                    │
 │                                                                          │
@@ -177,7 +177,7 @@ When prefill and decode workers are on the **same physical node**:
 
 When prefill and decode workers are on **different nodes**:
 
-```
+```text
 ┌──────────────────────────────┐         ┌──────────────────────────────┐
 │           Node 1             │         │           Node 2             │
 │                              │         │                              │
@@ -393,7 +393,7 @@ ibv_devinfo
 ```
 
 Expected output shows InfiniBand or RoCE devices:
-```
+```text
 hca_id: mlx5_0
         transport:                      InfiniBand (0)
         fw_ver:                         28.35.2000
@@ -408,7 +408,7 @@ ucx_info -d
 ```
 
 Look for GPU memory support:
-```
+```text
 # Memory domain: mlx5_0
 #     Component: ib
 #     memory types: host (access,reg,cache), cuda (access,reg,cache)
@@ -452,12 +452,12 @@ kubectl logs <worker-pod> | grep -i "NIXL\|UCX"
 ```
 
 **Good output**:
-```
+```text
 NIXL INFO Backend UCX was instantiated
 ```
 
 **Bad output** (RDMA not working):
-```
+```text
 UCX WARN no RDMA transports available
 NIXL INFO falling back to TCP transport
 ```
@@ -520,7 +520,7 @@ kubectl exec <prefill-pod> -- ping -c 3 <decode-pod-ip>
 
 The KV transfer overhead is amortized across output tokens:
 
-```
+```text
 Total Latency = TTFT + (OSL × ITL)
 
 Example (ISL=4000):
@@ -531,7 +531,7 @@ Break-even: 2400 - 218 = 2182ms overhead
             2182ms / (8.0 - 7.8)ms per token = 10,910 tokens
 
 At OSL=2000: Disagg is 1.1x slower (acceptable)
-At OSL=100:  Disagg is 3.7x slower (not recommended)
+At OSL=100:  Disagg is 3.1x slower (not recommended)
 ```
 
 ---
@@ -633,5 +633,5 @@ resources:
 
 - [Disaggregated Serving Architecture](../design-docs/disagg-serving.md)
 - [AIConfigurator Deployment Guide](../features/disaggregated-serving/README.md)
-- [NIXL Benchmark Deployment](../../deploy/pre-deployment/nixl/README.md)
+- [NIXL Benchmark Deployment](../../../deploy/pre-deployment/nixl/README.md)
 - [KV Cache Transfer Methods](../backends/trtllm/kv-cache-transfer.md)
