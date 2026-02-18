@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Model Caching with Fluid
 ---
 
 Fluid is an open-source, cloud-native data orchestration and acceleration platform for Kubernetes. It virtualizes and accelerates data access from various sources (object storage, distributed file systems, cloud storage), making it ideal for AI, machine learning, and big data workloads.
@@ -328,4 +329,4 @@ spec:
 - [MinIO Documentation](https://docs.min.io/)
 - [Hugging Face Hub](https://huggingface.co/docs/hub/index)
 - [Dynamo README](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md)
-- [Dynamo Documentation](https://docs.nvidia.com/dynamo/latest/index.html)
+- [Dynamo Documentation](https://docs.nvidia.com/dynamo/)

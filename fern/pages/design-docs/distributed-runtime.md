@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Distributed Runtime
 ---
 
 # Dynamo Distributed Runtime
@@ -41,11 +42,11 @@ The hierarchy and naming may change over time, and this document might not refle
 
 The `DistributedRuntime` supports two service discovery backends, configured via `DYN_DISCOVERY_BACKEND`:
 
-- **KV Store Discovery** (`DYN_DISCOVERY_BACKEND=kv_store`): Uses etcd for service discovery. **This is the global default** for all deployments unless explicitly overridden.
+- **KV Store Discovery** (`DYN_DISCOVERY_BACKEND=etcd`): Uses etcd for service discovery. **This is the default** for all deployments unless explicitly overridden. Other KV store backends (`file`, `mem`) are also available.
 
 - **Kubernetes Discovery** (`DYN_DISCOVERY_BACKEND=kubernetes`): Uses native Kubernetes resources (DynamoWorkerMetadata CRD, EndpointSlices) for service discovery. **Must be explicitly set.** The Dynamo operator automatically sets this environment variable for Kubernetes deployments. **No etcd required.**
 
-> **Note:** There is no automatic detection of the deployment environment. The runtime always defaults to `kv_store`. For Kubernetes deployments, the operator injects `DYN_DISCOVERY_BACKEND=kubernetes` into pod environments.
+> **Note:** There is no automatic detection of the deployment environment. The runtime defaults to `etcd`. For Kubernetes deployments, the operator injects `DYN_DISCOVERY_BACKEND=kubernetes` into pod environments.
 
 When using Kubernetes discovery, the KV store backend automatically switches to in-memory storage since etcd is not needed.
 

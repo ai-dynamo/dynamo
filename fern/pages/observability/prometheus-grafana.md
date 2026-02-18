@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Prometheus + Grafana Setup
 ---
 
 # Metrics Visualization with Prometheus and Grafana
@@ -9,7 +10,7 @@
 
 This guide shows how to set up Prometheus and Grafana for visualizing Dynamo metrics on a single machine for demo purposes.
 
-![Grafana Dynamo Dashboard](/assets/img/grafana-dynamo-composite.png)
+![Grafana Dynamo Dashboard](../../assets/img/grafana-dynamo-composite.png)
 
 **Components:**
 - **Prometheus Server** - Collects and stores metrics from Dynamo services

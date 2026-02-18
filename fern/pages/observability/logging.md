@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Logging
 ---
 
 # Dynamo Logging
@@ -144,7 +145,7 @@ This section shows how trace and span information appears in JSONL logs. These l
 
 When viewing the corresponding trace in Grafana, you should be able to see something like the following:
 
-![Disaggregated Trace Example](/assets/img/grafana-disagg-trace.png)
+![Disaggregated Trace Example](../../assets/img/grafana-disagg-trace.png)
 ### Trace Overview
 
 Dynamo creates distributed traces that span across multiple services in a disaggregated serving setup. The following sections describe the key spans you'll see in Grafana when viewing traces for chat completion requests.

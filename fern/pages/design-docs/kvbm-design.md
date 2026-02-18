@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: KVBM Design
 ---
 
 # KVBM Design
@@ -9,7 +10,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ## KVBM Components
 
-![Internal Components of Dynamo KVBM](/assets/img/kvbm-components.png)
+![Internal Components of Dynamo KVBM](../../assets/img/kvbm-components.png)
 
 
 *Internal Components of Dynamo KVBM*
@@ -40,7 +41,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ## KVBM Data Flows
 
-![KVBM Data Flows](/assets/img/kvbm-data-flows.png)
+![KVBM Data Flows](../../assets/img/kvbm-data-flows.png)
 
 
 *KVBM Data Flows from device to other memory hierarchies*
@@ -73,7 +74,7 @@ This document provides an in-depth look at the architecture, components, framewo
 
 ## Internal Architecture Deep Dive
 
-![Internal architecture and key modules in the Dynamo KVBM](/assets/img/kvbm-internal-arch.png)
+![Internal architecture and key modules in the Dynamo KVBM](../../assets/img/kvbm-internal-arch.png)
 
 
 *Internal architecture and key modules in the Dynamo KVBM*
@@ -249,7 +250,7 @@ flowchart TD
     A["Distributed Inference Engine"] --> B["Dynamo KV Block Manager"]
 
     B --> C["NIXL Storage Agent<br/>- Volume registration<br/>- get()/put() abstraction"]
-    B --> D["Event Plane<br/>- NATS-based Pub/Sub<br/>- StoreEvent / RemoveEvent"]
+    B --> D["Event Plane<br/>- Pub/Sub (NATS or ZMQ)<br/>- StoreEvent / RemoveEvent"]
 
     C --> E["G4 Storage Infrastructure<br/>(SSD, Object store, etc.)<br/>- Store KV blocks"]
     D --> F["Storage Provider Subscriber<br/>- Parse Events<br/>- Build fast tree/index<br/>- Optimize G4 tiering"]
@@ -267,7 +268,7 @@ These abstractions allow backends to be integrated without tying into the host's
 
 #### Dynamo Event Plane (Pub/Sub Coordination Layer)
 
-To support external storage optimizations without modifying KVBM logic, we provide an **event plane** built on NATS.io that emits lifecycle events for all block operations:
+To support external storage optimizations without modifying KVBM logic, we provide an **event plane** (supporting NATS and ZMQ transports) that emits lifecycle events for all block operations:
 
 - **StoreEvent**: Emitted when a KV block is registered
 - **RemoveEvent**: Emitted when a KV block is released or evicted
@@ -294,7 +295,7 @@ External storage systems are not tightly coupled with Dynamo's execution pipelin
 1. Storage volumes are pre-provisioned and mounted by the storage provider
 2. These volumes are registered with Dynamo through the NIXL Storage Agent using `registerVolume()` APIs
 3. Dynamo KV Block Manager interacts only with logical block-level APIs (`get()` and `put()`)
-4. The Event Plane asynchronously broadcasts KV lifecycle events using a NATS-based pub/sub channel
+4. The Event Plane asynchronously broadcasts KV lifecycle events via pub/sub (NATS or ZMQ)
 5. Storage vendors implement a lightweight subscriber process that listens to these events
 
 To enable fast lookup and dynamic tiering, storage vendors may build internal data structures using the received event stream:
@@ -321,23 +322,23 @@ There are two components of the interface:
 - **Scheduler (Leader)**: Responsible for orchestration of KV block offload/onboard, builds metadata specifying transfer data to the workers. It also maintains hooks for handling asynchronous transfer completion.
 - **Worker**: Responsible for reading metadata built by the scheduler (leader), performs async onboarding/offloading at the end of the forward pass.
 
-![vLLM KVBM Integration](/assets/img/kvbm-integrations.png)
+![vLLM KVBM Integration](../../assets/img/kvbm-integrations.png)
 
 *Typical integration of KVBM with inference frameworks (vLLM shown as example)*
 
 ### Onboarding Operations
 
-![Onboarding blocks from Host to Device](/assets/img/kvbm-onboard-host2device.png)
+![Onboarding blocks from Host to Device](../../assets/img/kvbm-onboard-host2device.png)
 
 *Onboarding blocks from Host to Device*
 
-![Onboarding blocks from Disk to Device](/assets/img/kvbm-onboard-disk2device.png)
+![Onboarding blocks from Disk to Device](../../assets/img/kvbm-onboard-disk2device.png)
 
 *Onboarding blocks from Disk to Device*
 
 ### Offloading Operations
 
-![Offloading blocks from Device to Host & Disk](/assets/img/kvbm-offload.png)
+![Offloading blocks from Device to Host & Disk](../../assets/img/kvbm-offload.png)
 
 *Offloading blocks from Device to Host & Disk*
 

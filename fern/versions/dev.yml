@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Navigation structure for dev (main branch) version
-# Tracks the latest development content from main
+# Navigation structure matching https://docs.nvidia.com/dynamo/dev/
+# Rebuilt to exactly replicate the rendered Sphinx sidebar
 
 navigation:
   # ==================== Getting Started ====================
@@ -51,6 +51,8 @@ navigation:
             path: ../pages/kubernetes/deployment/dynamomodel-guide.md
           - page: Autoscaling
             path: ../pages/kubernetes/autoscaling.md
+          - page: Inference Gateway (GAIE)
+            path: ../pages/kubernetes/inference-gateway.md
           - section: Checkpointing
             path: ../pages/kubernetes/chrek/README.md
             contents:
@@ -253,8 +255,6 @@ navigation:
       - page: Model Caching with Fluid
         path: ../pages/kubernetes/model-caching-with-fluid.md
       # -- Reference --
-      - page: CLI Reference
-        path: ../pages/reference/cli.md
       - page: Glossary
         path: ../pages/reference/glossary.md
       - page: Tuning Disaggregated Performance
@@ -272,6 +272,8 @@ navigation:
             path: ../pages/backends/vllm/prometheus.md
           - page: Prompt Embeddings
             path: ../pages/backends/vllm/prompt-embeddings.md
+          - page: vLLM-Omni
+            path: ../pages/backends/vllm/vllm-omni.md
       - section: SGLang Details
         contents:
           - page: Expert Distribution (EPLB)

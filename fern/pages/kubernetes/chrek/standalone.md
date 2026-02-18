@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Standalone Usage
 ---
 
 > ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. It requires privileged mode for restore operations, which may not be suitable for all production environments. Review the [security implications](#security-considerations) before deploying.
@@ -201,7 +202,7 @@ Your checkpoint job MUST set these environment variables:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `DYN_CHECKPOINT_SIGNAL_FILE` | Path where DaemonSet writes completion signal | `/checkpoint-signal/my-checkpoint.done` |
-| `DYN_CHECKPOINT_READY_FILE` | Path where your app signals it's ready | `/tmp/checkpoint-ready` |
+| `DYN_READY_FOR_CHECKPOINT_FILE` | Path where your app signals it's ready | `/tmp/ready-for-checkpoint` |
 | `DYN_CHECKPOINT_HASH` | Unique identifier for this checkpoint | `abc123def456` |
 | `DYN_CHECKPOINT_LOCATION` | Directory where checkpoint is stored | `/checkpoints/abc123def456` |
 | `DYN_CHECKPOINT_STORAGE_TYPE` | Storage backend type | `pvc` |
@@ -259,7 +260,7 @@ spec:
         # This is what triggers the DaemonSet to start checkpointing
         readinessProbe:
           exec:
-            command: ["sh", "-c", "cat ${DYN_CHECKPOINT_READY_FILE}"]
+            command: ["sh", "-c", "cat ${DYN_READY_FOR_CHECKPOINT_FILE}"]
           initialDelaySeconds: 15
           periodSeconds: 2
 
@@ -272,8 +273,8 @@ spec:
         env:
         - name: DYN_CHECKPOINT_SIGNAL_FILE
           value: "/checkpoint-signal/my-checkpoint.done"
-        - name: DYN_CHECKPOINT_READY_FILE
-          value: "/tmp/checkpoint-ready"
+        - name: DYN_READY_FOR_CHECKPOINT_FILE
+          value: "/tmp/ready-for-checkpoint"
         - name: DYN_CHECKPOINT_HASH
           value: "abc123def456"
         - name: DYN_CHECKPOINT_LOCATION
@@ -318,8 +319,8 @@ import time
 def main():
     # 1. Check for checkpoint mode
     signal_file = os.environ.get("DYN_CHECKPOINT_SIGNAL_FILE")
-    ready_file = os.environ.get("DYN_CHECKPOINT_READY_FILE")
-    restore_marker = os.environ.get("DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored")
+    ready_file = os.environ.get("DYN_READY_FOR_CHECKPOINT_FILE")
+    restore_marker = os.environ.get("DYN_RESTORE_MARKER_FILE")
 
     is_checkpoint_mode = signal_file is not None
 
@@ -369,7 +370,7 @@ def main():
    ```yaml
    readinessProbe:
      exec:
-       command: ["sh", "-c", "cat ${DYN_CHECKPOINT_READY_FILE}"]
+       command: ["sh", "-c", "cat ${DYN_READY_FOR_CHECKPOINT_FILE}"]
      initialDelaySeconds: 15
      periodSeconds: 2
    ```
@@ -418,9 +419,8 @@ spec:
     - name: DYN_CHECKPOINT_PATH
       value: "/checkpoints"  # Base path (hash appended automatically)
 
-    # Optional: Customize restore marker file path
-    # - name: DYN_RESTORE_MARKER_FILE
-    #   value: "/tmp/dynamo-restored"
+    - name: DYN_RESTORE_MARKER_FILE
+      value: "/tmp/dynamo-restored"
 
     # GPU request
     resources:
@@ -461,7 +461,7 @@ spec:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DYN_CHECKPOINT_SIGNAL_FILE` | Yes | Full path to signal file (e.g., `/checkpoint-signal/my-checkpoint.done`) |
-| `DYN_CHECKPOINT_READY_FILE` | Yes | Full path where app signals readiness (e.g., `/tmp/checkpoint-ready`) |
+| `DYN_READY_FOR_CHECKPOINT_FILE` | Yes | Full path where app signals readiness (e.g., `/tmp/ready-for-checkpoint`) |
 | `DYN_CHECKPOINT_HASH` | Yes | Unique checkpoint identifier (alphanumeric string) |
 | `DYN_CHECKPOINT_LOCATION` | Yes | Directory where checkpoint is stored (e.g., `/checkpoints/abc123`) |
 | `DYN_CHECKPOINT_STORAGE_TYPE` | Yes | Storage backend: `pvc`, `s3`, or `oci` |
@@ -472,7 +472,7 @@ spec:
 |----------|----------|-------------|
 | `DYN_CHECKPOINT_HASH` | Yes | Checkpoint identifier (must match checkpoint job) |
 | `DYN_CHECKPOINT_PATH` | Yes | Base checkpoint directory (hash appended automatically) |
-| `DYN_RESTORE_MARKER_FILE` | No | Path for restore marker file (default: `/tmp/dynamo-restored`) |
+| `DYN_RESTORE_MARKER_FILE` | Yes | Path for restore marker file |
 
 ### Optional CRIU Tuning (Advanced)
 
@@ -503,7 +503,7 @@ spec:
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ 2. Application loads model and creates ready file           │
-│    /tmp/checkpoint-ready                                     │
+│    /tmp/ready-for-checkpoint                                 │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
@@ -516,7 +516,7 @@ spec:
 │ 4. ChReK DaemonSet detects:                                 │
 │    - Pod is Ready                                            │
 │    - Has checkpoint-source label                             │
-│    - Ready file exists: /tmp/checkpoint-ready               │
+│    - Ready file exists: /tmp/ready-for-checkpoint           │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
@@ -606,7 +606,7 @@ spec:
 
 3. Check ready file was created:
    ```bash
-   kubectl exec <pod-name> -- ls -la /tmp/checkpoint-ready
+   kubectl exec <pod-name> -- ls -la /tmp/ready-for-checkpoint
    ```
 
 4. Check DaemonSet logs:

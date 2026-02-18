@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: KV Events for Custom Engines
 ---
 
 # KV Event Publishing for Custom Engines
@@ -11,10 +12,12 @@ This document explains how to implement KV event publishing for custom inference
 
 The KV Router relies on real-time events from backend workers to track which KV cache blocks are stored on each worker. When your custom engine allocates or evicts KV cache blocks, it should publish these events so the router can make optimal routing decisions.
 
-There are two main publishing pathways:
+Events are published over the **Dynamo event plane**, a transport-agnostic pub/sub layer that supports both NATS and ZMQ backends (see [Event Plane](../design-docs/event-plane.md) for details). The `KvEventPublisher` binding handles all transport concerns — your engine code does not interact with the event plane directly.
 
-1. **Direct NATS publishing** (`KvEventPublisher`) - Publishes events directly to NATS. Simplest approach for custom engines.
-2. **ZMQ-based publishing** - For engines with ZMQ event output (like vLLM). Uses a ZMQ publisher in the engine and `ZmqKvEventPublisher` to forward events to NATS.
+`KvEventPublisher` supports two publishing modes:
+
+1. **Direct publishing** — Your engine calls `publish_stored()` / `publish_removed()` to push events directly over the event plane. Simplest approach for custom engines.
+2. **ZMQ relay** — For engines that emit raw KV events over a ZMQ socket (like vLLM and SGLang). The publisher subscribes to the ZMQ endpoint and relays events to the event plane automatically.
 
 ## Event Types
 
@@ -29,7 +32,7 @@ The KV cache supports three event types:
 ### Event Structure
 
 Each event contains:
-- **`event_id`**: Monotonically increasing identifier per worker
+- **`event_id`**: Monotonically increasing identifier per worker (managed internally by the publisher)
 - **`dp_rank`**: Data parallel rank (0 if DP not enabled)
 - **`data`**: One of `Stored`, `Removed`, or `Cleared`
 
@@ -43,9 +46,9 @@ For `BlockStored` events:
 For `BlockRemoved` events:
 - **`block_hashes`**: List of sequence block hashes being evicted
 
-## Option 1: Direct NATS Publishing (Recommended)
+## Direct Publishing (Recommended for Custom Engines)
 
-The `KvEventPublisher` class publishes events directly to NATS. This is the simplest approach for custom engines.
+Call `publish_stored()` and `publish_removed()` directly from your engine code. The publisher handles event IDs, serialization, and transport.
 
 ```mermaid
 flowchart LR
@@ -57,17 +60,17 @@ flowchart LR
         pub["KvEventPublisher"]
     end
 
-    subgraph NATS["NATS"]
-        subject["kv-events subject"]
+    subgraph EP["Dynamo Event Plane"]
+        topic["kv-events topic"]
     end
 
     subgraph Router["KV Router"]
         indexer["KvIndexer"]
     end
 
-    cache -->|"on_blocks_stored()<br/>on_blocks_removed()"| pub
-    pub -->|"publish to NATS"| subject
-    subject --> indexer
+    cache -->|"publish_stored()<br/>publish_removed()"| pub
+    pub -->|"event plane"| topic
+    topic --> indexer
 ```
 
 **When to use:**
@@ -81,12 +84,10 @@ flowchart LR
 from dynamo.llm import KvEventPublisher
 
 class CustomEnginePublisher:
-    def __init__(self, component, worker_id: int, block_size: int, dp_rank: int = 0):
+    def __init__(self, component, block_size: int, dp_rank: int = 0):
         self.block_size = block_size
-        self.event_id = 0
         self.kv_publisher = KvEventPublisher(
             component=component,
-            worker_id=worker_id,
             kv_block_size=block_size,
             dp_rank=dp_rank,
         )
@@ -94,10 +95,8 @@ class CustomEnginePublisher:
     def on_blocks_stored(self, token_ids: list[int], block_hashes: list[int],
                          lora_id: int = 0, parent_hash: int | None = None):
         """Call after KV cache blocks are allocated."""
-        self.event_id += 1
         num_block_tokens = [self.block_size] * len(block_hashes)
         self.kv_publisher.publish_stored(
-            event_id=self.event_id,
             token_ids=token_ids,
             num_block_tokens=num_block_tokens,
             block_hashes=block_hashes,
@@ -107,30 +106,25 @@ class CustomEnginePublisher:
 
     def on_blocks_removed(self, block_hashes: list[int]):
         """Call when KV cache blocks are evicted."""
-        self.event_id += 1
-        self.kv_publisher.publish_removed(event_id=self.event_id, block_hashes=block_hashes)
+        self.kv_publisher.publish_removed(block_hashes=block_hashes)
 ```
 
 ### Integration with Your Engine
 
 ```python
-from dynamo.llm import register_llm
+from dynamo.llm import register_model
 
 async def main():
-    # Register your engine with Dynamo
-    component, endpoint = await register_llm(
+    component, endpoint = await register_model(
         model="my-model",
         generator=my_generate_fn,
     )
 
-    # Initialize publisher
     publisher = CustomEnginePublisher(
         component=component,
-        worker_id=endpoint.connection_id(),
         block_size=16,  # Match your engine's block size
     )
 
-    # Hook into your engine's cache events
     def on_prefill_complete(request_id, token_ids, blocks):
         block_hashes = [block.hash for block in blocks]
         publisher.on_blocks_stored(token_ids=token_ids, block_hashes=block_hashes)
@@ -140,18 +134,15 @@ async def main():
         publisher.on_blocks_removed(block_hashes=block_hashes)
 ```
 
-## Option 2: ZMQ-based Publishing
+## ZMQ Relay (For Engines with Raw KV Events)
 
-For engines that publish events via ZMQ (like vLLM), this option uses two components that work together:
-
-1. **ZMQ Publisher** (in your engine) - Publishes events to a ZMQ socket
-2. **ZmqKvEventPublisher** (Dynamo binding) - Subscribes to ZMQ and forwards to NATS
+For engines that already publish raw KV events over a ZMQ socket (like vLLM and SGLang), use the same `KvEventPublisher` with a `zmq_endpoint`. The publisher subscribes to the ZMQ socket and relays events to the event plane automatically.
 
 ```mermaid
 flowchart LR
-    subgraph Engine["Custom Engine / vLLM"]
+    subgraph Engine["Custom Engine / vLLM / SGLang"]
         cache["KV Cache Manager"]
-        zmq_pub["ZMQ Publisher<br/>(Pure Python)"]
+        zmq_pub["ZMQ Publisher"]
     end
 
     subgraph ZMQ["ZMQ Socket"]
@@ -159,11 +150,11 @@ flowchart LR
     end
 
     subgraph Worker["Dynamo Worker Process"]
-        zmq_sub["ZmqKvEventPublisher<br/>(Rust bindings)"]
+        relay["KvEventPublisher<br/>(relay mode)"]
     end
 
-    subgraph NATS["NATS"]
-        subject["kv-events subject"]
+    subgraph EP["Dynamo Event Plane"]
+        topic["kv-events topic"]
     end
 
     subgraph Router["KV Router"]
@@ -172,98 +163,35 @@ flowchart LR
 
     cache --> zmq_pub
     zmq_pub -->|"PUB"| socket
-    socket -->|"SUB"| zmq_sub
-    zmq_sub --> subject
-    subject --> indexer
+    socket -->|"SUB"| relay
+    relay -->|"event plane"| topic
+    topic --> indexer
 ```
 
 **When to use:**
-- Your engine already has a ZMQ-based event system (like vLLM)
-- You're integrating with a consolidator (like KVBM)
+- Your engine already publishes KV events via ZMQ (like vLLM or SGLang)
 - You want to decouple event publishing from your engine's main loop
 
-### Part 1: ZMQ Subscriber (Dynamo Bindings)
+### Setup
 
-If your engine already publishes to ZMQ, use `KvEventPublisher` with a `ZmqKvEventPublisherConfig` to subscribe and forward to NATS:
+Pass `zmq_endpoint` (and optional `zmq_topic`) to the same `KvEventPublisher`:
 
 ```python
-from dynamo.llm import KvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.llm import KvEventPublisher
 
-# Configure the ZMQ subscriber
-config = ZmqKvEventPublisherConfig(
-    worker_id=endpoint.connection_id(),
+kv_publisher = KvEventPublisher(
+    component=component,
     kv_block_size=block_size,
     zmq_endpoint="tcp://127.0.0.1:5557",  # Where your engine publishes
     zmq_topic="",                          # Subscribe to all topics
 )
-
-# Create publisher - it automatically subscribes to ZMQ and forwards to NATS
-kv_publisher = KvEventPublisher(
-    component=component,
-    zmq_config=config,
-)
 ```
 
-### Part 2: ZMQ Publisher (Pure Python)
-
-If your engine needs to publish to ZMQ (e.g., for consolidator integration), implement the ZMQ protocol:
-
-```python
-import zmq
-import msgpack
-import time
-
-class ZmqKvEventPublisher:
-    """Pure Python ZMQ publisher for KV events (vLLM-compatible format)."""
-
-    def __init__(self, zmq_endpoint: str, kv_block_size: int, topic: str = ""):
-        self.kv_block_size = kv_block_size
-        self.topic = topic
-        self.ctx = zmq.Context()
-        self.socket = self.ctx.socket(zmq.PUB)
-        self.socket.bind(zmq_endpoint)
-        self.sequence = 0
-        self.data_parallel_rank = 0
-
-    def _to_signed_i64(self, value: int | None) -> int | None:
-        if value is None:
-            return None
-        return value - 0x10000000000000000 if value > 0x7FFFFFFFFFFFFFFF else value
-
-    def publish_stored(self, event_id: int, token_ids: list[int], num_block_tokens: list[int],
-                       block_hashes: list[int], lora_id: int = 0, parent_hash: int | None = None):
-        event = {
-            "type": "BlockStored",
-            "block_hashes": [self._to_signed_i64(h) for h in block_hashes],
-            "parent_block_hash": self._to_signed_i64(parent_hash),
-            "token_ids": token_ids,
-            "block_size": self.kv_block_size,
-            "lora_id": lora_id if lora_id != 0 else None,
-        }
-        self._publish_event(event)
-
-    def publish_removed(self, event_id: int, block_hashes: list[int]):
-        event = {"type": "BlockRemoved", "block_hashes": [self._to_signed_i64(h) for h in block_hashes]}
-        self._publish_event(event)
-
-    def publish_all_cleared(self):
-        self._publish_event({"type": "AllBlocksCleared"})
-
-    def _publish_event(self, event: dict):
-        batch = [time.time(), [event], self.data_parallel_rank]
-        payload = msgpack.packb(batch, use_bin_type=True)
-        sequence_bytes = self.sequence.to_bytes(8, byteorder="big")
-        self.sequence += 1
-        self.socket.send_multipart([self.topic.encode(), sequence_bytes, payload])
-
-    def shutdown(self):
-        self.socket.close()
-        self.ctx.term()
-```
+No further calls to `publish_stored()` / `publish_removed()` are needed — the publisher reads events from the ZMQ socket and forwards them automatically.
 
 ### ZMQ Wire Format
 
-The ZMQ message format (compatible with vLLM):
+The ZMQ message format (compatible with vLLM / SGLang):
 
 | Frame | Description |
 |-------|-------------|
@@ -271,18 +199,99 @@ The ZMQ message format (compatible with vLLM):
 | 2 | Sequence number (8 bytes, big-endian) |
 | 3 | Msgpack payload: `[timestamp, [events], dp_rank]` |
 
-Each event in the payload is a dictionary with `type` field (`BlockStored`, `BlockRemoved`, or `AllBlocksCleared`).
+Each event in the payload is a dictionary with a `type` field (`BlockStored`, `BlockRemoved`, or `AllBlocksCleared`).
+
+For `BlockStored`:
+```python
+{
+    "type": "BlockStored",
+    "block_hashes": [signed_i64, ...],      # Sequence block hashes
+    "parent_block_hash": signed_i64 | None,  # Parent hash
+    "token_ids": [int, ...],                 # Token IDs
+    "block_size": int,                       # Tokens per block
+    "lora_id": int | None,                   # LoRA adapter ID
+}
+```
+
+For `BlockRemoved`:
+```python
+{
+    "type": "BlockRemoved",
+    "block_hashes": [signed_i64, ...],
+}
+```
+
+For `AllBlocksCleared`:
+```python
+{"type": "AllBlocksCleared"}
+```
+
+## API Reference
+
+### `KvEventPublisher`
+
+```python
+KvEventPublisher(
+    component: Component,
+    kv_block_size: int,
+    dp_rank: int = 0,
+    enable_local_indexer: bool = False,
+    zmq_endpoint: str | None = None,   # Set for relay mode
+    zmq_topic: str | None = None,      # Defaults to "" when zmq_endpoint is set
+)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `component` | The Dynamo component this publisher belongs to |
+| `kv_block_size` | Number of tokens per block (must be > 0, must match your engine) |
+| `dp_rank` | Data parallel rank (defaults to 0) |
+| `enable_local_indexer` | Enable a worker-local KV indexer for direct overlap queries |
+| `zmq_endpoint` | ZMQ endpoint to subscribe to for relay mode (e.g. `"tcp://127.0.0.1:5557"`) |
+| `zmq_topic` | ZMQ topic filter (defaults to `""` = all topics) |
+
+#### `publish_stored()`
+
+```python
+publish_stored(
+    token_ids: list[int],
+    num_block_tokens: list[int],
+    block_hashes: list[int],
+    lora_id: int,
+    parent_hash: int | None = None,
+)
+```
+
+Publish a block-stored event. Event IDs are managed internally.
+
+#### `publish_removed()`
+
+```python
+publish_removed(block_hashes: list[int])
+```
+
+Publish a block-removed event. Event IDs are managed internally.
+
+#### `shutdown()`
+
+```python
+shutdown()
+```
+
+Stop background tasks (ZMQ listener, event forwarding).
 
 ## Best Practices
 
-1. **Event IDs must be monotonically increasing** per worker (use a thread-safe counter)
+1. **`kv_block_size` must match** your engine's actual block size.
 
-2. **Block size must match** your engine's actual `kv_block_size`
+2. **`parent_hash` is required** for all blocks except the first in a sequence — it links blocks to enable prefix matching.
 
-3. **`parent_hash` is required** for all blocks except the first in a sequence - it links blocks to enable prefix matching
+3. **Block hashes are signed 64-bit integers** in the Python API. The publisher handles conversion internally.
+
+4. **Event ordering is automatic** — the publisher assigns monotonically increasing event IDs. You do not need to track event IDs yourself.
 
 ## See Also
 
-- **[Router README](../components/router/README.md)**: Quick start guide for the KV Router
+- **[Event Plane](../design-docs/event-plane.md)**: Transport options (NATS, ZMQ) and configuration
 - **[Router Guide](../components/router/router-guide.md)**: Configuration, tuning, and production setup
 - **[Router Design](../design-docs/router-design.md)**: Architecture details and event transport modes

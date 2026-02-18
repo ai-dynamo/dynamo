@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Planner Design
 ---
 
 # Planner Design
@@ -9,11 +10,11 @@
 
 ## Overview
 
-The Planner is Dynamo's autoscaling controller. It observes system metrics, predicts future load, and adjusts prefill/decode worker replica counts to proactively meet SLA targets. This document covers the internal architecture, algorithms, and design trade-offs.
+The Planner is Dynamo's autoscaling controller. It supports two scaling modes: **throughput-based** (using profiling data and traffic prediction) and **load-based** (using real-time engine metrics and online regression). This document covers the internal architecture, algorithms, and design trade-offs for both modes.
 
-## Architecture
+## Throughput-Based Scaling
 
-![Planner architecture showing Metric Collector, Load Predictor, and Performance Interpolator feeding into the Scaling Algorithm and Connector Layer](/assets/img/planner-architecture.svg)
+![Planner architecture showing Metric Collector, Load Predictor, and Performance Interpolator feeding into the Scaling Algorithm and Connector Layer](../../assets/img/planner-architecture.svg)
 
 ## Scaling Algorithm
 
@@ -166,17 +167,48 @@ After the delay:
 - **Interpolation accuracy vs profiling cost**: Higher `prefillInterpolationGranularity` and `decodeInterpolationGranularity` in the profiling sweep produce more accurate interpolation but increase profiling time linearly. Default granularity (16 prefill, 6 decode) balances accuracy with profiling duration.
 - **Predictor warm-up period**: All predictors need observation history before making reliable forecasts. ARIMA and Prophet need multiple adjustment intervals of data. Kalman starts forecasting after `--kalman-min-points` observations. During warm-up, the planner uses the constant predictor as fallback.
 
+## Load-Based Scaling (Experimental)
+
+The load-based mode uses real-time per-worker metrics from the router to make SLA-aware scaling decisions without requiring profiling data.
+
+### Metrics
+
+The planner pulls per-worker load metrics directly from the frontend's `/metrics` endpoint:
+- **Active prefill tokens**: pending prefill tokens per worker
+- **Active decode blocks**: active KV blocks per worker
+- **Last TTFT, ITL, ISL**: most recent observed latencies per worker
+
+### Regression Model
+
+A sliding-window linear regression maps load to latency:
+- Prefill: `(active_prefill_tokens + ISL)` -> `TTFT`
+- Decode: `active_decode_blocks` -> `ITL`
+
+Given a TTFT/ITL SLA target, the model reverse-solves for the maximum load that satisfies the SLA.
+
+### Scaling Decisions
+
+- **Scale up**: if ALL workers' recent load exceeds the regression-derived target
+- **Scale down**: if ALL workers' recent load is below the target adjusted by `(num_workers - 1) / num_workers * sensitivity / 100`
+- Only scales by +/-1 per interval (blocking)
+
+### Co-existence with Throughput-Based Scaling
+
+When both modes are enabled, throughput-based scaling (longer interval) sets a lower bound on replicas while load-based scaling (shorter interval) handles real-time adjustments above that floor.
+
+### Aggregated Mode
+
+In aggregated mode (`--mode agg`), engines handle both prefill and decode via chunked prefill. The planner maintains both TTFT and ITL regression models but uses per-worker time-averaged metrics (not instantaneous) for regression training to smooth out chunked prefill noise. Scale up if either prefill or decode signals overload; scale down only if both signal underload.
+
 ## Known Limitations
 
 1. **30-second startup delay**: Hardcoded wait for component registration. It should be replaced with runtime readiness probing.
 2. **Adjustment interval vs scaling latency**: If `adjustment_interval` \< time to scale, scaling decisions can pile up. The planner logs warnings but doesn't queue.
-3. **Average-based interpolation**: The planner uses average ISL/OSL, which may not represent bimodal or heavy-tailed distributions well.
+3. **Average-based interpolation**: Throughput-based scaling uses average ISL/OSL, which may not represent bimodal or heavy-tailed distributions well.
 4. **Single DGD scope**: Each planner instance manages exactly one DGD. Multi-model/multi-DGD coordination is not supported.
-5. **Load-based planner deprecated**: The load-based code path exists but is non-functional with current backends (no prefill queue metrics).
 
 ## Future Work
 
-- Support aggregated (non-disaggregated) scaling mode for single-worker deployments
 - Multi-DGD coordination for shared-cluster scenarios
 - Distribution-aware interpolation (beyond mean ISL/OSL)
 - Adaptive adjustment interval based on observed scaling latency
@@ -184,17 +216,22 @@ After the delay:
 ## File Map
 
 
-| File                         | Size | Purpose                                               |
-| ---------------------------- | ---- | ----------------------------------------------------- |
-| `planner_core.py`            | 36k  | Main scaling loop, algorithm implementation           |
-| `perf_interpolation.py`      | 13k  | NPZ data loading and throughput/latency interpolation |
-| `load_predictor.py`          | 16k  | ARIMA, Prophet, Kalman, Constant predictors           |
-| `pre_swept_results_utils.py` | 12k  | Pre-computed H100/H200 profiling data loader          |
-| `kubernetes_connector.py`    | 11k  | K8s API integration for DGD scaling                   |
-| `kube.py`                    | 7.4k | Low-level K8s client wrapper                          |
-| `exceptions.py`              | 7.2k | Custom exception hierarchy                            |
-| `prometheus.py`              | 7.3k | Prometheus query builder and client                   |
-| `defaults.py`                | 8.1k | Default configs, backend name mappings                |
-| `planner_argparse.py`        | 6.2k | CLI argument definitions                              |
+| File                         | Purpose                                               |
+| ---------------------------- | ----------------------------------------------------- |
+| `planner_core.py`            | Base planner, shared scaling loop, algorithm core     |
+| `disagg_planner.py`          | Disaggregated mode orchestrator (prefill + decode)    |
+| `agg_planner.py`             | Aggregated mode orchestrator (load-based only)        |
+| `prefill_planner.py`         | Prefill-specific scaling logic                        |
+| `decode_planner.py`          | Decode-specific scaling logic                         |
+| `load_based_regression.py`   | Sliding-window linear regression for load-based scaling |
+| `prometheus.py`              | Prometheus/router metrics clients, data classes       |
+| `perf_interpolation.py`      | NPZ data loading and throughput/latency interpolation |
+| `load_predictor.py`          | ARIMA, Prophet, Kalman, Constant predictors           |
+| `pre_swept_results_utils.py` | Pre-computed H100/H200 profiling data loader          |
+| `kubernetes_connector.py`    | K8s API integration for DGD scaling                   |
+| `kube.py`                    | Low-level K8s client wrapper                          |
+| `exceptions.py`              | Custom exception hierarchy                            |
+| `defaults.py`                | Default configs, backend name mappings                |
+| `planner_argparse.py`        | CLI argument definitions                              |
 
 

@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Profiler Examples
 ---
 
 # Profiler Examples
@@ -162,7 +163,7 @@ spec:
 Launch an interactive configuration selection interface:
 
 ```bash
-python -m benchmarks.profiler.profile_sla \
+python -m dynamo.profiler.profile_sla \
   --backend trtllm \
   --config path/to/disagg.yaml \
   --pick-with-webui \
@@ -224,7 +225,7 @@ Once you select a configuration, the full DGD CRD is saved as `config_with_plann
 ### Basic Profiling
 
 ```bash
-python -m benchmarks.profiler.profile_sla \
+python -m dynamo.profiler.profile_sla \
   --backend vllm \
   --config path/to/disagg.yaml \
   --model meta-llama/Llama-3-8B \
@@ -235,7 +236,7 @@ python -m benchmarks.profiler.profile_sla \
 ### With GPU Constraints
 
 ```bash
-python -m benchmarks.profiler.profile_sla \
+python -m dynamo.profiler.profile_sla \
   --backend sglang \
   --config examples/backends/sglang/deploy/disagg.yaml \
   --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -248,7 +249,7 @@ python -m benchmarks.profiler.profile_sla \
 ### AI Configurator (Offline)
 
 ```bash
-python -m benchmarks.profiler.profile_sla \
+python -m dynamo.profiler.profile_sla \
   --backend trtllm \
   --config path/to/disagg.yaml \
   --use-ai-configurator \

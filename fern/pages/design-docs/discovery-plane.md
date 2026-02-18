@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Discovery Plane
 ---
 
 # Discovery Plane
@@ -8,16 +9,16 @@
 Dynamo's service discovery layer lets components find each other at runtime. Workers register their endpoints when they start, and frontends discover them automatically.
 The discovery backend adapts to the deployment environment.
 
-![Discovery plane architecture showing Kubernetes and etcd backends](/assets/img/discovery-plane.svg)
+![Discovery plane architecture showing Kubernetes and etcd backends](../../assets/img/discovery-plane.svg)
 
 ## Discovery Backends
 
 | Deployment | Discovery Backend | Configuration |
 |------------|-------------------|---------------|
 | **Kubernetes** (with Dynamo operator) | Native K8s (CRDs, EndpointSlices) | Operator sets `DYN_DISCOVERY_BACKEND=kubernetes` |
-| **Bare metal / Local** (default) | etcd | `ETCD_ENDPOINTS` (defaults to `localhost:2379`) |
+| **Bare metal / Local** (default) | etcd | `ETCD_ENDPOINTS` (defaults to `http://localhost:2379`) |
 
-> **Note:** The runtime always defaults to etcd (`kv_store`). Kubernetes discovery must be explicitly enabled -- the Dynamo operator handles this automatically.
+> **Note:** The runtime always defaults to etcd. Kubernetes discovery must be explicitly enabled -- the Dynamo operator handles this automatically.
 
 ## Kubernetes Discovery
 
@@ -47,7 +48,7 @@ When running on Kubernetes with the Dynamo operator, service discovery uses nati
 
 ## etcd Discovery (Default)
 
-When `DYN_DISCOVERY_BACKEND` is not set (or set to `kv_store`), etcd is used for service discovery.
+When `DYN_DISCOVERY_BACKEND` is not set (or set to `etcd`), etcd is used for service discovery.
 
 ### Connection Configuration
 
@@ -86,7 +87,7 @@ Frontends and routers discover available workers by watching the relevant prefix
 
 Each runtime maintains a lease with etcd (default TTL: 10 seconds). If a worker crashes or loses connectivity:
 
-![Lease lifecycle showing DistributedRuntime keep-alive heartbeat to etcd](/assets/img/discovery-plane-lease.svg)
+![Lease lifecycle showing DistributedRuntime keep-alive heartbeat to etcd](../../assets/img/discovery-plane-lease.svg)
 
 1. Keep-alive heartbeats stop.
 2. The lease expires after the TTL.

@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: KVBM Guide
 subtitle: Enable KV offloading using KV Block Manager (KVBM) for Dynamo deployments
 ---
 
@@ -48,10 +49,11 @@ To build KVBM from source, see the detailed instructions in the [KVBM bindings R
 docker compose -f deploy/docker-compose.yml up -d
 
 # Build a dynamo vLLM container (KVBM is built in by default)
-./container/build.sh --framework vllm
+python container/render.py --framework vllm --target runtime --output-short-filename
+docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
-./container/run.sh --framework vllm -it --mount-workspace --use-nixl-gds
+container/run.sh --image dynamo:latest-vllm-runtime -it --mount-workspace --use-nixl-gds
 ```
 
 ### Aggregated Serving
@@ -99,10 +101,11 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 docker compose -f deploy/docker-compose.yml up -d
 
 # Build a dynamo TRTLLM container (KVBM is built in by default)
-./container/build.sh --framework trtllm
+python container/render.py --framework trtllm --target runtime --output-short-filename
+docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
-./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
+container/run.sh --image dynamo:latest-trtllm-runtime -it --mount-workspace --use-nixl-gds
 ```
 
 ### Aggregated Serving
@@ -201,6 +204,32 @@ cd $DYNAMO_HOME/examples/backends/vllm
 ```
 
 ### Disaggregated Serving with TRT-LLM
+
+<Note>
+The latest TensorRT-LLM release (1.3.0rc1) is currently experiencing a request hang when running disaggregated serving with KVBM.
+Please include the TensorRT-LLM commit id `18e611da773026a55d187870ebcfa95ff00c8482` when building the Dynamo TensorRT-LLM runtime image to test the KVBM + disaggregated serving feature.
+</Note>
+
+```bash
+# Build the Dynamo TensorRT-LLM container using commit ID 18e611da773026a55d187870ebcfa95ff00c8482. Note: This build can take a long time.
+./container/build.sh --framework trtllm --tensorrtllm-commit 18e611da773026a55d187870ebcfa95ff00c8482 --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git
+
+# Launch the container
+./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
+```
+<Note>
+Important: After logging into the Dynamo TensorRT-LLM runtime container, copy the Triton kernels into the container's virtual environment as a separate Python module.
+</Note>
+
+```bash
+# Clone the TensorRT-LLM repo and copy the triton_kernels folder into the container as a Python module.
+git clone https://github.com/NVIDIA/TensorRT-LLM.git /tmp/TensorRT-LLM && \
+cd /tmp/TensorRT-LLM && \
+git checkout 18e611da773026a55d187870ebcfa95ff00c8482 && \
+cp -r triton_kernels /opt/dynamo/venv/lib/python3.12/site-packages/ && \
+cd /workspace && \
+rm -rf /tmp/TensorRT-LLM
+```
 
 ```bash
 # Launch prefill worker with KVBM
@@ -360,7 +389,7 @@ trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --ex
 
 **Solution:** Enable KVBM metrics and check the Grafana dashboard for `Onboard Blocks - Host to Device` and `Onboard Blocks - Disk to Device`. Large numbers of onboarded KV blocks indicate good cache reuse:
 
-![Grafana Example](/assets/img/kvbm-metrics-grafana.png)
+![Grafana Example](../../../assets/img/kvbm-metrics-grafana.png)
 
 ### KVBM Worker Initialization Timeout
 
