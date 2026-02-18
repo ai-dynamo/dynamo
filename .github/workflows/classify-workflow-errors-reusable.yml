@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Classify Workflow Errors (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        description: 'Python version to use'
+        type: string
+        default: '3.11'
+      max_parallel_jobs:
+        description: 'Max parallel jobs to analyze'
+        type: string
+        default: '5'
+      enable_pr_comments:
+        description: 'Enable PR comments'
+        type: string
+        default: 'true'
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  classify-workflow-errors:
+    name: Classify All Workflow Errors
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-venv || true
+          python3 -m venv /tmp/error-classification-venv
+          . /tmp/error-classification-venv/bin/activate
+          pip install -r error_classification/requirements.txt
+
+      - name: Classify Workflow Errors
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          API_FORMAT: "openai"
+          API_BASE_URL: "https://inference-api.nvidia.com/v1"
+          ANTHROPIC_MODEL: "aws/anthropic/claude-opus-4-5"
+          ENABLE_ERROR_CLASSIFICATION: "true"
+          ENABLE_PR_COMMENTS: ${{ inputs.enable_pr_comments }}
+          MAX_PARALLEL_JOBS: ${{ inputs.max_parallel_jobs }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          . /tmp/error-classification-venv/bin/activate
+          python3 .github/workflows/classify_workflow_errors.py || echo "⚠️  Classification failed but continuing"

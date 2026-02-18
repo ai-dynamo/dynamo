@@ -160,3 +160,17 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+
+  classify-errors:
+    if: always() && !cancelled()
+    needs: [changed-files, pre-commit, rust-tests, rust-clippy]
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write  # Required for PR comments
+    uses: ./.github/workflows/classify-workflow-errors-reusable.yml
+    with:
+      enable_pr_comments: 'true'
+      max_parallel_jobs: '5'
+      python_version: '3.11'
+    secrets: inherit
