@@ -95,9 +95,7 @@ class FrontendConfig(ConfigBase):
                 "--migration-limit must be between 0 and 4294967295 (0=disabled)"
             )
         if self.router_enable_cache_control and self.router_mode != "kv":
-            raise ValueError(
-                "--enable-cache-control requires --router-mode=kv"
-            )
+            raise ValueError("--enable-cache-control requires --router-mode=kv")
 
 
 @register_encoder(FrontendConfig)
