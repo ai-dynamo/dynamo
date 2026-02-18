@@ -172,14 +172,16 @@ class FrontendArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--kv-overlap-score-weight",
-            env_var="DYN_KV_OVERLAP_SCORE_WEIGHT",
+            flag_name="--router-kv-overlap-score-weight",
+            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
             default=1.0,
             help=(
                 "KV Router: Weight for overlap score in worker selection. "
                 "Higher values prioritize KV cache reuse."
             ),
             arg_type=float,
+            dest="kv_overlap_score_weight",
+            obsolete_flag="--kv-overlap-score-weight",
         )
         add_argument(
             g,
@@ -194,26 +196,29 @@ class FrontendArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--kv-events",
-            env_var="DYN_KV_EVENTS",
+            flag_name="--router-kv-events",
+            env_var="DYN_ROUTER_USE_KV_EVENTS",
             default=True,
             help=(
-                "KV Router: Enable/disable KV events. Use --kv-events to enable "
-                "(default, router receives cache state events from workers) or --no-kv-events "
+                "KV Router: Enable/disable KV events. Use --router-kv-events to enable "
+                "(default, router receives cache state events from workers) or --no-router-kv-events "
                 "to disable (router predicts cache state based on routing decisions)."
             ),
             dest="use_kv_events",
+            obsolete_flag="--kv-events",
         )
         add_argument(
             g,
-            flag_name="--router-ttl",
-            env_var="DYN_ROUTER_TTL",
+            flag_name="--router-ttl-secs",
+            env_var="DYN_ROUTER_TTL_SECS",
             default=120.0,
             help=(
                 "KV Router: Time-to-live in seconds for blocks when KV events are disabled. "
-                "Only used when --no-kv-events is set."
+                "Only used when --no-router-kv-events is set."
             ),
             arg_type=float,
+            dest="router_ttl",
+            obsolete_flag="--router-ttl",
         )
         add_argument(
             g,
@@ -222,7 +227,7 @@ class FrontendArgGroup(ArgGroup):
             default=2**20,
             help=(
                 "KV Router: Maximum tree size before pruning when KV events are disabled. "
-                "Only used when --no-kv-events is set."
+                "Only used when --no-router-kv-events is set."
             ),
             arg_type=int,
         )
@@ -233,7 +238,7 @@ class FrontendArgGroup(ArgGroup):
             default=0.8,
             help=(
                 "KV Router: Target size ratio after pruning when KV events are disabled. "
-                "Only used when --no-kv-events is set."
+                "Only used when --no-router-kv-events is set."
             ),
             arg_type=float,
         )
@@ -284,8 +289,8 @@ class FrontendArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--durable-kv-events",
-            env_var="DYN_DURABLE_KV_EVENTS",
+            flag_name="--router-durable-kv-events",
+            env_var="DYN_ROUTER_DURABLE_KV_EVENTS",
             default=False,
             help=(
                 "KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. "
@@ -293,32 +298,36 @@ class FrontendArgGroup(ArgGroup):
                 "local_indexer mode. Use this flag when you need durability and multi-replica "
                 "consistency. Requires NATS with JetStream enabled."
             ),
+            dest="durable_kv_events",
+            obsolete_flag="--durable-kv-events",
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--track-active-blocks",
-            env_var="DYN_TRACK_ACTIVE_BLOCKS",
+            flag_name="--router-track-active-blocks",
+            env_var="DYN_ROUTER_TRACK_ACTIVE_BLOCKS",
             default=True,
             dest="router_track_active_blocks",
             help=(
                 "KV Router: Track active blocks (blocks being used for ongoing generation). "
                 "By default, active blocks are tracked for load balancing. "
             ),
+            obsolete_flag="--track-active-blocks",
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--assume-kv-reuse",
-            env_var="DYN_ASSUME_KV_REUSE",
+            flag_name="--router-assume-kv-reuse",
+            env_var="DYN_ROUTER_ASSUME_KV_REUSE",
             default=True,
             dest="router_assume_kv_reuse",
             help=(
                 "KV Router: When tracking active blocks, assume KV cache reuse. "
-                "Use --no-assume-kv-reuse to generate random hashes instead (when KV cache reuse is not expected)."
+                "Use --no-router-assume-kv-reuse to generate random hashes instead (when KV cache reuse is not expected)."
             ),
+            obsolete_flag="--assume-kv-reuse",
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--track-output-blocks",
+            flag_name="--router-track-output-blocks",
             env_var="DYN_ROUTER_TRACK_OUTPUT_BLOCKS",
             default=False,
             dest="router_track_output_blocks",
@@ -327,6 +336,7 @@ class FrontendArgGroup(ArgGroup):
                 "placeholder blocks as tokens are generated and applies fractional decay based on "
                 "progress toward expected_output_tokens."
             ),
+            obsolete_flag="--track-output-blocks",
         )
         add_argument(
             g,
