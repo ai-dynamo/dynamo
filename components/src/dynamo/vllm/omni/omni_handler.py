@@ -246,6 +246,8 @@ class OmniHandler(BaseOmniHandler):
         # So, we can't extract any diffusion related params from the raw_request
         # It falls back to default sampling params
         text_prompt = self._extract_text_prompt(request)
+        if text_prompt is None:
+            raise ValueError("No user message found in chat completion request")
 
         prompt = OmniTextPrompt(prompt=text_prompt)
 

@@ -77,6 +77,8 @@ def parse_request_type(
     Assumption: Right now we only consider user passes only one modality at a time.
     """
     # Fetch the first output modality from the list.
+    if not output_modalities:
+        raise ValueError("output_modalities must not be empty")
     output_modality = output_modalities[0]
     modality = OutputModality.from_name(output_modality)
 
