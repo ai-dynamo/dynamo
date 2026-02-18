@@ -159,7 +159,7 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 | Flag | Description |
 |---|---|
 | `--omni` | Enable the vLLM-Omni orchestrator (required for all omni workloads) |
-| `--output-modalities <modality>` | Output modality: `text`, `image`, `video`, or `audio` |
+| `--output-modalities <modality>` | Output modality: `text`, `image`, or `video` |
 | `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
 | `--connector none` | Disable KV connector (recommended for omni workers) |
 
