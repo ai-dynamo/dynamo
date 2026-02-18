@@ -166,11 +166,7 @@ pub enum AnthropicContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "deserialize_tool_result_content"
-        )]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<ToolResultContent>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
@@ -181,9 +177,7 @@ pub enum AnthropicContentBlock {
     /// Catch-all for unrecognized block types. Silently accepted and skipped
     /// during conversion so that new Anthropic features don't break the endpoint.
     #[serde(skip)]
-    Unknown {
-        block_type: String,
-    },
+    Unknown { block_type: String },
 }
 
 /// Content of a `tool_result` block — either a plain string or an array of
@@ -221,16 +215,6 @@ pub enum ToolResultContentBlock {
     },
     /// Catch-all for non-text blocks (images, etc.) in tool results.
     Other(serde_json::Value),
-}
-
-/// Custom deserializer for `Option<ToolResultContent>`.
-fn deserialize_tool_result_content<'de, D>(
-    deserializer: D,
-) -> Result<Option<ToolResultContent>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<ToolResultContent>::deserialize(deserializer)
 }
 
 /// Custom deserializer for `AnthropicContentBlock` that handles unknown types
@@ -616,12 +600,10 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 stream: Some(true), // Always stream internally
-                stream_options: Some(
-                    dynamo_async_openai::types::ChatCompletionStreamOptions {
-                        include_usage: true,
-                        continuous_usage_stats: false,
-                    },
-                ),
+                stream_options: Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                    include_usage: true,
+                    continuous_usage_stats: false,
+                }),
                 ..Default::default()
             },
             common: CommonExt {
@@ -666,10 +648,7 @@ fn convert_user_blocks(
                     ));
                     text_parts.clear();
                 }
-                let text = content
-                    .clone()
-                    .map(|c| c.into_text())
-                    .unwrap_or_default();
+                let text = content.clone().map(|c| c.into_text()).unwrap_or_default();
                 messages.push(ChatCompletionRequestMessage::Tool(
                     ChatCompletionRequestToolMessage {
                         content: ChatCompletionRequestToolMessageContent::Text(text),
@@ -965,16 +944,18 @@ impl AnthropicCountTokensRequest {
         }
 
         let tokens = total_len / 3;
-        if tokens == 0 && total_len > 0 { 1 } else { tokens as u32 }
+        if tokens == 0 && total_len > 0 {
+            1
+        } else {
+            tokens as u32
+        }
     }
 }
 
 fn estimate_block_len(block: &AnthropicContentBlock) -> usize {
     match block {
         AnthropicContentBlock::Text { text } => text.len(),
-        AnthropicContentBlock::ToolUse { name, input, .. } => {
-            name.len() + input.to_string().len()
-        }
+        AnthropicContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
         AnthropicContentBlock::ToolResult { content, .. } => content
             .as_ref()
             .map(|c| match c {
@@ -1358,10 +1339,7 @@ mod tests {
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         match &chat_req.inner.messages[0] {
             ChatCompletionRequestMessage::Assistant(a) => {
-                assert_eq!(
-                    a.reasoning_content.as_deref(),
-                    Some("I should think...")
-                );
+                assert_eq!(a.reasoning_content.as_deref(), Some("I should think..."));
                 match &a.content {
                     Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => {
                         assert_eq!(t, "Answer");
@@ -1440,15 +1418,13 @@ mod tests {
         }"#;
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
         match &req.messages[0].content {
-            AnthropicMessageContent::Blocks { content } => {
-                match &content[0] {
-                    AnthropicContentBlock::ToolResult { content, .. } => {
-                        let text = content.clone().unwrap().into_text();
-                        assert_eq!(text, "simple text");
-                    }
-                    other => panic!("expected ToolResult, got {other:?}"),
+            AnthropicMessageContent::Blocks { content } => match &content[0] {
+                AnthropicContentBlock::ToolResult { content, .. } => {
+                    let text = content.clone().unwrap().into_text();
+                    assert_eq!(text, "simple text");
                 }
-            }
+                other => panic!("expected ToolResult, got {other:?}"),
+            },
             _ => panic!("expected blocks"),
         }
     }
@@ -1470,15 +1446,13 @@ mod tests {
         }"#;
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
         match &req.messages[0].content {
-            AnthropicMessageContent::Blocks { content } => {
-                match &content[0] {
-                    AnthropicContentBlock::ToolResult { content, .. } => {
-                        let text = content.clone().unwrap().into_text();
-                        assert_eq!(text, "line 1line 2");
-                    }
-                    other => panic!("expected ToolResult, got {other:?}"),
+            AnthropicMessageContent::Blocks { content } => match &content[0] {
+                AnthropicContentBlock::ToolResult { content, .. } => {
+                    let text = content.clone().unwrap().into_text();
+                    assert_eq!(text, "line 1line 2");
                 }
-            }
+                other => panic!("expected ToolResult, got {other:?}"),
+            },
             _ => panic!("expected blocks"),
         }
     }

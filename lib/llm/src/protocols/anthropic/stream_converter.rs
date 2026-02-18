@@ -587,7 +587,10 @@ mod tests {
 
         // Stream some text
         let text_events = conv.process_chunk_tagged(&text_chunk("I'll edit the file."));
-        assert_eq!(event_types(&text_events), vec!["content_block_start", "content_block_delta"]);
+        assert_eq!(
+            event_types(&text_events),
+            vec!["content_block_start", "content_block_delta"]
+        );
 
         // Stream a tool call — text block must close first
         let tool_events = conv.process_chunk_tagged(&tool_call_chunk(
@@ -599,7 +602,11 @@ mod tests {
 
         assert_eq!(
             event_types(&tool_events),
-            vec!["content_block_stop", "content_block_start", "content_block_delta"],
+            vec![
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ],
             "text block must be closed before tool block starts"
         );
 
@@ -609,7 +616,10 @@ mod tests {
             other => panic!("expected ContentBlockStop, got {other:?}"),
         }
         match &tool_events[1].data {
-            AnthropicStreamEvent::ContentBlockStart { index, content_block } => {
+            AnthropicStreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
                 assert_eq!(*index, 1);
                 match content_block {
                     AnthropicResponseContentBlock::ToolUse { name, .. } => {
@@ -645,7 +655,10 @@ mod tests {
             Some("Read"),
             Some("{\"path\":\"/tmp/test.txt\"}"),
         ));
-        assert_eq!(event_types(&tool_events), vec!["content_block_start", "content_block_delta"]);
+        assert_eq!(
+            event_types(&tool_events),
+            vec!["content_block_start", "content_block_delta"]
+        );
 
         let end_events = conv.emit_end_events_tagged();
         assert_eq!(
