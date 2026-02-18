@@ -140,9 +140,9 @@ VLLMDecodeWorker:
 | Transport | Bandwidth | Latency | Same-Node | Cross-Node | GPU Direct |
 |-----------|-----------|---------|-----------|------------|------------|
 | **NVLink** | 450-900 GB/s | ~µs | ✅ (intra-pod only) | ❌ | ✅ |
-| **InfiniBand RDMA** | 200-400 GB/s | ~1 µs | ✅ | ✅ | ✅ (with GPUDirect) |
-| **RoCE RDMA** | 100-200 GB/s | ~2 µs | ✅ | ✅ | ✅ (with GPUDirect) |
-| **TCP** | 10-25 GB/s | ~50 µs | ✅ | ✅ | ❌ (host staging) |
+| **InfiniBand RDMA** | 20-50 GB/s | ~1 µs | ✅ | ✅ | ✅ (with GPUDirect) |
+| **RoCE RDMA** | 10-25 GB/s | ~2 µs | ✅ | ✅ | ✅ (with GPUDirect) |
+| **TCP** | 1-10 GB/s | ~50 µs | ✅ | ✅ | ❌ (host staging) |
 
 ### Same-Node Communication
 
