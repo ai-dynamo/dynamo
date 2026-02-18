@@ -236,25 +236,10 @@ impl ConcurrentRadixTree {
                 let guard = block.read();
                 let child_count = guard.workers.len();
 
-                if child_count < active_count {
-                    // Workers dropped out. Record scores for those that left.
-                    // Score = matched_depth (number of nodes they were present at).
-                    for worker in &active {
-                        if !guard.workers.contains(worker) {
-                            scores.scores.insert(*worker, matched_depth);
-                        }
-                    }
-                    active.clone_from(&guard.workers);
-                    active_count = child_count;
-
-                    if active_count == 0 {
-                        break;
-                    }
-                } else if child_count > active_count {
-                    // child_count > active_count means stale entries exist
-                    // (child retains workers already removed from an ancestor).
-                    // Fall back to full membership check: keep only workers
-                    // present in both active and this child, scoring dropouts.
+                if child_count != active_count {
+                    // Workers changed: either dropped out (child < active) or
+                    // stale entries exist (child > active). In both cases,
+                    // retain only workers present in the child, scoring dropouts.
                     active.retain(|w| {
                         if guard.workers.contains(w) {
                             true

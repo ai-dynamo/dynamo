@@ -21,8 +21,8 @@
 //! `KvIndexerInterface` with sticky event routing and worker threads, wrap it
 //! in a `ThreadPoolIndexer`.
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
-use std::sync::RwLock;
 
 use crate::indexer::SyncIndexer;
 use crate::protocols::{
@@ -161,7 +161,7 @@ impl SyncIndexer for PositionalIndexer {
 
         for entry in self.worker_blocks.iter() {
             let worker = *entry.key();
-            let worker_map = entry.value().read().unwrap();
+            let worker_map = entry.value().read();
 
             // Collect (position, local_hash, seq_hash) and sort by position
             // so parents are emitted before children during replay.
@@ -285,7 +285,7 @@ impl PositionalIndexer {
                     return Err(KvCacheEventError::ParentBlockNotFound);
                 };
 
-                let worker_map = worker_map.read().unwrap();
+                let worker_map = worker_map.read();
 
                 let Some(entry) = worker_map.get(&parent_hash) else {
                     tracing::warn!(
@@ -307,7 +307,7 @@ impl PositionalIndexer {
         }
 
         let worker_blocks_entry = worker_blocks.get(&worker).unwrap();
-        let mut worker_map = worker_blocks_entry.write().unwrap();
+        let mut worker_map = worker_blocks_entry.write();
 
         for (i, block_data) in store_data.blocks.into_iter().enumerate() {
             let position = start_pos + i;
@@ -344,7 +344,7 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
-        let mut worker_map = worker_map.write().unwrap();
+        let mut worker_map = worker_map.write();
 
         for seq_hash in seq_hashes {
             let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
@@ -381,7 +381,7 @@ impl PositionalIndexer {
     pub fn current_size(&self) -> usize {
         self.worker_blocks
             .iter()
-            .map(|entry| entry.value().read().unwrap().len())
+            .map(|entry| entry.value().read().len())
             .sum()
     }
 
@@ -415,7 +415,7 @@ impl PositionalIndexer {
         for worker in workers {
             if let Some((_, worker_map)) = worker_blocks.remove(&worker) {
                 // Remove each block from the index
-                for entry in worker_map.read().unwrap().iter() {
+                for entry in worker_map.read().iter() {
                     let seq_hash = *entry.0;
                     let (position, local_hash) = *entry.1;
 
@@ -625,7 +625,7 @@ impl PositionalIndexer {
             // Populate tree_sizes
             for worker in scores.scores.keys() {
                 if let Some(worker_map) = self.worker_blocks.get(worker) {
-                    let worker_map = worker_map.read().unwrap();
+                    let worker_map = worker_map.read();
                     scores.tree_sizes.insert(*worker, worker_map.len());
                 }
             }
@@ -677,7 +677,7 @@ impl PositionalIndexer {
         // Populate tree_sizes from worker_blocks
         for worker in scores.scores.keys() {
             if let Some(worker_map) = self.worker_blocks.get(worker) {
-                let worker_map = worker_map.read().unwrap();
+                let worker_map = worker_map.read();
                 scores.tree_sizes.insert(*worker, worker_map.len());
             }
         }

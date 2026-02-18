@@ -36,6 +36,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use rustc_hash::FxBuildHasher;
 #[cfg(feature = "metrics")]
 pub use dynamo_runtime::protocols::maybe_error::MaybeError;
 #[cfg(feature = "metrics")]
@@ -406,7 +407,7 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     backend: Arc<T>,
 
     /// Maps WorkerId to worker thread index for sticky routing.
-    worker_assignments: DashMap<WorkerId, usize>,
+    worker_assignments: DashMap<WorkerId, usize, FxBuildHasher>,
     /// Counter for round-robin assignment of new WorkerIds.
     worker_assignment_count: AtomicUsize,
 
@@ -463,7 +464,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
         Self {
             backend,
-            worker_assignments: DashMap::new(),
+            worker_assignments: DashMap::with_hasher(FxBuildHasher),
             worker_assignment_count: AtomicUsize::new(0),
             worker_event_channels: worker_event_senders,
             num_workers,
@@ -1388,7 +1389,7 @@ pub struct KvIndexerSharded {
     cancel: CancellationToken,
     /// The size of the KV block this indexer can handle.
     kv_block_size: u32,
-    worker_assignments: DashMap<WorkerId, usize>,
+    worker_assignments: DashMap<WorkerId, usize, FxBuildHasher>,
     worker_counts: Arc<Mutex<Vec<usize>>>,
 
     event_tx: Vec<mpsc::Sender<RouterEvent>>,
@@ -1421,7 +1422,7 @@ impl KvIndexerSharded {
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
-        let worker_assignments = DashMap::new();
+        let worker_assignments = DashMap::with_hasher(FxBuildHasher);
         let worker_counts = Arc::new(Mutex::new(vec![0; num_shards]));
 
         let mut event_tx = Vec::new();
