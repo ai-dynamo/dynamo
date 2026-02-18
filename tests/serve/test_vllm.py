@@ -457,7 +457,7 @@ vllm_configs = {
     # Reference: Linear OPS-3015
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal/launch"),
+        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -484,7 +484,7 @@ vllm_configs = {
     ),
     "multimodal_video_disagg": VLLMConfig(
         name="multimodal_video_disagg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal/launch"),
+        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_disagg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
