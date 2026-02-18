@@ -112,7 +112,7 @@ class PlannerSharedState:
     throughput_lower_bound_p: int = 1
     throughput_lower_bound_d: int = 1
     # Separate timestamp for load-based adjustment loop
-    last_loadbased_adjustment_time: float = 0.0
+    last_load_adjustment_time: float = 0.0
 
 
 def _apply_global_gpu_budget(
@@ -339,7 +339,7 @@ class BasePlanner:
         # Load-based scaling flags.
         # Argument validation (flag resolution, constraint checks, correction factor
         # auto-disable) is handled by validate_sla_planner_args() in planner_argparse.
-        self.enable_loadbased = config.enable_loadbased_scaling
+        self.enable_load = config.enable_load_scaling
         self.enable_throughput = config.enable_throughput_scaling
 
         # Only create interpolators when throughput-based scaling is enabled
@@ -417,30 +417,30 @@ class BasePlanner:
         else:
             self.no_correction = config.no_correction
 
-        if self.enable_loadbased:
+        if self.enable_load:
             if prometheus_engine_client is not None:
                 self.prometheus_engine_client = prometheus_engine_client
             else:
                 # Auto-discover frontend metrics URL in Kubernetes mode
-                if not config.loadbased_router_metrics_url and isinstance(
+                if not config.load_router_metrics_url and isinstance(
                     getattr(self, "connector", None), KubernetesConnector
                 ):
-                    config.loadbased_router_metrics_url = (
+                    config.load_router_metrics_url = (
                         self.connector.get_frontend_metrics_url()
                     )
-                    if not config.loadbased_router_metrics_url:
+                    if not config.load_router_metrics_url:
                         raise ValueError(
                             "Could not auto-discover frontend metrics URL from DGD. "
                             "No service with componentType 'frontend' found. "
-                            "Please set loadbased_router_metrics_url in the config."
+                            "Please set load_router_metrics_url in the config."
                         )
                     else:
                         logger.info(
-                            f"Auto-discovered frontend metrics URL: {config.loadbased_router_metrics_url}"
+                            f"Auto-discovered frontend metrics URL: {config.load_router_metrics_url}"
                         )
 
                 self.prometheus_engine_client = DirectRouterMetricsClient(
-                    config.loadbased_router_metrics_url, config.namespace
+                    config.load_router_metrics_url, config.namespace
                 )
             self.cached_load_metrics = CachedLoadMetrics()
 
@@ -450,13 +450,13 @@ class BasePlanner:
 
             if self.component_type == SubComponentType.PREFILL:
                 self.ttft_regression = LoadBasedRegressionModel(
-                    window_size=self.config.loadbased_learning_window,
-                    min_observations=self.config.loadbased_min_observations,
+                    window_size=self.config.load_learning_window,
+                    min_observations=self.config.load_min_observations,
                 )
             elif self.component_type == SubComponentType.DECODE:
                 self.itl_regression = LoadBasedRegressionModel(
-                    window_size=self.config.loadbased_learning_window,
-                    min_observations=self.config.loadbased_min_observations,
+                    window_size=self.config.load_learning_window,
+                    min_observations=self.config.load_min_observations,
                 )
 
     @property
@@ -819,7 +819,7 @@ class BasePlanner:
                     )
                     self.itl_regression.add_observation(x, y)
 
-    def loadbased_plan_adjustment(self) -> Optional[int]:
+    def load_plan_adjustment(self) -> Optional[int]:
         """Load-based scaling decision. Override in subclasses."""
         raise NotImplementedError
 
@@ -842,7 +842,7 @@ class BasePlanner:
                 )
                 desired_replicas = self.plan_adjustment()
                 if desired_replicas is not None:
-                    if self.enable_loadbased:
+                    if self.enable_load:
                         # When load-based is also enabled: just set lower bound
                         if self.component_type == SubComponentType.PREFILL:
                             self.shared_state.throughput_lower_bound_p = (
@@ -868,7 +868,7 @@ class BasePlanner:
     async def _load_loop(self, require_prefill: bool, require_decode: bool) -> None:
         """Load-based scaling loop at shorter interval."""
         while True:
-            await asyncio.sleep(self.config.loadbased_adjustment_interval)
+            await asyncio.sleep(self.config.load_adjustment_interval)
             logger.info("New load-based adjustment interval started!")
 
             # Query DGD for fresh worker counts
@@ -894,7 +894,7 @@ class BasePlanner:
                 )
                 continue
 
-            desired_replicas = self.loadbased_plan_adjustment()
+            desired_replicas = self.load_plan_adjustment()
 
             if desired_replicas is not None:
                 # Enforce lower bound from throughput-based
@@ -957,18 +957,18 @@ class BasePlanner:
             self.model_name = model_name.lower()
 
         self.shared_state.last_adjustment_time = time.time()
-        self.shared_state.last_loadbased_adjustment_time = time.time()
+        self.shared_state.last_load_adjustment_time = time.time()
 
         # Build list of concurrent loops based on enabled scaling modes
         loops = []
         if self.enable_throughput:
             loops.append(self._throughput_loop(require_prefill, require_decode))
-        if self.enable_loadbased:
+        if self.enable_load:
             loops.append(self._load_loop(require_prefill, require_decode))
             loops.append(
                 self.prometheus_engine_client.run_sampling_loop(
-                    self.config.loadbased_metric_samples,
-                    self.config.loadbased_adjustment_interval,
+                    self.config.load_metric_samples,
+                    self.config.load_adjustment_interval,
                 )
             )
 

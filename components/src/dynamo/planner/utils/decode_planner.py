@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class DecodePlanner(BasePlanner):
     component_type = SubComponentType.DECODE
 
-    def loadbased_plan_adjustment(self) -> Optional[int]:
+    def load_plan_adjustment(self) -> Optional[int]:
         """Load-based scaling decision for decode. Returns desired_replicas or None."""
         if not self.itl_regression.has_sufficient_data():
             logger.info(
@@ -63,7 +63,7 @@ class DecodePlanner(BasePlanner):
 
         # Scale down: ALL workers below boundary (use recent metrics)
         if num_workers > 1:
-            sensitivity = self.config.loadbased_scaling_down_sensitivity / 100.0
+            sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             all_below = all(
                 m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()

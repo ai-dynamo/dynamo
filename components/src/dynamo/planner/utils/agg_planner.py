@@ -51,9 +51,9 @@ class AggPlanner:
                 "Aggregated planner only supports load-based scaling. "
                 "Set enable_throughput_scaling to false in the config."
             )
-        if not config.enable_loadbased_scaling:
+        if not config.enable_load_scaling:
             raise ValueError(
-                "Aggregated planner requires enable_loadbased_scaling to be true."
+                "Aggregated planner requires enable_load_scaling to be true."
             )
 
         prometheus_metrics = PlannerPrometheusMetrics()
@@ -72,12 +72,12 @@ class AggPlanner:
 
         # Create both regression models (agg needs both TTFT and ITL)
         self.ttft_regression = LoadBasedRegressionModel(
-            window_size=config.loadbased_learning_window,
-            min_observations=config.loadbased_min_observations,
+            window_size=config.load_learning_window,
+            min_observations=config.load_min_observations,
         )
         self.itl_regression = LoadBasedRegressionModel(
-            window_size=config.loadbased_learning_window,
-            min_observations=config.loadbased_min_observations,
+            window_size=config.load_learning_window,
+            min_observations=config.load_min_observations,
         )
 
         self.cached_load_metrics = CachedLoadMetrics()
@@ -125,8 +125,8 @@ class AggPlanner:
         loops = [
             self._load_loop(),
             self.planner.prometheus_engine_client.run_sampling_loop(
-                self.config.loadbased_metric_samples,
-                self.config.loadbased_adjustment_interval,
+                self.config.load_metric_samples,
+                self.config.load_adjustment_interval,
             ),
         ]
         await asyncio.gather(*loops)
@@ -213,7 +213,7 @@ class AggPlanner:
 
         # Scale down: ALL workers below boundary
         if num_workers > 1:
-            sensitivity = self.config.loadbased_scaling_down_sensitivity / 100.0
+            sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = target * (num_workers - 1) / num_workers * sensitivity
             if all(
                 m.get("active_prefill_tokens", 0.0) < boundary for m in recent.values()
@@ -256,7 +256,7 @@ class AggPlanner:
         # TODO: should we strictly enforce all workers below boundary?
         # how about user-configurable percentage?
         if num_workers > 1:
-            sensitivity = self.config.loadbased_scaling_down_sensitivity / 100.0
+            sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             if all(
                 m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
@@ -268,7 +268,7 @@ class AggPlanner:
     async def _load_loop(self) -> None:
         """Load-based scaling loop for aggregated mode."""
         while True:
-            await asyncio.sleep(self.config.loadbased_adjustment_interval)
+            await asyncio.sleep(self.config.load_adjustment_interval)
             logger.info("New agg load-based adjustment interval started!")
 
             # Query DGD for fresh worker counts

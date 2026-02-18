@@ -32,7 +32,7 @@ class DisaggPlanner:
         prometheus_metrics = PlannerPrometheusMetrics()
 
         self.enable_throughput = config.enable_throughput_scaling
-        self.enable_loadbased = config.enable_loadbased_scaling
+        self.enable_load = config.enable_load_scaling
 
         self.prefill_planner = PrefillPlanner(
             runtime,
@@ -100,18 +100,18 @@ class DisaggPlanner:
         self.decode_planner.model_name = model_name
 
         self.shared_state.last_adjustment_time = time.time()
-        self.shared_state.last_loadbased_adjustment_time = time.time()
+        self.shared_state.last_load_adjustment_time = time.time()
 
         # Build list of concurrent loops based on enabled scaling modes
         loops = []
         if self.enable_throughput:
             loops.append(self._throughput_loop())
-        if self.enable_loadbased:
+        if self.enable_load:
             loops.append(self._load_loop())
             loops.append(
                 self.prefill_planner.prometheus_engine_client.run_sampling_loop(
-                    self.config.loadbased_metric_samples,
-                    self.config.loadbased_adjustment_interval,
+                    self.config.load_metric_samples,
+                    self.config.load_adjustment_interval,
                 )
             )
 
@@ -141,7 +141,7 @@ class DisaggPlanner:
                     await asyncio.sleep(self.config.throughput_adjustment_interval / 10)
                     continue
 
-                if self.enable_loadbased:
+                if self.enable_load:
                     # When load-based is also enabled: just set lower bounds
                     self.shared_state.throughput_lower_bound_p = next_num_p
                     self.shared_state.throughput_lower_bound_d = next_num_d
@@ -178,7 +178,7 @@ class DisaggPlanner:
     async def _load_loop(self) -> None:
         """Load-based scaling loop for disagg mode at shorter interval."""
         while True:
-            await asyncio.sleep(self.config.loadbased_adjustment_interval)
+            await asyncio.sleep(self.config.load_adjustment_interval)
             logger.info("New load-based adjustment interval started!")
 
             # Query DGD for fresh worker counts
@@ -204,8 +204,8 @@ class DisaggPlanner:
                 continue
 
             # Scale prefill and decode independently
-            p_desired = self.prefill_planner.loadbased_plan_adjustment()
-            d_desired = self.decode_planner.loadbased_plan_adjustment()
+            p_desired = self.prefill_planner.load_plan_adjustment()
+            d_desired = self.decode_planner.load_plan_adjustment()
 
             final_p = (
                 p_desired if p_desired is not None else self.shared_state.num_p_workers

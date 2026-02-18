@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class PrefillPlanner(BasePlanner):
     component_type = SubComponentType.PREFILL
 
-    def loadbased_plan_adjustment(self) -> Optional[int]:
+    def load_plan_adjustment(self) -> Optional[int]:
         """Load-based scaling decision for prefill. Returns desired_replicas or None."""
         if not self.ttft_regression.has_sufficient_data():
             logger.info(
@@ -70,7 +70,7 @@ class PrefillPlanner(BasePlanner):
 
         # Scale down: ALL workers below boundary (use recent metrics)
         if num_workers > 1:
-            sensitivity = self.config.loadbased_scaling_down_sensitivity / 100.0
+            sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = (
                 target_active_tokens * (num_workers - 1) / num_workers * sensitivity
             )

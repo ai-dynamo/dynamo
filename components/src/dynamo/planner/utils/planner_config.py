@@ -102,21 +102,17 @@ class PlannerConfig(BaseModel):
 
     # Scaling mode flags
     enable_throughput_scaling: bool = SLAPlannerDefaults.enable_throughput_scaling
-    enable_loadbased_scaling: bool = SLAPlannerDefaults.enable_loadbased_scaling
+    enable_load_scaling: bool = SLAPlannerDefaults.enable_load_scaling
 
     # Load-based scaling settings
-    loadbased_router_metrics_url: Optional[
-        str
-    ] = SLAPlannerDefaults.loadbased_router_metrics_url
-    loadbased_adjustment_interval: int = (
-        SLAPlannerDefaults.loadbased_adjustment_interval
+    load_router_metrics_url: Optional[str] = SLAPlannerDefaults.load_router_metrics_url
+    load_adjustment_interval: int = SLAPlannerDefaults.load_adjustment_interval
+    load_learning_window: int = SLAPlannerDefaults.load_learning_window
+    load_scaling_down_sensitivity: int = (
+        SLAPlannerDefaults.load_scaling_down_sensitivity
     )
-    loadbased_learning_window: int = SLAPlannerDefaults.loadbased_learning_window
-    loadbased_scaling_down_sensitivity: int = (
-        SLAPlannerDefaults.loadbased_scaling_down_sensitivity
-    )
-    loadbased_metric_samples: int = SLAPlannerDefaults.loadbased_metric_samples
-    loadbased_min_observations: int = SLAPlannerDefaults.loadbased_min_observations
+    load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
+    load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
@@ -128,31 +124,25 @@ class PlannerConfig(BaseModel):
             )
 
         # At least one scaling mode must be enabled
-        if not self.enable_throughput_scaling and not self.enable_loadbased_scaling:
+        if not self.enable_throughput_scaling and not self.enable_load_scaling:
             raise ValueError(
                 "At least one scaling mode must be enabled "
-                "(enable_throughput_scaling or enable_loadbased_scaling)"
+                "(enable_throughput_scaling or enable_load_scaling)"
             )
 
-        if self.enable_loadbased_scaling:
+        if self.enable_load_scaling:
             # Router metrics URL is required outside kubernetes mode
-            if (
-                not self.loadbased_router_metrics_url
-                and self.environment != "kubernetes"
-            ):
+            if not self.load_router_metrics_url and self.environment != "kubernetes":
                 raise ValueError(
-                    "loadbased_router_metrics_url is required when "
+                    "load_router_metrics_url is required when "
                     "load-based scaling is enabled outside kubernetes mode"
                 )
 
             # Load-based interval must be shorter than throughput interval
             if self.enable_throughput_scaling:
-                if (
-                    self.loadbased_adjustment_interval
-                    >= self.throughput_adjustment_interval
-                ):
+                if self.load_adjustment_interval >= self.throughput_adjustment_interval:
                     raise ValueError(
-                        f"loadbased_adjustment_interval ({self.loadbased_adjustment_interval}s) "
+                        f"load_adjustment_interval ({self.load_adjustment_interval}s) "
                         f"must be shorter than throughput_adjustment_interval ({self.throughput_adjustment_interval}s). "
                         "Load-based scaling is the fast reactive loop; throughput-based is the "
                         "slow predictive loop."
@@ -213,3 +203,13 @@ class PlannerConfig(BaseModel):
                     )
 
         return cls.model_validate(data)
+
+
+if __name__ == "__main__":
+    from pathlib import Path
+
+    schema = PlannerConfig.model_json_schema()
+
+    output_path = Path(__file__).parent / "planner_config_json_schema.json"
+    output_path.write_text(json.dumps(schema, indent=2))
+    print(f"PlannerConfig JSON schema written to {output_path}")

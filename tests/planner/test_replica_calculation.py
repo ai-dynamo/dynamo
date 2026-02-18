@@ -166,7 +166,7 @@ def planner():
         environment="kubernetes",
         namespace="test-namespace",
         enable_throughput_scaling=True,
-        enable_loadbased_scaling=False,
+        enable_load_scaling=False,
         load_predictor_warmup_trace=None,
         load_predictor_log1p=False,
     )

@@ -58,7 +58,7 @@ def _build_config():
         namespace="test-namespace",
         mode="disagg",
         enable_throughput_scaling=True,
-        enable_loadbased_scaling=False,
+        enable_load_scaling=False,
     )
 
 
@@ -383,68 +383,67 @@ class TestInitializeGpuCounts:
 
 # Tests for dryrun GPU defaults
 class TestDryrunGpuDefaults:
-    """Dryrun tests - these use argparse.Namespace since dryrun.py still uses argparse."""
-
     @staticmethod
-    def _build_dryrun_args():
-        args = argparse.Namespace()
-        args.adjustment_interval = 60
-        args.prefill_engine_num_gpu = 1
-        args.decode_engine_num_gpu = 1
-        args.min_endpoint = 1
-        args.max_gpu_budget = -1
-        args.ttft = 500.0
-        args.itl = 50.0
-        args.backend = "vllm"
-        args.no_operation = True
-        args.no_correction = True
-        args.metric_pulling_prometheus_endpoint = "http://localhost:9090"
-        args.metric_reporting_prometheus_port = 0
-        args.load_predictor = "constant"
-        args.load_predictor_warmup_trace = None
-        args.profile_results_dir = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "profiling_results",
-            "H200_TP1P_TP1D",
+    def _build_dryrun_config(**overrides) -> PlannerConfig:
+        defaults = dict(
+            throughput_adjustment_interval=60,
+            prefill_engine_num_gpu=1,
+            decode_engine_num_gpu=1,
+            min_endpoint=1,
+            max_gpu_budget=-1,
+            ttft=500.0,
+            itl=50.0,
+            backend="vllm",
+            no_operation=True,
+            no_correction=True,
+            metric_pulling_prometheus_endpoint="http://localhost:9090",
+            metric_reporting_prometheus_port=0,
+            load_predictor="constant",
+            load_predictor_warmup_trace=None,
+            load_predictor_log1p=False,
+            profile_results_dir=os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "profiling_results",
+                "H200_TP1P_TP1D",
+            ),
+            environment="kubernetes",
+            namespace="test-namespace",
+            mode="disagg",
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
         )
-        args.environment = "kubernetes"
-        args.namespace = "test-namespace"
-        args.mode = "disagg"
-        args.enable_throughput_scaling = True
-        args.enable_loadbased_scaling = False
-        return args
+        defaults.update(overrides)
+        return PlannerConfig.model_construct(**defaults)
 
     def test_dryrun_defaults_gpu_counts_when_none(self):
         """Test that dryrun sets default GPU counts of 1 when None"""
         from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
 
-        args = self._build_dryrun_args()
-        args.prefill_engine_num_gpu = None
-        args.decode_engine_num_gpu = None
-        args.dataset = "nonexistent.jsonl"
+        config = self._build_dryrun_config(
+            prefill_engine_num_gpu=None, decode_engine_num_gpu=None
+        )
 
         try:
-            run_sla_planner_dryrun(args)
+            run_sla_planner_dryrun(config, dataset="nonexistent.jsonl")
         except (FileNotFoundError, ValueError):
             pass
 
-        assert args.prefill_engine_num_gpu == 1
-        assert args.decode_engine_num_gpu == 1
+        assert config.prefill_engine_num_gpu == 1
+        assert config.decode_engine_num_gpu == 1
 
     def test_dryrun_preserves_cli_gpu_counts(self):
-        """Test that dryrun preserves GPU counts provided via CLI"""
+        """Test that dryrun preserves GPU counts provided via config"""
         from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
 
-        args = self._build_dryrun_args()
-        args.prefill_engine_num_gpu = 2
-        args.decode_engine_num_gpu = 4
-        args.dataset = "nonexistent.jsonl"
+        config = self._build_dryrun_config(
+            prefill_engine_num_gpu=2, decode_engine_num_gpu=4
+        )
 
         try:
-            run_sla_planner_dryrun(args)
+            run_sla_planner_dryrun(config, dataset="nonexistent.jsonl")
         except (FileNotFoundError, ValueError):
             pass
 
-        assert args.prefill_engine_num_gpu == 2
-        assert args.decode_engine_num_gpu == 4
+        assert config.prefill_engine_num_gpu == 2
+        assert config.decode_engine_num_gpu == 4
