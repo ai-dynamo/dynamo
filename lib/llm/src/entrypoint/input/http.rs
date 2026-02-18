@@ -16,6 +16,7 @@ use crate::{
     },
 };
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -50,6 +51,11 @@ pub async fn run(
     }
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
+
+    // Inject the DRT's metrics registry so that component-scoped metrics
+    // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
+    http_service_builder =
+        http_service_builder.drt_metrics(Some(distributed_runtime.get_metrics_registry().clone()));
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {

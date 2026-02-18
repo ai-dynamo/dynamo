@@ -40,7 +40,8 @@ pub static WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE: LazyLock<GaugeVec> = LazyLock:
     GaugeVec::new(
         Opts::new(
             format!(
-                "dynamo_frontend_{}",
+                "{}_{}",
+                name_prefix::FRONTEND,
                 frontend_service::WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS
             ),
             "Last observed time to first token per worker (seconds)",
@@ -57,7 +58,8 @@ pub static WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE: LazyLock<IntGaugeVec> = Lazy
     IntGaugeVec::new(
         Opts::new(
             format!(
-                "dynamo_frontend_{}",
+                "{}_{}",
+                name_prefix::FRONTEND,
                 frontend_service::WORKER_LAST_INPUT_SEQUENCE_TOKENS
             ),
             "Last observed input sequence tokens per worker",
@@ -73,7 +75,8 @@ pub static WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE: LazyLock<GaugeVec> = LazyLock:
     GaugeVec::new(
         Opts::new(
             format!(
-                "dynamo_frontend_{}",
+                "{}_{}",
+                name_prefix::FRONTEND,
                 frontend_service::WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS
             ),
             "Last observed inter-token latency per worker (seconds)",
@@ -220,9 +223,13 @@ fn parse_bucket_config(
     (min, max, count)
 }
 
-/// State for metrics handler with custom backend support
+/// State for metrics handler.
+/// Optionally holds a reference to the DRT's [`MetricsRegistry`] so that
+/// metrics created via `metrics().create*()` anywhere in the process are
+/// automatically included in the `/metrics` response.
 struct MetricsHandlerState {
     registry: Arc<Registry>,
+    drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
 }
 
 pub struct Metrics {
@@ -404,6 +411,9 @@ impl Metrics {
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
+        // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
+        // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
+        // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
         let raw_prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX)
             .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
@@ -1332,13 +1342,21 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     }
 }
 
-/// Create a new router with optional custom backend metrics support
-pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Router) {
+/// Create a new router with optional DRT metrics integration.
+///
+/// When `drt_metrics` is provided, the `/metrics` handler will also include
+/// metrics from the DRT's registry tree (anything created via `metrics().create*()`).
+pub fn router(
+    registry: Registry,
+    path: Option<String>,
+    drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
+) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or_else(|| "/metrics".to_string());
     let doc = RouteDoc::new(axum::http::Method::GET, &path);
 
     let metrics_state = MetricsHandlerState {
         registry: Arc::new(registry),
+        drt_metrics,
     };
 
     let route = Router::new()
@@ -1347,7 +1365,10 @@ pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Route
     (vec![doc], route)
 }
 
-/// Unified metrics handler
+/// Unified metrics handler.
+///
+/// Gathers from the local HTTP-service registry first, then appends any
+/// metrics from the DRT's registry tree (if configured).
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
     let encoder = prometheus::TextEncoder::new();
     let metric_families = state.registry.gather();
@@ -1360,7 +1381,7 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
             .into_response();
     }
 
-    let metrics = match String::from_utf8(buffer) {
+    let mut metrics = match String::from_utf8(buffer) {
         Ok(metrics) => metrics,
         Err(_) => {
             return (
@@ -1370,6 +1391,23 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
                 .into_response();
         }
     };
+
+    // Append DRT registry tree metrics (anything created via metrics().create*()).
+    if let Some(ref drt_metrics) = state.drt_metrics {
+        match drt_metrics.prometheus_expfmt_combined() {
+            Ok(drt_text) => {
+                if !drt_text.is_empty() {
+                    if !metrics.is_empty() && !metrics.ends_with('\n') {
+                        metrics.push('\n');
+                    }
+                    metrics.push_str(&drt_text);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to gather DRT metrics: {}", e);
+            }
+        }
+    }
 
     (StatusCode::OK, metrics).into_response()
 }

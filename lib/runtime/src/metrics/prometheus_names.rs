@@ -69,8 +69,8 @@ pub mod name_prefix {
     /// Prefix for frontend service metrics
     pub const FRONTEND: &str = "dynamo_frontend";
 
-    /// Prefix for routing overhead metrics (raw Prometheus, not component-scoped)
-    pub const ROUTING_OVERHEAD: &str = "dynamo_routing_overhead";
+    /// Prefix for KV router metrics (used with router_id label)
+    pub const ROUTER: &str = "dynamo_router";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
@@ -112,14 +112,32 @@ pub mod labels {
 
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
+
+    /// Label for router instance (discovery.instance_id() of the frontend)
+    pub const ROUTER_ID: &str = "router_id";
+}
+
+/// Well-known component names used as values for the `dynamo_component` label.
+///
+/// These are the canonical names passed to `namespace.component(name)` to create
+/// `Component` instances whose metrics carry `dynamo_component=<name>`.
+///
+/// Python codegen: These constants are exported to lib/bindings/python/src/dynamo/prometheus_names.py
+pub mod component_names {
+    /// Component name for the KV router (frontend-side request routing).
+    pub const ROUTER: &str = "router";
+
+    // TODO: add PREFILL = "prefill" and DECODE = "decode" component names
+    // and migrate backend worker component creation to use these constants.
 }
 
 /// Frontend service metrics (LLM HTTP service)
 ///
 /// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod frontend_service {
-    // TODO: Move DYN_METRICS_PREFIX and other environment variable names to environment_names.rs
-    // for centralized environment variable constant management across the codebase
+    // TODO: Remove DYN_METRICS_PREFIX — the custom prefix override was added for NIM
+    // compatibility (PR #2432) but is no longer needed. All frontend metrics should
+    // use the fixed `dynamo_frontend_` prefix from `name_prefix::FRONTEND`.
     /// Environment variable that overrides the default metric prefix
     pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
 
@@ -372,25 +390,25 @@ pub mod kvbm {
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
-/// Routing overhead phase latency histogram names (raw Prometheus, not component-scoped).
+/// Routing overhead phase latency histogram names (component-scoped).
 ///
-/// These are combined with [`name_prefix::ROUTING_OVERHEAD`] to form full metric names,
-/// e.g. `dynamo_routing_overhead_block_hashing_ms`.
+/// These are passed to `metrics().create_histogram()` which adds the `dynamo_component_`
+/// prefix, yielding e.g. `dynamo_component_overhead_block_hashing_ms{dynamo_component="router"}`.
 pub mod routing_overhead {
     /// Time spent computing block hashes
-    pub const BLOCK_HASHING_MS: &str = "block_hashing_ms";
+    pub const BLOCK_HASHING_MS: &str = "overhead_block_hashing_ms";
 
     /// Time spent in indexer find_matches
-    pub const INDEXER_FIND_MATCHES_MS: &str = "indexer_find_matches_ms";
+    pub const INDEXER_FIND_MATCHES_MS: &str = "overhead_indexer_find_matches_ms";
 
     /// Time spent computing sequence hashes
-    pub const SEQ_HASHING_MS: &str = "seq_hashing_ms";
+    pub const SEQ_HASHING_MS: &str = "overhead_seq_hashing_ms";
 
     /// Time spent in scheduler worker selection
-    pub const SCHEDULING_MS: &str = "scheduling_ms";
+    pub const SCHEDULING_MS: &str = "overhead_scheduling_ms";
 
     /// Total routing overhead per request
-    pub const TOTAL_MS: &str = "total_ms";
+    pub const TOTAL_MS: &str = "overhead_total_ms";
 }
 
 // KvRouter (including KvInexer) Prometheus metric names

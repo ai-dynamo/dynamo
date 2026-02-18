@@ -112,7 +112,7 @@ The core Dynamo backend system automatically exposes metrics on the system statu
 - `dynamo_component_request_duration_seconds`: Request processing time (histogram)
 - `dynamo_component_requests_total`: Total requests processed (counter)
 - `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
-- `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge)
+- `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge). Automatically updated before each Prometheus scrape on both the frontend (`/metrics` on port 8000) and system status server (`/metrics` on port 8081).
 
 **Access backend component metrics:**
 ```bash

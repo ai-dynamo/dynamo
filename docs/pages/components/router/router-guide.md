@@ -262,6 +262,88 @@ The `router_temperature` parameter controls routing randomness:
    - To reduce ITL: Decrease the weight
 4. If you observe severe load imbalance, increase the temperature setting
 
+## Prometheus Metrics
+
+The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`.
+
+> **Note:** All metrics in this section require `--router-mode kv`. They are not registered when using `round-robin` or `random` routing (aggregated mode), so they will not appear in `/metrics` output at all.
+
+### How to Scrape
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+### Router Request Metrics
+
+These metrics are only registered when `--router-mode kv` is used. If no requests have been routed yet, the metrics will exist but show zero values.
+
+They use the `dynamo_router_*` prefix and carry a constant label `router_id` (the frontend's discovery instance ID). Filter in Prometheus with:
+
+```promql
+dynamo_router_requests_total{router_id="12345"}
+```
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_router_requests_total` | Counter | Total requests processed by the router |
+| `dynamo_router_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
+| `dynamo_router_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
+| `dynamo_router_input_sequence_tokens` | Histogram | Input sequence length (tokens) |
+| `dynamo_router_output_sequence_tokens` | Histogram | Output sequence length (tokens) |
+
+**Labels on every metric above:**
+
+| Label | Example Value | Description |
+|-------|---------------|-------------|
+| `router_id` | `12345` | Frontend discovery instance ID (`discovery.instance_id()`) |
+
+### Routing Overhead Metrics
+
+Per-request latency breakdown of the routing decision pipeline (milliseconds). Created on first routing decision. Same `router_id` label as the request metrics above.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_router_overhead_block_hashing_ms` | Histogram | Time computing block hashes |
+| `dynamo_router_overhead_indexer_find_matches_ms` | Histogram | Time in indexer find_matches |
+| `dynamo_router_overhead_seq_hashing_ms` | Histogram | Time computing sequence hashes |
+| `dynamo_router_overhead_scheduling_ms` | Histogram | Time in scheduler worker selection |
+| `dynamo_router_overhead_total_ms` | Histogram | Total routing overhead per request |
+
+### KV Indexer Metrics
+
+Tracks KV cache events applied to the router's radix tree index. Only appears when `--kv-overlap-score-weight` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--kv-overlap-score-weight 0` is set or no KV events have been received.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_component_kv_cache_events_applied` | Counter | KV cache events applied to the index |
+
+**Additional labels:** `status` (`ok` / `error`), `event_type` (`stored` / `removed` / `cleared`)
+
+### Per-Worker Load and Timing Gauges
+
+These appear once workers register and begin serving requests. They are registered on the frontend's local Prometheus registry (not component-scoped) and do not carry `dynamo_namespace` or `dynamo_component` labels.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_frontend_worker_active_decode_blocks` | Gauge | Active KV cache decode blocks per worker |
+| `dynamo_frontend_worker_active_prefill_tokens` | Gauge | Active prefill tokens queued per worker |
+| `dynamo_frontend_worker_last_time_to_first_token_seconds` | Gauge | Last observed TTFT per worker (seconds) |
+| `dynamo_frontend_worker_last_input_sequence_tokens` | Gauge | Last observed input sequence length per worker |
+| `dynamo_frontend_worker_last_inter_token_latency_seconds` | Gauge | Last observed ITL per worker (seconds) |
+
+**Labels:**
+
+| Label | Example Value | Description |
+|-------|---------------|-------------|
+| `worker_id` | `7890` | Worker instance ID (etcd lease ID) |
+| `dp_rank` | `0` | Data-parallel rank |
+| `worker_type` | `prefill` or `decode` | Worker role |
+
+### Notes on Disaggregated Mode
+
+All metrics above work in both aggregated and disaggregated modes. In disaggregated mode, the `worker_type` label on per-worker gauges will show both `"prefill"` and `"decode"` values, making it easy to filter by worker role. In aggregated mode, all workers report as `"decode"`.
+
 ## Disaggregated Serving
 
 Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../../development/backend-guide.md)), the frontend automatically detects them and activates an internal prefill router.
@@ -436,3 +518,5 @@ curl http://localhost:8000/busy_threshold
 - **[KV Router Index Data Structures](../../../../lib/kv-router/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing
+- **[Prometheus and Grafana Setup](../../observability/prometheus-grafana.md)**: General Prometheus/Grafana configuration
+- **[Metrics Developer Guide](../../observability/metrics-developer-guide.md)**: How the Dynamo metrics API works
