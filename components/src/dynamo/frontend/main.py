@@ -128,10 +128,6 @@ async def async_main():
     config, vllm_flags = parse_args()
     dump_config(config.dump_config_to, config)
 
-    if config.debug_perf:
-        from .perf_instrumentation import start_all as start_perf
-
-        start_perf()
     os.environ["DYN_EVENT_PLANE"] = config.event_plane
     logger.info(
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
