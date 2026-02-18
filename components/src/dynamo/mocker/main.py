@@ -16,7 +16,7 @@ import uvloop
 
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
-from dynamo.llm import EngineType, EntrypointArgs, fetch_llm, make_engine, run_input
+from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -46,7 +46,7 @@ async def prefetch_model(model_path: str) -> None:
 
     logger.info(f"Pre-fetching model from HuggingFace: {model_path}")
     try:
-        local_path = await fetch_llm(model_path, ignore_weights=True)
+        local_path = await fetch_model(model_path, ignore_weights=True)
         logger.info(f"Model cached at: {local_path}")
     except Exception as e:
         logger.warning(

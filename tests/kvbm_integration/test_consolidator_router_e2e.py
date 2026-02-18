@@ -25,6 +25,7 @@ import yaml
 
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.test_output import resolve_test_output_path
 
 # Check if engines are available and build list of available engines
 from .common import check_module_available
@@ -58,7 +59,7 @@ FRONTEND_PORT = 8000
 @pytest.fixture
 def test_directory(request):
     """Create a test directory for logs and temporary files."""
-    test_dir = Path(request.node.name)
+    test_dir = Path(resolve_test_output_path(request.node.name))
     test_dir.mkdir(parents=True, exist_ok=True)
     yield test_dir
     # Cleanup handled by pytest (logs are kept for debugging)

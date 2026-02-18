@@ -50,7 +50,6 @@ vLLM supports all multimodal deployment patterns. See [Architecture Patterns](RE
 | Prefill Worker | `--multimodal-worker --is-prefill-worker` | Prefill only |
 | Decode Worker | `--multimodal-decode-worker` | Decode only |
 | Encode+Prefill Worker | `--multimodal-encode-prefill-worker --is-prefill-worker` | Combined (Llama 4) |
-| vLLM Native Encoder | `--vllm-native-encoder-worker` | vLLM-native encoding with ECConnector |
 
 ## Use the Latest Release
 
@@ -465,7 +464,7 @@ Dynamo's Rust SDK supports two input types that determine how the HTTP frontend 
 
 ```python
 # Processor - Entry point from HTTP frontend
-await register_llm(
+await register_model(
     ModelInput.Text,        # Frontend sends raw text
     ModelType.Chat,
     generate_endpoint,
@@ -474,7 +473,7 @@ await register_llm(
 )
 
 # Workers - Internal components
-await register_llm(
+await register_model(
     ModelInput.Tokens,      # Expect pre-tokenized input
     ModelType.Chat,         # or ModelType.Prefill for prefill workers
     generate_endpoint,

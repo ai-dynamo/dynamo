@@ -3,17 +3,27 @@
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import safetensors
 import torch
+from vllm.sampling_params import SamplingParams as VllmSamplingParams
 
 import dynamo.nixl_connect as connect
+from dynamo.runtime import Client
 
 from .model import construct_mm_data
-from .protocol import MultiModalGroup
+from .protocol import (
+    MultiModalGroup,
+    MultiModalInput,
+    PatchedTokensPrompt,
+    vLLMMultimodalRequest,
+)
 
 logger = logging.getLogger(__name__)
+
+IMAGE_URL_KEY = "image_url"
+VIDEO_URL_KEY = "video_url"
 
 TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 
@@ -115,3 +125,62 @@ def accumulate_embeddings(
             multi_modal_data["image"] = torch.cat(
                 (multi_modal_data["image"], mm_data["image"])
             )
+
+
+async def fetch_embeddings_from_encode_workers(
+    encode_worker_client: Client,
+    image_urls: List[str],
+    request_id: str,
+) -> List[MultiModalGroup]:
+    """Fan out image URLs to encode workers and collect embedding results.
+
+    Splits image URLs into batches based on available encode worker count,
+    dispatches via round-robin, and collects the resulting MultiModalGroups
+    containing pre-computed embeddings.
+    """
+    encode_worker_count = len(encode_worker_client.instance_ids())
+    if encode_worker_count == 0:
+        raise RuntimeError("No encode workers available to process multimodal input")
+
+    encode_batch_size = max(1, len(image_urls) // encode_worker_count)
+
+    encode_request = vLLMMultimodalRequest(
+        engine_prompt=PatchedTokensPrompt(prompt_token_ids=[]),
+        sampling_params=VllmSamplingParams(),
+        request_id=request_id,
+        multimodal_inputs=[],
+    )
+
+    batch: List[MultiModalGroup] = []
+    encode_response_streams = []
+    for url in image_urls:
+        multimodal_input = MultiModalInput()
+        multimodal_input.image_url = url
+        batch.append(MultiModalGroup(multimodal_input=multimodal_input))
+
+        if len(batch) >= encode_batch_size:
+            encode_request.multimodal_inputs = batch
+            payload = encode_request.model_dump_json()
+            encode_response_streams.append(
+                await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
+            )
+            batch = []
+
+    # Flush remaining
+    if batch:
+        encode_request.multimodal_inputs = batch
+        payload = encode_request.model_dump_json()
+        encode_response_streams.append(
+            await encode_worker_client.round_robin(payload)  # type: ignore[arg-type]
+        )
+
+    # Collect results
+    multimodal_groups: List[MultiModalGroup] = []
+    for stream in encode_response_streams:
+        async for response in stream:
+            logger.debug(f"Received response from encode worker: {response}")
+            output = vLLMMultimodalRequest.model_validate_json(response.data())  # type: ignore[attr-defined]
+            if output.multimodal_inputs:
+                multimodal_groups.extend(output.multimodal_inputs)
+
+    return multimodal_groups

@@ -89,8 +89,10 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
 # Install Python, build-essential and python3-dev as apt dependencies
+# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 ARG PYTHON_VERSION
-RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    if [ ${ARCH_ALT} = "x86_64" ]; then \
         ARCH_FOR_GPG=${ARCH_ALT}; \
     else \
         ARCH_FOR_GPG="sbsa"; \
@@ -232,10 +234,10 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     chmod -R g+w /workspace/benchmarks
 
 # Install common and test dependencies
+# --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
