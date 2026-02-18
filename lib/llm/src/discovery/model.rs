@@ -21,8 +21,7 @@ use crate::types::{
     openai::{
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-        images::OpenAIImagesStreamingEngine,
-        videos::OpenAIVideosStreamingEngine,
+        images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -135,7 +134,9 @@ impl Model {
 
     /// Check if any WorkerSet has a videos engine.
     pub fn has_videos_engine(&self) -> bool {
-        self.worker_sets.iter().any(|entry| entry.value().has_videos_engine())
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_videos_engine())
     }
 
     /// Get the MDC checksum for a specific namespace's WorkerSet, if it exists.
