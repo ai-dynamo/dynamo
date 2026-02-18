@@ -36,7 +36,6 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use rustc_hash::FxBuildHasher;
 #[cfg(feature = "metrics")]
 pub use dynamo_runtime::protocols::maybe_error::MaybeError;
 #[cfg(feature = "metrics")]
@@ -45,6 +44,7 @@ use dynamo_runtime::{
     metrics::{MetricsHierarchy, prometheus_names::kvrouter},
 };
 use prometheus::{IntCounterVec, Opts};
+use rustc_hash::FxBuildHasher;
 
 /// Trait for types that may represent an error response.
 /// Used for RPC-style responses that can indicate success or failure.
