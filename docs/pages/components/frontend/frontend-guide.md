@@ -164,4 +164,5 @@ Backends auto-register with the frontend when they call `register_model()`. Supp
 | Document | Description |
 |----------|-------------|
 | [Frontend Overview](README.md) | Quick start and feature matrix |
+| [NVIDIA Request Extensions (`nvext`)](nvext.md) | Routing, preprocessing, response metadata, and engine priority extensions |
 | [Router Documentation](../router/README.md) | KV-aware routing configuration |

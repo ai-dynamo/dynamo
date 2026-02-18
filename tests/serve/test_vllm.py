@@ -276,34 +276,37 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "multimodal_agg_qwen2vl_2b_epd": VLLMConfig(
-        name="multimodal_agg_qwen2vl_2b_epd",
-        directory=vllm_dir,
-        script_name="agg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                # With proper prompt templating, the model actually only returns "green",
-                # verified behavior with native vLLM.
-                expected_response=["green"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
+    # The original script is misleading  agg_multimodal_epd.sh is actually a disagg
+    # case which uses disgg encoder. We are bringing this test back shortly
+    # TODO(qiwa): enable this in https://github.com/ai-dynamo/dynamo/pull/6061/
+    # "multimodal_agg_qwen2vl_2b_epd": VLLMConfig(
+    #     name="multimodal_agg_qwen2vl_2b_epd",
+    #     directory=vllm_dir,
+    #     script_name="agg_multimodal_epd.sh",
+    #     marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+    #     model="Qwen/Qwen2-VL-2B-Instruct",
+    #     script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
+    #     request_payloads=[
+    #         chat_payload(
+    #             [
+    #                 {
+    #                     "type": "text",
+    #                     "text": "What colors are in the following image? Respond only with the colors.",
+    #                 },
+    #                 {
+    #                     "type": "image_url",
+    #                     "image_url": {"url": MULTIMODAL_IMG_URL},
+    #                 },
+    #             ],
+    #             repeat_count=1,
+    #             # With proper prompt templating, the model actually only returns "green",
+    #             # verified behavior with native vLLM.
+    #             expected_response=["green"],
+    #             temperature=0.0,
+    #             max_tokens=100,
+    #         )
+    #     ],
+    # ),
     "multimodal_agg_frontend_decoding": VLLMConfig(
         name="multimodal_agg_frontend_decoding",
         directory=vllm_dir,
