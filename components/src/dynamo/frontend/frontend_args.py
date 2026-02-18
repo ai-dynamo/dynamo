@@ -123,6 +123,18 @@ class FrontendArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--namespace",
+            env_var="DYN_NAMESPACE",
+            default=None,
+            help=(
+                "Dynamo namespace for model discovery scoping. If specified, models will "
+                "only be discovered from this namespace. If not specified, discovers models "
+                "from all namespaces (global discovery)."
+            ),
+        )
+
+        add_argument(
+            g,
             flag_name="--kv-cache-block-size",
             env_var="DYN_KV_CACHE_BLOCK_SIZE",
             default=None,
@@ -241,18 +253,6 @@ class FrontendArgGroup(ArgGroup):
                 "Only used when --no-router-kv-events is set."
             ),
             arg_type=float,
-        )
-
-        add_argument(
-            g,
-            flag_name="--namespace",
-            env_var="DYN_NAMESPACE",
-            default=None,
-            help=(
-                "Dynamo namespace for model discovery scoping. If specified, models will "
-                "only be discovered from this namespace. If not specified, discovers models "
-                "from all namespaces (global discovery)."
-            ),
         )
 
         add_negatable_bool_argument(
