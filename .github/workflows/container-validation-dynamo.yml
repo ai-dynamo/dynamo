@@ -112,6 +112,7 @@ jobs:
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          no_cache: 'true'
           push_image: 'true'
 
   rust-checks:
