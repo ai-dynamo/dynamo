@@ -103,10 +103,7 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 	}
 
 	// Validate GPU hardware information is available (last, so other errors are collected first)
-
-	gpuWarnings, gpuErr := v.validateGPUHardwareInfo()
-	warnings = append(warnings, gpuWarnings...)
-	if gpuErr != nil {
+	if gpuErr := v.validateGPUHardwareInfo(); gpuErr != nil {
 		err = errors.Join(err, gpuErr)
 	}
 
@@ -115,13 +112,13 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 
 // validateGPUHardwareInfo ensures GPU hardware information will be available for profiling.
 // Returns an error at admission time if GPU discovery is disabled and no manual hardware config is provided.
-func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error {
 	// Parse profiling config
 	var config map[string]any
 	if v.request.Spec.ProfilingConfig.Config != nil {
 		if err := yaml.Unmarshal(v.request.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
 			// Config parse errors will be caught by other validators
-			return nil, nil
+			return nil
 		}
 	} else {
 		config = make(map[string]any)
@@ -153,7 +150,7 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() (admis
 
 				// Validate that min <= max
 				if minVal > maxVal {
-					return nil, fmt.Errorf("invalid GPU range: minNumGpusPerEngine (%v) cannot be greater than maxNumGpusPerEngine (%v)",
+					return fmt.Errorf("invalid GPU range: minNumGpusPerEngine (%v) cannot be greater than maxNumGpusPerEngine (%v)",
 						minVal, maxVal)
 				}
 
@@ -163,16 +160,16 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() (admis
 	}
 
 	if hasManualHardwareConfig || hasExplicitGPURanges {
-		return nil, nil
+		return nil
 	}
 
 	// No manual hardware config provided. Cluster-wide operators always have GPU discovery via node
 	// permissions. Namespace-scoped operators rely on Helm-provisioned GPU discovery (gpuDiscovery.enabled).
 	if v.isClusterWideOperator || v.gpuDiscoveryEnabled {
-		return nil, nil
+		return nil
 	}
 
-	return nil, errors.New("GPU hardware configuration required: GPU discovery is disabled (set dynamo-operator.gpuDiscovery.enabled=true in Helm values, or provide hardware config in spec.profilingConfig.config)")
+	return errors.New("GPU hardware configuration required: GPU discovery is disabled (set dynamo-operator.gpuDiscovery.enabled=true in Helm values, or provide hardware config in spec.profilingConfig.config)")
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeploymentRequest.
