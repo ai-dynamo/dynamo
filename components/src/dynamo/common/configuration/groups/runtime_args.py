@@ -74,7 +74,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--endpoint",
             env_var="DYN_ENDPOINT",
             default=None,
-            help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: dyn://dynamo.backend.generate. Currently used only by TRT-LLM and SGLang backends.",
+            help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: dyn://dynamo.backend.generate.",
         )
         add_argument(
             g,
