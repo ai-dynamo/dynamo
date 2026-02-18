@@ -81,6 +81,7 @@ class VllmProcessor:
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
+        debug_perf: bool = False,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -89,6 +90,7 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
+        self.debug_perf = debug_perf
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -103,12 +105,49 @@ class VllmProcessor:
 
         # ** VllmProcessor.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
 
+        if self.debug_perf:
+            from .perf_instrumentation import enter_generator, exit_generator
+
+            active = enter_generator()
+            t_start = time.monotonic()
+            logger.info("[perf] generator enter: active_requests=%d", active)
+
+        try:
+            async for item in self._generator_inner(request):
+                yield item
+        finally:
+            if self.debug_perf:
+                active = exit_generator()
+                elapsed_ms = (time.monotonic() - t_start) * 1000.0
+                logger.info(
+                    "[perf] generator exit: total=%.2fms active_requests=%d",
+                    elapsed_ms,
+                    active,
+                )
+
+    async def _generator_inner(
+        self, request: dict[str, Any]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        request_id = random_uuid()
+
+        if self.debug_perf:
+            t0 = time.monotonic()
+
         pre = await preprocess_chat_request(
             request,
             tokenizer=self.tokenizer,
             renderer=self.input_processor.renderer,
             tool_parser_class=self.tool_parser_class,
         )
+
+        if self.debug_perf:
+            t1 = time.monotonic()
+            logger.info(
+                "[perf] preprocess_chat_request: %.2fms (request=%s)",
+                (t1 - t0) * 1000.0,
+                request_id,
+            )
+
         request_for_sampling = pre.request_for_sampling
         tool_parser = pre.tool_parser
         chat_template_kwargs = pre.chat_template_kwargs
@@ -155,7 +194,6 @@ class VllmProcessor:
                 "Logprobs requested but not supported in distributed inference mode"
             )
 
-        request_id = random_uuid()
         # This calls update_from_generation_config and update_from_tokenizer on SamplingParams
         prompt_inputs = TokensPrompt(prompt_token_ids=tokens)
         if "multi_modal_data" in engine_prompt:
@@ -168,6 +206,10 @@ class VllmProcessor:
             prompt_inputs[
                 "mm_processor_kwargs"
             ] = request_for_sampling.mm_processor_kwargs
+
+        if self.debug_perf:
+            t2 = time.monotonic()
+
         vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
             request_id,
             prompt_inputs,
@@ -179,6 +221,16 @@ class VllmProcessor:
             # priority: int = 0,
             # data_parallel_rank: int | None = None,
         )
+
+        if self.debug_perf:
+            t3 = time.monotonic()
+            logger.info(
+                "[perf] input_processor.process_inputs: %.2fms (request=%s tokens=%d)",
+                (t3 - t2) * 1000.0,
+                request_id,
+                len(tokens),
+            )
+
         InputProcessor.assign_request_id(vllm_preproc)
 
         # Processed: EngineCoreRequest(request_id='a2b76a85cd65e151', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], mm_features=None, sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), pooling_params=None, eos_token_id=151645, arrival_time=1769036937.9417946, lora_request=None, cache_salt=None, data_parallel_rank=None, prompt_embeds=None, client_index=0, current_wave=0, priority=0, trace_headers=None)
@@ -256,6 +308,10 @@ class VllmProcessor:
         )
 
         # dynamo_response: Annotated
+        token_count = 0
+        output_proc_total_ms = 0.0
+        post_proc_total_ms = 0.0
+
         try:
             # Dynamo Router. This goes to the backend, waits, gets the streaming response, returns it.
             # Stream is AsyncResponseStream
@@ -321,16 +377,21 @@ class VllmProcessor:
                     # num_nans_in_logits=request.num_nans_in_logits,
                 )
 
+                if self.debug_perf:
+                    t_op0 = time.monotonic()
+
                 # Let vllm handle all post-processing
                 vllm_out: OutputProcessorOutput = self.output_processor.process_outputs(
                     [vllm_response]
                 )
+
+                if self.debug_perf:
+                    t_op1 = time.monotonic()
+                    output_proc_total_ms += (t_op1 - t_op0) * 1000.0
+
                 if vllm_out.reqs_to_abort:
                     # Router has no abort API; we cannot propagate aborts.
                     pass
-
-                # vllm
-                # RequestOutput: OutputProcessorOutput(request_outputs=[RequestOutput(request_id=9dbe240d8de78db3, prompt='What is the capital of Tuvalu?', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], encoder_prompt=None, encoder_prompt_token_ids=None, prompt_logprobs=None, outputs=[CompletionOutput(index=0, text=' The', token_ids=[576], cumulative_logprob=None, logprobs=None, finish_reason=None, stop_reason=None)], finished=False, metrics=RequestStateStats(num_generation_tokens=0, arrival_time=1769118902.2172132, queued_ts=0.0, scheduled_ts=0.0, first_token_ts=0.0, last_token_ts=0.0, first_token_latency=0.0, is_corrupted=False), lora_request=None, num_cached_tokens=0, multi_modal_placeholders={})], reqs_to_abort=[])
 
                 # Vec<ChatChoiceStream>
                 choices = []
@@ -340,6 +401,12 @@ class VllmProcessor:
                     choice = post.process_output(output)
                     if choice:
                         choices.append(choice)
+
+                if self.debug_perf:
+                    t_op2 = time.monotonic()
+                    post_proc_total_ms += (t_op2 - t_op1) * 1000.0
+
+                token_count += len(engine_response["token_ids"])
 
                 if choices:
                     # dynamo_out: NvCreateChatCompletionStreamResponse
@@ -361,6 +428,18 @@ class VllmProcessor:
                 self.output_processor.abort_requests(
                     [vllm_preproc.request_id], internal=True
                 )
+            if self.debug_perf and token_count > 0:
+                logger.info(
+                    "[perf] stream done: request=%s tokens=%d "
+                    "output_processor_total=%.2fms (%.3fms/tok) "
+                    "post_processor_total=%.2fms (%.3fms/tok)",
+                    request_id,
+                    token_count,
+                    output_proc_total_ms,
+                    output_proc_total_ms / token_count,
+                    post_proc_total_ms,
+                    post_proc_total_ms / token_count,
+                )
 
 
 class EngineFactory:
@@ -370,11 +449,13 @@ class EngineFactory:
         router_config: RouterConfig,
         config: FrontendConfig,
         flags: Namespace,
+        debug_perf: bool = False,
     ):
         self.runtime = runtime
         self.router_config = router_config
         self.config = config
         self.flags = flags
+        self.debug_perf = debug_perf
 
     async def chat_engine_factory(
         self,
@@ -462,6 +543,7 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+            debug_perf=self.debug_perf,
         )
 
         return PythonAsyncEngine(gen.generator, loop)
