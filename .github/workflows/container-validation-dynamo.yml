@@ -15,11 +15,15 @@ concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+
 jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
       core: ${{ steps.changes.outputs.core }}
+      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -30,6 +34,10 @@ jobs:
         uses: ./.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
+      - name: Export builder name
+        id: export-builder-name
+        run: |
+          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
   dynamo-status-check:
     runs-on: ubuntu-latest
@@ -43,25 +51,31 @@ jobs:
   build-test:
     needs: changed-files
     if: needs.changed-files.outputs.core == 'true'
-    runs-on:
-        group: Fastchecker
+    runs-on: prod-default-v2
     name: Build and Test - dynamo
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_dynamo
-      PYTEST_XML_FILE: pytest_test_report.xml
-      PYTEST_PARALLEL_XML_FILE: pytest_parallel.xml
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to NGC
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          flavor: general
+          arch: amd64
+      - name: Docker Login
         if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
         uses: ./.github/actions/docker-login
         with:
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Define Image Tag
         id: define_image_tag
         run: |
@@ -69,24 +83,27 @@ jobs:
       - name: Generate Dockerfile
         shell: bash
         run: |
-          echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
+          echo "Generating Dockerfile for target: dev and framework: dynamo"
           python ./container/render.py \
               --target=dev \
               --framework=dynamo \
               --platform=amd64 \
+              --cuda-version=12.9 \
               --show-result \
               --output-short-filename
-      - name: Build image
-        env:
-          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
-        run: |
-          docker buildx build \
-            --progress=plain \
-            --tag ${{ steps.define_image_tag.outputs.image_tag }} \
-            -f ./container/rendered.Dockerfile \
-            --build-arg ENABLE_MEDIA_FFMPEG=true \
-            --build-arg ENABLE_KVBM=true \
-            --load .
+      - name: Build Container
+        uses: ./.github/actions/docker-remote-build
+        with:
+          image_tag: ${{ steps.define_image_tag.outputs.image_tag }}
+          framework: dynamo
+          target: dev
+          platform: amd64
+          cuda_version: '12.9'
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          no_load: 'false'
+          push_image: 'false'
       - name: Start services with docker-compose
         working-directory: ./deploy
         run: |
@@ -107,38 +124,27 @@ jobs:
         run: |
           docker compose down
       - name: Run pytest (parallel tests with xdist)
-        env:
-          PYTEST_MARKS: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
-        run: |
-          docker run -w /workspace \
-            --name ${{ env.CONTAINER_ID }}_pytest_parallel \
-            ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --mypy --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} --durations=10 -n 4 -m \"${{ env.PYTEST_MARKS }}\""
-      - name: Copy parallel test report from Container
-        if: always()
-        run: |
-          docker cp ${{ env.CONTAINER_ID }}_pytest_parallel:/workspace/${{ env.PYTEST_PARALLEL_XML_FILE }} . || echo "No parallel test report found"
-      - name: Run pytest (sequential tests)
-        env:
-          PYTEST_MARKS: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
-        run: |
-          docker run -w /workspace \
-            --name ${{ env.CONTAINER_ID }}_pytest \
-            ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --mypy --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ env.PYTEST_MARKS }}\" "
-      - name: Copy test report from test Container
-        if: always()
-        run: |
-          docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_XML_FILE }} .
-      - name: Archive test report
-        uses: actions/upload-artifact@v4
-        if: always()
+        uses: ./.github/actions/pytest
         with:
-          name: dynamo-python-test-results
-          if-no-files-found: error
-          path: |
-            ${{ env.PYTEST_XML_FILE }}
-            ${{ env.PYTEST_PARALLEL_XML_FILE }}
+          image_tag: ${{ steps.define_image_tag.outputs.image_tag }}
+          pytest_marks: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
+          framework: dynamo
+          test_type: "pre_merge_parallel"
+          platform_arch: amd64
+          enable_mypy: 'true'
+          parallel_mode: '4'
+          dind_as_sidecar: 'false'
+      - name: Run pytest (sequential tests)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.define_image_tag.outputs.image_tag }}
+          pytest_marks: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
+          framework: dynamo
+          test_type: "pre_merge_sequential"
+          platform_arch: amd64
+          enable_mypy: 'false'
+          parallel_mode: 'none'
+          dind_as_sidecar: 'false'
 
   event_file:
     name: "Event File"

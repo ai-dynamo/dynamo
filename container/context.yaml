@@ -27,8 +27,8 @@ dynamo:
   nixl_gdrcopy_ref: v2.5.1
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
   nixl_libfabric_ref: v2.3.0
-  enable_kvbm: "false"
-  enable_media_ffmpeg: "false"
+  enable_kvbm: "true"
+  enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "false"
   ffmpeg_version: "7.1"
   efa_version: 1.45.1
