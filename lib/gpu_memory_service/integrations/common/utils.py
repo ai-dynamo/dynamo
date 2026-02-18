@@ -9,6 +9,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import torch
+from gpu_memory_service.common.types import RequestedLockType
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
@@ -64,3 +65,14 @@ def finalize_gms_write(
     )
 
     return int(total_bytes)
+
+
+def get_requested_lock_type(extra_config: dict) -> RequestedLockType:
+    """Determine the GMS lock mode from model_loader_extra_config.
+
+    When extra_config["gms_weights_import_only"] is true, returns RO so the
+    client blocks until weights are committed.  Otherwise returns RW_OR_RO.
+    """
+    if (extra_config or {}).get("gms_weights_import_only", False):
+        return RequestedLockType.RO
+    return RequestedLockType.RW_OR_RO

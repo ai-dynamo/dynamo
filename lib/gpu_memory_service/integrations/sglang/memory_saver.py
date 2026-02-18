@@ -7,9 +7,11 @@ This module provides a hybrid implementation that combines:
 1. GPU Memory Service allocator for "weights" tag (VA-stable unmap/remap, shared)
 2. Torch mempool mode for other tags like "kv_cache" (CPU backup, per-instance)
 
-The impl uses RW_OR_RO mode to connect to GMS:
+By default the impl uses RW_OR_RO mode to connect to GMS:
 - First process gets RW lock and loads weights from disk
 - Subsequent processes get RO lock and import weights from metadata
+Set ``gms_weights_import_only: true`` in ``--model-loader-extra-config`` to
+force RO mode, which blocks until weights are committed.
 """
 
 from __future__ import annotations
@@ -26,6 +28,9 @@ if TYPE_CHECKING:
     from torch_memory_saver.entrypoint import _TorchMemorySaverImpl
 
 logger = logging.getLogger(__name__)
+
+# Populated by the patched ModelRunner.load_model before _ensure_initialized runs
+_model_loader_extra_config: dict = {}
 
 
 def get_gms_memory_saver_impl() -> Optional["GMSMemorySaverImpl"]:
@@ -76,12 +81,13 @@ class GMSMemorySaverImpl:
     ) -> tuple[Optional["GMSClientMemoryManager"], Optional["MemPool"], str]:
         """Create allocator with automatic mode selection."""
         from gpu_memory_service import get_or_create_gms_client_memory_manager
-        from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+        from gpu_memory_service.common.types import GrantedLockType
+        from gpu_memory_service.integrations.common.utils import get_requested_lock_type
 
         allocator, mem_pool = get_or_create_gms_client_memory_manager(
             self._socket_path,
             self._device_index,
-            mode=RequestedLockType.RW_OR_RO,
+            mode=get_requested_lock_type(_model_loader_extra_config),
             tag="weights",
         )
         granted_mode = allocator.mode
