@@ -17,14 +17,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use dynamo_kv_router::protocols::XXH3_SEED;
+
 /// LocalBlockHash type (content hash from tokens only)
 type LocalBlockHash = u64;
 
 /// SequenceHash type (position-aware hash, includes parent context)
 type SequenceHash = u64;
-
-/// Seed for xxHash3 computation (must match the indexer's seed)
-const XXH3_SEED: u64 = 1337;
 
 /// Compute a LocalBlockHash from token IDs (content only)
 fn compute_local_block_hash(token_ids: &[u32]) -> LocalBlockHash {

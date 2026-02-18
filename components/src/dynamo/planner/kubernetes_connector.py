@@ -51,6 +51,7 @@ class KubernetesConnector(PlannerConnector):
         dynamo_namespace: str,
         model_name: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
+        parent_dgd_name: Optional[str] = None,
     ):
         self.kube_api = KubernetesAPI(k8s_namespace)
 
@@ -60,13 +61,19 @@ class KubernetesConnector(PlannerConnector):
                 model_name.lower()
             )  # normalize model name to lowercase (MDC)
 
-        graph_deployment_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
-        if not graph_deployment_name:
-            raise DeploymentValidationError(
-                ["DYN_PARENT_DGD_K8S_NAME environment variable is not set"]
-            )
+        # Allow overriding parent DGD name for centralized planner
+        if parent_dgd_name:
+            self.parent_dgd_name = parent_dgd_name
+        else:
+            graph_deployment_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
+            if not graph_deployment_name:
+                raise DeploymentValidationError(
+                    ["DYN_PARENT_DGD_K8S_NAME environment variable is not set"]
+                )
+            self.parent_dgd_name = graph_deployment_name
 
-        self.graph_deployment_name = graph_deployment_name
+        # For backwards compatibility
+        self.graph_deployment_name = self.parent_dgd_name
 
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True
@@ -174,7 +181,7 @@ class KubernetesConnector(PlannerConnector):
                     self.graph_deployment_name
                 )
 
-            # TODO: benchmarks/profiler/utils/config.py already contains DGD config parsing
+            # TODO: dynamo/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
             prefill_model_name = None
             decode_model_name = None
@@ -277,6 +284,28 @@ class KubernetesConnector(PlannerConnector):
             raise DeploymentValidationError(errors)
 
         return prefill_gpu_count, decode_gpu_count
+
+    def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
+        """Auto-discover the Frontend service's metrics URL from the DGD.
+
+        Iterates spec.services to find the service with componentType "frontend",
+        then constructs the in-cluster URL using the operator's naming convention:
+        http://{dgd_name}-{service_key_lowercase}:{port}/metrics
+
+        Returns:
+            The metrics URL string, or None if no frontend service is found.
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        services = deployment.get("spec", {}).get("services", {})
+
+        for service_key, service_spec in services.items():
+            if service_spec.get("componentType", "") == "frontend":
+                service_name = f"{self.graph_deployment_name}-{service_key.lower()}"
+                url = f"http://{service_name}:{port}/metrics"
+                logger.info(f"Auto-discovered frontend metrics URL: {url}")
+                return url
+
+        return None
 
     async def wait_for_deployment_ready(self):
         """Wait for the deployment to be ready"""
@@ -389,7 +418,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--blocking", action="store_true")
     args = parser.parse_args()
-    connector = KubernetesConnector(args.dynamo_namespace, args.k8s_namespace)
+    connector = KubernetesConnector(
+        args.dynamo_namespace, k8s_namespace=args.k8s_namespace
+    )
 
     if args.action == "add":
         task = connector.add_component(SubComponentType(args.component), args.blocking)

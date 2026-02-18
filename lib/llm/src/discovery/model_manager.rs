@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
-use super::{KvWorkerMonitor, RuntimeConfigs};
+use super::{KvWorkerMonitor, RuntimeConfigWatch, runtime_config_watch};
 
 use dynamo_runtime::{
     component::{Client, Endpoint, build_transport_type},
@@ -34,6 +34,7 @@ use crate::{
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -67,6 +68,7 @@ pub struct ModelManager {
     chat_completion_engines: RwLock<ModelEngines<OpenAIChatCompletionsStreamingEngine>>,
     embeddings_engines: RwLock<ModelEngines<OpenAIEmbeddingsStreamingEngine>>,
     images_engines: RwLock<ModelEngines<OpenAIImagesStreamingEngine>>,
+    videos_engines: RwLock<ModelEngines<OpenAIVideosStreamingEngine>>,
     tensor_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
     // Prefill models don't have engines - they're only tracked for discovery/lifecycle
     prefill_engines: RwLock<ModelEngines<()>>,
@@ -77,7 +79,7 @@ pub struct ModelManager {
 
     // Per-model monitoring: worker_monitors for load-based rejection, runtime_configs for KvScheduler
     worker_monitors: DashMap<String, KvWorkerMonitor>,
-    runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
+    runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 }
 
 impl Default for ModelManager {
@@ -93,6 +95,7 @@ impl ModelManager {
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
             images_engines: RwLock::new(ModelEngines::default()),
+            videos_engines: RwLock::new(ModelEngines::default()),
             tensor_engines: RwLock::new(ModelEngines::default()),
             prefill_engines: RwLock::new(ModelEngines::default()),
             cards: DashMap::new(),
@@ -117,6 +120,7 @@ impl ModelManager {
                 ModelType::Embedding => self.embeddings_engines.read().checksum(model_name),
                 ModelType::TensorBased => self.tensor_engines.read().checksum(model_name),
                 ModelType::Images => self.images_engines.read().checksum(model_name),
+                ModelType::Videos => self.videos_engines.read().checksum(model_name),
                 ModelType::Prefill => self.prefill_engines.read().checksum(model_name),
                 _ => {
                     continue;
@@ -168,6 +172,8 @@ impl ModelManager {
             .into_iter()
             .chain(self.list_completions_models())
             .chain(self.list_embeddings_models())
+            .chain(self.list_images_models())
+            .chain(self.list_videos_models())
             .chain(self.list_tensor_models())
             .chain(self.list_prefill_models())
             .collect()
@@ -191,6 +197,14 @@ impl ModelManager {
 
     pub fn list_prefill_models(&self) -> Vec<String> {
         self.prefill_engines.read().list()
+    }
+
+    pub fn list_images_models(&self) -> Vec<String> {
+        self.images_engines.read().list()
+    }
+
+    pub fn list_videos_models(&self) -> Vec<String> {
+        self.videos_engines.read().list()
     }
 
     pub fn add_completions_model(
@@ -243,6 +257,16 @@ impl ModelManager {
         clients.add(model, card_checksum, engine)
     }
 
+    pub fn add_videos_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIVideosStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let mut clients = self.videos_engines.write();
+        clients.add(model, card_checksum, engine)
+    }
+
     pub fn add_prefill_model(
         &self,
         model: &str,
@@ -274,6 +298,11 @@ impl ModelManager {
 
     pub fn remove_images_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.images_engines.write();
+        clients.remove(model)
+    }
+
+    pub fn remove_videos_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let mut clients = self.videos_engines.write();
         clients.remove(model)
     }
 
@@ -331,6 +360,17 @@ impl ModelManager {
         model: &str,
     ) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
         self.images_engines
+            .read()
+            .get(model)
+            .cloned()
+            .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn get_videos_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
+        self.videos_engines
             .read()
             .get(model)
             .cloned()
@@ -517,11 +557,17 @@ impl ModelManager {
             .and_then(|r| r.value().runtime_config.tool_call_parser.clone())
     }
 
+    pub fn get_model_reasoning_parser(&self, model: &str) -> Option<String> {
+        self.cards
+            .iter()
+            .find(|r| r.value().display_name == model)
+            .and_then(|r| r.value().runtime_config.reasoning_parser.clone())
+    }
+
     /// Creates parsing options with tool call parser and reasoning parser for the specified model.
-    /// Currently reasoning parser is not implemented (returns None).
     pub fn get_parsing_options(&self, model: &str) -> crate::protocols::openai::ParsingOptions {
         let tool_call_parser = self.get_model_tool_call_parser(model);
-        let reasoning_parser = None; // TODO: Implement reasoning parser
+        let reasoning_parser = self.get_model_reasoning_parser(model);
 
         crate::protocols::openai::ParsingOptions::new(tool_call_parser, reasoning_parser)
     }
@@ -563,12 +609,12 @@ impl ModelManager {
     }
 
     /// Get or create a runtime config watcher for an endpoint.
-    /// Spawns a background task to watch for worker config changes.
-    /// Returns a shared RuntimeConfigs that KvScheduler can use directly.
+    /// Spawns a background task that joins instance availability and config discovery.
+    /// Returns a `watch::Receiver` with the latest `HashMap<WorkerId, ModelRuntimeConfig>`.
     pub async fn get_or_create_runtime_config_watcher(
         &self,
         endpoint: &Endpoint,
-    ) -> anyhow::Result<Arc<RuntimeConfigs>> {
+    ) -> anyhow::Result<RuntimeConfigWatch> {
         let endpoint_id = endpoint.id();
 
         // Fast path: return existing if present
@@ -576,20 +622,17 @@ impl ModelManager {
             return Ok(existing.clone());
         }
 
-        // Atomic get-or-insert to avoid TOCTOU race
-        let inner = Arc::new(RuntimeConfigs::new());
-        let (result, is_new) = match self.runtime_configs.entry(endpoint_id) {
-            Entry::Occupied(e) => (e.get().clone(), false),
+        // Slow path: create the watch (spawns a background task).
+        // If another caller raced us, the entry() below picks up the winner;
+        // the loser's background task stops once its receivers are dropped.
+        let rx = runtime_config_watch(endpoint).await?;
+        let result = match self.runtime_configs.entry(endpoint_id) {
+            Entry::Occupied(e) => e.get().clone(),
             Entry::Vacant(e) => {
-                e.insert(inner.clone());
-                (inner, true)
+                e.insert(rx.clone());
+                rx
             }
         };
-
-        // Only spawn watcher if we were the one who inserted
-        if is_new {
-            result.start_watcher(endpoint).await?;
-        }
 
         Ok(result)
     }
@@ -601,9 +644,9 @@ impl ModelManager {
         endpoint_id: &EndpointId,
         worker_id: WorkerId,
     ) -> Option<DisaggregatedEndpoint> {
-        let inner = self.runtime_configs.get(endpoint_id)?;
-        let config_ref = inner.configs.get(&worker_id)?;
-        config_ref.as_ref()?.disaggregated_endpoint.clone()
+        let rx = self.runtime_configs.get(endpoint_id)?;
+        let configs = rx.borrow();
+        configs.get(&worker_id)?.disaggregated_endpoint.clone()
     }
 
     /// Lists all models with worker monitors configured.

@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 from typing import Optional
 
 import uvloop
@@ -14,18 +15,22 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
+from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
-from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.prometheus import (
+    LLMBackendMetrics,
+    register_engine_metrics_callback,
+)
+from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
-    ZmqKvEventPublisherConfig,
-    fetch_llm,
-    register_llm,
+    fetch_model,
+    register_model,
 )
 
 # Optional imports for frontend decoding support
@@ -41,27 +46,25 @@ except ImportError:
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
-    ECProcessorHandler,
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
-    PreprocessedHandler,
-    VLLMEncodeWorkerHandler,
 )
-from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
-from .args import Config, overwrite_args, parse_args
+from .args import Config, parse_args
+from .chrek import get_checkpoint_config
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
     VllmHealthCheckPayload,
     VllmOmniHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
 )
-from .publisher import StatLoggerFactory
+from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
+CHECKPOINT_SLEEP_MODE_LEVEL = 1
 
 
 async def _handle_non_leader_node(dp_rank: int) -> None:
@@ -77,53 +80,9 @@ async def _handle_non_leader_node(dp_rank: int) -> None:
     await asyncio.Event().wait()
 
 
-async def await_checkpoint_and_was_restored(signal_file: str) -> bool:
-    """
-    Wait for checkpoint signal file OR restore marker file.
-
-    In checkpoint creation mode, poll until either:
-    1. The signal file exists (checkpoint complete, should exit)
-    2. The restore marker file exists (restored by CRIU, should proceed)
-
-    The restore marker file is created by the restore-entrypoint before CRIU restore,
-    so the restored process can detect it was restored even though os.environ is
-    restored from the checkpoint and doesn't contain new container env vars.
-
-    Args:
-        signal_file: Path to the checkpoint signal file
-
-    Returns:
-        True if restored (should proceed with registration)
-        False if signal file detected (should exit)
-    """
-    # Get restore marker file path (created by restore entrypoint before CRIU restore)
-    restore_marker = os.environ.get("DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored")
-
-    logger.info(
-        f"CHECKPOINT_READY: Model loaded, ready for container checkpoint. Waiting for signal file: {signal_file} or restore marker file: {restore_marker}"
-    )
-
-    while True:
-        # Check if we've been restored (marker file created by restore entrypoint)
-        if os.path.exists(restore_marker):
-            logger.info(
-                f"Detected restore from checkpoint (marker file exists: {restore_marker})"
-            )
-            return True  # Restored - proceed with registration
-
-        # Check if checkpoint is complete (signal file exists)
-        if os.path.exists(signal_file):
-            logger.info(f"Checkpoint signal file detected: {signal_file}")
-            return False  # Checkpoint done - exit
-
-        await asyncio.sleep(1)
-
-
 async def worker():
     config = parse_args()
 
-    loop = asyncio.get_running_loop()
-    overwrite_args(config)
     dump_config(config.dump_config_to, config)
 
     # Name the model. Use either the full path (vllm and sglang do the same),
@@ -131,109 +90,55 @@ async def worker():
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
 
-    # Check checkpoint-related environment variables EARLY
-    signal_file = os.environ.get("DYN_CHECKPOINT_SIGNAL_FILE")
-    ready_file = os.environ.get("DYN_CHECKPOINT_READY_FILE")
-
-    is_checkpoint_mode = signal_file is not None
-
-    # EARLY EXIT: Check if checkpoint already exists (before downloading model!)
-    if is_checkpoint_mode:
-        storage_type = os.environ.get("DYN_CHECKPOINT_STORAGE_TYPE")
-        checkpoint_location = os.environ.get("DYN_CHECKPOINT_LOCATION")
-
-        if storage_type == "pvc" and checkpoint_location:
-            done_marker = f"{checkpoint_location}/checkpoint.done"
-
-            if os.path.exists(done_marker):
-                logger.info(
-                    f"Found existing checkpoint at {checkpoint_location}. Storage type: {storage_type}"
-                )
-                return
-            else:
-                logger.info(
-                    f"Checkpoint not found at: {checkpoint_location}. creating new checkpoint"
-                )
+    # Check checkpoint mode and validate env vars EARLY (fail fast if misconfigured)
+    checkpoint_cfg = get_checkpoint_config()
+    if checkpoint_cfg and checkpoint_cfg.checkpoint_exists():
+        return
 
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
     #
-    # We don't set `config.engine_args.model` to the local path fetch_llm returns
+    # We don't set `config.engine_args.model` to the local path fetch_model returns
     # because vllm will send that name to its Ray pipeline-parallel workers, which
     # may not have the local path.
     # vllm will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
     if not os.path.exists(config.model):
-        await fetch_llm(config.model)
+        await fetch_model(config.model)
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
     pre_created_engine = None
-    is_restored = False
-    if is_checkpoint_mode:
+    if checkpoint_cfg is not None:
         logger.info(
-            f"Checkpoint mode enabled (DYN_CHECKPOINT_SIGNAL_FILE={signal_file})"
+            f"Checkpoint mode enabled (signal_file={checkpoint_cfg.signal_file})"
         )
 
-        # CHECKPOINT MODE: Load model, sleep, wait for signal file or restore
+        # Checkpoint mode requires sleep mode — enable before engine init
+        config.engine_args.enable_sleep_mode = True
+
         pre_created_engine = setup_vllm_engine(config)
         engine_client = pre_created_engine[0]
 
-        # Put model to sleep before checkpoint (if sleep mode enabled)
-        if config.engine_args.enable_sleep_mode:
-            logger.info(f"Putting model to sleep (level={config.sleep_mode_level})")
-            await engine_client.sleep(level=config.sleep_mode_level)
-
-        # Write ready file to signal that we're ready for checkpointing
-        if ready_file:
-            with open(ready_file, "w") as f:
-                f.write("ready")
-            logger.info(f"Wrote checkpoint ready file: {ready_file}")
-
-        # Wait for checkpoint signal file OR restore detection
-        is_restored = await await_checkpoint_and_was_restored(signal_file)
-
-        if is_restored:
-            # Wake up model and proceed with registration
-            if config.engine_args.enable_sleep_mode:
-                logger.info("Waking up model after checkpoint restore")
-                await engine_client.wake_up()
-            logger.info("Proceeding with endpoint registration after restore")
-        else:
-            # Checkpoint complete, exit
-            logger.info("Exiting after checkpoint completion")
+        if not await checkpoint_cfg.run_lifecycle(
+            engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
+        ):
             return
 
-    # Create shutdown event
     shutdown_event = asyncio.Event()
-
-    # Set DYN_EVENT_PLANE environment variable based on config
-    os.environ["DYN_EVENT_PLANE"] = config.event_plane
-
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Event plane is NATS AND use_kv_events is True
-    enable_nats = config.request_plane == "nats" or (
-        config.event_plane == "nats" and config.use_kv_events
+    runtime, loop = create_runtime(
+        discovery_backend=config.discovery_backend,
+        request_plane=config.request_plane,
+        event_plane=config.event_plane,
+        use_kv_events=config.use_kv_events,
+        shutdown_event=shutdown_event,
     )
 
-    runtime = DistributedRuntime(
-        loop, config.store_kv, config.request_plane, enable_nats
-    )
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
     # Route to appropriate initialization based on config flags
-    if config.vllm_native_encoder_worker:
-        await init_vllm_native_encoder(runtime, config, shutdown_event)
-        logger.debug("init_vllm_native_encoder completed")
-    elif config.ec_processor:
-        await init_ec_processor(runtime, config, shutdown_event)
-        logger.debug("init_ec_processor completed")
-    elif config.multimodal_processor:
-        await init_multimodal_processor(runtime, config, shutdown_event)
-        logger.debug("init_multimodal_processor completed")
-    elif config.multimodal_encode_worker:
+    if config.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config, shutdown_event)
         logger.debug("init_multimodal_encode_worker completed")
     elif (
@@ -276,8 +181,24 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
     Solution: Try adding MultiProcessCollector to REGISTRY. If that fails, use
     separate registry for multiprocess collection and register callbacks to both
     registries to ensure all metrics (vllm, lmcache, dynamo_component) are collected.
+
+    Auto-label injection:
+        Hierarchy labels (dynamo_namespace, dynamo_component, dynamo_endpoint) are automatically
+        injected into engine metrics to align Python metrics with Rust auto-labels.
+        Additional labels can be provided via inject_labels parameter.
     """
     if config.engine_args.disable_log_stats is False:
+        # Register the dedicated dynamo_component registry callback
+        # IMPORTANT: We do NOT use MultiProcessCollector for DYNAMO_COMPONENT_REGISTRY
+        # because our gauges use in-memory values which work fine for single-process
+        # and multi-process (each process has its own gauge with dp_rank label).
+        # Using MultiProcessCollector would read from .db files which causes stale
+        # values to accumulate across test runs.
+        register_engine_metrics_callback(
+            endpoint=generate_endpoint,
+            registry=DYNAMO_COMPONENT_REGISTRY,
+        )
+
         if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
             try:
                 # MultiProcessCollector reads metrics from .db files in PROMETHEUS_MULTIPROC_DIR
@@ -288,6 +209,10 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
                     metric_prefix_filters=["vllm:", "lmcache:"],
+                    namespace_name=config.namespace,
+                    component_name=config.component,
+                    endpoint_name=config.endpoint,
+                    model_name=config.model,
                 )
             except ValueError as e:
                 # Conflict: metrics already in REGISTRY, MultiProcessCollector tries to add same metrics from .db files
@@ -299,17 +224,25 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                 multiprocess.MultiProcessCollector(multiproc_registry)
 
                 # Register both registries to collect all metrics
-                # Global REGISTRY has in-memory metrics (vllm, dynamo_component)
+                # Global REGISTRY has in-memory metrics (vllm)
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
-                    metric_prefix_filters=["vllm:", "dynamo_component:"],
+                    metric_prefix_filters=["vllm:"],
+                    namespace_name=config.namespace,
+                    component_name=config.component,
+                    endpoint_name=config.endpoint,
+                    model_name=config.model,
                 )
                 # Multiproc registry has .db file metrics (lmcache, possibly vllm duplicates)
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=multiproc_registry,
                     metric_prefix_filters=["vllm:", "lmcache:"],
+                    namespace_name=config.namespace,
+                    component_name=config.component,
+                    endpoint_name=config.endpoint,
+                    model_name=config.model,
                 )
         else:
             # No multiprocess mode
@@ -317,6 +250,10 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
                 endpoint=generate_endpoint,
                 registry=REGISTRY,
                 metric_prefix_filters=["vllm:", "lmcache:"],
+                namespace_name=config.namespace,
+                component_name=config.component,
+                endpoint_name=config.endpoint,
+                model_name=config.model,
             )
 
 
@@ -381,14 +318,14 @@ def setup_kv_event_publisher(
                 f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
             )
 
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.connection_id(),
+        kv_publisher = KvEventPublisher(
+            component=component,
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
+            zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
         )
-        kv_publisher = KvEventPublisher(component=component, zmq_config=zmq_config)
         kv_publishers.append(kv_publisher)
 
         logger.info(
@@ -415,6 +352,19 @@ def setup_vllm_engine(config, stat_logger=None):
         f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
     )
 
+    # Construct Prometheus gauges AFTER setup_multiprocess_prometheus() so Gauge objects
+    # see the correct ValueClass (multiprocess vs in-memory).
+    component_gauges = LLMBackendMetrics(
+        registry=DYNAMO_COMPONENT_REGISTRY,
+        model_name=config.served_model_name or "",
+        component_name=config.component or "",
+    )
+
+    # If a StatLoggerFactory was provided, give it the gauges so the loggers
+    # it creates can publish Prometheus metrics.
+    if stat_logger is not None:
+        stat_logger.component_gauges = component_gauges
+
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -428,6 +378,22 @@ def setup_vllm_engine(config, stat_logger=None):
 
     if engine_args.load_format == "gms":
         engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+
+    if engine_args.load_format in ("mx-source", "mx-target"):
+        try:
+            from modelexpress import register_modelexpress_loaders
+
+            # Ensure the ModelExpress server URL env var is set for the model loader
+            if config.model_express_url:
+                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
+            register_modelexpress_loaders()
+            # Use wrapper worker to ensure loaders are registered in spawned worker processes
+            engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
+        except ImportError as e:
+            raise ImportError(
+                f"ModelExpress package required for --load-format={engine_args.load_format}. "
+                "Install with: pip install modelexpress"
+            ) from e
 
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
@@ -459,6 +425,8 @@ def setup_vllm_engine(config, stat_logger=None):
     if stat_logger:
         factory.append(stat_logger)
 
+    # Time engine initialization
+    start_time = time.time()
     engine_client = AsyncLLM.from_vllm_config(
         vllm_config=vllm_config,
         usage_context=usage_context,
@@ -466,10 +434,20 @@ def setup_vllm_engine(config, stat_logger=None):
         enable_log_requests=engine_args.enable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
+    load_time = time.time() - start_time
+
+    # Record model load time
+    component_gauges.set_model_load_time(load_time)
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
-    return engine_client, vllm_config, default_sampling_params, prometheus_temp_dir
+    return (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        prometheus_temp_dir,
+        component_gauges,
+    )
 
 
 async def register_vllm_model(
@@ -501,12 +479,15 @@ async def register_vllm_model(
     runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
-    runtime_config.enable_local_indexer = config.enable_local_indexer
+    # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
+    runtime_config.enable_local_indexer = (
+        config.enable_local_indexer and not config.is_decode_worker
+    )
 
     # Add tool/reasoning parsers for decode models
     if model_type != ModelType.Prefill:
-        runtime_config.tool_call_parser = config.tool_call_parser
-        runtime_config.reasoning_parser = config.reasoning_parser
+        runtime_config.tool_call_parser = config.dyn_tool_call_parser
+        runtime_config.reasoning_parser = config.dyn_reasoning_parser
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
@@ -530,7 +511,7 @@ async def register_vllm_model(
         media_fetcher.timeout_ms(30000)
         media_fetcher.allow_direct_port(True)
 
-    await register_llm(
+    await register_model(
         model_input,
         model_type,
         generate_endpoint,
@@ -565,6 +546,7 @@ async def init_prefill(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = pre_created_engine
     else:
         (
@@ -572,6 +554,7 @@ async def init_prefill(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
@@ -655,12 +638,24 @@ async def init_prefill(
                 handler.generate,
                 graceful_shutdown=True,
                 # In practice config.served_model_name is always set, but mypy needs the "or" here.
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
-                metrics_labels=[("model", config.served_model_name)],
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, config.served_model_name),
+                    (prometheus_names.labels.MODEL_NAME, config.served_model_name),
+                ],
             ),
         )
         logger.debug("serve_endpoint completed for prefill worker")
@@ -690,11 +685,15 @@ async def init(
     unload_lora_endpoint = component.endpoint("unload_lora")
     list_loras_endpoint = component.endpoint("list_loras")
 
-    factory = StatLoggerFactory(
-        component,
-        config.engine_args.data_parallel_rank or 0,
-        metrics_labels=[("model", config.served_model_name or config.model)],
-    )
+    shutdown_endpoints[:] = [
+        generate_endpoint,
+        clear_endpoint,
+        load_lora_endpoint,
+        unload_lora_endpoint,
+        list_loras_endpoint,
+    ]
+
+    model_name = config.served_model_name or config.model
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
@@ -703,13 +702,30 @@ async def init(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            component_gauges,
         ) = pre_created_engine
+        # Factory is created after unpack so component_gauges is available
+        factory = StatLoggerFactory(
+            component,
+            component_gauges=component_gauges,
+            dp_rank=config.engine_args.data_parallel_rank or 0,
+            metrics_labels=[("model", model_name)],
+        )
     else:
+        # Factory is created without component_gauges; setup_vllm_engine() will
+        # create the gauges after setup_multiprocess_prometheus() and set them
+        # on the factory before vLLM calls create_stat_logger().
+        factory = StatLoggerFactory(
+            component,
+            dp_rank=config.engine_args.data_parallel_rank or 0,
+            metrics_labels=[("model", model_name)],
+        )
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            component_gauges,
         ) = setup_vllm_engine(config, factory)
 
     # TODO Hack to get data, move this to registering in TBD
@@ -777,14 +793,14 @@ async def init(
         list_loras_endpoint,
     ]
 
-    # Parse endpoint types from --dyn-endpoint-types flag
-    model_type = parse_endpoint_types(config.dyn_endpoint_types)
-    logger.info(f"Registering model with endpoint types: {config.dyn_endpoint_types}")
+    # Parse endpoint types from --endpoint-types flag
+    model_type = parse_endpoint_types(config.endpoint_types)
+    logger.info(f"Registering model with endpoint types: {config.endpoint_types}")
 
     model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
 
     # Warn if custom template provided but chat endpoint not enabled
-    if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+    if config.custom_jinja_template and "chat" not in config.endpoint_types:
         logger.warning(
             "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
@@ -811,24 +827,69 @@ async def init(
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
             ),
             load_lora_endpoint.serve_endpoint(
                 handler.load_lora,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
             ),
             unload_lora_endpoint.serve_endpoint(
                 handler.unload_lora,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
             ),
             list_loras_endpoint.serve_endpoint(
                 handler.list_loras,
-                metrics_labels=[("model", config.served_model_name or config.model)],
+                metrics_labels=[
+                    (
+                        prometheus_names.labels.MODEL,
+                        config.served_model_name or config.model,
+                    ),
+                    (
+                        prometheus_names.labels.MODEL_NAME,
+                        config.served_model_name or config.model,
+                    ),
+                ],
             ),
         )
         logger.debug("serve_endpoint completed for decode worker")
@@ -869,64 +930,6 @@ def get_engine_cache_info(engine: AsyncLLM):
         raise
 
 
-async def init_multimodal_processor(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-):
-    """Initialize multimodal processor component"""
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
-    shutdown_endpoints[:] = [generate_endpoint]
-
-    # Get encode worker client
-    encode_worker_client = (
-        await runtime.namespace(config.namespace)
-        .component("encoder")
-        .endpoint("generate")
-        .client()
-    )
-
-    pd_worker_client = (
-        await runtime.namespace(config.namespace)
-        .component("backend")
-        .endpoint("generate")
-        .client()
-    )
-
-    handler = PreprocessedHandler(
-        config.engine_args,
-        encode_worker_client,
-        pd_worker_client,
-    )
-
-    logger.info("Waiting for Encoder Worker Instances ...")
-    await encode_worker_client.wait_for_instances()
-
-    # Register the endpoint as entrypoint to a model
-    await register_llm(
-        ModelInput.Tokens,
-        ModelType.Chat,
-        generate_endpoint,
-        config.model,
-        config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-    )
-
-    logger.info("Starting to serve the processor endpoint...")
-
-    try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve endpoints: {e}")
-        raise
-    finally:
-        handler.cleanup()
-
-
 async def init_multimodal_encode_worker(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
 ):
@@ -936,170 +939,24 @@ async def init_multimodal_encode_worker(
     generate_endpoint = component.endpoint(config.endpoint)
     shutdown_endpoints[:] = [generate_endpoint]
 
-    # Get PD worker client
-    # In multimodal mode, the PD worker always registers as "backend"
-    # (even in disaggregated mode with prefill/decode split, we still connect to "backend")
-    pd_worker_client = (
-        await runtime.namespace(config.namespace)
-        .component("backend")
-        .endpoint("generate")
-        .client()
-    )
-
     handler = EncodeWorkerHandler(
         config.engine_args,
-        pd_worker_client,
     )
     await handler.async_init(runtime)
-    logger.info("Waiting for PD Worker Instances ...")
-    await pd_worker_client.wait_for_instances()
     logger.info("Starting to serve the encode worker endpoint...")
 
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
+                handler.generate,
+                metrics_labels=[
+                    (prometheus_names.labels.MODEL, config.model),
+                    (prometheus_names.labels.MODEL_NAME, config.model),
+                ],
             ),
         )
     except Exception as e:
         logger.error(f"Failed to serve encode worker endpoint: {e}")
-        raise
-    finally:
-        handler.cleanup()
-
-
-async def init_vllm_native_encoder(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-):
-    """
-    Initialize vLLM-native encoder worker component (ECConnector mode).
-    In this mode, vLLM handles encoder execution, caching, and storage automatically.
-    """
-    # Create component and endpoint
-    component = runtime.namespace(config.namespace).component(config.component)
-    generate_endpoint = component.endpoint(config.endpoint)
-    shutdown_endpoints[:] = [generate_endpoint]
-
-    # Configure ECTransferConfig for producer role
-    instance_id = 0
-    engine_id = f"{config.namespace}.{config.component}.encoder.{instance_id}"
-
-    # Configure encoder with producer role, it will be responsible for creating embeddings and storing them in the shared storage
-    ec_transfer_config = create_ec_transfer_config(
-        engine_id=engine_id,
-        ec_role="ec_producer",
-        ec_connector_backend=config.ec_connector_backend,
-        ec_storage_path=config.ec_storage_path,
-        ec_extra_config=config.ec_extra_config,
-    )
-
-    # Set ECTransferConfig on engine args
-    config.engine_args.ec_transfer_config = ec_transfer_config
-
-    # Setup vLLM engine
-    (
-        engine_client,
-        vllm_config,
-        default_sampling_params,
-        prometheus_temp_dir,
-    ) = setup_vllm_engine(config)
-
-    # Initialize vLLM Native Encoder Worker Handler
-    handler = VLLMEncodeWorkerHandler(
-        runtime,
-        component,
-        engine_client,
-        config,
-    )
-    handler.add_temp_dir(prometheus_temp_dir)
-
-    # 5. No async init needed - vLLM handles everything
-    # await handler.async_init(runtime)  # Not needed for ECConnector mode
-
-    logger.info("Starting to serve vLLM-native encoder endpoint...")
-
-    # 6. Serve endpoint
-    try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve vLLM-native encoder endpoint: {e}")
-        raise
-    finally:
-        handler.cleanup()
-
-
-async def init_ec_processor(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
-):
-    """
-    Initialize ECConnector processor component.
-
-    Simple processor that routes multimodal requests using ECConnector pattern:
-    1. Preprocess request (same as regular processor)
-    2. Send multimodal items to encoder workers (stores to shared storage)
-    3. Forward preprocessed request to PD worker (loads from shared storage)
-    4. Stream response back to client
-    """
-    # Create component and endpoint
-    component = runtime.namespace(config.namespace).component(config.component)
-    generate_endpoint = component.endpoint(config.endpoint)
-    shutdown_endpoints[:] = [generate_endpoint]
-
-    # Get encoder worker client
-    encoder_client = (
-        await runtime.namespace(config.namespace)
-        .component("encoder")
-        .endpoint("generate")
-        .client()
-    )
-
-    # Get PD worker client
-    pd_client = (
-        await runtime.namespace(config.namespace)
-        .component("backend")
-        .endpoint("generate")
-        .client()
-    )
-
-    # Get prompt template from args (must be passed via environment or command line)
-    mm_prompt_template = config.mm_prompt_template
-
-    # Create EC processor handler (with preprocessing like regular processor)
-    handler = ECProcessorHandler(
-        config.engine_args,
-        encoder_worker_client=encoder_client,
-        pd_worker_client=pd_client,
-        prompt_template=mm_prompt_template,
-    )
-
-    logger.info("Waiting for encoder and PD worker instances...")
-    await encoder_client.wait_for_instances()
-    await pd_client.wait_for_instances()
-
-    # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
-    await register_llm(
-        ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
-        ModelType.Chat,
-        generate_endpoint,
-        config.model,
-        config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-    )
-
-    logger.info("Starting to serve EC processor endpoint...")
-
-    try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate, metrics_labels=[("model", config.model)]
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve EC processor endpoint: {e}")
         raise
     finally:
         handler.cleanup()
@@ -1114,39 +971,20 @@ async def init_multimodal_worker(
     """
     Initialize multimodal worker component.
 
-    Supports two modes:
-    1. --multimodal-worker: Receives embeddings from separate encoder
-    2. --multimodal-encode-prefill-worker: Handles inline encoding (e.g., Llama 4)
-
-    Both can operate in aggregated (P+D) or disaggregated (P→D) mode.
-
-    When --ec-consumer-mode is enabled, configures as ECConnector consumer
-    to load encoder embeddings from shared storage.
+    Supports three modes:
+    1. --multimodal-worker: Prefill+decode worker for multimodal LLM; can route
+       to a separate encoder (--route-to-encoder) for embeddings. Runs
+       aggregated (P+D) or disaggregated (P→D).
+    2. --multimodal-decode-worker: Decode-only worker in disaggregated (P→D)
+       mode.
+    3. --multimodal-encode-prefill-worker: Unified encode+prefill+decode in one
+       worker for models with integrated image encoding (e.g., Llama 4).
     """
     component = runtime.namespace(config.namespace).component(config.component)
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
     shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
-
-    # Configure ECConnector consumer mode if enabled
-    if config.ec_consumer_mode:
-        logger.info("Configuring as ECConnector consumer for encoder embeddings")
-        instance_id = 0
-        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
-
-        # The PD Worker just load the embeddings from the shared storage, so it is a consumer
-        ec_transfer_config = create_ec_transfer_config(
-            engine_id=engine_id,
-            ec_role="ec_consumer",
-            ec_connector_backend=config.ec_connector_backend,
-            ec_storage_path=config.ec_storage_path,
-            ec_extra_config=config.ec_extra_config,
-        )
-
-        # Set ECTransferConfig on engine args
-        config.engine_args.ec_transfer_config = ec_transfer_config
-        logger.info(f"Configured as ECConnector consumer with engine_id={engine_id}")
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
@@ -1155,6 +993,7 @@ async def init_multimodal_worker(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = pre_created_engine
     else:
         (
@@ -1162,7 +1001,22 @@ async def init_multimodal_worker(
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
+            _component_gauges,
         ) = setup_vllm_engine(config)
+
+    # Set up encode worker client when routing to encoder is enabled
+    # (PD worker handles encode routing directly instead of a separate processor)
+    encode_worker_client = None
+    if config.route_to_encoder:
+        encode_worker_client = (
+            await runtime.namespace(config.namespace)
+            .component("encoder")
+            .endpoint("generate")
+            .client()
+        )
+        logger.info("Waiting for Encoder Worker Instances ...")
+        await encode_worker_client.wait_for_instances()
+        logger.info("Connected to encoder workers")
 
     # Set up decode worker client for disaggregated mode
     decode_worker_client = None
@@ -1188,6 +1042,7 @@ async def init_multimodal_worker(
             component,
             engine_client,
             config,
+            encode_worker_client,
             decode_worker_client,
             shutdown_event,
         )
@@ -1202,7 +1057,22 @@ async def init_multimodal_worker(
     if kv_publisher:
         handler.kv_publisher = kv_publisher
 
-    metrics_labels = [("model", config.model)]
+    # Register model with the frontend so it can route requests
+    model_type = parse_endpoint_types(config.endpoint_types)
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+    await register_vllm_model(
+        model_input,
+        model_type,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+    )
+
+    metrics_labels = [
+        (prometheus_names.labels.MODEL, config.served_model_name or config.model),
+        (prometheus_names.labels.MODEL_NAME, config.served_model_name or config.model),
+    ]
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -1235,19 +1105,14 @@ async def init_omni(
 
     component = runtime.namespace(config.namespace).component(config.component)
     generate_endpoint = component.endpoint(config.endpoint)
-
-    # Load default sampling params from model config (same as other workers)
-    default_sampling_params = (
-        config.engine_args.create_model_config().get_diff_sampling_param()
-    )
-    logger.info(f"Loaded default sampling params: {default_sampling_params}")
+    shutdown_endpoints[:] = [generate_endpoint]
 
     # Initialize OmniHandler with Omni orchestrator
     handler = OmniHandler(
         runtime=runtime,
         component=component,
         config=config,
-        default_sampling_params=default_sampling_params,
+        default_sampling_params={},
         shutdown_event=shutdown_event,
     )
 
@@ -1263,11 +1128,9 @@ async def init_omni(
     shutdown_endpoints[:] = [generate_endpoint]
 
     # TODO: extend for multi-stage pipelines
-    # Register as Chat endpoint for text-to-text generation
-    # Use Tokens input since we're doing token-based processing
-    await register_llm(
-        ModelInput.Tokens,
-        ModelType.Chat,
+    await register_model(
+        ModelInput.Text,
+        ModelType.Images,
         generate_endpoint,
         config.model,
         config.served_model_name,
@@ -1276,7 +1139,6 @@ async def init_omni(
 
     logger.info("Starting to serve Omni worker endpoint...")
 
-    # Create health check payload (extracts BOS token from AsyncOmni)
     health_check_payload = (
         await VllmOmniHealthCheckPayload.create(handler.engine_client)
     ).to_dict()
@@ -1285,7 +1147,16 @@ async def init_omni(
         await generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
-            metrics_labels=[("model", config.served_model_name or config.model)],
+            metrics_labels=[
+                (
+                    prometheus_names.labels.MODEL,
+                    config.served_model_name or config.model,
+                ),
+                (
+                    prometheus_names.labels.MODEL_NAME,
+                    config.served_model_name or config.model,
+                ),
+            ],
             health_check_payload=health_check_payload,
         )
     except Exception as e:

@@ -14,12 +14,10 @@ use dynamo_runtime::{
 };
 use futures::StreamExt;
 use rand::Rng;
-use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-    indexer::{DumpRequest, GetWorkersRequest},
+    Indexer, KV_EVENT_SUBJECT, KvRouterConfig, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
     protocols::{DpRank, RouterEvent, WorkerId},
     router_discovery_query,
     worker_query::WorkerQueryClient,
@@ -84,7 +82,7 @@ async fn get_instance_discovery_stream(
 async fn download_stable_snapshot(
     nats_client: &dynamo_runtime::transports::nats::Client,
     bucket_name: &str,
-    kv_events_tx: &mpsc::Sender<RouterEvent>,
+    indexer: &Indexer,
 ) -> Result<()> {
     let url = url::Url::parse(&format!(
         "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
@@ -147,9 +145,7 @@ async fn download_stable_snapshot(
 
     // Send all events to the indexer
     for event in prev_events {
-        if let Err(e) = kv_events_tx.send(event).await {
-            tracing::warn!("Failed to send initial event to indexer: {e:?}");
-        }
+        indexer.apply_event(event).await;
     }
     tracing::info!("Successfully sent all initial events to indexer");
 
@@ -162,57 +158,27 @@ struct SnapshotResources {
     nats_client: dynamo_runtime::transports::nats::Client,
     bucket_name: String,
     instances_rx: tokio::sync::watch::Receiver<Vec<dynamo_runtime::component::Instance>>,
-    get_workers_tx: mpsc::Sender<GetWorkersRequest>,
-    snapshot_tx: mpsc::Sender<DumpRequest>,
+    indexer: Indexer,
 }
 
 impl SnapshotResources {
     /// Perform snapshot upload and purge operations
-    async fn purge_then_snapshot(
-        &self,
-        nats_queue: &mut NatsQueue,
-        remove_worker_tx: &mpsc::Sender<WorkerId>,
-    ) -> anyhow::Result<()> {
-        // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
-        // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
-        // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
+    async fn purge_then_snapshot(&self, nats_queue: &mut NatsQueue) -> anyhow::Result<()> {
         tracing::info!("Purging acknowledged messages and performing snapshot of radix tree");
         let start_time = std::time::Instant::now();
 
         // Clean up stale workers before snapshot
-        // Get current worker IDs from instances_rx
         let current_instances = self.instances_rx.borrow().clone();
         let current_worker_ids: std::collections::HashSet<u64> = current_instances
             .iter()
             .map(|instance| instance.instance_id)
             .collect();
 
-        // Get worker IDs from the indexer
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let get_workers_req = GetWorkersRequest { resp: resp_tx };
-
-        if let Err(e) = self.get_workers_tx.send(get_workers_req).await {
-            tracing::warn!("Failed to send get_workers request during snapshot: {e:?}");
-        } else {
-            match resp_rx.await {
-                Ok(indexer_worker_ids) => {
-                    // Find workers in indexer but not in current instances
-                    for worker_id in indexer_worker_ids {
-                        if !current_worker_ids.contains(&worker_id) {
-                            tracing::info!(
-                                "Removing stale worker {worker_id} from indexer during snapshot"
-                            );
-                            if let Err(e) = remove_worker_tx.send(worker_id).await {
-                                tracing::warn!(
-                                    "Failed to send remove_worker for stale worker {worker_id}: {e:?}"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to receive worker IDs from indexer: {e:?}");
-                }
+        let indexer_worker_ids = self.indexer.get_workers().await;
+        for worker_id in indexer_worker_ids {
+            if !current_worker_ids.contains(&worker_id) {
+                tracing::info!("Removing stale worker {worker_id} from indexer during snapshot");
+                self.indexer.remove_worker(worker_id).await;
             }
         }
 
@@ -220,18 +186,11 @@ impl SnapshotResources {
         nats_queue.purge_acknowledged().await?;
 
         // Now request a snapshot from the indexer (which reflects the post-purge state)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let dump_req = DumpRequest { resp: resp_tx };
-
-        self.snapshot_tx
-            .send(dump_req)
+        let events = self
+            .indexer
+            .dump_events()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send dump request: {e:?}"))?;
-
-        // Wait for the dump response
-        let events = resp_rx
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to receive dump response: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to dump events for snapshot: {e:?}"))?;
 
         // Upload the snapshot to NATS object store in background (non-blocking)
         let nats_client = self.nats_client.clone();
@@ -262,14 +221,10 @@ impl SnapshotResources {
 }
 
 /// Start a unified background task for event consumption and optional snapshot management
-#[allow(clippy::too_many_arguments)]
 pub async fn start_kv_router_background(
     component: Component,
     consumer_id: String,
-    kv_events_tx: mpsc::Sender<RouterEvent>,
-    remove_worker_tx: mpsc::Sender<WorkerId>,
-    maybe_get_workers_tx: Option<mpsc::Sender<GetWorkersRequest>>,
-    maybe_snapshot_tx: Option<mpsc::Sender<DumpRequest>>,
+    indexer: Indexer,
     cancellation_token: CancellationToken,
     router_snapshot_threshold: Option<u32>,
     router_reset_states: bool,
@@ -307,7 +262,7 @@ pub async fn start_kv_router_background(
     // Handle initial state based on router_reset_states flag
     if !router_reset_states {
         // Try to download initial state from object store with stability check
-        download_stable_snapshot(&nats_client, &bucket_name, &kv_events_tx).await?;
+        download_stable_snapshot(&nats_client, &bucket_name, &indexer).await?;
     } else {
         // Delete the bucket to reset state
         tracing::info!("Resetting router state, deleting bucket: {bucket_name}");
@@ -335,22 +290,13 @@ pub async fn start_kv_router_background(
     let client = generate_endpoint.client().await?;
     let instances_rx = client.instance_source.as_ref().clone();
 
-    // Only set up snapshot-related resources if snapshot_tx, get_workers_tx, and threshold are provided
-    let snapshot_resources = if let (Some(get_workers_tx), Some(snapshot_tx), Some(_)) = (
-        maybe_get_workers_tx,
-        maybe_snapshot_tx,
-        router_snapshot_threshold,
-    ) {
-        Some(SnapshotResources {
-            nats_client,
-            bucket_name,
-            instances_rx,
-            get_workers_tx,
-            snapshot_tx,
-        })
-    } else {
-        None
-    };
+    // Only set up snapshot-related resources if snapshot threshold is configured
+    let snapshot_resources = router_snapshot_threshold.map(|_| SnapshotResources {
+        nats_client,
+        bucket_name,
+        instances_rx,
+        indexer: indexer.clone(),
+    });
 
     tokio::spawn(async move {
         // Create interval with jitter
@@ -392,9 +338,7 @@ pub async fn start_kv_router_background(
                         "DISCOVERY: Generate endpoint instance removed, removing worker {worker_id}"
                     );
 
-                    if let Err(e) = remove_worker_tx.send(worker_id).await {
-                        tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
-                    }
+                    indexer.remove_worker(worker_id).await;
                 }
 
                 // Handle event consumption
@@ -410,12 +354,7 @@ pub async fn start_kv_router_background(
                             };
 
                             // Forward the RouterEvent to the indexer
-                            if let Err(e) = kv_events_tx.send(event).await {
-                                tracing::warn!(
-                                    "failed to send kv event to indexer; shutting down: {e:?}"
-                                );
-                                break;
-                            }
+                            indexer.apply_event(event).await;
                         },
                         Ok(None) => {
                             tracing::trace!("Dequeue timeout, continuing");
@@ -449,7 +388,6 @@ pub async fn start_kv_router_background(
 
                     match resources.purge_then_snapshot(
                         &mut nats_queue,
-                        &remove_worker_tx,
                     ).await {
                         Ok(_) => tracing::info!("Successfully performed purge and snapshot"),
                         Err(e) => tracing::debug!("Could not perform purge and snapshot: {e:?}"),
@@ -510,11 +448,14 @@ pub async fn start_kv_router_background(
 /// This is appropriate when workers have local indexers enabled.
 pub async fn start_kv_router_background_event_plane(
     component: Component,
-    kv_events_tx: mpsc::Sender<RouterEvent>,
+    indexer: Indexer,
     cancellation_token: CancellationToken,
-    mut worker_query_client: WorkerQueryClient,
     transport_kind: EventTransportKind,
 ) -> Result<()> {
+    // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
+    // No blocking wait — recovery happens asynchronously as endpoints are discovered.
+    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer.clone()).await?;
+
     // Subscribe to KV events using the selected event plane transport
     let mut subscriber =
         EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
@@ -542,20 +483,6 @@ pub async fn start_kv_router_background_event_plane(
         }
     }
 
-    // Wait for at least one worker with a known runtime config before proceeding.
-    // This ensures we have actual config data (including enable_local_indexer) available.
-    tracing::info!("KV subscriber waiting for at least one worker with runtime config...");
-    let ready_workers = worker_query_client.wait_for_ready().await;
-    tracing::info!(
-        "KV subscriber found {} worker(s) with runtime config, proceeding",
-        ready_workers.len()
-    );
-
-    // Recover initial state from all workers with local indexer enabled
-    worker_query_client
-        .process_and_recover_workers(&kv_events_tx, "Initial recovery")
-        .await;
-
     tokio::spawn(async move {
         // Track last received event ID per (worker, dp_rank) for gap detection
         // Each dp_rank has its own monotonic event ID sequence
@@ -568,18 +495,6 @@ pub async fn start_kv_router_background_event_plane(
                 _ = cancellation_token.cancelled() => {
                     tracing::debug!("KV Router event plane background task received cancellation signal");
                     break;
-                }
-
-                // Handle runtime config changes (worker add/remove, recovery for new workers)
-                result = worker_query_client.wait_for_config_change() => {
-                    if result.is_err() {
-                        tracing::warn!("Runtime config watch sender dropped");
-                        continue;
-                    }
-
-                    worker_query_client
-                        .process_and_recover_workers(&kv_events_tx, "DISCOVERY")
-                        .await;
                 }
 
                 // Handle event consumption from event plane subscription
@@ -597,7 +512,6 @@ pub async fn start_kv_router_background_event_plane(
                     let event_id = event.event.event_id;
                     let event_key = (worker_id, dp_rank);
 
-                    // Use envelope metadata for additional debugging
                     tracing::trace!(
                         "Received event from publisher {} (seq {})",
                         envelope.publisher_id,
@@ -609,7 +523,6 @@ pub async fn start_kv_router_background_event_plane(
                     if let Some(&last_id) = last_event_ids.get(&event_key)
                         && event_id > last_id + 1
                     {
-                        // Gap detected - recover missing events before processing current
                         let gap_start = last_id + 1;
                         let gap_end = event_id - 1;
                         let gap_size = gap_end - gap_start + 1;
@@ -617,22 +530,15 @@ pub async fn start_kv_router_background_event_plane(
                             "Event ID gap detected for worker {worker_id} dp_rank {dp_rank}, recovering events [{gap_start}, {gap_end}], gap_size: {gap_size}"
                         );
 
-                        // Note: While recovering, new events may queue in the subscriber's
-                        // internal buffer. We don't explicitly buffer them here for simplicity.
-                        // The subscriber will process them in order after recovery completes.
                         if let Err(e) = worker_query_client
-                            .recover_from_worker(worker_id, dp_rank, Some(gap_start), Some(gap_end), &kv_events_tx)
+                            .recover_from_worker(worker_id, dp_rank, Some(gap_start), Some(gap_end))
                             .await
                         {
                             tracing::error!(
                                 "Failed to recover gap events for worker {worker_id} dp_rank {dp_rank} (gap_start: {gap_start}, gap_end: {gap_end}); proceeding with current event anyway: {e}"
                             );
-                            // Note: If recovery fails, we still apply the current event.
-                            // The tree will have a gap, but it's better than dropping the event.
                         }
                     }
-                    // First event from this (worker, dp_rank) is always valid - we accept whatever ID it has.
-                    // This handles initial startup and worker restarts without requiring event 0.
 
                     // Update last seen event ID (use max to handle out-of-order)
                     last_event_ids
@@ -641,12 +547,7 @@ pub async fn start_kv_router_background_event_plane(
                         .or_insert(event_id);
 
                     // Forward the RouterEvent to the indexer
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::warn!(
-                            "failed to send kv event to indexer; shutting down: {e:?}"
-                        );
-                        break;
-                    }
+                    indexer.apply_event(event).await;
                 }
             }
         }
@@ -655,23 +556,6 @@ pub async fn start_kv_router_background_event_plane(
     });
 
     Ok(())
-}
-
-/// Backwards-compatible wrapper for NATS Core local-indexer mode.
-pub async fn start_kv_router_background_nats_core(
-    component: Component,
-    kv_events_tx: mpsc::Sender<RouterEvent>,
-    cancellation_token: CancellationToken,
-    worker_query_client: WorkerQueryClient,
-) -> Result<()> {
-    start_kv_router_background_event_plane(
-        component,
-        kv_events_tx,
-        cancellation_token,
-        worker_query_client,
-        EventTransportKind::Nats,
-    )
-    .await
 }
 
 /// Cleanup orphaned NATS consumers that no longer have corresponding router entries
@@ -709,5 +593,60 @@ async fn cleanup_orphaned_consumers(
             tracing::info!("Cleaning up orphaned consumer: {consumer}");
             let _ = nats_queue.shutdown(Some(consumer)).await;
         }
+    }
+}
+
+/// Helper to decide which subscriber (JetStream or Event Plane) to start based on config
+pub async fn start_subscriber(
+    component: Component,
+    kv_router_config: &KvRouterConfig,
+    router_id: u64,
+    indexer: Indexer,
+    cancellation_token: CancellationToken,
+) -> Result<()> {
+    let transport_kind = EventTransportKind::from_env_or_default();
+
+    // Start subscriber - durable_kv_events flag determines the mode:
+    // - durable_kv_events=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
+    // - durable_kv_events=true: Use JetStream for durability and multi-replica consistency
+    if kv_router_config.durable_kv_events {
+        if transport_kind == EventTransportKind::Zmq {
+            tracing::warn!(
+                "--durable-kv-events requires NATS, but ZMQ event plane is configured; falling back to JetStream anyway"
+            );
+        }
+        tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
+
+        let consumer_id = router_id.to_string();
+        start_kv_router_background(
+            component,
+            consumer_id,
+            indexer,
+            cancellation_token,
+            kv_router_config.router_snapshot_threshold,
+            kv_router_config.router_reset_states,
+        )
+        .await
+    } else {
+        if transport_kind == EventTransportKind::Zmq {
+            if kv_router_config.router_snapshot_threshold.is_some()
+                || kv_router_config.router_reset_states
+            {
+                tracing::warn!(
+                    "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
+                );
+            }
+            tracing::info!("Using ZMQ event plane subscription (local_indexer mode)");
+        } else {
+            tracing::info!("Using NATS Core subscription (local_indexer mode)");
+        }
+
+        start_kv_router_background_event_plane(
+            component.clone(),
+            indexer,
+            cancellation_token,
+            transport_kind,
+        )
+        .await
     }
 }

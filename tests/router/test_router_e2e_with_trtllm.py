@@ -30,6 +30,7 @@ TRTLLM_BLOCK_SIZE = 32  # fixed internally to 32
 
 pytestmark = [
     pytest.mark.e2e,
+    pytest.mark.router,
     pytest.mark.trtllm,
     pytest.mark.model(MODEL_NAME),
 ]
@@ -84,7 +85,7 @@ class TRTLLMProcess:
         single_gpu: bool = False,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        enable_local_indexer: bool = False,
+        durable_kv_events: bool = False,
     ):
         """Initialize TRT-LLM workers with dynamo integration.
 
@@ -104,7 +105,7 @@ class TRTLLMProcess:
             single_gpu: If True, all workers share GPU 0
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            enable_local_indexer: If True, enable worker-local KV indexer for NATS Core mode. Defaults to False.
+            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
 
         Note: TRT-LLM supports two forms of parallelism for routing:
               1. Multiple workers (num_workers > 1): Each worker is a separate routing target
@@ -119,6 +120,11 @@ class TRTLLMProcess:
         self.num_workers = num_workers
         self.worker_processes = []
         self.store_backend = store_backend
+
+        # Dynamically allocate unique system ports (one per worker) to avoid
+        # conflicts when tests run in parallel via pytest-xdist.
+        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        request.addfinalizer(lambda: deallocate_ports(self._system_ports))
 
         if trtllm_args is None:
             trtllm_args = {}
@@ -168,6 +174,10 @@ class TRTLLMProcess:
             if max_seq_len is not None:
                 command.extend(["--max-seq-len", str(max_seq_len)])
 
+            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
+            if durable_kv_events:
+                command.append("--durable-kv-events")
+
             # Set tensor parallel size if specified (needed for attention DP)
             if tensor_parallel_size is not None:
                 command.extend(["--tensor-parallel-size", str(tensor_parallel_size)])
@@ -177,8 +187,8 @@ class TRTLLMProcess:
                 command.append("--enable-attention-dp")
 
             # Each TRT-LLM worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
-            # See examples/backends/trtllm/launch/disagg_same_gpu.sh for reference.
-            system_port = 8081 + worker_idx
+            # Ports are dynamically allocated for xdist-safe parallel execution.
+            system_port = self._system_ports[worker_idx]
 
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
@@ -186,17 +196,12 @@ class TRTLLMProcess:
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
-                # Set unique system port for each worker to avoid port conflicts
                 "DYN_SYSTEM_PORT": str(system_port),
             }
 
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
                 env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
-
-            # Enable local indexer for NATS Core mode
-            if enable_local_indexer:
-                env_vars["DYN_LOCAL_INDEXER"] = "true"
 
             env.update(env_vars)
 
@@ -332,18 +337,16 @@ def test_trtllm_kv_router_basic(
         f"Starting TRT-LLM KV router test with {N_TRTLLM_WORKERS} workers using request_plane={request_plane}"
     )
 
-    try:
+    with TRTLLMProcess(
+        request,
+        trtllm_args=TRTLLM_ARGS,
+        num_workers=N_TRTLLM_WORKERS,
+        single_gpu=True,  # fit workers into one GPU
+        request_plane=request_plane,
+    ) as trtllm_workers:
         # Start TRT-LLM workers
         logger.info(f"Starting {N_TRTLLM_WORKERS} TRT-LLM workers")
-        trtllm_workers = TRTLLMProcess(
-            request,
-            trtllm_args=TRTLLM_ARGS,
-            num_workers=N_TRTLLM_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-            request_plane=request_plane,
-        )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
-        trtllm_workers.__enter__()
 
         # Run basic router test (starts router internally and waits for workers to be ready)
         frontend_port = allocate_frontend_ports(request, 1)[0]
@@ -358,10 +361,6 @@ def test_trtllm_kv_router_basic(
             store_backend="etcd",  # Explicit for clarity
             request_plane=request_plane,
         )
-
-    finally:
-        if "trtllm_workers" in locals():
-            trtllm_workers.__exit__(None, None, None)
 
 
 @pytest.mark.gpu_2
@@ -392,19 +391,17 @@ def test_router_decisions_trtllm_attention_dp(
         "tensor_parallel_size": N_ATTENTION_DP_RANKS,
     }
 
-    try:
+    with TRTLLMProcess(
+        request,
+        trtllm_args=TRTLLM_ADP_ARGS,
+        num_workers=N_TRTLLM_WORKERS,
+        single_gpu=False,
+        request_plane=request_plane,
+    ) as trtllm_workers:
         logger.info(
             f"Starting 1 TRT-LLM worker with attention DP enabled (attention_dp_size={N_ATTENTION_DP_RANKS})"
         )
-        trtllm_workers = TRTLLMProcess(
-            request,
-            trtllm_args=TRTLLM_ADP_ARGS,
-            num_workers=N_TRTLLM_WORKERS,
-            single_gpu=False,
-            request_plane=request_plane,
-        )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
-        trtllm_workers.__enter__()
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
@@ -422,15 +419,15 @@ def test_router_decisions_trtllm_attention_dp(
             block_size=TRTLLM_BLOCK_SIZE,
         )
 
-    finally:
-        # Clean up TRTLLM workers
-        if "trtllm_workers" in locals():
-            trtllm_workers.__exit__(None, None, None)
-
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "router_event_threads",
+    [1, 2],
+    ids=["single_thread", "multi_thread"],
+)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
     request,
@@ -438,29 +435,25 @@ def test_router_decisions_trtllm_multiple_workers(
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
+    router_event_threads,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting TRT-LLM router prefix reuse test with two workers")
     N_WORKERS = 2
 
-    try:
+    with TRTLLMProcess(
+        request,
+        trtllm_args=TRTLLM_ARGS,
+        num_workers=N_WORKERS,
+        single_gpu=True,  # Worker uses GPU 0
+        request_plane=request_plane,
+    ) as trtllm_workers:
         # Start 2 worker processes on the same GPU
         logger.info(
             "Starting 2 TRT-LLM worker processes on single GPU (gpu_mem_frac=0.4)"
         )
-        trtllm_workers = TRTLLMProcess(
-            request,
-            trtllm_args=TRTLLM_ARGS,
-            num_workers=N_WORKERS,
-            single_gpu=True,  # Worker uses GPU 0
-            request_plane=request_plane,
-        )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
 
-        # Initialize TRT-LLM workers
-        trtllm_workers.__enter__()
-
-        # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         namespace = runtime.namespace(trtllm_workers.namespace)
         component = namespace.component("tensorrt_llm")
@@ -473,25 +466,20 @@ def test_router_decisions_trtllm_multiple_workers(
             request,
             test_dp_rank=False,
             block_size=TRTLLM_BLOCK_SIZE,
+            router_event_threads=router_event_threads,
         )
-
-    finally:
-        # Clean up TRT-LLM workers
-        if "trtllm_workers" in locals():
-            trtllm_workers.__exit__(None, None, None)
 
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 @pytest.mark.parametrize(
-    "store_backend,use_nats_core,request_plane",
+    "store_backend,durable_kv_events,request_plane",
     [
-        ("etcd", False, "nats"),  # JetStream mode
-        # ("etcd", True, "tcp"),  # nats_core mode - disabled for now
-        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for TRT-LLM
+        ("etcd", False, "tcp"),
     ],
-    ids=["jetstream"],
+    ids=["nats_core"],
+    indirect=["durable_kv_events", "request_plane"],
 )
 def test_trtllm_indexers_sync(
     request,
@@ -500,7 +488,7 @@ def test_trtllm_indexers_sync(
     file_storage_backend,
     set_ucx_tls_no_mm,
     store_backend,
-    use_nats_core,
+    durable_kv_events,
     request_plane,
 ):
     """
@@ -508,36 +496,35 @@ def test_trtllm_indexers_sync(
     with TRT-LLM workers. This test verifies that both routers converge to the same internal state.
 
     Tests with configuration:
-    - jetstream: etcd backend, JetStream for KV events, NATS request plane
-    - tcp_nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+    - nats_core: etcd backend, local indexer with NATS Core, TCP request plane
+                 (includes NATS interruption/recovery testing)
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     nats_process, _etcd_process = runtime_services_dynamic_ports
 
     logger.info(
         f"Starting TRT-LLM indexers sync test: store_backend={store_backend}, "
-        f"use_nats_core={use_nats_core}, request_plane={request_plane}"
+        f"durable_kv_events={durable_kv_events}, request_plane={request_plane}"
     )
 
     N_TRTLLM_WORKERS = 2
 
-    try:
+    with TRTLLMProcess(
+        request,
+        trtllm_args=TRTLLM_ARGS,
+        num_workers=N_TRTLLM_WORKERS,
+        single_gpu=True,  # fit workers into one GPU
+        request_plane=request_plane,
+        store_backend=store_backend,
+        durable_kv_events=durable_kv_events,
+    ) as trtllm_workers:
         # Start TRT-LLM workers
         logger.info(f"Starting {N_TRTLLM_WORKERS} TRT-LLM workers")
-        trtllm_workers = TRTLLMProcess(
-            request,
-            trtllm_args=TRTLLM_ARGS,
-            num_workers=N_TRTLLM_WORKERS,
-            single_gpu=True,  # fit workers into one GPU
-            request_plane=request_plane,
-            store_backend=store_backend,
-            enable_local_indexer=use_nats_core,
-        )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
-        trtllm_workers.__enter__()
 
         # Use the common test implementation (creates its own runtimes for each router)
         # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
+        # When using durable_kv_events=True, use JetStream mode for the router
         _test_router_indexers_sync(
             engine_workers=trtllm_workers,
             block_size=TRTLLM_BLOCK_SIZE,
@@ -545,12 +532,9 @@ def test_trtllm_indexers_sync(
             num_workers=N_TRTLLM_WORKERS,
             store_backend=store_backend,
             request_plane=request_plane,
-            test_nats_interruption=use_nats_core,
-            nats_server=nats_process if use_nats_core else None,
+            test_nats_interruption=not durable_kv_events,
+            nats_server=nats_process if not durable_kv_events else None,
+            durable_kv_events=durable_kv_events,
         )
 
         logger.info("TRT-LLM indexers sync test completed successfully")
-
-    finally:
-        if "trtllm_workers" in locals():
-            trtllm_workers.__exit__(None, None, None)

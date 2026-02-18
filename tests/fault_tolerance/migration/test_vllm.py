@@ -29,6 +29,7 @@ SHORT_GRACE_PERIOD_S = 1
 LONG_GRACE_PERIOD_S = 10
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
