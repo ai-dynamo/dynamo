@@ -112,6 +112,12 @@ pub struct NaiveNestedMap {
     tx: mpsc::Sender<ActorMessage>,
 }
 
+impl Default for NaiveNestedMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NaiveNestedMap {
     pub fn new() -> Self {
         let (tx, mut rx) = mpsc::channel::<ActorMessage>(2048);
@@ -314,6 +320,12 @@ enum InvertedIndexMessage {
 /// serialized through a single OS thread via channels.
 pub struct InvertedIndex {
     tx: mpsc::Sender<InvertedIndexMessage>,
+}
+
+impl Default for InvertedIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InvertedIndex {
