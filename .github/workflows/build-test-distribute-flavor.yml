@@ -337,7 +337,7 @@ jobs:
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
-        if: ( inputs.platform == 'amd64' && inputs.run_single_gpu_tests == 'true' ) # We only run GPU tests on amd64
+        if: ( inputs.platform == 'amd64' && inputs.run_single_gpu_tests == true ) # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
