@@ -233,12 +233,9 @@ class VllmPDWorker(VllmBaseWorker):
                 parsed_component_name,
                 parsed_endpoint_name,
             ) = parse_endpoint(self.downstream_endpoint)
-            self.decode_worker_client = (
-                await runtime.namespace(parsed_namespace)
-                .component(parsed_component_name)
-                .endpoint(parsed_endpoint_name)
-                .client()
-            )
+            self.decode_worker_client = await runtime.endpoint(
+                f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+            ).client()
 
         if "video" in self.engine_args.model.lower():
             self.EMBEDDINGS_DTYPE = torch.uint8

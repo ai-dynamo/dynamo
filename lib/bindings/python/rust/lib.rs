@@ -150,7 +150,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
-    m.add_class::<Namespace>()?;
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
@@ -463,13 +462,6 @@ struct CancellationToken {
 
 #[pyclass]
 #[derive(Clone)]
-struct Namespace {
-    inner: rs::component::Namespace,
-    event_loop: PyObject,
-}
-
-#[pyclass]
-#[derive(Clone)]
 struct Component {
     inner: rs::component::Component,
     event_loop: PyObject,
@@ -645,13 +637,6 @@ impl DistributedRuntime {
         Ok(DistributedRuntime {
             inner,
             event_loop: py.None(),
-        })
-    }
-
-    fn namespace(&self, name: String) -> PyResult<Namespace> {
-        Ok(Namespace {
-            inner: self.inner.namespace(name).map_err(to_pyerr)?,
-            event_loop: self.event_loop.clone(),
         })
     }
 
@@ -947,17 +932,6 @@ impl Endpoint {
             inner: self.inner.component().clone(),
             event_loop: self.event_loop.clone(),
         }
-    }
-}
-
-#[pymethods]
-impl Namespace {
-    fn component(&self, name: String) -> PyResult<Component> {
-        let inner = self.inner.component(name).map_err(to_pyerr)?;
-        Ok(Component {
-            inner,
-            event_loop: self.event_loop.clone(),
-        })
     }
 }
 
