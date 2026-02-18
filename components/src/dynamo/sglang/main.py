@@ -291,23 +291,30 @@ async def init(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    cache_control_endpoint = component.endpoint("cache_control")
+    # Only register cache_control endpoint when HiCache is enabled
+    serve_tasks = [
+        generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=metrics_labels,
+            health_check_payload=health_check_payload,
+        ),
+    ]
+    if server_args.enable_hierarchical_cache:
+        cache_control_endpoint = component.endpoint("cache_control")
+        serve_tasks.append(
+            cache_control_endpoint.serve_endpoint(
+                handler.cache_control,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+            )
+        )
 
     try:
         # Start endpoint immediately and register model concurrently
         # Requests queue until ready_event is set (TODO: Part of new PR)
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-                health_check_payload=health_check_payload,
-            ),
-            cache_control_endpoint.serve_endpoint(
-                handler.cache_control,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-            ),
+            *serve_tasks,
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
@@ -375,23 +382,30 @@ async def init_prefill(
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    cache_control_endpoint = component.endpoint("cache_control")
+    # Only register cache_control endpoint when HiCache is enabled
+    serve_tasks = [
+        generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=metrics_labels,
+            health_check_payload=health_check_payload,
+        ),
+    ]
+    if server_args.enable_hierarchical_cache:
+        cache_control_endpoint = component.endpoint("cache_control")
+        serve_tasks.append(
+            cache_control_endpoint.serve_endpoint(
+                handler.cache_control,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+            )
+        )
 
     try:
         # Start endpoint immediately and register model concurrently
         # Registration publishes runtime_config with bootstrap endpoint for optimization
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-                health_check_payload=health_check_payload,
-            ),
-            cache_control_endpoint.serve_endpoint(
-                handler.cache_control,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-            ),
+            *serve_tasks,
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
