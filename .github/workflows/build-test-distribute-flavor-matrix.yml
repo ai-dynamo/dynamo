@@ -148,7 +148,7 @@ jobs:
       run_cpu_only_tests: ${{ inputs.run_cpu_only_tests }}
       cpu_only_test_markers: ${{ inputs.cpu_only_test_markers }}
       cpu_only_test_timeout_minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-      run_single_gpu_tests: ${{ inputs.un_single_gpu_test }}
+      run_single_gpu_tests: ${{ inputs.run_single_gpu_tests }}
       single_gpu_test_markers: ${{ inputs.single_gpu_test_markers }}
       single_gpu_test_timeout_minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
       run_multi_gpu_tests: ${{ inputs.run_multi_gpu_tests }}

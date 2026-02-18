@@ -319,6 +319,7 @@ jobs:
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
+        if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
@@ -336,7 +337,7 @@ jobs:
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
-        if: ${{ inputs.platform == 'amd64' }} # We only run GPU tests on amd64
+        if: ${{ inputs.platform == 'amd64' && inputs.run_single_gpu_tests }} # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
