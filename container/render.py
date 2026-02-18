@@ -58,35 +58,63 @@ def parse_args():
 def validate_args(args):
     valid_inputs = {
         "vllm": {
-            "target": ["runtime", "dev", "local-dev", "framework", "wheel_builder", "base"],
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "framework",
+                "wheel_builder",
+                "base",
+            ],
             "cuda_version": ["12.9", "13.0"],
         },
         "trtllm": {
-            "target": ["runtime", "dev", "local-dev", "framework", "wheel_builder", "base"],
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "framework",
+                "wheel_builder",
+                "base",
+            ],
             "cuda_version": ["13.1"],
         },
         "sglang": {
-            "target": ["runtime", "dev", "local-dev", "wheel_builder", "base"],
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "wheel_builder",
+                "base",
+            ],
             "cuda_version": ["12.9", "13.0"],
         },
         "dynamo": {
-            "target": ["runtime", "dev", "local-dev", "frontend", "wheel_builder", "base"],
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "frontend",
+                "wheel_builder",
+                "base",
+            ],
             "cuda_version": ["12.9", "13.0"],
         },
     }
 
     if args.framework in valid_inputs:
-        if args.target in valid_inputs[args.framework]["target"] and args.cuda_version in valid_inputs[args.framework]["cuda_version"]:
+        if (
+            args.target in valid_inputs[args.framework]["target"]
+            and args.cuda_version in valid_inputs[args.framework]["cuda_version"]
+        ):
             return
-        else:
-            raise ValueError(
-                f"Invalid input combination: [framework={args.framework},target={args.target},cuda_version={args.cuda_version}]"
-            )
+        raise ValueError(
+            f"Invalid input combination: [framework={args.framework},target={args.target},cuda_version={args.cuda_version}]"
+        )
 
     raise ValueError(
         f"Invalid input combination: [framework={args.framework},target={args.target},cuda_version={args.cuda_version}]"
     )
-    return
 
 
 def render(args, context, script_dir):
