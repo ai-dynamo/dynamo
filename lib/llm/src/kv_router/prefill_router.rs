@@ -221,7 +221,9 @@ impl PrefillRouter {
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(push_router, kv_chooser).await?))
+            InnerPrefillRouter::KvRouter(Arc::new(
+                KvPushRouter::new(push_router, kv_chooser).await?,
+            ))
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;

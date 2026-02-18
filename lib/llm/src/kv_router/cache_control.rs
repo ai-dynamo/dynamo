@@ -23,7 +23,9 @@ pub type CacheControlClient = PushRouter<serde_json::Value, Annotated<serde_json
 /// Connects to the "cache_control" endpoint on the given component and returns
 /// a PushRouter client for sending cache control operations (pin_prefix,
 /// unpin_prefix) to workers.
-pub(crate) async fn create_cache_control_client(component: &Component) -> Result<CacheControlClient> {
+pub(crate) async fn create_cache_control_client(
+    component: &Component,
+) -> Result<CacheControlClient> {
     let client = component.endpoint("cache_control").client().await?;
     CacheControlClient::from_client(client, RouterMode::KV).await
 }

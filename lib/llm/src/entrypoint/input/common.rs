@@ -9,9 +9,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{
-        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter,
-    },
+    kv_router::{DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
