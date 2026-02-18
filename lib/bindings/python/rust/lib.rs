@@ -162,7 +162,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
-    m.add_class::<llm::model_card::ModelDeploymentCard>()?;
+    m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
