@@ -22,8 +22,8 @@ from gpu_memory_service import (
     get_or_create_gms_client_memory_manager,
 )
 from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.integrations.common.utils import get_requested_lock_type
 from gpu_memory_service.integrations.common import patch_empty_cache
+from gpu_memory_service.integrations.common.utils import get_requested_lock_type
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
 from gpu_memory_service.integrations.vllm.patches import patch_memory_snapshot
 
@@ -61,7 +61,10 @@ class GMSWorker(Worker):
         socket_path = get_socket_path(device)
         extra_config = self.load_config.model_loader_extra_config
         get_or_create_gms_client_memory_manager(
-            socket_path, device, mode=get_requested_lock_type(extra_config), tag="weights"
+            socket_path,
+            device,
+            mode=get_requested_lock_type(extra_config),
+            tag="weights",
         )
 
         # Parent will set device again (harmless) and do memory checks

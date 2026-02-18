@@ -164,7 +164,13 @@ def patch_model_runner() -> None:
 
         raw = getattr(self.server_args, "model_loader_extra_config", None) or {}
         if isinstance(raw, str):
-            raw = json.loads(raw)
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "[GMS] Failed to parse model_loader_extra_config, using defaults"
+                )
+                raw = {}
         ms_mod._model_loader_extra_config = raw
 
         return original_load_model(self, *args, **kwargs)
