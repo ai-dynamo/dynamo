@@ -427,7 +427,7 @@ mod tests {
             serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args.get("path").unwrap().as_str().unwrap(), "/tmp/hello.py");
         assert!(
-            args.get("content").is_some(),
+            args.contains_key("content"),
             "content argument must be parsed even when it contains newlines"
         );
         let content = args.get("content").unwrap().as_str().unwrap();
@@ -512,7 +512,7 @@ mod tests {
         // number coercion
         assert_eq!(args.get("degrees").unwrap().as_f64().unwrap(), 72.5);
         // boolean coercion
-        assert_eq!(args.get("enabled").unwrap().as_bool().unwrap(), true);
+        assert!(args.get("enabled").unwrap().as_bool().unwrap());
         // integer coercion
         assert_eq!(args.get("count").unwrap().as_i64().unwrap(), 3);
         // string stays string
