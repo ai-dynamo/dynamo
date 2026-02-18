@@ -30,13 +30,20 @@ The object is forwarded as-is through the request pipeline. Each component extra
 
 | Key | Type | Default | Consumed By | Description |
 |-----|------|---------|-------------|-------------|
-| `priority` | `int` | `0` | vLLM and SGLang backends | Request priority for the engine scheduler. Higher values are scheduled first. |
+| `priority` | `int` | `0` | vLLM and SGLang backends | Request priority for queue ordering, KV cache eviction, and queue admission. |
 | `ttft_target` | `float` | config default | Global Router | Target time-to-first-token in milliseconds. Used to select the prefill worker pool. |
 | `itl_target` | `float` | config default | Global Router | Target inter-token latency in milliseconds. Used to select the decode worker pool. |
 
 ### `priority`
 
-Extracted by the vLLM and SGLang worker handlers and passed to the engine's `generate` call. The engine scheduler uses this value to order requests in its queue — higher priority requests are scheduled before lower ones. When omitted, vLLM defaults to `0`; SGLang defaults to `None` (engine default).
+Extracted by the vLLM and SGLang worker handlers and passed to the engine's `generate` call. Priority influences queue ordering, KV cache eviction under memory pressure, and queue admission when the waiting queue is full.
+
+The semantics of the priority value differ between backends:
+
+- **vLLM**: Smaller values = higher priority. A request with `priority: 0` is scheduled before `priority: 10`. Ties are broken by arrival time. Requires `--scheduling-policy priority` on the engine.
+- **SGLang**: By default, larger values = higher priority. This can be inverted with `--schedule-low-priority-values-first` to match vLLM's convention. Requires `--enable-priority-scheduling` on the engine.
+
+When omitted, vLLM defaults to `0`; SGLang defaults to `None` (engine default).
 
 ### `ttft_target`
 
