@@ -129,6 +129,14 @@ impl ModelType {
         let mut endpoint_types = Vec::new();
         if self.contains(Self::Chat) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Chat);
+            // Translation layers over chat completions
+            endpoint_types.push(crate::endpoint_type::EndpointType::Responses);
+            // AnthropicMessages is gated by DYN_ENABLE_ANTHROPIC_API env var
+            if dynamo_runtime::config::env_is_truthy(
+                dynamo_runtime::config::environment_names::llm::DYN_ENABLE_ANTHROPIC_API,
+            ) {
+                endpoint_types.push(crate::endpoint_type::EndpointType::AnthropicMessages);
+            }
         }
         if self.contains(Self::Completions) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Completion);
