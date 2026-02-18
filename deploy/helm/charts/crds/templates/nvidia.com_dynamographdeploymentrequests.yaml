@@ -565,15 +565,6 @@ spec:
                 features:
                   description: Features controls optional Dynamo platform features in the generated deployment.
                   properties:
-                    kvRouter:
-                      description: KVRouter configures KV-cache-aware routing in the generated DGD.
-                      properties:
-                        enabled:
-                          description: |-
-                            Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.
-                            KV routing optimizes request scheduling based on KV cache locality.
-                          type: boolean
-                      type: object
                     mocker:
                       description: Mocker configures the simulated (mocker) backend for testing without GPUs.
                       properties:
@@ -620,14 +611,6 @@ spec:
                     gpuSku:
                       description: GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").
                       type: string
-                    maxNumGpusPerEngine:
-                      description: MaxNumGPUsPerEngine is the maximum number of GPUs per engine for profiling search space.
-                      format: int32
-                      type: integer
-                    minNumGpusPerEngine:
-                      description: MinNumGPUsPerEngine is the minimum number of GPUs per engine for profiling search space.
-                      format: int32
-                      type: integer
                     numGpusPerNode:
                       description: NumGPUsPerNode is the number of GPUs per node.
                       format: int32
@@ -642,8 +625,9 @@ spec:
                   type: object
                 image:
                   description: |-
-                    Image is the container image reference for the deployment.
+                    Image is the container image reference for the profiling job (frontend image).
                     Example: "nvcr.io/nvidia/dynamo-runtime:latest"
+                    backend type automatically; backend images can be overridden via overrides.dgd.
                   type: string
                 model:
                   description: |-
@@ -676,8 +660,12 @@ spec:
                   properties:
                     dgd:
                       description: |-
-                        DGD allows providing a full or partial DynamoGraphDeployment to use as the base
-                        for the generated deployment. Fields from profiling results are merged on top.
+                        DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment
+                        to use as the base for the generated deployment. Fields from profiling results
+                        are merged on top. Use this to override backend worker images.
+
+                        Note: runtime.RawExtension is used instead of a direct *v1alpha1.DynamoGraphDeployment
+                        to avoid a circular import: v1alpha1 already imports v1beta1 as the conversion hub.
                       type: object
                       x-kubernetes-embedded-resource: true
                       x-kubernetes-preserve-unknown-fields: true
@@ -9123,10 +9111,12 @@ spec:
                         Required (or RequestRate) when the planner is disabled.
                       type: number
                     isl:
+                      default: 4000
                       description: ISL is the Input Sequence Length (number of tokens).
                       format: int32
                       type: integer
                     osl:
+                      default: 1000
                       description: OSL is the Output Sequence Length (number of tokens).
                       format: int32
                       type: integer

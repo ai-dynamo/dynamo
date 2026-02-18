@@ -1,3 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Auto-generated Pydantic models from v1beta1 DGDR Go types.
 
@@ -10,26 +24,26 @@ DO NOT EDIT MANUALLY - regenerate using the script.
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class DGDRPhase(str, Enum):
-    PENDING = "Pending"
-    PROFILING = "Profiling"
-    READY = "Ready"
-    DEPLOYING = "Deploying"
-    DEPLOYED = "Deployed"
-    FAILED = "Failed"
+    Pending = "Pending"
+    Profiling = "Profiling"
+    Ready = "Ready"
+    Deploying = "Deploying"
+    Deployed = "Deployed"
+    Failed = "Failed"
 
 
 class ProfilingPhase(str, Enum):
-    INITIALIZING = "Initializing"
-    SWEEPINGPREFILL = "SweepingPrefill"
-    SWEEPINGDECODE = "SweepingDecode"
-    SELECTINGCONFIG = "SelectingConfig"
-    BUILDINGCURVES = "BuildingCurves"
-    GENERATINGDGD = "GeneratingDGD"
-    DONE = "Done"
+    Initializing = "Initializing"
+    SweepingPrefill = "SweepingPrefill"
+    SweepingDecode = "SweepingDecode"
+    SelectingConfig = "SelectingConfig"
+    BuildingCurves = "BuildingCurves"
+    GeneratingDGD = "GeneratingDGD"
+    Done = "Done"
 
 
 class OptimizationType(str, Enum):
@@ -44,9 +58,9 @@ class SearchStrategy(str, Enum):
 
 class BackendType(str, Enum):
     Auto = "auto"
-    SGLang = "sglang"
-    TRTLLM = "trtllm"
-    VLLM = "vllm"
+    Sglang = "sglang"
+    Trtllm = "trtllm"
+    Vllm = "vllm"
 
 
 class PlannerPreDeploymentSweepMode(str, Enum):
@@ -59,10 +73,10 @@ class WorkloadSpec(BaseModel):
     """WorkloadSpec defines the workload characteristics for SLA-based profiling."""
 
     isl: Optional[int] = Field(
-        default=None, description="ISL is the Input Sequence Length (number of tokens)."
+        default=4000, description="ISL is the Input Sequence Length (number of tokens)."
     )
     osl: Optional[int] = Field(
-        default=None,
+        default=1000,
         description="OSL is the Output Sequence Length (number of tokens).",
     )
     concurrency: Optional[float] = Field(
@@ -76,24 +90,45 @@ class WorkloadSpec(BaseModel):
 
 
 class SLASpec(BaseModel):
-    """SLASpec defines the service-level agreement targets."""
+    """Service-level agreement targets.
+
+    Provide exactly one of:
+
+    - ``ttft`` + ``itl``: explicit latency targets (default: 2000 ms / 30 ms)
+    - ``e2eLatency``: end-to-end latency target
+    - ``optimizationType``: high-level objective without explicit numeric targets"""
 
     optimizationType: Optional[OptimizationType] = Field(
         default=None,
         description="OptimizationType controls the profiling optimization strategy. Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.",
     )
     ttft: Optional[float] = Field(
-        default=None,
+        default=2000,
         description="TTFT is the Time To First Token target in milliseconds.",
     )
     itl: Optional[float] = Field(
-        default=None,
-        description="ITL is the Inter-Token Latency target in milliseconds.",
+        default=30, description="ITL is the Inter-Token Latency target in milliseconds."
     )
     e2eLatency: Optional[float] = Field(
         default=None,
         description="E2ELatency is the target end-to-end request latency in milliseconds. Alternative to specifying TTFT + ITL.",
     )
+
+    @model_validator(mode="after")
+    def _validate_sla_options(self) -> "SLASpec":
+        """Ensure at most one SLA mode is active."""
+        has_ttft_itl = self.ttft is not None and self.itl is not None
+        has_e2e = self.e2eLatency is not None
+        has_opt = self.optimizationType is not None
+        options_count = sum([has_ttft_itl, has_e2e, has_opt])
+        if options_count > 1:
+            raise ValueError(
+                "SLA must specify exactly one of: (ttft and itl), e2eLatency, "
+                "or optimizationType — not multiple."
+            )
+        if (self.ttft is not None) != (self.itl is not None):
+            raise ValueError("ttft and itl must both be provided together.")
+        return self
 
 
 class ModelCacheSpec(BaseModel):
@@ -107,8 +142,8 @@ class ModelCacheSpec(BaseModel):
         default=None,
         description='PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").',
     )
-    pvcMountPath: Optional[str] = Field(
-        default=None,
+    pvcMountPath: str = Field(
+        default="/opt/model-cache",
         description="PVCMountPath is the mount path for the PVC inside the container.",
     )
 
@@ -122,7 +157,7 @@ class OverridesSpec(BaseModel):
     )
     dgd: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="DGD allows providing a full or partial DynamoGraphDeployment to use as the base for the generated deployment. Fields from profiling results are merged on top.",
+        description="DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment to use as the base for the generated deployment. Fields from profiling results are merged on top. Use this to override backend worker images.  The field is stored as a raw embedded resource rather than a typed *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already imports v1beta1 as the conversion hub and Go does not allow import cycles.  The EmbeddedResource marker tells the API server to validate that the value is a well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion, kind, and field schema) is performed by the controller during reconciliation. TODO(future MR): add webhook admission validation for the DGD field type.",
     )
 
 
@@ -167,10 +202,6 @@ class FeaturesSpec(BaseModel):
         default=None,
         description="Planner configures the SLA planner for autoscaling in the generated DGD.",
     )
-    kvRouter: Optional[KVRouterSpec] = Field(
-        default=None,
-        description="KVRouter configures KV-cache-aware routing in the generated DGD.",
-    )
     mocker: Optional[MockerSpec] = Field(
         default=None,
         description="Mocker configures the simulated (mocker) backend for testing without GPUs.",
@@ -194,14 +225,6 @@ class HardwareSpec(BaseModel):
     numGpusPerNode: Optional[int] = Field(
         default=None, description="NumGPUsPerNode is the number of GPUs per node."
     )
-    minNumGpusPerEngine: Optional[int] = Field(
-        default=None,
-        description="MinNumGPUsPerEngine is the minimum number of GPUs per engine for profiling search space.",
-    )
-    maxNumGpusPerEngine: Optional[int] = Field(
-        default=None,
-        description="MaxNumGPUsPerEngine is the maximum number of GPUs per engine for profiling search space.",
-    )
 
 
 class DynamoGraphDeploymentRequestSpec(BaseModel):
@@ -210,13 +233,13 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     model: str = Field(
         description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.'
     )
-    backend: Optional[BackendType] = Field(
-        default=None,
+    backend: BackendType = Field(
+        default="auto",
         description="Backend specifies the inference backend to use for profiling and deployment.",
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the deployment. Example: "nvcr.io/nvidia/dynamo-runtime:latest"',
+        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/dynamo-runtime:latest" TODO: In a future MR, the operator will derive the backend inference image from the backend type automatically; backend images can be overridden via overrides.dgd.',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
@@ -242,12 +265,12 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         default=None,
         description="Features controls optional Dynamo platform features in the generated deployment.",
     )
-    searchStrategy: Optional[SearchStrategy] = Field(
-        default=None,
+    searchStrategy: SearchStrategy = Field(
+        default="rapid",
         description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
     )
-    autoApply: Optional[bool] = Field(
-        default=None,
+    autoApply: bool = Field(
+        default=True,
         description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
     )
 
@@ -319,7 +342,13 @@ class DynamoGraphDeploymentRequestStatus(BaseModel):
 
 
 class DynamoGraphDeploymentRequest(BaseModel):
-    """1. Pending: Spec validated, preparing for profiling 2. Profiling: Profiling job is running to discover optimal configurations 3. Ready: Profiling complete, generated DGD spec available in status 4. Deploying: DGD is being created and rolled out (when autoApply=true) 5. Deployed: DGD is running and healthy 6. Failed: An unrecoverable error occurred"""
+    """DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API. It provides a simplified, SLA-driven interface for deploying inference models on Dynamo. Users specify a model and optional performance targets; the controller handles profiling, configuration selection, and deployment."""
 
-    spec: Optional[DynamoGraphDeploymentRequestSpec] = Field(default=None)
-    status: Optional[DynamoGraphDeploymentRequestStatus] = Field(default=None)
+    spec: Optional[DynamoGraphDeploymentRequestSpec] = Field(
+        default=None,
+        description="Spec defines the desired state for this deployment request.",
+    )
+    status: Optional[DynamoGraphDeploymentRequestStatus] = Field(
+        default=None,
+        description="Status reflects the current observed state of this deployment request.",
+    )

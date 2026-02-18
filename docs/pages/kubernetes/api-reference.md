@@ -1464,7 +1464,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob allows overriding the profiling Job specification.<br />Fields set here are merged into the controller-generated Job spec. |  | Optional: \{\} <br /> |
-| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment<br />to use as the base for the generated deployment. Fields from profiling results<br />are merged on top. Use this to override backend worker images. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment<br />to use as the base for the generated deployment. Fields from profiling results<br />are merged on top. Use this to override backend worker images.<br />Note: runtime.RawExtension is used instead of a direct *v1alpha1.DynamoGraphDeployment<br />to avoid a circular import: v1alpha1 already imports v1beta1 as the conversion hub. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 
 
 #### ParetoConfig
@@ -1567,7 +1567,8 @@ _Appears in:_
 
 
 
-SLASpec defines the service-level agreement targets.
+SLASpec defines the service-level agreement targets for profiling optimization.
+Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 
 
 
@@ -1613,8 +1614,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `isl` _integer_ | ISL is the Input Sequence Length (number of tokens). |  | Optional: \{\} <br /> |
-| `osl` _integer_ | OSL is the Output Sequence Length (number of tokens). |  | Optional: \{\} <br /> |
+| `isl` _integer_ | ISL is the Input Sequence Length (number of tokens). | 4000 | Optional: \{\} <br /> |
+| `osl` _integer_ | OSL is the Output Sequence Length (number of tokens). | 1000 | Optional: \{\} <br /> |
 | `concurrency` _float_ | Concurrency is the target concurrency level.<br />Required (or RequestRate) when the planner is disabled. |  | Optional: \{\} <br /> |
 | `requestRate` _float_ | RequestRate is the target request rate (req/s).<br />Required (or Concurrency) when the planner is disabled. |  | Optional: \{\} <br /> |
 

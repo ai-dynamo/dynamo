@@ -189,19 +189,21 @@ type BackendType string
 
 const (
 	BackendTypeAuto   BackendType = "auto"
-	BackendTypeSGLang BackendType = "sglang"
-	BackendTypeTRTLLM BackendType = "trtllm"
-	BackendTypeVLLM   BackendType = "vllm"
+	BackendTypeSglang BackendType = "sglang"
+	BackendTypeTrtllm BackendType = "trtllm"
+	BackendTypeVllm   BackendType = "vllm"
 )
 
 // WorkloadSpec defines the workload characteristics for SLA-based profiling.
 type WorkloadSpec struct {
 	// ISL is the Input Sequence Length (number of tokens).
 	// +optional
+	// +kubebuilder:default=4000
 	ISL *int32 `json:"isl,omitempty"`
 
 	// OSL is the Output Sequence Length (number of tokens).
 	// +optional
+	// +kubebuilder:default=1000
 	OSL *int32 `json:"osl,omitempty"`
 
 	// Concurrency is the target concurrency level.
@@ -215,7 +217,8 @@ type WorkloadSpec struct {
 	RequestRate *float64 `json:"requestRate,omitempty"`
 }
 
-// SLASpec defines the service-level agreement targets.
+// SLASpec defines the service-level agreement targets for profiling optimization.
+// Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 type SLASpec struct {
 	// OptimizationType controls the profiling optimization strategy.
 	// Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
@@ -225,10 +228,12 @@ type SLASpec struct {
 
 	// TTFT is the Time To First Token target in milliseconds.
 	// +optional
+	// +python-default=2000
 	TTFT *float64 `json:"ttft,omitempty"`
 
 	// ITL is the Inter-Token Latency target in milliseconds.
 	// +optional
+	// +python-default=30
 	ITL *float64 `json:"itl,omitempty"`
 
 	// E2ELatency is the target end-to-end request latency in milliseconds.
@@ -265,6 +270,16 @@ type OverridesSpec struct {
 	// DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment
 	// to use as the base for the generated deployment. Fields from profiling results
 	// are merged on top. Use this to override backend worker images.
+	//
+	// The field is stored as a raw embedded resource rather than a typed
+	// *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already
+	// imports v1beta1 as the conversion hub and Go does not allow import cycles.
+	//
+	// The EmbeddedResource marker tells the API server to validate that the value is a
+	// well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it
+	// is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,
+	// kind, and field schema) is performed by the controller during reconciliation.
+	// TODO(future MR): add webhook admission validation for the DGD field type.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:EmbeddedResource

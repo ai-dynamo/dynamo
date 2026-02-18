@@ -41,6 +41,8 @@ def _repo_root() -> Path:
 # Add the components src to path so we can import the generated models
 sys.path.insert(0, str(_repo_root() / "components" / "src"))
 
+import pydantic  # noqa: E402
+
 from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
     BackendType,
     DeploymentInfoStatus,
@@ -79,7 +81,7 @@ def test_full_dgdr():
     """Test creating a full DGDR with all fields"""
     spec = DynamoGraphDeploymentRequestSpec(
         model="meta-llama/Llama-3.1-405B",
-        backend=BackendType.VLLM,
+        backend=BackendType.Vllm,
         image="nvcr.io/nvidia/dynamo-runtime:latest",
         workload=WorkloadSpec(
             isl=1024,
@@ -87,7 +89,6 @@ def test_full_dgdr():
             concurrency=10.0,
         ),
         sla=SLASpec(
-            optimizationType=OptimizationType.Latency,
             ttft=100.0,
             itl=10.0,
         ),
@@ -105,14 +106,59 @@ def test_full_dgdr():
     print("✓ Created full DGDR spec")
 
     assert spec.model == "meta-llama/Llama-3.1-405B"
-    assert spec.backend == BackendType.VLLM
+    assert spec.backend == BackendType.Vllm
     assert spec.workload.isl == 1024
-    assert spec.sla.optimizationType == OptimizationType.Latency
+    assert spec.sla.ttft == 100.0
+    assert spec.sla.itl == 10.0
     assert spec.modelCache.pvcName == "model-cache"
     assert spec.modelCache.pvcModelPath == "llama-3.1-405b"
     assert spec.features.planner.enabled is True
     assert spec.features.mocker.enabled is False
     print("✓ Full DGDR spec validation passed")
+
+
+def test_sla_defaults_and_validation():
+    """Test SLASpec defaults and mutual-exclusivity validator"""
+    # Default mode: ttft + itl with python-defaults
+    sla = SLASpec()
+    assert sla.ttft == 2000.0
+    assert sla.itl == 30.0
+    assert sla.e2eLatency is None
+    assert sla.optimizationType is None
+    print("✓ SLASpec defaults correct")
+
+    # explicit ttft+itl mode: OK
+    SLASpec(ttft=100.0, itl=10.0)
+
+    # e2eLatency mode: OK (null out ttft/itl)
+    SLASpec(ttft=None, itl=None, e2eLatency=500.0)
+
+    # optimizationType mode: OK (null out ttft/itl)
+    SLASpec(ttft=None, itl=None, optimizationType=OptimizationType.Throughput)
+
+    # mixing modes should raise
+    try:
+        SLASpec(ttft=100.0, itl=10.0, e2eLatency=500.0)
+        raise AssertionError("expected ValidationError for mixed SLA modes")
+    except pydantic.ValidationError:
+        pass
+
+    # ttft without itl should raise
+    try:
+        SLASpec(itl=None, ttft=100.0)
+        raise AssertionError("expected ValidationError for ttft without itl")
+    except pydantic.ValidationError:
+        pass
+
+    print("✓ SLASpec validation correct")
+
+
+def test_workload_defaults():
+    """Test WorkloadSpec kubebuilder defaults"""
+    w = WorkloadSpec()
+    assert w.isl == 4000
+    assert w.osl == 1000
+    print("✓ WorkloadSpec defaults correct")
 
 
 def test_enums():
@@ -136,7 +182,7 @@ def test_enums():
 
     # BackendType — mixed case from Go const names
     assert BackendType.Auto == "auto"
-    assert BackendType.VLLM == "vllm"
+    assert BackendType.Vllm == "vllm"
 
     # PlannerPreDeploymentSweepMode (None → None_ to avoid Python keyword clash)
     assert PlannerPreDeploymentSweepMode.None_ == "none"
@@ -173,6 +219,8 @@ def main():
 
     test_simple_dgdr()
     test_full_dgdr()
+    test_sla_defaults_and_validation()
+    test_workload_defaults()
     test_enums()
     test_status_models()
 
