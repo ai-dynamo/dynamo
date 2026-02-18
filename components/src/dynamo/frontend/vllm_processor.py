@@ -405,8 +405,7 @@ class VllmProcessor:
                 if self.debug_perf:
                     t_op2 = time.monotonic()
                     post_proc_total_ms += (t_op2 - t_op1) * 1000.0
-
-                token_count += len(engine_response["token_ids"])
+                    token_count += len(engine_response["token_ids"])
 
                 if choices:
                     # dynamo_out: NvCreateChatCompletionStreamResponse
