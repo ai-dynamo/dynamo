@@ -89,6 +89,27 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Prefill,
 ];
 
+/// Returns true if no models in the manager support the given model type.
+fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bool {
+    if model_type == ModelType::Chat {
+        manager.list_chat_completions_models().is_empty()
+    } else if model_type == ModelType::Completions {
+        manager.list_completions_models().is_empty()
+    } else if model_type == ModelType::Embedding {
+        manager.list_embeddings_models().is_empty()
+    } else if model_type == ModelType::Images {
+        manager.list_images_models().is_empty()
+    } else if model_type == ModelType::Videos {
+        manager.list_videos_models().is_empty()
+    } else if model_type == ModelType::TensorBased {
+        manager.list_tensor_models().is_empty()
+    } else if model_type == ModelType::Prefill {
+        manager.list_prefill_models().is_empty()
+    } else {
+        true
+    }
+}
+
 impl ModelWatcher {
     pub fn new(
         runtime: DistributedRuntime,
@@ -323,7 +344,9 @@ impl ModelWatcher {
 
         if let Some(tx) = &self.model_update_tx {
             for model_type in ALL_MODEL_TYPES {
-                if card.model_type.intersects(*model_type) {
+                if card.model_type.intersects(*model_type)
+                    && is_model_type_list_empty(&self.manager, *model_type)
+                {
                     tx.send(ModelUpdate::Removed(card.clone())).await.ok();
                 }
             }
@@ -800,5 +823,73 @@ impl ModelWatcher {
             matches_name && matches_namespace
         });
         Ok(all)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::discovery::WorkerSet;
+    use crate::model_card::ModelDeploymentCard;
+
+    fn make_worker_set(namespace: &str) -> WorkerSet {
+        WorkerSet::new(
+            namespace.to_string(),
+            "test-checksum".to_string(),
+            ModelDeploymentCard::default(),
+        )
+    }
+
+    #[test]
+    fn test_is_model_type_list_empty_on_empty_manager() {
+        let mm = ModelManager::new();
+        assert!(is_model_type_list_empty(&mm, ModelType::Chat));
+        assert!(is_model_type_list_empty(&mm, ModelType::Completions));
+        assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
+        assert!(is_model_type_list_empty(&mm, ModelType::Images));
+        assert!(is_model_type_list_empty(&mm, ModelType::Videos));
+        assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
+        assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
+    }
+
+    #[test]
+    fn test_is_model_type_list_empty_prefill_present() {
+        let mm = ModelManager::new();
+        // A WorkerSet with no engines is treated as a prefill set
+        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
+
+        assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
+        // Other types should still be empty since the WorkerSet has no engines
+        assert!(is_model_type_list_empty(&mm, ModelType::Chat));
+        assert!(is_model_type_list_empty(&mm, ModelType::Completions));
+        assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
+        assert!(is_model_type_list_empty(&mm, ModelType::Images));
+        assert!(is_model_type_list_empty(&mm, ModelType::Videos));
+        assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
+    }
+
+    #[test]
+    fn test_is_model_type_list_empty_after_removal() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
+        assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
+
+        mm.remove_model("model-a");
+        assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
+    }
+
+    #[test]
+    fn test_is_model_type_list_not_empty_when_other_model_remains() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
+        mm.add_worker_set("model-b", "ns1", make_worker_set("ns1"));
+
+        // Remove one model — other still provides prefill
+        mm.remove_model("model-a");
+        assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
+
+        // Remove the last model — now empty
+        mm.remove_model("model-b");
+        assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
     }
 }
