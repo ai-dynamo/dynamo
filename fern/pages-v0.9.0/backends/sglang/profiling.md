@@ -5,8 +5,9 @@
 
 # Profiling SGLang Workers in Dynamo
 
-> [!NOTE]
-> **See also**: [Profiler Component Overview](../../components/profiler/README.md) for SLA-driven profiling and deployment optimization.
+<Note>
+**See also**: [Profiler Component Overview](../../components/profiler/README.md) for SLA-driven profiling and deployment optimization.
+</Note>
 
 Dynamo exposes profiling endpoints for SGLang workers via the system server's `/engine/*` routes. This allows you to start and stop PyTorch profiling on running inference workers without restarting them.
 

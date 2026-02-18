@@ -117,8 +117,9 @@ A Python worker may need to be shut down promptly, for example when the node run
 
 In such cases, you can signal incomplete responses by raising a `GeneratorExit` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../fault-tolerance/request-migration.md) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
 
-> [!WARNING]
-> We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
+<Warning>
+We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
+</Warning>
 
 Here's an example of how to implement this in your `RequestHandler`:
 

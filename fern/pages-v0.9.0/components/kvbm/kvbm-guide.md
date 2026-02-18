@@ -84,12 +84,13 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 
 ## Run KVBM in Dynamo with TensorRT-LLM
 
-> [!NOTE]
-> **Prerequisites:**
-> - Ensure `etcd` and `nats` are running before starting
-> - KVBM only supports TensorRT-LLM's PyTorch backend
-> - Disable partial reuse (`enable_partial_reuse: false`) to increase offloading cache hits
-> - KVBM requires TensorRT-LLM v1.2.0rc2 or newer
+<Note>
+**Prerequisites:**
+- Ensure `etcd` and `nats` are running before starting
+- KVBM only supports TensorRT-LLM's PyTorch backend
+- Disable partial reuse (`enable_partial_reuse: false`) to increase offloading cache hits
+- KVBM requires TensorRT-LLM v1.2.0rc2 or newer
+</Note>
 
 ### Docker Setup
 
@@ -201,9 +202,10 @@ cd $DYNAMO_HOME/examples/backends/vllm
 
 ### Disaggregated Serving with TRT-LLM
 
-> [!NOTE]
-> The latest TensorRT-LLM release (1.3.0rc1) is currently experiencing a request hang when running disaggregated serving with KVBM.
-> Please include the TensorRT-LLM commit id `18e611da773026a55d187870ebcfa95ff00c8482` when building the Dynamo TensorRT-LLM runtime image to test the KVBM + disaggregated serving feature.
+<Note>
+The latest TensorRT-LLM release (1.3.0rc1) is currently experiencing a request hang when running disaggregated serving with KVBM.
+Please include the TensorRT-LLM commit id `18e611da773026a55d187870ebcfa95ff00c8482` when building the Dynamo TensorRT-LLM runtime image to test the KVBM + disaggregated serving feature.
+</Note>
 
 ```bash
 # Build the Dynamo TensorRT-LLM container using commit ID 18e611da773026a55d187870ebcfa95ff00c8482. Note: This build can take a long time.
@@ -213,8 +215,9 @@ cd $DYNAMO_HOME/examples/backends/vllm
 ./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
 ```
 
-> [!NOTE]
-> Important: After logging into the Dynamo TensorRT-LLM runtime container, copy the Triton kernels into the container's virtual environment as a separate Python module.
+<Note>
+Important: After logging into the Dynamo TensorRT-LLM runtime container, copy the Triton kernels into the container's virtual environment as a separate Python module.
+</Note>
 
 ```bash
 # Clone the TensorRT-LLM repo and copy the triton_kernels folder into the container as a Python module.
