@@ -145,8 +145,8 @@ jobs:
   # On PRs: generates a preview URL and comments on the PR
   #############################################################################
 
-  sync-dev:
-    name: Sync dev to docs-website
+  preview-or-publish-docs:
+    name: Preview or publish docs
     needs: changed-files
     if: |
       github.ref_type != 'tag' &&
@@ -295,15 +295,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUM="${GITHUB_REF##*/}"
-          COMMENT="🌿 **Fern Docs Preview:** ${{ steps.preview.outputs.url }}"
-          # Check for existing preview comment and update it, or create new
-          EXISTING=$(gh api "repos/${{ github.repository }}/issues/${PR_NUM}/comments" \
-            --jq '.[] | select(.body | startswith("🌿 **Fern Docs Preview:**")) | .id' | head -1) || true
-          if [ -n "$EXISTING" ]; then
-            gh api "repos/${{ github.repository }}/issues/comments/${EXISTING}" -X PATCH -f body="$COMMENT"
-          else
-            gh api "repos/${{ github.repository }}/issues/${PR_NUM}/comments" -f body="$COMMENT"
-          fi
+          gh pr comment "https://github.com/${{ github.repository }}/pull/${PR_NUM}" \
+            --edit-last --create-if-none \
+            --body "🌿 **Fern Docs Preview:** ${{ steps.preview.outputs.url }}/dev"
 
       ##########################################################################
       # PUSH AND PUBLISH - push changes to docs-website branch and publish docs
