@@ -18,22 +18,32 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
       eppConfig:
-        # This configuration uses Dynamo's KV-aware scorer for intelligent routing
         config:
           # Plugins define the behavior of EPP
           plugins:
-            # Required: tells EPP which profile to use (even if you only have one)
-            - type: single-profile-handler
+            # Disagg profile handler: works for both aggregated and disaggregated modes.
+            # In aggregated mode (no prefill profile), it runs only the decode profile.
+            - type: disagg-profile-handler
+            # Label filter: restricts pods to decode workers
+            - name: decode-filter
+              type: label-filter
             # Picker: chooses the final endpoint after scoring
             - name: picker
               type: max-score-picker
-            - name: dyn-kv
-              type: kv-aware-scorer
-          # Scheduling profiles configure which plugins are used and their weights
+            # Dynamo decode scorer: calls Dynamo FFI decode router, handles request lifecycle
+            - name: dyn-decode
+              type: dyn-decode-scorer
+          # Scheduling profiles: decode only (no prefill profile = aggregated mode)
           schedulingProfiles:
-            - name: default
+            - name: decode
               plugins:
-                - pluginRef: dyn-kv
+                - pluginRef: decode-filter
+                  parameters:
+                    label: "nvidia.com/dynamo-sub-component-type"
+                    validValues:
+                      - "decode"
+                    allowsNoLabel: true
+                - pluginRef: dyn-decode
                   weight: 1
                 - pluginRef: picker
     Frontend:

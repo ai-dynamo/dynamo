@@ -43,18 +43,11 @@ var _ framework.Filter = &LabelFilter{}
 //	    - "prefill"
 //	  allowsNoLabel: false
 type LabelFilterConfig struct {
-	// Label is the label key to match on each pod's labels.
-	Label string `json:"label"`
-	// ValidValues is the set of acceptable label values. A pod is kept if its label
-	// value matches any entry in this list.
-	ValidValues []string `json:"validValues"`
-	// AllowsNoLabel controls whether pods that do not have the label at all are kept.
-	// When true, pods missing the label pass the filter; when false (default), they are excluded.
-	AllowsNoLabel bool `json:"allowsNoLabel"`
+	Label         string   `json:"label"`
+	ValidValues   []string `json:"validValues"`
+	AllowsNoLabel bool     `json:"allowsNoLabel"`
 }
 
-// LabelFilterFactory defines the factory function for LabelFilter.
-// It parses the JSON parameters to obtain the label key, valid values, and allowsNoLabel flag.
 func LabelFilterFactory(name string, rawParameters json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
 	cfg := LabelFilterConfig{}
 	if rawParameters == nil {
@@ -72,7 +65,6 @@ func LabelFilterFactory(name string, rawParameters json.RawMessage, _ plugins.Ha
 	return NewLabelFilter(cfg.Label, cfg.ValidValues, cfg.AllowsNoLabel).WithName(name), nil
 }
 
-// NewLabelFilter initializes a new LabelFilter with the given label key, valid values, and allowsNoLabel flag.
 func NewLabelFilter(label string, validValues []string, allowsNoLabel bool) *LabelFilter {
 	// Build a set for O(1) lookups
 	valuesSet := make(map[string]struct{}, len(validValues))
@@ -87,10 +79,6 @@ func NewLabelFilter(label string, validValues []string, allowsNoLabel bool) *Lab
 	}
 }
 
-// LabelFilter filters pods based on a pod label key and a set of valid values.
-// A pod is kept if:
-//   - its label[key] is one of the configured validValues, OR
-//   - the pod does not have the label and allowsNoLabel is true.
 type LabelFilter struct {
 	typedName     plugins.TypedName
 	label         string
@@ -98,12 +86,10 @@ type LabelFilter struct {
 	allowsNoLabel bool
 }
 
-// TypedName returns the type and name tuple of this plugin instance.
 func (f *LabelFilter) TypedName() plugins.TypedName {
 	return f.typedName
 }
 
-// WithName sets the name of the filter.
 func (f *LabelFilter) WithName(name string) *LabelFilter {
 	f.typedName.Name = name
 	return f

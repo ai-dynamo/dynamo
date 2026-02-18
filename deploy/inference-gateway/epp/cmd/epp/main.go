@@ -42,22 +42,16 @@ import (
 
 	// Dynamo plugins
 	"github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/disagg"
-	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 	labelfilter "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/label_filter"
 )
 
 func main() {
 	// Register Dynamo custom plugins:
-	// - kv-aware-scorer: Implements Scorer, PreRequest, and ResponseStreaming interfaces
-	//   - Score: Calls Dynamo router to select workers based on KV cache, sets routing headers
-	//   - PreRequest: Registers request with router bookkeeping after scheduling is finalized
-	//   - ResponseComplete: Cleans up router bookkeeping when response completes
-	plugins.Register("kv-aware-scorer", dynscorer.KVAwareScorerFactory)
 
 	// - label-filter: Filters pods by a configured label key/value pair
 	plugins.Register("label-filter", labelfilter.LabelFilterFactory)
 
-	// Disaggregated serving plugins (prefill/decode split):
+	// Disaggregated serving plugins (also handles aggregated mode transparently):
 	// - disagg-profile-handler: Orchestrates prefill→decode profile execution
 	plugins.Register(disagg.DisaggProfileHandlerType, disagg.DisaggProfileHandlerFactory)
 	// - dyn-prefill-scorer: Selects prefill workers via Dynamo FFI

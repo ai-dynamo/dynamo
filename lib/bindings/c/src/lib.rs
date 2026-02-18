@@ -414,6 +414,8 @@ pub struct RouterHandles {
 
 impl RouterHandles {
     /// Query optimal prefill worker for a request.
+    ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered.
     /// Returns worker_id on success.
     async fn query_prefill_worker(
         &self,
@@ -421,9 +423,16 @@ impl RouterHandles {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<u64, QueryRouterResult> {
         self.prefill_router
-            .query_prefill_worker(tokens, update_states, lora_name, priority_jump)
+            .query_prefill_worker(
+                tokens,
+                update_states,
+                lora_name,
+                priority_jump,
+                allowed_worker_ids,
+            )
             .await
             .map(|(worker_id, _dp_rank)| worker_id)
             .map_err(|e| {
@@ -494,14 +503,6 @@ pub enum QueryRouterResult {
 }
 
 /// Build a `KvRouterConfig` from defaults, overridden by optional `DYN_*` environment variables.
-///
-/// Supported env vars (all optional — unset or empty values are ignored):
-/// - `DYN_OVERLAP_SCORE_WEIGHT` — Weight for overlap score in worker selection (default: 1.0)
-/// - `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
-/// - `DYN_USE_KV_EVENTS` — Use KV events for cache tracking (default: true)
-/// - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
-/// - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
-/// - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
 fn kv_router_config_from_env() -> KvRouterConfig {
     let mut cfg = KvRouterConfig::default();
 
@@ -1099,7 +1100,7 @@ pub unsafe extern "C" fn route_request(
     let result = handles.runtime.secondary().block_on(async {
         let prefill_worker_id = if is_disaggregated {
             handles
-                .query_prefill_worker(tokens, false, None, 0.0)
+                .query_prefill_worker(tokens, false, None, 0.0, None)
                 .await?
         } else {
             0
@@ -1313,15 +1314,11 @@ pub unsafe extern "C" fn route_prefill_request(
         Err(code) => return code,
     };
 
-    let _allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
-    // Note: allowed_worker_ids filtering for prefill is not yet wired through
-    // PrefillRouter::query_prefill_worker. For now the pods filter is parsed
-    // but not applied to prefill routing (prefill uses its own discovery).
-    // This can be extended in the future.
+    let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
     let result = handles.runtime.secondary().block_on(async {
         let prefill_worker_id = handles
-            .query_prefill_worker(&tokens, false, None, 0.0)
+            .query_prefill_worker(&tokens, false, None, 0.0, allowed_worker_ids)
             .await?;
 
         tracing::info!(

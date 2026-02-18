@@ -19,25 +19,18 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
       eppConfig:
         config:
-          # Plugins define the behavior of EPP
           plugins:
-            # Disagg profile handler: orchestrates prefill→decode profile execution
             - type: disagg-profile-handler
-            # Label filters: restrict pods by subComponentType label
             - name: prefill-filter
               type: label-filter
             - name: decode-filter
               type: label-filter
-            # Picker: chooses the final endpoint after scoring
             - name: picker
               type: max-score-picker
-            # Dynamo prefill scorer: calls Dynamo FFI prefill router
             - name: dyn-prefill
               type: dyn-prefill-scorer
-            # Dynamo decode scorer: calls Dynamo FFI decode router, handles request lifecycle
             - name: dyn-decode
               type: dyn-decode-scorer
-          # Scheduling profiles: prefill runs first, then decode (decode is primary)
           schedulingProfiles:
           - name: prefill
             plugins:
