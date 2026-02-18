@@ -655,6 +655,33 @@ impl DistributedRuntime {
         })
     }
 
+    /// Get an endpoint directly by path (e.g., "namespace.component.endpoint" or "dyn://...").
+    fn endpoint(&self, path: String) -> PyResult<Endpoint> {
+        let path = path.trim_start_matches("dyn://");
+        let parts: Vec<&str> = path.split('.').collect();
+
+        if parts.len() != 3 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid endpoint path '{}'. Expected format: 'namespace.component.endpoint' or 'dyn://namespace.component.endpoint'",
+                path
+            )));
+        }
+
+        let namespace_name = parts[0];
+        let component_name = parts[1];
+        let endpoint_name = parts[2];
+
+        // Get endpoint using existing chain
+        let namespace = self.inner.namespace(namespace_name.to_string()).map_err(to_pyerr)?;
+        let component = namespace.component(component_name.to_string()).map_err(to_pyerr)?;
+        let endpoint = component.endpoint(endpoint_name.to_string());
+
+        Ok(Endpoint {
+            inner: endpoint,
+            event_loop: self.event_loop.clone(),
+        })
+    }
+
     fn shutdown(&self) {
         self.inner.shutdown();
     }
@@ -909,6 +936,14 @@ impl Endpoint {
             inner.register_endpoint_instance().await.map_err(to_pyerr)?;
             Ok(())
         })
+    }
+
+    /// Get the parent Component.
+    fn component(&self) -> Component {
+        Component {
+            inner: self.inner.component().clone(),
+            event_loop: self.event_loop.clone(),
+        }
     }
 }
 

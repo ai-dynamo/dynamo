@@ -64,6 +64,26 @@ class DistributedRuntime:
         """
         ...
 
+    def endpoint(self, path: str) -> Endpoint:
+        """
+        Get an endpoint directly by path.
+
+        Args:
+            path: Endpoint path in format 'namespace.component.endpoint'
+                  or 'dyn://namespace.component.endpoint'
+
+        Returns:
+            Endpoint: The requested endpoint
+
+        Raises:
+            ValueError: If path format is invalid
+
+        Example:
+            endpoint = runtime.endpoint("demo.backend.generate")
+            endpoint = runtime.endpoint("dyn://demo.backend.generate")
+        """
+        ...
+
     def shutdown(self) -> None:
         """
         Shutdown the runtime by triggering the cancellation token
@@ -205,6 +225,19 @@ class Endpoint:
         This adds the endpoint back to the instances bucket, allowing the router
         to send requests to this worker again. Use this when a worker wakes up
         and should start receiving requests.
+        """
+        ...
+
+    def component(self) -> Component:
+        """
+        Get the parent Component that this endpoint belongs to.
+
+        Returns:
+            Component: The parent component
+
+        Example:
+            endpoint = runtime.endpoint("demo.backend.generate")
+            component = endpoint.component()  # Get parent component
         """
         ...
 
