@@ -118,7 +118,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
-        priority = (inner_request.get("extra_args") or {}).get("priority")
+        priority = (inner_request.get("routing") or {}).get("priority")
 
         trace_header = self._get_trace_header(context) if self.enable_trace else None
 

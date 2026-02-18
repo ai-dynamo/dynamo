@@ -50,6 +50,10 @@ pub struct RoutingHints {
     /// ahead in the scheduler queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_jump: Option<f64>,
+
+    /// Backend engine scheduling priority forwarded to the generate call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

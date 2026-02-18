@@ -109,7 +109,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        priority = (request.get("extra_args") or {}).get("priority")
+        priority = (request.get("routing") or {}).get("priority")
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
