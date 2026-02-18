@@ -929,6 +929,9 @@ impl Endpoint {
     }
 
     /// Get the parent Component.
+    ///
+    /// Note: To avoid duplicate metrics registries, reuse the returned Component for
+    /// multiple endpoints: `component.endpoint("ep1")`, `component.endpoint("ep2")`.
     fn component(&self) -> Component {
         Component {
             inner: self.inner.component().clone(),
