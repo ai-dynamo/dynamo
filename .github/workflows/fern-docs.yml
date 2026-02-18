@@ -298,7 +298,7 @@ jobs:
           if [ -n "$EXISTING" ]; then
             gh api "repos/${{ github.repository }}/issues/comments/${EXISTING}" -X PATCH -f body="$COMMENT"
           else
-            gh pr comment "$PR_NUM" --body "$COMMENT"
+            gh api "repos/${{ github.repository }}/issues/${PR_NUM}/comments" -f body="$COMMENT"
           fi
 
       ##########################################################################
