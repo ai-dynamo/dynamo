@@ -25,7 +25,7 @@ class DecodePlanner(BasePlanner):
             )
             return None
 
-        x_sla = self.itl_regression.predict_x_from_sla(self.args.itl)
+        x_sla = self.itl_regression.predict_x_from_sla(self.config.itl)
         if x_sla is None:
             return None
 
@@ -63,7 +63,7 @@ class DecodePlanner(BasePlanner):
 
         # Scale down: ALL workers below boundary (use recent metrics)
         if num_workers > 1:
-            sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
+            sensitivity = self.config.loadbased_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             all_below = all(
                 m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
@@ -87,7 +87,7 @@ class DecodePlanner(BasePlanner):
             concurrency=self.last_metrics.num_req  # type: ignore
             / self.shared_state.num_d_workers
             * self.last_metrics.request_duration  # type: ignore
-            / self.args.adjustment_interval,
+            / self.config.adjustment_interval,
             context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
         )
         self.d_correction_factor = self.last_metrics.itl / expect_itl
@@ -103,9 +103,9 @@ class DecodePlanner(BasePlanner):
             logger.warning(
                 f"d_correction_factor is {self.d_correction_factor}, using default value of 1.0"
             )
-            corrected_itl = self.args.itl
+            corrected_itl = self.config.itl
         else:
-            corrected_itl = self.args.itl / self.d_correction_factor
+            corrected_itl = self.config.itl / self.d_correction_factor
         (
             pred_decode_thpt_per_gpu,
             _,
@@ -118,17 +118,19 @@ class DecodePlanner(BasePlanner):
                 f"pred_decode_thpt_per_gpu is {pred_decode_thpt_per_gpu} "
                 "(no throughput satisfies ITL target), falling back to min_endpoint"
             )
-            return self.args.min_endpoint
-        pred_decode_throughput = next_num_req * next_osl / self.args.adjustment_interval
+            return self.config.min_endpoint
+        pred_decode_throughput = (
+            next_num_req * next_osl / self.config.adjustment_interval
+        )
         next_num_d = math.ceil(
             pred_decode_throughput
             / pred_decode_thpt_per_gpu
-            / self.args.decode_engine_num_gpu
+            / self.config.decode_engine_num_gpu
         )
-        next_num_d = max(next_num_d, self.args.min_endpoint)
+        next_num_d = max(next_num_d, self.config.min_endpoint)
         logger.info(
             f"Decode calculation: {pred_decode_throughput:.2f}(d_thpt) / "
-            f"{pred_decode_thpt_per_gpu * self.args.decode_engine_num_gpu:.2f}(d_engine_cap) = "
+            f"{pred_decode_thpt_per_gpu * self.config.decode_engine_num_gpu:.2f}(d_engine_cap) = "
             f"{next_num_d}(num_d)"
         )
         return next_num_d

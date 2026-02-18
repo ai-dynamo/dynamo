@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import logging
 from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.utils.load_based_regression import LoadBasedRegressionModel
+from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import (
     BasePlanner,
     PlannerPrometheusMetrics,
@@ -41,17 +41,17 @@ class AggPlanner:
     ENGINE_WORKER_TYPE = "decode"
 
     def __init__(
-        self, runtime: Optional[DistributedRuntime], args: argparse.Namespace
+        self, runtime: Optional[DistributedRuntime], config: PlannerConfig
     ) -> None:
-        self.args = args
+        self.config = config
         self.shared_state = PlannerSharedState()
 
-        if getattr(args, "enable_throughput_scaling", False):
+        if config.enable_throughput_scaling:
             raise ValueError(
                 "Aggregated planner only supports load-based scaling. "
                 "Please use --disable-throughput-scaling or do not set --enable-throughput-scaling."
             )
-        if not getattr(args, "enable_loadbased_scaling", False):
+        if not config.enable_loadbased_scaling:
             raise ValueError("Aggregated planner requires --enable-loadbased-scaling.")
 
         prometheus_metrics = PlannerPrometheusMetrics()
@@ -60,7 +60,7 @@ class AggPlanner:
         # We use DECODE component_type because engine metrics are labeled "decode"
         self.planner = BasePlanner(
             runtime,
-            args,
+            config,
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
             start_prometheus_server=True,
@@ -70,12 +70,12 @@ class AggPlanner:
 
         # Create both regression models (agg needs both TTFT and ITL)
         self.ttft_regression = LoadBasedRegressionModel(
-            window_size=args.loadbased_learning_window,
-            min_observations=args.loadbased_min_observations,
+            window_size=config.loadbased_learning_window,
+            min_observations=config.loadbased_min_observations,
         )
         self.itl_regression = LoadBasedRegressionModel(
-            window_size=args.loadbased_learning_window,
-            min_observations=args.loadbased_min_observations,
+            window_size=config.loadbased_learning_window,
+            min_observations=config.loadbased_min_observations,
         )
 
         self.cached_load_metrics = CachedLoadMetrics()
@@ -84,7 +84,7 @@ class AggPlanner:
         await self.planner._async_init()
 
     async def run(self):
-        if not self.args.no_operation:
+        if not self.config.no_operation:
             logger.info("Validating deployment...")
             # Agg mode: only decode component exists (engines serve both P and D)
             await self.planner.connector.validate_deployment(
@@ -96,7 +96,7 @@ class AggPlanner:
             logger.info("Successfully validated the deployment")
 
             _initialize_gpu_counts(
-                self.args,
+                self.config,
                 self.planner.connector,
                 require_prefill=False,
                 require_decode=True,
@@ -105,14 +105,14 @@ class AggPlanner:
             await self.planner.connector.wait_for_deployment_ready()
 
         # Model name discovery runs in all modes (needed for metrics collection)
-        if not self.args.no_operation:
+        if not self.config.no_operation:
             model_name = await self.planner._get_model_name(
                 require_prefill=False, require_decode=True
             )
             logger.info(f"Detected model name from deployment: {model_name}")
             self.planner.model_name = model_name.lower()
         else:
-            model_name = getattr(self.args, "model_name", None)
+            model_name = getattr(self.config, "model_name", None)
             if not model_name:
                 raise ValueError(
                     "Model name is required in no-operation mode. "
@@ -123,8 +123,8 @@ class AggPlanner:
         loops = [
             self._load_loop(),
             self.planner.prometheus_engine_client.run_sampling_loop(
-                self.args.loadbased_metric_samples,
-                self.args.loadbased_adjustment_interval,
+                self.config.loadbased_metric_samples,
+                self.config.loadbased_adjustment_interval,
             ),
         ]
         await asyncio.gather(*loops)
@@ -184,7 +184,7 @@ class AggPlanner:
             )
             return None
 
-        x_sla = self.ttft_regression.predict_x_from_sla(self.args.ttft)
+        x_sla = self.ttft_regression.predict_x_from_sla(self.config.ttft)
         if x_sla is None:
             return None
 
@@ -211,7 +211,7 @@ class AggPlanner:
 
         # Scale down: ALL workers below boundary
         if num_workers > 1:
-            sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
+            sensitivity = self.config.loadbased_scaling_down_sensitivity / 100.0
             boundary = target * (num_workers - 1) / num_workers * sensitivity
             if all(
                 m.get("active_prefill_tokens", 0.0) < boundary for m in recent.values()
@@ -231,7 +231,7 @@ class AggPlanner:
             )
             return None
 
-        x_sla = self.itl_regression.predict_x_from_sla(self.args.itl)
+        x_sla = self.itl_regression.predict_x_from_sla(self.config.itl)
         if x_sla is None:
             return None
 
@@ -254,7 +254,7 @@ class AggPlanner:
         # TODO: should we strictly enforce all workers below boundary?
         # how about user-configurable percentage?
         if num_workers > 1:
-            sensitivity = self.args.loadbased_scaling_down_sensitivity / 100.0
+            sensitivity = self.config.loadbased_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
             if all(
                 m.get("active_decode_blocks", 0.0) < boundary for m in recent.values()
@@ -266,7 +266,7 @@ class AggPlanner:
     async def _load_loop(self) -> None:
         """Load-based scaling loop for aggregated mode."""
         while True:
-            await asyncio.sleep(self.args.loadbased_adjustment_interval)
+            await asyncio.sleep(self.config.loadbased_adjustment_interval)
             logger.info("New agg load-based adjustment interval started!")
 
             # Query DGD for fresh worker counts
@@ -309,9 +309,10 @@ class AggPlanner:
                 logger.info("Agg scaling: no scaling needed")
                 continue
 
-            desired = max(desired, self.args.min_endpoint)
+            desired = max(desired, self.config.min_endpoint)
+            assert self.config.decode_engine_num_gpu is not None
             desired = _apply_component_gpu_budget(
-                desired, self.args.decode_engine_num_gpu, self.args
+                desired, self.config.decode_engine_num_gpu, self.config
             )
 
             logger.info(f"Agg load-based scaling: {num_workers} -> {desired}")
@@ -322,7 +323,7 @@ class AggPlanner:
             ):
                 self.planner.prometheus_metrics.predicted_num_d.set(desired)
 
-            if not self.args.no_operation:
+            if not self.config.no_operation:
                 target_replicas = [
                     TargetReplica(
                         sub_component_type=SubComponentType.DECODE,

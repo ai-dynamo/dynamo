@@ -17,7 +17,7 @@ import logging
 import os
 import shlex
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 class BasePlannerDefaults:
     # Namespace from DYN_NAMESPACE env var (injected by operator as "{k8s_namespace}-{dgd_name}")
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-    environment = "kubernetes"
-    backend = "vllm"
+    environment: Literal["kubernetes", "virtual", "global-planner"] = "kubernetes"
+    backend: Literal["vllm", "sglang", "trtllm", "mocker"] = "vllm"
     no_operation = False
     log_dir = None
     adjustment_interval = 180  # in seconds
@@ -71,7 +71,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     kalman_min_points = 5
 
     no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
-    mode = "disagg"  # ["disagg", "prefill", "decode"]
+    mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
 
     # Scaling mode flags
     enable_throughput_scaling = True

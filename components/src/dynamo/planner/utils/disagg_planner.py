@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import logging
 import time
@@ -9,6 +8,7 @@ from typing import Optional
 
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.utils.decode_planner import DecodePlanner
+from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.planner_core import (
     PlannerPrometheusMetrics,
     PlannerSharedState,
@@ -25,25 +25,25 @@ logger = logging.getLogger(__name__)
 
 class DisaggPlanner:
     def __init__(
-        self, runtime: Optional[DistributedRuntime], args: argparse.Namespace
+        self, runtime: Optional[DistributedRuntime], config: PlannerConfig
     ) -> None:
-        self.args = args
+        self.config = config
         self.shared_state = PlannerSharedState()
         prometheus_metrics = PlannerPrometheusMetrics()
 
-        self.enable_throughput = getattr(args, "enable_throughput_scaling", True)
-        self.enable_loadbased = getattr(args, "enable_loadbased_scaling", False)
+        self.enable_throughput = config.enable_throughput_scaling
+        self.enable_loadbased = config.enable_loadbased_scaling
 
         self.prefill_planner = PrefillPlanner(
             runtime,
-            args,
+            config,
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
             start_prometheus_server=True,
         )
         self.decode_planner = DecodePlanner(
             runtime,
-            args,
+            config,
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
             prometheus_traffic_client=getattr(
@@ -61,7 +61,7 @@ class DisaggPlanner:
         await self.prefill_planner._async_init()
 
     async def run(self):
-        if not self.args.no_operation:
+        if not self.config.no_operation:
             logger.info("Validating deployment...")
             await self.prefill_planner.connector.validate_deployment(
                 prefill_component_name=self.prefill_planner.prefill_component_name,
@@ -73,7 +73,7 @@ class DisaggPlanner:
 
             # Initialize GPU counts
             _initialize_gpu_counts(
-                self.args,
+                self.config,
                 self.prefill_planner.connector,
                 require_prefill=True,
                 require_decode=True,
@@ -82,14 +82,14 @@ class DisaggPlanner:
             await self.prefill_planner.connector.wait_for_deployment_ready()
 
         # Model name discovery runs in all modes (needed for metrics collection)
-        if not self.args.no_operation:
+        if not self.config.no_operation:
             model_name = await self.prefill_planner._get_model_name(
                 require_prefill=True, require_decode=True
             )
             logger.info(f"Detected model name from deployment: {model_name}")
             model_name = model_name.lower()
         else:
-            model_name = getattr(self.args, "model_name", None)
+            model_name = getattr(self.config, "model_name", None)
             if not model_name:
                 raise ValueError(
                     "Model name is required in no-operation mode. "
@@ -110,8 +110,8 @@ class DisaggPlanner:
             loops.append(self._load_loop())
             loops.append(
                 self.prefill_planner.prometheus_engine_client.run_sampling_loop(
-                    self.args.loadbased_metric_samples,
-                    self.args.loadbased_adjustment_interval,
+                    self.config.loadbased_metric_samples,
+                    self.config.loadbased_adjustment_interval,
                 )
             )
 
@@ -124,7 +124,7 @@ class DisaggPlanner:
 
             if (
                 current_time - self.shared_state.last_adjustment_time
-                >= self.args.adjustment_interval
+                >= self.config.adjustment_interval
             ):
                 self.shared_state.last_adjustment_time = time.time()
                 logger.info("New throughput adjustment interval started!")
@@ -138,7 +138,7 @@ class DisaggPlanner:
                 next_num_p = self.prefill_planner.plan_adjustment()
                 next_num_d = self.decode_planner.plan_adjustment()
                 if next_num_p is None or next_num_d is None:
-                    await asyncio.sleep(self.args.adjustment_interval / 10)
+                    await asyncio.sleep(self.config.adjustment_interval / 10)
                     continue
 
                 if self.enable_loadbased:
@@ -151,12 +151,12 @@ class DisaggPlanner:
                 else:
                     # Throughput-only: apply scaling directly
                     next_num_p, next_num_d = _apply_global_gpu_budget(
-                        next_num_p, next_num_d, self.args
+                        next_num_p, next_num_d, self.config
                     )
                     self.prefill_planner.update_predicted_replicas_metric(next_num_p)
                     self.decode_planner.update_predicted_replicas_metric(next_num_d)
 
-                    if not self.args.no_operation:
+                    if not self.config.no_operation:
                         target_replicas = [
                             TargetReplica(
                                 sub_component_type=SubComponentType.PREFILL,
@@ -173,12 +173,12 @@ class DisaggPlanner:
                             target_replicas, blocking=False
                         )
 
-            await asyncio.sleep(self.args.adjustment_interval / 10)
+            await asyncio.sleep(self.config.adjustment_interval / 10)
 
     async def _load_loop(self) -> None:
         """Load-based scaling loop for disagg mode at shorter interval."""
         while True:
-            await asyncio.sleep(self.args.loadbased_adjustment_interval)
+            await asyncio.sleep(self.config.loadbased_adjustment_interval)
             logger.info("New load-based adjustment interval started!")
 
             # Query DGD for fresh worker counts
@@ -227,7 +227,7 @@ class DisaggPlanner:
                 final_d = max(final_d, self.shared_state.throughput_lower_bound_d)
 
             # Apply GPU budget
-            final_p, final_d = _apply_global_gpu_budget(final_p, final_d, self.args)
+            final_p, final_d = _apply_global_gpu_budget(final_p, final_d, self.config)
 
             logger.info(
                 f"Load-based disagg scaling: prefill {self.shared_state.num_p_workers}->{final_p}, "
@@ -237,7 +237,7 @@ class DisaggPlanner:
             self.prefill_planner.update_predicted_replicas_metric(final_p)
             self.decode_planner.update_predicted_replicas_metric(final_d)
 
-            if not self.args.no_operation:
+            if not self.config.no_operation:
                 target_replicas = [
                     TargetReplica(
                         sub_component_type=SubComponentType.PREFILL,
