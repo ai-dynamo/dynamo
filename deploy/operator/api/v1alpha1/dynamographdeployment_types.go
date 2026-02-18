@@ -109,7 +109,6 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Services map[string]ServiceReplicaStatus `json:"services,omitempty"`
-
 	// Restart contains the status of the restart of the graph deployment.
 	// +optional
 	Restart *RestartStatus `json:"restart,omitempty"`
@@ -117,6 +116,10 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Checkpoints map[string]ServiceCheckpointStatus `json:"checkpoints,omitempty"`
+	// RollingUpdate tracks the progress of operator manged rolling updates.
+	// Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
+	// +optional
+	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
 }
 
 // ServiceCheckpointStatus contains checkpoint information for a single service.
@@ -151,14 +154,57 @@ const (
 	RestartPhaseRestarting RestartPhase = "Restarting"
 	RestartPhaseCompleted  RestartPhase = "Completed"
 	RestartPhaseFailed     RestartPhase = "Failed"
+	RestartPhaseSuperseded RestartPhase = "Superseded"
 )
+
+// RollingUpdatePhase represents the current phase of a rolling update.
+// +kubebuilder:validation:Enum=Pending;InProgress;Completed;Failed;""
+type RollingUpdatePhase string
+
+const (
+	RollingUpdatePhasePending    RollingUpdatePhase = "Pending"
+	RollingUpdatePhaseInProgress RollingUpdatePhase = "InProgress"
+	RollingUpdatePhaseCompleted  RollingUpdatePhase = "Completed"
+	RollingUpdatePhaseNone       RollingUpdatePhase = ""
+)
+
+// RollingUpdateStatus tracks the progress of a rolling update.
+type RollingUpdateStatus struct {
+	// Phase indicates the current phase of the rolling update.
+	// +optional
+	Phase RollingUpdatePhase `json:"phase,omitempty"`
+
+	// StartTime is when the rolling update began.
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// EndTime is when the rolling update completed (successfully or failed).
+	// +optional
+	EndTime *metav1.Time `json:"endTime,omitempty"`
+
+	// UpdatedServices is the list of services that have completed the rolling update.
+	// A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.
+	// Only services of componentType Worker (or Prefill/Decode) are considered.
+	// +optional
+	UpdatedServices []string `json:"updatedServices,omitempty"`
+}
 
 // ServiceReplicaStatus contains replica information for a single service.
 type ServiceReplicaStatus struct {
 	// ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
 	ComponentKind ComponentKind `json:"componentKind"`
-	// ComponentName is the name of the underlying resource.
+
+	// ComponentName is the name of the primary underlying resource.
+	// DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.
+	// During rolling updates, this reflects the new (target) component name.
+	// +kubebuilder:deprecatedversion:warning="ComponentName is deprecated, view ComponentNames instead"
 	ComponentName string `json:"componentName"`
+
+	// ComponentNames is the list of underlying resource names for this service.
+	// During normal operation, this contains a single name.
+	// During rolling updates, this contains both old and new component names.
+	// +optional
+	ComponentNames []string `json:"componentNames,omitempty"`
 
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.
@@ -264,11 +310,6 @@ func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
 	return false
 }
 
-// GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
-func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
-	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
-}
-
 // HasEPPService returns true if any service in the DGD has EPP component type
 func (dgd *DynamoGraphDeployment) HasEPPService() bool {
 	for _, component := range dgd.Spec.Services {
@@ -277,6 +318,11 @@ func (dgd *DynamoGraphDeployment) HasEPPService() bool {
 		}
 	}
 	return false
+}
+
+// GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
+func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
+	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
 }
 
 // GetEPPService returns the EPP service name and spec if present
