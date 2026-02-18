@@ -1134,7 +1134,7 @@ mod tests {
 
             for i in 0..10 {
                 indexer
-                    .apply_event(create_store_event(0, i, vec![i as u64], None))
+                    .apply_event(create_store_event(0, i, vec![i], None))
                     .await;
             }
 
@@ -1154,7 +1154,7 @@ mod tests {
                     .apply_event(create_store_event(
                         worker_id,
                         1,
-                        vec![1, 2, worker_id as u64 + 10],
+                        vec![1, 2, worker_id + 10],
                         None,
                     ))
                     .await;
