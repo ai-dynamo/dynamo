@@ -12,6 +12,7 @@ The init_worker() function dispatches to the appropriate worker based on modalit
 
 import asyncio
 import logging
+from typing import Optional
 
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.constants import Modality
@@ -19,7 +20,10 @@ from dynamo.trtllm.utils.trtllm_utils import Config
 
 
 async def init_worker(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    shutdown_endpoints: Optional[list] = None,
 ) -> None:
     """Initialize the appropriate worker based on modality.
 
@@ -30,6 +34,7 @@ async def init_worker(
         runtime: The Dynamo distributed runtime.
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
+        shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
     logging.info(f"Initializing worker with modality={config.modality}")
 
@@ -41,7 +46,9 @@ async def init_worker(
                 init_video_diffusion_worker,
             )
 
-            await init_video_diffusion_worker(runtime, config, shutdown_event)
+            await init_video_diffusion_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
             return
         # TODO: Add IMAGE_DIFFUSION support in follow-up PR
         raise ValueError(f"Unsupported diffusion modality: {modality}")
@@ -49,7 +56,7 @@ async def init_worker(
     # LLM modalities (text, multimodal) use the LLM worker
     from dynamo.trtllm.workers.llm_worker import init_llm_worker
 
-    await init_llm_worker(runtime, config, shutdown_event)
+    await init_llm_worker(runtime, config, shutdown_event, shutdown_endpoints)
 
 
 __all__ = ["init_worker"]

@@ -7,13 +7,12 @@ Common runtime utilities shared across Dynamo engine backends.
 Provides:
     - parse_endpoint: Parse 'dyn://namespace.component.endpoint' strings
     - graceful_shutdown: Shutdown DistributedRuntime with optional event signaling
-    - create_runtime: Create DistributedRuntime with signal handlers
+    - create_runtime: Create DistributedRuntime.
 """
 
 import asyncio
 import logging
 import os
-import signal
 from typing import Optional, Tuple
 
 from dynamo.runtime import DistributedRuntime
@@ -68,10 +67,10 @@ def create_runtime(
     use_kv_events: bool,
     shutdown_event: Optional[asyncio.Event] = None,
 ) -> Tuple[DistributedRuntime, asyncio.AbstractEventLoop]:
-    """Create a DistributedRuntime and register signal handlers for graceful shutdown.
+    """Create a DistributedRuntime.
 
     Sets DYN_EVENT_PLANE in the environment, computes whether NATS is needed,
-    creates the runtime, and installs SIGTERM/SIGINT handlers.
+    and creates the runtime.
 
     Args:
         discovery_backend: Discovery backend type (kubernetes, etcd, file, mem).
@@ -90,13 +89,5 @@ def create_runtime(
     enable_nats = request_plane == "nats" or (event_plane == "nats" and use_kv_events)
 
     runtime = DistributedRuntime(loop, discovery_backend, request_plane, enable_nats)
-
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime, shutdown_event))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.debug("Signal handlers set up for graceful shutdown")
 
     return runtime, loop

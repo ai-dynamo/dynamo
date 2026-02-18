@@ -9,6 +9,7 @@ workers using diffusion models (Wan, Flux, Cosmos, etc.).
 
 import asyncio
 import logging
+from typing import Optional
 
 from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
@@ -16,7 +17,10 @@ from dynamo.trtllm.utils.trtllm_utils import Config
 
 
 async def init_video_diffusion_worker(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    shutdown_endpoints: Optional[list] = None,
 ) -> None:
     """Initialize and run the video diffusion worker.
 
@@ -27,6 +31,7 @@ async def init_video_diffusion_worker(
         runtime: The Dynamo distributed runtime.
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
+        shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
     # Import diffusion-specific modules (lazy import to avoid loading heavy deps early)
     from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
@@ -69,6 +74,8 @@ async def init_video_diffusion_worker(
     # Get the component and endpoint from the runtime
     component = runtime.namespace(config.namespace).component(config.component)
     endpoint = component.endpoint(config.endpoint)
+    if shutdown_endpoints is not None:
+        shutdown_endpoints[:] = [endpoint]
 
     # Initialize the diffusion engine (auto-detects pipeline from model_index.json)
     engine = DiffusionEngine(diffusion_config)

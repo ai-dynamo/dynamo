@@ -43,7 +43,7 @@ async def worker():
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
     logging.info(f"Initializing the worker with config: {config}")
-    await init_worker(runtime, config, shutdown_event)
+    await init_worker(runtime, config, shutdown_event, shutdown_endpoints)
 
 
 def main():

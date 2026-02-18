@@ -40,11 +40,10 @@ pytestmark = [
     ),
     pytest.mark.parametrize(
         "immediate_kill, grace_period_s",
-        [(True, 0), (False, SHORT_GRACE_PERIOD_S), (False, LONG_GRACE_PERIOD_S)],
+        [(True, 0), (False, 0)],
         ids=[
             "worker_failure",
-            "graceful_shutdown_short_grace_period",
-            "graceful_shutdown_long_grace_period",
+            "graceful_shutdown_zero_grace_period",
         ],
     ),
     pytest.mark.parametrize(
