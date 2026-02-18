@@ -223,14 +223,14 @@ RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
         uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
     fi
 
-# Install common and test dependencies. Cache uv downloads; uv handles its own locking for this cache.
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+# Install runtime dependencies. Cache uv downloads; uv handles its own locking for this cache.
+RUN --mount=type=bind,source=./container/deps/requirements.runtime.txt,target=/tmp/requirements.runtime.txt \
+    --mount=type=bind,source=./container/deps/requirements.runtime.vllm.txt,target=/tmp/requirements.runtime.vllm.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+        --requirement /tmp/requirements.runtime.txt \
+        --requirement /tmp/requirements.runtime.vllm.txt
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>

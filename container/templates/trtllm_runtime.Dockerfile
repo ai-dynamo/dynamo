@@ -229,17 +229,17 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
 
-# Install common and test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+# Install runtime dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.runtime.txt,target=/tmp/requirements.runtime.txt \
+    --mount=type=bind,source=./container/deps/requirements.runtime.trtllm.txt,target=/tmp/requirements.runtime.trtllm.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt \
+        --requirement /tmp/requirements.runtime.txt \
+        --requirement /tmp/requirements.runtime.trtllm.txt \
         cupy-cuda13x
 
 # Copy tests, deploy and components for CI with correct ownership

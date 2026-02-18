@@ -138,11 +138,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && rm -rf /opt/dynamo/wheelhouse
 
-# Install common and test dependencies
-COPY container/deps/requirements.txt /tmp/requirements.txt
+# Install runtime, framework-specific, and test dependencies
+COPY container/deps/requirements.runtime.txt /tmp/requirements.runtime.txt
+COPY container/deps/requirements.runtime.vllm.txt /tmp/requirements.runtime.vllm.txt
 COPY container/deps/requirements.test.txt /tmp/requirements.test.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt && \
+    uv pip install --requirement /tmp/requirements.runtime.txt --requirement /tmp/requirements.runtime.vllm.txt --requirement /tmp/requirements.test.txt && \
     rm /tmp/requirements*.txt
 
 # Copy workspace files

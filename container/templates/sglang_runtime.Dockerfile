@@ -83,14 +83,14 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
-# Install common and test dependencies as root
-RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/requirements.txt \
-    --mount=type=bind,source=container/deps/requirements.test.txt,target=/tmp/deps/requirements.test.txt \
+# Install runtime dependencies as root
+RUN --mount=type=bind,source=container/deps/requirements.runtime.txt,target=/tmp/deps/requirements.runtime.txt \
+    --mount=type=bind,source=container/deps/requirements.runtime.sglang.txt,target=/tmp/deps/requirements.runtime.sglang.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
-        --requirement /tmp/deps/requirements.txt \
-        --requirement /tmp/deps/requirements.test.txt \
+        --requirement /tmp/deps/requirements.runtime.txt \
+        --requirement /tmp/deps/requirements.runtime.sglang.txt \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
