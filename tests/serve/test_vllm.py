@@ -688,6 +688,7 @@ def vllm_config_test(request):
     return vllm_configs[request.param]
 
 
+@pytest.mark.parametrize("durable_kv_events", [True], indirect=True)
 @pytest.mark.vllm
 @pytest.mark.e2e
 def test_serve_deployment(
@@ -697,9 +698,13 @@ def test_serve_deployment(
     dynamo_dynamic_ports,
     predownload_models,
     image_server,
+    durable_kv_events,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
+
+    Uses JetStream for durable KV events, which is required for video multimodal
+    tests and provides better test coverage for all configurations.
     """
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
