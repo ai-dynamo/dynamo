@@ -270,6 +270,9 @@ pub mod llm {
     /// LoRA cache directory path
     pub const DYN_LORA_PATH: &str = "DYN_LORA_PATH";
 
+    /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
+    pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -446,6 +449,7 @@ mod tests {
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
+            llm::DYN_ENABLE_ANTHROPIC_API,
             llm::metrics::DYN_METRICS_PREFIX,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
