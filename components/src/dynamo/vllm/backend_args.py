@@ -266,6 +266,17 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Number of GPUs used for classifier free guidance parallelism.",
         )
 
+        # Headless mode for multi-node TP/PP
+        add_negatable_bool_argument(
+            g,
+            flag_name="--headless",
+            env_var="DYN_VLLM_HEADLESS",
+            default=False,
+            help="Run in headless mode for multi-node TP/PP. "
+            "Secondary nodes run vLLM workers only, no dynamo endpoints. "
+            "See vLLM multi-node data parallel documentation for more details.",
+        )
+
         # ModelExpress P2P
         add_argument(
             g,
@@ -318,6 +329,9 @@ class DynamoVllmConfig(ConfigBase):
     ulysses_degree: int = 1
     ring_degree: int = 1
     cfg_parallel_size: int = 1
+
+    # Headless mode for multi-node TP/PP
+    headless: bool = False
 
     # ModelExpress P2P
     model_express_url: Optional[str] = None

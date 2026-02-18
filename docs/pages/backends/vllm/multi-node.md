@@ -79,19 +79,92 @@ Deploy prefill and decode workers on separate nodes for optimized resource utili
 # Start ingress
 python -m dynamo.frontend --router-mode kv &
 
-# Start prefill worker
+# Start decode worker
 python -m dynamo.vllm \
-  --model meta-llama/Llama-3.3-70B-Instruct
+  --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager
 ```
 
 **Node 2**: Run prefill worker
 ```bash
-# Start decode worker
+# Start prefill worker
 python -m dynamo.vllm \
-  --model meta-llama/Llama-3.3-70B-Instruct
+  --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager \
   --is-prefill-worker
+```
+
+### Multi-node Tensor/Pipeline Parallelism
+
+When the total parallelism (TP × PP) exceeds the number of GPUs on a single node,
+you need multiple nodes to host a **single** model instance. In this mode, one node
+runs the full `dynamo.vllm` process (head node) while additional nodes run in
+`--headless` mode — spawning only vLLM workers without Dynamo endpoints, NATS, or etcd.
+
+**How it works:**
+
+- **Head node** (`node_rank_within_dp == 0`): runs the full Dynamo stack — engine core,
+  scheduler, and Dynamo endpoints (NATS/etcd required).
+- **Worker nodes** (`--headless`): run `vLLM` workers only via `run_headless()`.
+  No engine core, no scheduler, no Dynamo endpoints. Only `torch.distributed`
+  connectivity to the head node is required.
+
+**Infrastructure requirements:**
+
+| Node | NATS/etcd | torch.distributed | Dynamo endpoints |
+|------|-----------|-------------------|------------------|
+| Head | Yes | Yes | Yes |
+| Worker (`--headless`) | No | Yes | No |
+
+**Example: TP=16 across 2× 8-GPU nodes**
+
+```bash
+# On both nodes
+export HEAD_NODE_IP="<your-head-node-ip>"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+```
+
+Node 1 (head):
+```bash
+python -m dynamo.frontend --router-mode kv &
+
+python -m dynamo.vllm \
+  --model meta-llama/Llama-3.1-405B-Instruct \
+  --tensor-parallel-size 16 \
+  --enforce-eager
+```
+
+Node 2 (worker):
+```bash
+python -m dynamo.vllm \
+  --model meta-llama/Llama-3.1-405B-Instruct \
+  --tensor-parallel-size 16 \
+  --enforce-eager \
+  --headless
+```
+
+**Example: TP=8, PP=2 across 2× 8-GPU nodes**
+
+Node 1 (head):
+```bash
+python -m dynamo.frontend --router-mode kv &
+
+python -m dynamo.vllm \
+  --model meta-llama/Llama-3.1-405B-Instruct \
+  --tensor-parallel-size 8 \
+  --pipeline-parallel-size 2 \
+  --enforce-eager
+```
+
+Node 2 (worker):
+```bash
+python -m dynamo.vllm \
+  --model meta-llama/Llama-3.1-405B-Instruct \
+  --tensor-parallel-size 8 \
+  --pipeline-parallel-size 2 \
+  --enforce-eager \
+  --headless
 ```
