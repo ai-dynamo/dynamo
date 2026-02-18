@@ -63,35 +63,23 @@ install_sccache() {
     # The real compiler path is passed at runtime via SCCACHE_CC_REAL / SCCACHE_CXX_REAL.
     cat > /usr/local/bin/sccache-cc <<'WRAPPER'
 #!/bin/sh
-if [ -z "${_SCCACHE_CHECKED+x}" ]; then
-    if sccache --start-server >/dev/null 2>&1 || sccache --show-stats >/dev/null 2>&1; then
-        export _SCCACHE_CHECKED=ok
-    else
-        export _SCCACHE_CHECKED=fail
-    fi
-fi
-if [ "$_SCCACHE_CHECKED" = "ok" ]; then
-    exec sccache "${SCCACHE_CC_REAL:-gcc}" "$@"
-else
-    exec "${SCCACHE_CC_REAL:-gcc}" "$@"
-fi
+# Only use sccache for pure compilations (-c flag).
+# Autoconf tests the compiler with combined compile+link (no -c), and sccache
+# can interfere with those tests. sccache only caches compilations anyway,
+# so routing linking/other invocations directly to gcc loses nothing.
+case " $* " in
+    *" -c "*) exec sccache "${SCCACHE_CC_REAL:-gcc}" "$@" ;;
+    *)        exec "${SCCACHE_CC_REAL:-gcc}" "$@" ;;
+esac
 WRAPPER
     chmod +x /usr/local/bin/sccache-cc
 
     cat > /usr/local/bin/sccache-cxx <<'WRAPPER'
 #!/bin/sh
-if [ -z "${_SCCACHE_CHECKED+x}" ]; then
-    if sccache --start-server >/dev/null 2>&1 || sccache --show-stats >/dev/null 2>&1; then
-        export _SCCACHE_CHECKED=ok
-    else
-        export _SCCACHE_CHECKED=fail
-    fi
-fi
-if [ "$_SCCACHE_CHECKED" = "ok" ]; then
-    exec sccache "${SCCACHE_CXX_REAL:-g++}" "$@"
-else
-    exec "${SCCACHE_CXX_REAL:-g++}" "$@"
-fi
+case " $* " in
+    *" -c "*) exec sccache "${SCCACHE_CXX_REAL:-g++}" "$@" ;;
+    *)        exec "${SCCACHE_CXX_REAL:-g++}" "$@" ;;
+esac
 WRAPPER
     chmod +x /usr/local/bin/sccache-cxx
 
