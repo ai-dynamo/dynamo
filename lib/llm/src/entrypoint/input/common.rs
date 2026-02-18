@@ -286,9 +286,9 @@ where
             };
             let cc_client = if chooser
                 .kv_router_config()
-                .router_enable_agentic_cache_control
+                .router_enable_cache_control
             {
-                tracing::info!("Agentic cache control enabled: cache_control client created for PIN/UNPIN operations");
+                tracing::info!("Cache control enabled: cache_control client created for PIN operations");
                 let component = chooser.client().endpoint.component().clone();
                 Some(create_cache_control_client(&component).await?)
             } else {

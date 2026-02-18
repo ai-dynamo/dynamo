@@ -63,7 +63,7 @@ class FrontendConfig(ConfigBase):
     router_track_output_blocks: bool
     router_event_threads: int
     router_queue_threshold: Optional[float]
-    router_enable_agentic_cache_control: bool
+    router_enable_cache_control: bool
     enforce_disagg: bool
 
     migration_limit: int
@@ -93,6 +93,10 @@ class FrontendConfig(ConfigBase):
         if self.migration_limit < 0 or self.migration_limit > 4294967295:
             raise ValueError(
                 "--migration-limit must be between 0 and 4294967295 (0=disabled)"
+            )
+        if self.router_enable_cache_control and self.router_mode != "kv":
+            raise ValueError(
+                "--enable-cache-control requires --router-mode=kv"
             )
 
 
@@ -364,14 +368,14 @@ class FrontendArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enable-agentic-cache-control",
-            env_var="DYN_ENABLE_AGENTIC_CACHE_CONTROL",
+            flag_name="--enable-cache-control",
+            env_var="DYN_ENABLE_CACHE_CONTROL",
             default=False,
-            dest="router_enable_agentic_cache_control",
+            dest="router_enable_cache_control",
             help=(
-                "KV Router: Enable agentic cache control (PIN). When set, the router creates "
+                "KV Router: Enable cache control (PIN with TTL). When set, the router creates "
                 "a cache_control service mesh client and fires pin_prefix after generation for "
-                "requests with nvext.agent_hints.pin=true."
+                "requests with nvext.cache_control. Requires --router-mode=kv."
             ),
         )
         add_negatable_bool_argument(

@@ -719,8 +719,8 @@ impl KvRouter {
             .await?;
 
             // Create cache_control client if agentic cache control is enabled
-            let cc_client = if kv_router_config.inner().router_enable_agentic_cache_control {
-                tracing::info!("Agentic cache control enabled: cache_control client created for PIN/UNPIN operations");
+            let cc_client = if kv_router_config.inner().router_enable_cache_control {
+                tracing::info!("Cache control enabled: cache_control client created for PIN operations");
                 let component = kv_router.client().endpoint.component().clone();
                 Some(
                     llm_rs::kv_router::create_cache_control_client(&component)
