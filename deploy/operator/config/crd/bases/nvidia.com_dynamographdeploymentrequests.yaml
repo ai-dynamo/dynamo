@@ -57,7 +57,7 @@ spec:
             specific performance and resource constraints, enabling SLA-driven deployments.
 
             Lifecycle:
-             1. Initial → Pending: Validates spec and prepares for profiling
+             1. Initializing → Pending: Validates spec and prepares for profiling
              2. Pending → Profiling: Creates and runs profiling job (online or AIC)
              3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
              4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
@@ -451,11 +451,19 @@ spec:
                     Format: "configmap/\<name\>"
                   type: string
                 state:
-                  description: |-
-                    State is a high-level textual status of the deployment request lifecycle.
-                    Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"
-                    Empty string ("") represents the initial state before initialization.
+                  default: Initializing
+                  description: State is a high-level textual status of the deployment request lifecycle.
+                  enum:
+                    - Initializing
+                    - Pending
+                    - Profiling
+                    - Deploying
+                    - Ready
+                    - DeploymentDeleted
+                    - Failed
                   type: string
+              required:
+                - state
               type: object
           type: object
       served: true

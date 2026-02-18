@@ -53,15 +53,6 @@ import (
 )
 
 const (
-	// DGDR state constants
-	DGDRStateEmpty             = ""
-	DGDRStatePending           = "Pending"
-	DGDRStateProfiling         = "Profiling"
-	DGDRStateDeploying         = "Deploying"
-	DGDRStateReady             = "Ready"
-	DGDRStateDeploymentDeleted = "DeploymentDeleted"
-	DGDRStateFailed            = "Failed"
-
 	// Condition types
 	ConditionTypeValidation      = "Validation"
 	ConditionTypeProfiling       = "Profiling"
@@ -373,8 +364,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	// Check for spec changes (immutability enforcement)
 	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
 		// Spec changed after initial processing
-		if dgdr.Status.State == DGDRStateProfiling || dgdr.Status.State == DGDRStateDeploying ||
-			dgdr.Status.State == DGDRStateReady || dgdr.Status.State == DGDRStateDeploymentDeleted {
+		if dgdr.Status.State == nvidiacomv1alpha1.DGDRStateProfiling || dgdr.Status.State == nvidiacomv1alpha1.DGDRStateDeploying ||
+			dgdr.Status.State == nvidiacomv1alpha1.DGDRStateReady || dgdr.Status.State == nvidiacomv1alpha1.DGDRStateDeploymentDeleted {
 			logger.Info("Spec change detected in immutable state",
 				"state", dgdr.Status.State,
 				"observedGeneration", dgdr.Status.ObservedGeneration,
@@ -390,23 +381,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	}
 	// State machine: handle different states
 	switch dgdr.Status.State {
-	case DGDRStateEmpty:
+	case nvidiacomv1alpha1.DGDRStateInitializing, "":
 		return r.handleInitialState(ctx, dgdr)
-	case DGDRStatePending:
+	case nvidiacomv1alpha1.DGDRStatePending:
 		return r.handlePendingState(ctx, dgdr)
-	case DGDRStateProfiling:
+	case nvidiacomv1alpha1.DGDRStateProfiling:
 		return r.handleProfilingState(ctx, dgdr)
-	case DGDRStateDeploying:
+	case nvidiacomv1alpha1.DGDRStateDeploying:
 		return r.handleDeployingState(ctx, dgdr)
-	case DGDRStateReady:
+	case nvidiacomv1alpha1.DGDRStateReady:
 		return r.handleReadyState(ctx, dgdr)
-	case DGDRStateDeploymentDeleted:
+	case nvidiacomv1alpha1.DGDRStateDeploymentDeleted:
 		return r.handleDeploymentDeletedState(ctx, dgdr)
-	case DGDRStateFailed:
+	case nvidiacomv1alpha1.DGDRStateFailed:
 		return r.handleFailedState(ctx, dgdr)
 	default:
 		logger.Info("Unknown state", "state", dgdr.Status.State)
-		return r.updateStateAndRequeue(ctx, dgdr, DGDRStateFailed, MessageInvalidState)
+		return r.updateStateAndRequeue(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, MessageInvalidState)
 	}
 }
 
@@ -418,7 +409,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 	// Validate the spec
 	if err := r.validateSpec(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonValidationFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeValidation, metav1.ConditionFalse, EventReasonValidationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeValidation, metav1.ConditionFalse, EventReasonValidationFailed, err.Error())
 	}
 
 	// Set observedGeneration to track the spec we're processing
@@ -429,7 +420,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 
 	// Initialize status
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonInitialized, MessageInitialized)
-	return r.updateStateAndRequeue(ctx, dgdr, DGDRStatePending, MessageInitialized)
+	return r.updateStateAndRequeue(ctx, dgdr, nvidiacomv1alpha1.DGDRStatePending, MessageInitialized)
 }
 
 // handlePendingState starts the profiling process
@@ -440,7 +431,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	// Create profiling job (online or AIC)
 	if err := r.createProfilingJob(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonProfilingJobFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
 
 	// Record event with appropriate message
@@ -451,7 +442,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	}
 
 	// Update to Profiling state with Running status
-	return r.updateStateWithCondition(ctx, dgdr, DGDRStateProfiling, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
+	return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateProfiling, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
 }
 
 // handleProfilingState monitors profiling progress and generates spec when complete
@@ -465,7 +456,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	if err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, err.Error())
 		// Job failed - transition to Failed state
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
 	}
 
 	if !completed {
@@ -486,7 +477,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// Retrieve profiling results and generate spec
 	if err := r.generateDGDSpec(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
 	}
 
 	// Record spec generation event
@@ -508,11 +499,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// If autoApply is enabled, transition to Deploying state
 	if dgdr.Spec.AutoApply {
 		logger.Info("AutoApply enabled, transitioning to Deploying state")
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
 	}
 
 	// Otherwise, transition to Ready state
-	return r.updateStateWithCondition(ctx, dgdr, DGDRStateReady, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecAvailable)
+	return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateReady, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecAvailable)
 }
 
 // handleReadyState handles DGDR in Ready state
@@ -549,7 +540,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyState(ctx context.Co
 		logger.Info("DGD degraded, transitioning back to Deploying",
 			"dgdState", dgd.Status.State)
 
-		dgdr.Status.State = DGDRStateDeploying
+		dgdr.Status.State = nvidiacomv1alpha1.DGDRStateDeploying
 
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDegraded,
 			fmt.Sprintf(MessageDeploymentDegraded, dgd.Name, string(dgd.Status.State)))
@@ -573,7 +564,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	if !dgdr.Spec.AutoApply {
 		// Shouldn't be in this state without autoApply
 		logger.Info("AutoApply not enabled, transitioning to Ready")
-		dgdr.Status.State = DGDRStateReady
+		dgdr.Status.State = nvidiacomv1alpha1.DGDRStateReady
 		return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 	}
 
@@ -604,7 +595,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	// Check if DGD is Ready
 	if dgd.Status.State == nvidiacomv1alpha1.DGDStateSuccessful {
 		logger.Info("DGD is Ready, transitioning to Ready state")
-		dgdr.Status.State = DGDRStateReady
+		dgdr.Status.State = nvidiacomv1alpha1.DGDRStateReady
 
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonDeploymentReady,
 			fmt.Sprintf(MessageDeploymentReady, dgd.Name))
@@ -632,7 +623,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	logger := log.FromContext(ctx)
 	logger.Info("DGD was deleted by user, transitioning to DeploymentDeleted state")
 
-	dgdr.Status.State = DGDRStateDeploymentDeleted
+	dgdr.Status.State = nvidiacomv1alpha1.DGDRStateDeploymentDeleted
 
 	r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDeleted,
 		fmt.Sprintf(MessageDeploymentDeleted, dgdr.Status.Deployment.Name))
@@ -1732,7 +1723,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent 
 }
 
 // updateStateAndRequeue updates the DGDR state and requeues
-func (r *DynamoGraphDeploymentRequestReconciler) updateStateAndRequeue(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, state, _ string) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) updateStateAndRequeue(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, state nvidiacomv1alpha1.DGDRState, _ string) (ctrl.Result, error) {
 	dgdr.Status.State = state
 	if err := r.Status().Update(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
@@ -1744,7 +1735,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updateStateAndRequeue(ctx conte
 func (r *DynamoGraphDeploymentRequestReconciler) updateStateWithCondition(
 	ctx context.Context,
 	dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest,
-	state string,
+	state nvidiacomv1alpha1.DGDRState,
 	conditionType string,
 	status metav1.ConditionStatus,
 	reason string,
