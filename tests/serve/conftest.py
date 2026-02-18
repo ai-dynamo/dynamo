@@ -40,19 +40,14 @@ def image_server(httpserver: HTTPServer):
             # ... use url in your test payload
     """
     # Load LLM graphic image from shared test data
-    # Skip if file doesn't exist (e.g., Git LFS not pulled) - tests that don't need it can still run
-    if (
-        os.path.exists(MULTIMODAL_IMG_PATH)
-        and os.path.getsize(MULTIMODAL_IMG_PATH) > 200
-    ):
-        with open(MULTIMODAL_IMG_PATH, "rb") as f:
-            image_data = f.read()
+    with open(MULTIMODAL_IMG_PATH, "rb") as f:
+        image_data = f.read()
 
-        # Configure server endpoint
-        httpserver.expect_request("/llm-graphic.png").respond_with_data(
-            image_data,
-            content_type="image/png",
-        )
+    # Configure server endpoint
+    httpserver.expect_request("/llm-graphic.png").respond_with_data(
+        image_data,
+        content_type="image/png",
+    )
 
     return httpserver
 

@@ -459,7 +459,7 @@ vllm_configs = {
         name="multimodal_video_agg",
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_agg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
         delayed_start=60,  # Video models require longer loading time
         script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
@@ -688,7 +688,6 @@ def vllm_config_test(request):
     return vllm_configs[request.param]
 
 
-@pytest.mark.parametrize("durable_kv_events", [True], indirect=True)
 @pytest.mark.vllm
 @pytest.mark.e2e
 def test_serve_deployment(
@@ -698,13 +697,9 @@ def test_serve_deployment(
     dynamo_dynamic_ports,
     predownload_models,
     image_server,
-    durable_kv_events,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
-
-    Uses JetStream for durable KV events, which is required for video multimodal
-    tests and provides better test coverage for all configurations.
     """
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
