@@ -19,8 +19,8 @@ use super::pythonic::{
 };
 use super::response::ToolCallResponse;
 use super::xml::{
-    detect_tool_call_start_xml, find_tool_call_end_position_xml, try_tool_call_parse_xml,
-    detect_tool_call_start_glm47, find_tool_call_end_position_glm47, try_tool_call_parse_glm47,
+    detect_tool_call_start_glm47, detect_tool_call_start_xml, find_tool_call_end_position_glm47,
+    find_tool_call_end_position_xml, try_tool_call_parse_glm47, try_tool_call_parse_xml,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -87,7 +87,8 @@ pub async fn try_tool_call_parse(
             Ok((results, normal_content))
         }
         ParserConfig::Glm47(glm47_config) => {
-            let (results, normal_content) = try_tool_call_parse_glm47(message, glm47_config, tools)?;
+            let (results, normal_content) =
+                try_tool_call_parse_glm47(message, glm47_config, tools)?;
             Ok((results, normal_content))
         }
     }
@@ -140,7 +141,9 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
             }
             ParserConfig::Xml(xml_config) => Ok(detect_tool_call_start_xml(chunk, xml_config)),
             ParserConfig::Dsml(dsml_config) => Ok(detect_tool_call_start_dsml(chunk, dsml_config)),
-            ParserConfig::Glm47(glm47_config) => Ok(detect_tool_call_start_glm47(chunk, glm47_config)),
+            ParserConfig::Glm47(glm47_config) => {
+                Ok(detect_tool_call_start_glm47(chunk, glm47_config))
+            }
         },
         None => anyhow::bail!(
             "Parser '{}' is not implemented. Available parsers: {:?}",
@@ -178,7 +181,9 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usi
             }
             ParserConfig::Xml(xml_config) => find_tool_call_end_position_xml(chunk, xml_config),
             ParserConfig::Dsml(dsml_config) => find_tool_call_end_position_dsml(chunk, dsml_config),
-            ParserConfig::Glm47(glm47_config) => find_tool_call_end_position_glm47(chunk, glm47_config),
+            ParserConfig::Glm47(glm47_config) => {
+                find_tool_call_end_position_glm47(chunk, glm47_config)
+            }
         },
         None => {
             // Unknown parser, return full content length
