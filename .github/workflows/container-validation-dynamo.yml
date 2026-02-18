@@ -64,7 +64,8 @@ jobs:
     runs-on: prod-builder-v3
     name: Build - dynamo
     outputs:
-      image_tag: ${{ steps.define_image_tag.outputs.remote_tag }}
+      # Only pass the non-secret tag suffix between jobs (GitHub blanks outputs containing secrets)
+      image_tag_suffix: ${{ steps.define_image_tag.outputs.image_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -91,8 +92,9 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          REMOTE_TAG="${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-dev-cuda12-amd64"
-          echo "remote_tag=${REMOTE_TAG}" >> $GITHUB_OUTPUT
+          IMAGE_TAG_SUFFIX="${{ github.sha }}-dynamo-dev-cuda12-amd64"
+          echo "image_tag_suffix=${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "remote_tag=${ECR_HOSTNAME}/ai-dynamo/dynamo:${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
       - name: Generate Dockerfile
         shell: bash
         run: |
@@ -128,6 +130,7 @@ jobs:
     name: Rust Checks - dynamo
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -137,7 +140,7 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ needs.build.outputs.image_tag }}
+        run: docker pull ${{ env.IMAGE_TAG }}
       - name: Start services with docker-compose
         working-directory: ./deploy
         run: |
@@ -146,7 +149,7 @@ jobs:
         run: |
           docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
-            ${{ needs.build.outputs.image_tag }} \
+            ${{ env.IMAGE_TAG }} \
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
                       cargo clippy --features block-manager,media-ffmpeg --no-deps --all-targets -- -D warnings && \
@@ -163,6 +166,8 @@ jobs:
     if: needs.changed-files.outputs.core == 'true'
     runs-on: prod-builder-v3
     name: Pytest Parallel - dynamo
+    env:
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -172,11 +177,11 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ needs.build.outputs.image_tag }}
+        run: docker pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (parallel tests with xdist)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ needs.build.outputs.image_tag }}
+          image_tag: ${{ env.IMAGE_TAG }}
           pytest_marks: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
           framework: dynamo
           test_type: "pre_merge_parallel"
@@ -190,6 +195,8 @@ jobs:
     if: needs.changed-files.outputs.core == 'true'
     runs-on: prod-builder-v3
     name: Pytest Sequential - dynamo
+    env:
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -199,11 +206,11 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
-        run: docker pull ${{ needs.build.outputs.image_tag }}
+        run: docker pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (sequential tests)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ needs.build.outputs.image_tag }}
+          image_tag: ${{ env.IMAGE_TAG }}
           pytest_marks: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
           framework: dynamo
           test_type: "pre_merge_sequential"
