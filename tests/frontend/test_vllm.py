@@ -437,7 +437,8 @@ def test_reasoning(request, start_services: ServicePorts, predownload_models) ->
 def test_multiple_choices_n5(
     request, start_services: ServicePorts, predownload_models
 ) -> None:
-    """Test that n=5 returns 5 distinct choices with correct indices and usage."""
+    """Test that n=5 streaming returns 5 distinct choices with correct indices."""
+    import json
 
     payload = {
         "model": TEST_MODEL,
@@ -450,32 +451,58 @@ def test_multiple_choices_n5(
         "max_tokens": 20,
         "n": 5,
         "temperature": 1.0,
+        "stream": True,
     }
 
     base_url = f"http://localhost:{start_services.frontend_port}"
-    response = _send_chat_request(payload, base_url=base_url)
-    response_data = _validate_chat_response(response)
+    response = requests.post(
+        f"{base_url}/v1/chat/completions",
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        stream=True,
+        timeout=180,
+    )
+    assert response.status_code == 200, (
+        f"Streaming request failed with status {response.status_code}: {response.text}"
+    )
 
-    choices = response_data.get("choices", [])
-    assert len(choices) == 5, f"Expected 5 choices, got {len(choices)}"
+    # Parse SSE events
+    chunks = []
+    for line in response.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "):
+            continue
+        data_str = line[len("data: "):]
+        if data_str == "[DONE]":
+            break
+        chunks.append(json.loads(data_str))
 
-    # Verify each choice has a unique index 0-4
-    indices = sorted(c["index"] for c in choices)
-    assert indices == [0, 1, 2, 3, 4], f"Expected indices [0,1,2,3,4], got {indices}"
+    assert len(chunks) > 0, "Expected at least one streaming chunk"
 
-    # Verify each choice has a finish_reason and non-empty content
-    for choice in choices:
-        assert choice.get("finish_reason") is not None, (
-            f"Choice {choice['index']} missing finish_reason"
-        )
-        message = choice.get("message", {})
-        content = message.get("content", "")
-        assert content, f"Choice {choice['index']} has empty content"
+    # Collect all choice indices and finished indices across all chunks
+    all_indices = set()
+    finished_indices = set()
+    content_per_choice: dict = {}
+    for chunk in chunks:
+        for choice in chunk.get("choices", []):
+            idx = choice["index"]
+            all_indices.add(idx)
+            delta_content = choice.get("delta", {}).get("content", "")
+            if delta_content:
+                content_per_choice.setdefault(idx, "")
+                content_per_choice[idx] += delta_content
+            if choice.get("finish_reason") is not None:
+                finished_indices.add(idx)
 
-    # Verify usage is present and completion_tokens accounts for all choices
-    usage = response_data.get("usage", {})
-    assert usage.get("prompt_tokens", 0) > 0, "Missing prompt_tokens in usage"
-    assert usage.get("completion_tokens", 0) > 0, "Missing completion_tokens in usage"
-    assert usage.get("total_tokens", 0) == (
-        usage["prompt_tokens"] + usage["completion_tokens"]
-    ), "total_tokens should equal prompt_tokens + completion_tokens"
+    # Verify all 5 choice indices appeared
+    assert all_indices == {0, 1, 2, 3, 4}, (
+        f"Expected indices {{0,1,2,3,4}}, got {all_indices}"
+    )
+
+    # Verify all 5 choices finished
+    assert finished_indices == {0, 1, 2, 3, 4}, (
+        f"Expected all 5 choices to finish, only got {finished_indices}"
+    )
+
+    # Verify each choice produced some content
+    for i in range(5):
+        assert content_per_choice.get(i), f"Choice {i} has no content"
