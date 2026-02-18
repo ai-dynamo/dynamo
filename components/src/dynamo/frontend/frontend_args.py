@@ -83,6 +83,7 @@ class FrontendConfig(ConfigBase):
     chat_processor: str
     enable_anthropic_api: bool
     exp_python_factory: bool
+    debug_perf: bool
 
     def validate(self) -> None:
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
@@ -533,5 +534,17 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be "
                 "created via a Python callback instead of the default Rust pipeline."
+            ),
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--debug-perf",
+            env_var="DYN_DEBUG_PERF",
+            default=False,
+            help=(
+                "Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
+                "Logs GIL contention, per-function timing via sys.monitoring, request concurrency, "
+                "and hot-path section durations."
             ),
         )
