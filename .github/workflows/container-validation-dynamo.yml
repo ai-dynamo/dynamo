@@ -57,6 +57,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true'
     runs-on: prod-builder-v3
     name: Build
+    timeout-minutes: 60
     outputs:
       # Only pass the non-secret tag suffix between jobs (GitHub blanks outputs containing secrets)
       image_tag_suffix: ${{ steps.define_image_tag.outputs.image_tag_suffix }}
@@ -122,6 +123,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true'
     runs-on: prod-builder-amd-v1
     name: Rust Checks
+    timeout-minutes: 30
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
       IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
@@ -157,6 +159,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true'
     runs-on: prod-builder-amd-v1
     name: Pytest (parallel)
+    timeout-minutes: 30
     env:
       IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
     steps:
@@ -186,6 +189,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true'
     runs-on: prod-builder-amd-v1
     name: Pytest (sequential)
+    timeout-minutes: 30
     env:
       IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
     steps:
