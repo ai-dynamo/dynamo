@@ -68,7 +68,9 @@ def register_gms_loader(load_format: str = "gms") -> None:
             gms_client, pool = get_or_create_gms_client_memory_manager(
                 get_socket_path(device),
                 device,
-                mode=get_requested_lock_type(self.load_config.model_loader_extra_config),
+                mode=get_requested_lock_type(
+                    self.load_config.model_loader_extra_config
+                ),
                 tag="weights",
             )
 
