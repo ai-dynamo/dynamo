@@ -151,6 +151,15 @@ class MockerSpec(BaseModel):
     )
 
 
+class KVRouterSpec(BaseModel):
+    """KVRouterSpec configures KV-cache-aware routing."""
+
+    enabled: Optional[bool] = Field(
+        default=None,
+        description="Enabled indicates whether to enable KV-cache-aware routing in the generated DGD. KV routing optimizes request scheduling based on KV cache locality.",
+    )
+
+
 class FeaturesSpec(BaseModel):
     """FeaturesSpec controls optional Dynamo platform features in the generated deployment."""
 
@@ -158,9 +167,9 @@ class FeaturesSpec(BaseModel):
         default=None,
         description="Planner configures the SLA planner for autoscaling in the generated DGD.",
     )
-    kvRouter: Optional[bool] = Field(
+    kvRouter: Optional[KVRouterSpec] = Field(
         default=None,
-        description="KVRouter enables KV-cache-aware routing in the generated DGD.",
+        description="KVRouter configures KV-cache-aware routing in the generated DGD.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,

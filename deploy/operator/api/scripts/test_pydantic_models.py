@@ -22,6 +22,7 @@ try:
         DynamoGraphDeploymentRequestSpec,
         DynamoGraphDeploymentRequestStatus,
         FeaturesSpec,
+        KVRouterSpec,
         MockerSpec,
         ModelCacheSpec,
         OptimizationType,
@@ -80,7 +81,7 @@ def test_full_dgdr():
             ),
             features=FeaturesSpec(
                 planner=PlannerSpec(enabled=True),
-                kvRouter=True,
+                kvRouter=KVRouterSpec(enabled=True),
                 mocker=MockerSpec(enabled=False),
             ),
             searchStrategy=SearchStrategy.Rapid,
@@ -95,6 +96,7 @@ def test_full_dgdr():
         assert spec.sla.optimizationType == OptimizationType.Latency
         assert spec.modelCache.pvcName == "model-cache"
         assert spec.features.planner.enabled is True
+        assert spec.features.kvRouter.enabled is True
         assert spec.features.mocker.enabled is False
         print("✓ Full DGDR spec validation passed")
     except Exception as e:

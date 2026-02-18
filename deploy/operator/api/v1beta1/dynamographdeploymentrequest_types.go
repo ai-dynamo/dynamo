@@ -306,15 +306,23 @@ type MockerSpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
+// KVRouterSpec configures KV-cache-aware routing.
+type KVRouterSpec struct {
+	// Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.
+	// KV routing optimizes request scheduling based on KV cache locality.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+}
+
 // FeaturesSpec controls optional Dynamo platform features in the generated deployment.
 type FeaturesSpec struct {
 	// Planner configures the SLA planner for autoscaling in the generated DGD.
 	// +optional
 	Planner *PlannerSpec `json:"planner,omitempty"`
 
-	// KVRouter enables KV-cache-aware routing in the generated DGD.
+	// KVRouter configures KV-cache-aware routing in the generated DGD.
 	// +optional
-	KVRouter *bool `json:"kvRouter,omitempty"`
+	KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
 
 	// Mocker configures the simulated (mocker) backend for testing without GPUs.
 	// +optional
