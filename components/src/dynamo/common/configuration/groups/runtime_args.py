@@ -31,6 +31,8 @@ class DynamoRuntimeConfig(ConfigBase):
     dump_config_to: Optional[str] = None
     multimodal_embedding_cache_capacity_gb: float
     output_modalities: List[str]
+    media_fs_url: str = "file:///tmp/dynamo_media"  # noqa: S108
+    media_base_url: Optional[str] = None
 
     def validate(self) -> None:
         # TODO  get a better way for spot fixes like this.
@@ -175,4 +177,20 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=["text"],
             help="Output modalities for omni/diffusion mode (e.g., --output-modalities text image audio video).",
             nargs="*",
+        )
+
+        # Media storage (generated images and videos)
+        add_argument(
+            g,
+            flag_name="--media-fs-url",
+            env_var="DYN_MEDIA_FS_URL",
+            default="file:///tmp/dynamo_media",  # noqa: S108
+            help="Filesystem URL for storing generated images and videos (e.g. file:///tmp/dynamo_media, s3://bucket/path).",
+        )
+        add_argument(
+            g,
+            flag_name="--media-base-url",
+            env_var="DYN_MEDIA_BASE_URL",
+            default=None,
+            help="Base URL for rewriting media file paths in responses (e.g. http://localhost:8000/media). If unset, returns raw filesystem paths.",
         )

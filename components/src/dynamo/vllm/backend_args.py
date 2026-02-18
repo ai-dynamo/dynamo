@@ -138,15 +138,7 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
         )
 
-        # Video diffusion output
-        # TODO: Propose an alternate design to switch to AsyncOmniEngine args while using vLLM-Omni
-        add_argument(
-            g,
-            flag_name="--video-output-dir",
-            env_var="DYN_VLLM_VIDEO_OUTPUT_DIR",
-            default="/tmp/dynamo_videos",  # noqa: S108
-            help="Directory to save generated video MP4 files.",
-        )
+        # Video encoding
         add_argument(
             g,
             flag_name="--default-video-fps",
@@ -307,8 +299,7 @@ class DynamoVllmConfig(ConfigBase):
     omni: bool
     stage_configs_path: Optional[str] = None
 
-    # Video diffusion output
-    video_output_dir: str = "/tmp/dynamo_videos"  # noqa: S108
+    # Video encoding
     default_video_fps: int = 16
 
     # Diffusion engine-level parameters (passed to AsyncOmni constructor)
