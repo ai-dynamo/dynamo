@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
-use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
+use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -142,9 +142,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
-    m.add_function(wrap_pyfunction!(register_llm, m)?)?;
-    m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
-    m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(register_model, m)?)?;
+    m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
@@ -228,7 +228,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 #[pyfunction]
 #[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
 #[allow(clippy::too_many_arguments)]
-fn register_llm<'p>(
+fn register_model<'p>(
     py: Python<'p>,
     model_input: ModelInput,
     model_type: ModelType,
@@ -409,7 +409,7 @@ fn register_llm<'p>(
 /// - LoRA model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}`
 #[pyfunction]
 #[pyo3(signature = (endpoint, lora_name=None))]
-fn unregister_llm<'p>(
+fn unregister_model<'p>(
     py: Python<'p>,
     endpoint: Endpoint,
     lora_name: Option<&str>,
@@ -425,11 +425,11 @@ fn unregister_llm<'p>(
     })
 }
 
-/// Download a model from Hugging Face, returning it's local path
-/// Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
+/// Download a model from Hugging Face, returning its local path
+/// Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
 #[pyfunction]
 #[pyo3(signature = (remote_name, ignore_weights=false))]
-fn fetch_llm<'p>(
+fn fetch_model<'p>(
     py: Python<'p>,
     remote_name: &str,
     ignore_weights: bool,
@@ -559,14 +559,20 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, store_kv, request_plane, enable_nats=None))]
+    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None))]
     fn new(
         event_loop: PyObject,
-        store_kv: String,
+        discovery_backend: String,
         request_plane: String,
         enable_nats: Option<bool>,
     ) -> PyResult<Self> {
-        let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
+        let discovery_backend_config = match discovery_backend.as_str() {
+            "kubernetes" => DiscoveryBackend::Kubernetes,
+            other => {
+                let selector: kv::Selector = other.parse().map_err(to_pyerr)?;
+                DiscoveryBackend::KvStore(selector)
+            }
+        };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
@@ -608,7 +614,7 @@ impl DistributedRuntime {
         let enable_nats = enable_nats.unwrap_or(true); // Default to true
 
         let runtime_config = DistributedConfig {
-            store_backend: selected_kv_store,
+            discovery_backend: discovery_backend_config,
             nats_config: if request_plane.is_nats() || enable_nats {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {

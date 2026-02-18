@@ -31,12 +31,13 @@ from dynamo.llm import (
     ModelInput,
     ModelType,
     lora_name_to_id,
-    register_llm,
-    unregister_llm,
+    register_model,
+    unregister_model,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
+from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.image_loader import ImageLoader
 
 # Multimodal data dictionary keys
@@ -47,6 +48,27 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def _compute_mm_uuids(
+    multi_modal_data: Dict[str, Any] | None
+) -> Dict[str, list[str]] | None:
+    """
+    Compute multi_modal_uuids from multi_modal_data.
+
+    Each image gets a SHA256 hex digest as its UUID, ensuring consistent
+    hashing across the MM Router, vLLM handler, and Rust KV publisher.
+    """
+    if not multi_modal_data or "image" not in multi_modal_data:
+        return None
+    images = multi_modal_data["image"]
+    if not isinstance(images, list):
+        images = [images]
+    if not images:
+        return None
+    uuids = compute_mm_uuids_from_images(images)
+    return {"image": uuids}
+
 
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
 # None = not yet initialized, False = disabled/failed, LoRAManager = initialized
@@ -571,7 +593,7 @@ class BaseWorkerHandler(ABC):
                             }
 
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                            await register_llm(
+                            await register_model(
                                 model_input=ModelInput.Tokens,
                                 model_type=ModelType.Chat | ModelType.Completions,
                                 endpoint=self.generate_endpoint,
@@ -691,7 +713,7 @@ class BaseWorkerHandler(ABC):
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
                         try:
-                            await unregister_llm(
+                            await unregister_model(
                                 endpoint=self.generate_endpoint,
                                 lora_name=lora_name,
                             )
@@ -1010,12 +1032,17 @@ class BaseWorkerHandler(ABC):
                         "token_ids": [],
                     },
                 )
-        else:
-            # Normal path: use token IDs
-            prompt = TokensPrompt(
-                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
-            )
-            return prompt, embedding_sequence_length, None
+        # Normal path: use token IDs
+        mm_uuids = _compute_mm_uuids(multi_modal_data)
+        prompt_kwargs = dict[str, Any](
+            prompt_token_ids=request["token_ids"],
+            multi_modal_data=multi_modal_data,
+        )
+        if mm_uuids is not None:
+            prompt_kwargs["multi_modal_uuids"] = mm_uuids
+
+        prompt = TokensPrompt(**prompt_kwargs)
+        return prompt, embedding_sequence_length, None
 
     @staticmethod
     def _build_completion_usage(
@@ -1161,6 +1188,7 @@ class BaseWorkerHandler(ABC):
         lora_request=None,
         embedding_sequence_length=None,
         trace_headers=None,
+        priority=0,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -1176,6 +1204,7 @@ class BaseWorkerHandler(ABC):
                 lora_request=lora_request,
                 data_parallel_rank=data_parallel_rank,
                 trace_headers=trace_headers,
+                priority=priority,
             )
 
             num_output_tokens_so_far = 0
@@ -1335,7 +1364,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             logger.debug(
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
-        dp_rank = request.get("routing", {}).get("dp_rank")
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+        priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
 
@@ -1349,6 +1380,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     lora_request=lora_request,
                     embedding_sequence_length=embedding_sequence_length,
                     trace_headers=trace_headers,
+                    priority=priority,
                 ):
                     if prefill_result is not None and "completion_usage" in tok:
                         tok["completion_usage"][
@@ -1379,7 +1411,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params
         )
 
-        dp_rank = request.get("routing", {}).get("dp_rank")
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+        priority = routing.get("priority", 0)
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1393,6 +1427,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
+                    priority=priority,
                 )
 
                 async for res in gen:
@@ -1547,7 +1582,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
             )
 
-        dp_rank = request.get("routing", {}).get("dp_rank")
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+        priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
 
@@ -1560,6 +1597,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    priority=priority,
                 )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")

@@ -16,13 +16,13 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.planner_core import (
-    DecodePlanner,
-    Metrics,
     PlannerSharedState,
-    PrefillPlanner,
     _apply_global_gpu_budget,
 )
+from dynamo.planner.utils.prefill_planner import PrefillPlanner
+from dynamo.planner.utils.prometheus import Metrics
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -78,7 +78,7 @@ class PlannerHarness:
             "isl_predictor",
             "osl_predictor",
             "connector",
-            "prometheus_api_client",
+            "prometheus_traffic_client",
             "args",
         }
         prefill_attrs = {
@@ -111,7 +111,7 @@ class PlannerHarness:
             "isl_predictor",
             "osl_predictor",
             "connector",
-            "prometheus_api_client",
+            "prometheus_traffic_client",
             "args",
             "get_workers_info",
         }
@@ -194,7 +194,7 @@ def planner():
         planner.connector = Mock()
 
         # Mock prometheus client
-        planner.prometheus_api_client = Mock()
+        planner.prometheus_traffic_client = Mock()
 
         # Set up some baseline correction factors
         planner.p_correction_factor = 1.0

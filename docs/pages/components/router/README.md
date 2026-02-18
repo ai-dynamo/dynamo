@@ -23,7 +23,7 @@ This command:
 - Exposes the service on port 8000 (configurable)
 - Automatically handles all backend workers registered to the Dynamo endpoint
 
-Backend workers register themselves using the `register_llm` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
+Backend workers register themselves using the `register_model` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
 
 #### CLI Arguments
 
@@ -83,8 +83,8 @@ For more configuration options and tuning guidelines, see the [Router Guide](rou
 ## Prerequisites and Limitations
 
 **Requirements:**
-- **Dynamic endpoints only**: KV router requires `register_llm()` with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
-- Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../../development/backend-guide.md))
+- **Dynamic endpoints only**: KV router requires `register_model()` with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
+- Backend workers must call `register_model()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../../development/backend-guide.md))
 - You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
 
 **Multimodal Support:**

@@ -11,15 +11,15 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Endpoint
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
-from dynamo.sglang.args import DynamoArgs
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.sglang.args import DynamoConfig
 
 
-async def _register_llm_with_runtime_config(
+async def _register_model_with_runtime_config(
     engine: sgl.Engine,
     endpoint: Endpoint,
     server_args: ServerArgs,
-    dynamo_args: DynamoArgs,
+    dynamo_args: DynamoConfig,
     input_type: Optional[ModelInput] = ModelInput.Tokens,
     output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
 ) -> bool:
@@ -49,7 +49,7 @@ async def _register_llm_with_runtime_config(
             output_type = ModelType.Chat
 
     try:
-        await register_llm(
+        await register_model(
             input_type,
             output_type,
             endpoint,
@@ -144,7 +144,7 @@ def _get_bootstrap_info_for_config(
 
 
 async def _get_runtime_config(
-    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoArgs
+    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
     """Extract runtime configuration from SGLang engine and args.
 
@@ -158,8 +158,8 @@ async def _get_runtime_config(
     """
     runtime_config = ModelRuntimeConfig()
     # set reasoning parser and tool call parser
-    runtime_config.reasoning_parser = dynamo_args.reasoning_parser
-    runtime_config.tool_call_parser = dynamo_args.tool_call_parser
+    runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
+    runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
@@ -231,11 +231,11 @@ async def _get_runtime_config(
         return runtime_config
 
 
-async def register_llm_with_readiness_gate(
+async def register_model_with_readiness_gate(
     engine: sgl.Engine,
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
-    dynamo_args: DynamoArgs,
+    dynamo_args: DynamoConfig,
     input_type: Optional[ModelInput] = ModelInput.Tokens,
     output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
@@ -254,7 +254,7 @@ async def register_llm_with_readiness_gate(
     Raises:
         RuntimeError: If model registration fails.
     """
-    registration_success = await _register_llm_with_runtime_config(
+    registration_success = await _register_model_with_runtime_config(
         engine,
         generate_endpoint,
         server_args,
@@ -295,7 +295,7 @@ async def register_image_diffusion_model(
     model_name = server_args.model_path
 
     try:
-        await register_llm(
+        await register_model(
             ModelInput.Text,
             ModelType.Images,
             endpoint,
@@ -335,7 +335,7 @@ async def register_video_generation_model(
     model_name = server_args.model_path
 
     try:
-        await register_llm(
+        await register_model(
             ModelInput.Text,
             ModelType.Videos,
             endpoint,

@@ -32,7 +32,7 @@ from dynamo.llm import (
     PythonAsyncEngine,
     RouterConfig,
     RouterMode,
-    fetch_llm,
+    fetch_model,
 )
 from dynamo.runtime import DistributedRuntime
 
@@ -393,7 +393,7 @@ class EngineFactory:
 
         source_path = mdc.source_path()
         if not os.path.exists(source_path):
-            await fetch_llm(source_path, ignore_weights=True)
+            await fetch_model(source_path, ignore_weights=True)
 
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"

@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 import yaml
 
+from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.planner_utils import add_planner_arguments_to_parser
 from dynamo.profiler.utils.search_space_autogen import auto_generate_search_space
 
@@ -100,16 +101,14 @@ def create_profiler_parser() -> argparse.Namespace:
         hardware:
             minNumGpusPerEngine: Int (minimum number of GPUs per engine, default: 0)
             maxNumGpusPerEngine: Int (maximum number of GPUs per engine, default: 0)
-            numGpusPerNode: Int (number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size, default: 0)
-            enableGpuDiscovery: Boolean (enable automatic GPU discovery from Kubernetes cluster nodes, when enabled overrides any manually specified hardware configuration, requires cluster-wide node access permissions, default: False)
+            numGpusPerNode: Int (number of GPUs per node, default: 0)
+            gpuModel: String (GPU model, used for auto-calculating search space, default: "")
+            gpuVramMib: Int (GPU VRAM in MiB, used for auto-calculating search space, default: 0)
+            system: String (target hardware system, e.g. h100_sxm, h200_sxm, default: None)
+        searchStrategy: String (search strategy for profiling: 'rapid' uses AI Configurator for quick estimation, 'thorough' runs actual deployments for comprehensive results, enum: [rapid, thorough], default: rapid)
         sweep:
             prefillInterpolationGranularity: Int (how many samples to benchmark to interpolate TTFT under different ISL, default: 16)
             decodeInterpolationGranularity: Int (how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length, default: 6)
-            useAiConfigurator: Boolean (use ai-configurator to estimate benchmarking results instead of running actual deployment, default: False)
-            aicSystem: String (target system for use with aiconfigurator, default: None)
-            aicHfId: String (aiconfigurator huggingface id of the target model, default: None)
-            aicBackend: String (aiconfigurator backend of the target model, if not provided, will use args.backend, default: "")
-            aicBackendVersion: String (specify backend version when using aiconfigurator to estimate perf, default: None)
             dryRun: Boolean (dry run the profile job, default: False)
             pickWithWebui: Boolean (pick the best parallelization mapping using webUI, default: False)
             webuiPort: Int (webUI port, default: $PROFILER_WEBUI_PORT or 8000)
@@ -226,7 +225,25 @@ def create_profiler_parser() -> argparse.Namespace:
         "--num-gpus-per-node",
         type=int,
         default=_get(hardware_cfg, "numGpusPerNode", "num_gpus_per_node", 0),
-        help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
+        help="Number of GPUs per node",
+    )
+    parser.add_argument(
+        "--gpu-model",
+        type=str,
+        default=_get(hardware_cfg, "gpuModel", "gpu_model", ""),
+        help="GPU model name (used for auto-calculating search space)",
+    )
+    parser.add_argument(
+        "--gpu-vram-mib",
+        type=int,
+        default=_get(hardware_cfg, "gpuVramMib", "gpu_vram_mib", 0),
+        help="GPU VRAM in MiB (used for auto-calculating search space)",
+    )
+    parser.add_argument(
+        "--system",
+        type=str,
+        default=_get(hardware_cfg, "system", "system", None),
+        help="Target hardware system, e.g. h100_sxm, h200_sxm",
     )
     parser.add_argument(
         "--isl",
@@ -251,6 +268,17 @@ def create_profiler_parser() -> argparse.Namespace:
         type=float,
         default=config.get("sla", {}).get("itl", 10.0),
         help="target Inter Token Latency (float, in milliseconds)",
+    )
+
+    # High-level profiling strategy argument
+    parser.add_argument(
+        "--search-strategy",
+        type=SearchStrategy,
+        default=SearchStrategy(
+            _get(config, "searchStrategy", "search_strategy", "rapid")
+        ),
+        choices=list(SearchStrategy),
+        help="Search strategy for profiling: 'rapid' uses AI Configurator for quick estimation, 'thorough' runs actual deployments for comprehensive results",
     )
 
     # arguments used for interpolating TTFT and ITL under different ISL/OSL
@@ -297,12 +325,6 @@ def create_profiler_parser() -> argparse.Namespace:
         help="Dry run the profile job",
     )
     parser.add_argument(
-        "--enable-gpu-discovery",
-        action="store_true",
-        default=_get(hardware_cfg, "enableGpuDiscovery", "enable_gpu_discovery", False),
-        help="Enable automatic GPU discovery from Kubernetes cluster nodes. When enabled, overrides any manually specified hardware configuration. Requires cluster-wide node access permissions.",
-    )
-    parser.add_argument(
         "--pick-with-webui",
         action="store_true",
         default=_get(sweep_cfg, "pickWithWebui", "pick_with_webui", False),
@@ -331,38 +353,6 @@ def create_profiler_parser() -> argparse.Namespace:
             for key, value in planner_config.items()
         }
         parser.set_defaults(**normalized_planner_config)
-
-    # arguments if using aiconfigurator
-    parser.add_argument(
-        "--use-ai-configurator",
-        action="store_true",
-        default=_get(sweep_cfg, "useAiConfigurator", "use_ai_configurator", False),
-        help="Use ai-configurator to estimate benchmarking results instead of running actual deployment.",
-    )
-    parser.add_argument(
-        "--aic-system",
-        type=str,
-        default=_get(sweep_cfg, "aicSystem", "aic_system", None),
-        help="Target system for use with aiconfigurator (e.g. h100_sxm, h200_sxm)",
-    )
-    parser.add_argument(
-        "--aic-hf-id",
-        type=str,
-        default=_get(sweep_cfg, "aicHfId", "aic_hf_id", None),
-        help="aiconfigurator name of the target model (e.g. Qwen/Qwen3-32B, meta-llama/Llama-3.1-405B)",
-    )
-    parser.add_argument(
-        "--aic-backend",
-        type=str,
-        default=_get(sweep_cfg, "aicBackend", "aic_backend", ""),
-        help="aiconfigurator backend of the target model, if not provided, will use args.backend",
-    )
-    parser.add_argument(
-        "--aic-backend-version",
-        type=str,
-        default=_get(sweep_cfg, "aicBackendVersion", "aic_backend_version", None),
-        help="Specify backend version when using aiconfigurator to estimate perf.",
-    )
 
     # Parse arguments
     args = parser.parse_args()

@@ -77,7 +77,7 @@ class FrontendConfig(ConfigBase):
     grpc_metrics_port: int
     dump_config_to: Optional[str]
 
-    store_kv: str
+    discovery_backend: str
     request_plane: str
     event_plane: str
     chat_processor: str
@@ -463,15 +463,15 @@ class FrontendArgGroup(ArgGroup):
 
         add_argument(
             g,
-            flag_name="--store-kv",
-            env_var="DYN_STORE_KV",
+            flag_name="--discovery-backend",
+            env_var="DYN_DISCOVERY_BACKEND",
             default="etcd",
             help=(
-                "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars "
-                "(e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var "
-                "DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv."
+                "Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), "
+                "mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. "
+                "File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv."
             ),
-            choices=["etcd", "file", "mem"],
+            choices=["kubernetes", "etcd", "file", "mem"],
         )
         add_argument(
             g,

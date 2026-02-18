@@ -117,7 +117,7 @@ def _build_mocker_command(
         MODEL_NAME,
         "--endpoint",
         endpoint,
-        "--store-kv",
+        "--discovery-backend",
         store_backend,
         "--num-workers",
         str(num_workers),
@@ -620,7 +620,6 @@ def test_query_instance_id_returns_worker_and_tokens(
         "block_size": BLOCK_SIZE,
         "durable_kv_events": durable_kv_events,
     }
-    os.makedirs(request.node.name, exist_ok=True)
 
     with MockerProcess(
         request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS

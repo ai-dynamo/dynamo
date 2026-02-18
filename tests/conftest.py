@@ -20,6 +20,7 @@ from tests.utils.port_utils import (
     deallocate_port,
     deallocate_ports,
 )
+from tests.utils.test_output import resolve_test_output_path
 
 _logger = logging.getLogger(__name__)
 
@@ -233,10 +234,11 @@ def predownload_tokenizers(pytestconfig):
 
 @pytest.fixture(autouse=True)
 def logger(request):
-    log_path = os.path.join(request.node.name, "test.log.txt")
+    log_dir = resolve_test_output_path(request.node.name)
+    log_path = os.path.join(log_dir, "test.log.txt")
     logger = logging.getLogger()
-    shutil.rmtree(request.node.name, ignore_errors=True)
-    os.makedirs(request.node.name, exist_ok=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+    os.makedirs(log_dir, exist_ok=True)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)
@@ -594,12 +596,12 @@ class SharedNatsServer(SharedManagedProcess):
 
 
 @pytest.fixture
-def store_kv(request):
+def discovery_backend(request):
     """
-    KV store for runtime. Defaults to "etcd".
+    Discovery backend for runtime. Defaults to "etcd".
 
-    To iterate over multiple stores in a test:
-        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+    To iterate over multiple backends in a test:
+        @pytest.mark.parametrize("discovery_backend", ["file", "etcd"], indirect=True)
         def test_example(runtime_services):
             ...
     """
@@ -641,24 +643,24 @@ def durable_kv_events(request):
 
 
 @pytest.fixture()
-def runtime_services(request, store_kv, request_plane):
+def runtime_services(request, discovery_backend, request_plane):
     """
-    Start runtime services (NATS and/or etcd) based on store_kv and request_plane.
+    Start runtime services (NATS and/or etcd) based on discovery_backend and request_plane.
 
-    - If store_kv != "etcd", etcd is not started (returns None)
+    - If discovery_backend != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
-    if request_plane == "nats" and store_kv == "etcd":
+    if request_plane == "nats" and discovery_backend == "etcd":
         with NatsServer(request) as nats_process:
             with EtcdServer(request) as etcd_process:
                 yield nats_process, etcd_process
     elif request_plane == "nats":
         with NatsServer(request) as nats_process:
             yield nats_process, None
-    elif store_kv == "etcd":
+    elif discovery_backend == "etcd":
         with EtcdServer(request) as etcd_process:
             yield None, etcd_process
     else:
@@ -666,7 +668,9 @@ def runtime_services(request, store_kv, request_plane):
 
 
 @pytest.fixture()
-def runtime_services_dynamic_ports(request, store_kv, request_plane, durable_kv_events):
+def runtime_services_dynamic_ports(
+    request, discovery_backend, request_plane, durable_kv_events
+):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
     This fixture actually allocates dynamic ports by passing port=0 to the servers.
@@ -678,7 +682,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, durable_kv_
     - Each pytest-xdist worker runs tests in a separate process, so env vars do not
       leak across workers.
 
-    - If store_kv != "etcd", etcd is not started (returns None)
+    - If discovery_backend != "etcd", etcd is not started (returns None)
     - NATS is always started when etcd is used, because KV events require NATS
       regardless of the request_plane (tcp/nats only affects request transport)
     - NATS Core mode (no JetStream) is the default; JetStream is enabled when durable_kv_events=True
@@ -690,7 +694,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane, durable_kv_
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
     # When durable_kv_events=False (default), disable JetStream for faster startup
-    if store_kv == "etcd":
+    if discovery_backend == "etcd":
         with NatsServer(
             request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:

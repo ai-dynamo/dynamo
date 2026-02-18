@@ -32,7 +32,7 @@ from dynamo.sglang.health_check import (
 from dynamo.sglang.publisher import DynamoSglangPublisher, setup_sgl_metrics
 from dynamo.sglang.register import (
     register_image_diffusion_model,
-    register_llm_with_readiness_gate,
+    register_model_with_readiness_gate,
     register_video_generation_model,
 )
 from dynamo.sglang.request_handlers import (
@@ -203,7 +203,7 @@ async def worker():
 
     dynamo_args = config.dynamo_args
     runtime, loop = create_runtime(
-        store_kv=dynamo_args.store_kv,
+        discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
         use_kv_events=dynamo_args.use_kv_events,
@@ -285,13 +285,8 @@ async def init(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()
 
-    logging.info(
-        f"Registering model with endpoint types: {dynamo_args.dyn_endpoint_types}"
-    )
-    if (
-        dynamo_args.custom_jinja_template
-        and "chat" not in dynamo_args.dyn_endpoint_types
-    ):
+    logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
+    if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
         logging.warning(
             "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
@@ -307,12 +302,12 @@ async def init(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
                 dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
             ),
         )
@@ -385,7 +380,7 @@ async def init_prefill(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -462,7 +457,7 @@ async def init_diffusion(
     ).to_dict()
 
     logging.info(
-        f"Registering diffusion model with endpoint types: {dynamo_args.dyn_endpoint_types}"
+        f"Registering diffusion model with endpoint types: {dynamo_args.endpoint_types}"
     )
 
     try:
@@ -474,12 +469,12 @@ async def init_diffusion(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
                 dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
             ),
         )
@@ -538,7 +533,7 @@ async def init_embedding(
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -766,7 +761,7 @@ async def init_multimodal_processor(
                     (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
                 ],
             ),
-            register_llm_with_readiness_gate(
+            register_model_with_readiness_gate(
                 None,  # engine
                 generate_endpoint,
                 server_args,

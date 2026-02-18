@@ -122,17 +122,17 @@ Options:
   --model-repository <path>   Path to model repository
   --backend-directory <path>  Path to Triton backends
   --log-verbose <level>       Triton log verbosity 0-6 (default: 1)
-  --store-kv <backend>        KV store backend: file, etcd, mem (default: file)
+  --discovery-backend <backend> Discovery backend: kubernetes, etcd, file, mem (default: file)
 ```
 
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DYN_STORE_KV` | KV store backend: `file`, `etcd`, or `mem` | `file` |
+| `DYN_DISCOVERY_BACKEND` | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` | `file` |
 | `DYN_LOG` | Log level (debug, info, warn, error) | `info` |
 | `DYN_HTTP_PORT` | Frontend HTTP port | `8000` |
-| `ETCD_ENDPOINTS` | etcd connection URL (only when `--store-kv etcd`) | `http://localhost:2379` |
+| `ETCD_ENDPOINTS` | etcd connection URL (only when `--discovery-backend etcd`) | `http://localhost:2379` |
 | `NATS_SERVER` | NATS connection URL (only for distributed mode) | `nats://localhost:4222` |
 
 ## Adding Your Own Models

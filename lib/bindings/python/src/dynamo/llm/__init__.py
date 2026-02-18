@@ -29,11 +29,16 @@ from dynamo._core import RouterMode as RouterMode
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import ZmqKvEventListener as ZmqKvEventListener
 from dynamo._core import compute_block_hash_for_seq as compute_block_hash_for_seq
-from dynamo._core import fetch_llm as fetch_llm
+from dynamo._core import fetch_model as fetch_model
 from dynamo._core import lora_name_to_id as lora_name_to_id
 from dynamo._core import make_engine
-from dynamo._core import register_llm as register_llm
+from dynamo._core import register_model as register_model
 from dynamo._core import run_input
-from dynamo._core import unregister_llm as unregister_llm
+from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError
+
+# Backward-compatible aliases
+fetch_llm = fetch_model
+register_llm = register_model
+unregister_llm = unregister_model
