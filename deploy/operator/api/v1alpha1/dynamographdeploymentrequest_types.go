@@ -29,7 +29,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -95,6 +94,19 @@ type ProfilingConfigSpec struct {
 	// +kubebuilder:validation:Optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
+
+// +kubebuilder:validation:Enum=initializing;pending;profiling;deploying;ready;deployment_deleted;failed
+type DGDRState string
+
+const (
+	DGDRStateInitializing       DGDRState = "initializing"
+	DGDRStatePending            DGDRState = "pending"
+	DGDRStateProfiling          DGDRState = "profiling"
+	DGDRStateDeploying          DGDRState = "deploying"
+	DGDRStateReady              DGDRState = "ready"
+	DGDRStateDeploymentDeleted  DGDRState = "deployment_deleted"
+	DGDRStateFailed             DGDRState = "failed"
+)
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
 // When autoApply is enabled, these overrides are applied to the generated DGD resource.
@@ -209,9 +221,8 @@ type DeploymentStatus struct {
 // The controller updates this status as the DGDR progresses through its lifecycle.
 type DynamoGraphDeploymentRequestStatus struct {
 	// State is a high-level textual status of the deployment request lifecycle.
-	// Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"
-	// Empty string ("") represents the initial state before initialization.
-	State string `json:"state,omitempty"`
+	// +kubebuilder:default=initializing
+	State DGDRState `json:"state"`
 
 	// Backend is extracted from profilingConfig.config.engine.backend for display purposes.
 	// This field is populated by the controller and shown in kubectl output.
@@ -253,12 +264,12 @@ type DynamoGraphDeploymentRequestStatus struct {
 // specific performance and resource constraints, enabling SLA-driven deployments.
 //
 // Lifecycle:
-//  1. Initial → Pending: Validates spec and prepares for profiling
-//  2. Pending → Profiling: Creates and runs profiling job (online or AIC)
-//  3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
-//  4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
-//  5. Ready: Terminal state when DGD is operational or spec is available
-//  6. DeploymentDeleted: Terminal state when auto-created DGD is manually deleted
+//  1. initializing → pending: Validates spec and prepares for profiling
+//  2. pending → profiling: Creates and runs profiling job (online or AIC)
+//  3. profiling → ready/deploying: Generates DGD spec after profiling completes
+//  4. deploying → ready: When autoApply=true, monitors DGD until Ready
+//  5. ready: Terminal state when DGD is operational or spec is available
+//  6. deployment_deleted: Terminal state when auto-created DGD is manually deleted
 //
 // The spec becomes immutable once profiling starts. Users must delete and recreate
 // the DGDR to modify configuration after this point.
@@ -283,16 +294,13 @@ type DynamoGraphDeploymentRequest struct {
 }
 
 // SetState updates the State field in the DGDR status.
-func (s *DynamoGraphDeploymentRequest) SetState(state string) {
+func (s *DynamoGraphDeploymentRequest) SetState(state DGDRState) {
 	s.Status.State = state
 }
 
 // GetState returns the current lifecycle state
 func (d *DynamoGraphDeploymentRequest) GetState() string {
-	if d.Status.State == "" {
-		return consts.ResourceStateUnknown
-	}
-	return d.Status.State
+	return string(d.Status.State)
 }
 
 // GetSpec returns the spec of this DGDR as a generic interface.

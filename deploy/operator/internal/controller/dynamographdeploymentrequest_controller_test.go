@@ -140,7 +140,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Check status
-			Eventually(func() string {
+			Eventually(func() nvidiacomv1alpha1.DGDRState {
 				var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
 				return updated.Status.State
@@ -190,7 +190,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Check status transitions to Pending (not Failed)
-			Eventually(func() string {
+			Eventually(func() nvidiacomv1alpha1.DGDRState {
 				var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
 				return updated.Status.State

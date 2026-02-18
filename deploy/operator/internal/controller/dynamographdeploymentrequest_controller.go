@@ -53,14 +53,14 @@ import (
 )
 
 const (
-	// DGDR state constants
-	DGDRStateEmpty             = ""
-	DGDRStatePending           = "Pending"
-	DGDRStateProfiling         = "Profiling"
-	DGDRStateDeploying         = "Deploying"
-	DGDRStateReady             = "Ready"
-	DGDRStateDeploymentDeleted = "DeploymentDeleted"
-	DGDRStateFailed            = "Failed"
+	// DGDR state constants - use typed enum from API types
+	DGDRStateInitializing      = nvidiacomv1alpha1.DGDRStateInitializing
+	DGDRStatePending           = nvidiacomv1alpha1.DGDRStatePending
+	DGDRStateProfiling         = nvidiacomv1alpha1.DGDRStateProfiling
+	DGDRStateDeploying         = nvidiacomv1alpha1.DGDRStateDeploying
+	DGDRStateReady             = nvidiacomv1alpha1.DGDRStateReady
+	DGDRStateDeploymentDeleted = nvidiacomv1alpha1.DGDRStateDeploymentDeleted
+	DGDRStateFailed            = nvidiacomv1alpha1.DGDRStateFailed
 
 	// Condition types
 	ConditionTypeValidation      = "Validation"
@@ -390,7 +390,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	}
 	// State machine: handle different states
 	switch dgdr.Status.State {
-	case DGDRStateEmpty:
+	case DGDRStateInitializing:
 		return r.handleInitialState(ctx, dgdr)
 	case DGDRStatePending:
 		return r.handlePendingState(ctx, dgdr)
@@ -1732,7 +1732,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent 
 }
 
 // updateStateAndRequeue updates the DGDR state and requeues
-func (r *DynamoGraphDeploymentRequestReconciler) updateStateAndRequeue(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, state, _ string) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) updateStateAndRequeue(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, state nvidiacomv1alpha1.DGDRState, _ string) (ctrl.Result, error) {
 	dgdr.Status.State = state
 	if err := r.Status().Update(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
@@ -1744,7 +1744,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updateStateAndRequeue(ctx conte
 func (r *DynamoGraphDeploymentRequestReconciler) updateStateWithCondition(
 	ctx context.Context,
 	dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest,
-	state string,
+	state nvidiacomv1alpha1.DGDRState,
 	conditionType string,
 	status metav1.ConditionStatus,
 	reason string,
