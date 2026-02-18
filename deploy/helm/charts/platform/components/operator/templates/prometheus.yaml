@@ -86,4 +86,32 @@ spec:
     matchLabels:
       nvidia.com/dynamo-component-type: planner
       nvidia.com/metrics-enabled: "true"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dynamo-router
+spec:
+  {{- if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchNames:
+    - {{ .Release.Namespace }}
+  {{- else }}
+  namespaceSelector:
+    any: true
+  {{- end }}
+  podMetricsEndpoints:
+  - interval: 5s
+    path: /metrics
+    targetPort: 9090
+    honorLabels: true
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+  selector:
+    matchLabels:
+      nvidia.com/dynamo-component-type: default
+      nvidia.com/metrics-enabled: "true"
 {{- end }}
