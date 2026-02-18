@@ -1187,6 +1187,17 @@ func GenerateBasePodSpec(
 	return &podSpec, nil
 }
 
+// toGroveTopologyConstraint converts a Dynamo TopologyConstraint to a Grove TopologyConstraint.
+// The domain names are the same strings in both APIs.
+func toGroveTopologyConstraint(tc *v1alpha1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
+	if tc == nil {
+		return nil
+	}
+	return &grovev1alpha1.TopologyConstraint{
+		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+	}
+}
+
 func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) {
 	// Convert user-provided metrics annotation into controller-managed label
 	// By default (no annotation), metrics are enabled
@@ -1264,6 +1275,10 @@ func GenerateGrovePodCliqueSet(
 		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
 	}
 
+	// Inject deployment-level topology constraint (PCS template).
+	// toGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
+	gangSet.Spec.Template.TopologyConstraint = toGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
+
 	// Validate kai-scheduler queue once if kai-scheduler is enabled
 	var validatedQueueName string
 	if controllerConfig.Grove.Enabled && controllerConfig.KaiScheduler.Enabled {
@@ -1338,6 +1353,13 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
+
+			// For single-node services, set topology constraint directly on the clique.
+			// For multinode services, the constraint goes on the PCSG instead;
+			// child cliques inherit from PCSG and should NOT have explicit constraints.
+			if !isMultinode {
+				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
+			}
 			labels, err := generateLabels(component, dynamoDeployment, serviceName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
@@ -1378,10 +1400,11 @@ func GenerateGrovePodCliqueSet(
 
 		if isMultinode {
 			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
-				Name:         strings.ToLower(serviceName),
-				CliqueNames:  cliqueNames,
-				Replicas:     component.Replicas,
-				MinAvailable: ptr.To(int32(1)),
+				Name:               strings.ToLower(serviceName),
+				CliqueNames:        cliqueNames,
+				Replicas:           component.Replicas,
+				MinAvailable:       ptr.To(int32(1)),
+				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			})
 		}
 	}

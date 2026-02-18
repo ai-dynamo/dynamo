@@ -45,7 +45,7 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: check
-check: generate manifests generate-api-docs
+check: generate manifests generate-api-docs generate-helm-docs
 	@echo "> Checking for uncommitted changes"
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "ERROR: Git tree is dirty after running validation steps."; \
@@ -341,6 +341,12 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
 	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
 	python3 docs/fix-api-anchors.py ../../docs/pages/kubernetes/api-reference.md
+
+HELM_CHART_DIR := ../helm/charts/platform
+
+.PHONY: generate-helm-docs
+generate-helm-docs: ## Generate Helm chart README from values.yaml and template
+	@$(MAKE) -C $(HELM_CHART_DIR) generate-helm-docs
 
 .PHONY: coverage
 coverage: test

@@ -64,7 +64,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 
 	// Create validator with manager for API group detection and perform validation
 	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr)
-	return validator.Validate(ctx)
+	return validator.Validate(ctx, false)
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
@@ -89,11 +89,11 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 		return nil, err
 	}
 
-	// Create validator with manager for API group detection and perform validation
+	// Create validator with manager for API group detection and perform validation.
+	// Pass isUpdate=true to skip the ClusterTopology CRD check — TAS fields are
+	// immutable, so domains were already validated at creation time.
 	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr)
-
-	// Validate stateless rules
-	warnings, err := validator.Validate(ctx)
+	warnings, err := validator.Validate(ctx, true)
 	if err != nil {
 		return warnings, err
 	}
