@@ -72,6 +72,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Completions,
     ModelType::Embedding,
     ModelType::Images,
+    ModelType::Audios,
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Prefill,
@@ -659,45 +660,60 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_images() {
-            // Case: Text + Images (e.g. vLLM-Omni, diffusion models)
-            // Takes text prompts as input, generates images. Images models also support
-            // chat completions (see model_type.rs as_endpoint_types).
-            let images_router = PushRouter::<
-                NvCreateImageRequest,
-                Annotated<NvImagesResponse>,
-            >::from_client_with_threshold(
-                client.clone(), self.router_config.router_mode, None, None
-            )
-            .await?;
-            self.manager
-                .add_images_model(card.name(), checksum, Arc::new(images_router))?;
+        }
+        // Case: Text + (Images, Audio, Videos)
+        else if card.model_input == ModelInput::Text
+            && (card.model_type.supports_images()
+                || card.model_type.supports_audios()
+                || card.model_type.supports_videos())
+        {
+            // Image Models can support chat completions (vllm omni way)
+            // So register chat_completions model as well
+            if card.model_type.supports_chat() {
+                let chat_router = PushRouter::<
+                    NvCreateChatCompletionRequest,
+                    Annotated<NvCreateChatCompletionStreamResponse>,
+                >::from_client_with_threshold(
+                    client.clone(),
+                    self.router_config.router_mode,
+                    None,
+                    None,
+                )
+                .await?;
+                self.manager.add_chat_completions_model(
+                    card.name(),
+                    checksum,
+                    Arc::new(chat_router),
+                )?;
+            }
 
-            let chat_router = PushRouter::<
-                NvCreateChatCompletionRequest,
-                Annotated<NvCreateChatCompletionStreamResponse>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
-            )
-            .await?;
-            self.manager.add_chat_completions_model(
-                card.name(),
-                checksum,
-                Arc::new(chat_router),
-            )?;
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_videos() {
-            // Case: Text + Videos (video generation models)
-            // Takes text prompts as input, generates videos
-            let push_router = PushRouter::<
-                NvCreateVideoRequest,
-                Annotated<NvVideosResponse>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
-            )
-            .await?;
-            let engine = Arc::new(push_router);
-            self.manager
-                .add_videos_model(card.name(), checksum, engine)?;
+            // This is ModelType::Images : registers /v1/images/* endpoints
+            if card.model_type.supports_images() {
+                let images_router = PushRouter::<
+                    NvCreateImageRequest,
+                    Annotated<NvImagesResponse>,
+                >::from_client_with_threshold(
+                    client.clone(), self.router_config.router_mode, None, None
+                )
+                .await?;
+                self.manager
+                    .add_images_model(card.name(), checksum, Arc::new(images_router))?;
+            }
+
+            // This is ModelType::Videos : registers /v1/videos/* endpoints
+            if card.model_type.supports_videos() {
+                let videos_router = PushRouter::<
+                    NvCreateVideoRequest,
+                    Annotated<NvVideosResponse>,
+                >::from_client_with_threshold(
+                    client.clone(), self.router_config.router_mode, None, None
+                )
+                .await?;
+                self.manager
+                    .add_videos_model(card.name(), checksum, Arc::new(videos_router))?;
+            }
+
+            // TODO: add audio models support
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens

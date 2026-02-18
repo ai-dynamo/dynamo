@@ -3,12 +3,13 @@
 
 """Dynamo runtime configuration ArgGroup."""
 
-from typing import Optional
+from typing import List, Optional
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.utils.output_modalities import OutputModality
 
 
 class DynamoRuntimeConfig(ConfigBase):
@@ -29,10 +30,25 @@ class DynamoRuntimeConfig(ConfigBase):
     endpoint_types: str
     dump_config_to: Optional[str] = None
     multimodal_embedding_cache_capacity_gb: float
+    output_modalities: List[str]
 
     def validate(self) -> None:
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events
+        self._validate_output_modalities()
+
+    def _validate_output_modalities(self) -> None:
+        """Validate --output-modalities values."""
+        if not self.output_modalities:
+            return
+        valid = OutputModality.valid_names()
+        normalized = [m.lower() for m in self.output_modalities]
+        invalid = [m for m in normalized if m not in valid]
+        if invalid:
+            raise ValueError(
+                f"Invalid output modality: {', '.join(invalid)}. "
+                f"Valid options are: {', '.join(sorted(valid))}"
+            )
 
 
 # For simplicity, we do not prepend "dyn-" unless it's absolutely necessary. These are
@@ -58,7 +74,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--endpoint",
             env_var="DYN_ENDPOINT",
             default=None,
-            help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: dyn://dynamo.backend.generate. Currently used only by TRT-LLM and SGLang backends.",
+            help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: dyn://dynamo.backend.generate.",
         )
         add_argument(
             g,
@@ -150,4 +166,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=0,
             arg_type=float,
             help="Capacity of the multimodal embedding cache in GB. 0 = disabled.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--output-modalities",
+            env_var="DYN_OUTPUT_MODALITIES",
+            default=["text"],
+            help="Output modalities for omni/diffusion mode (e.g., --output-modalities text image audio video).",
+            nargs="*",
         )
