@@ -130,6 +130,8 @@ runs:
         fi
         if [ "${{ inputs.use_sccache }}" == "true" ]; then
           EXTRA_ARGS+=" --build-arg USE_SCCACHE=true"
+          EXTRA_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_S3_BUCKET}"
+          EXTRA_ARGS+=" --build-arg SCCACHE_REGION=${AWS_DEFAULT_REGION}"
         fi
         if [ "${{ inputs.push_image }}" == "true" ]; then
           EXTRA_ARGS+=" --push"

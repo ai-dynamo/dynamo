@@ -63,13 +63,35 @@ install_sccache() {
     # The real compiler path is passed at runtime via SCCACHE_CC_REAL / SCCACHE_CXX_REAL.
     cat > /usr/local/bin/sccache-cc <<'WRAPPER'
 #!/bin/sh
-exec sccache "${SCCACHE_CC_REAL:-gcc}" "$@"
+if [ -z "${_SCCACHE_CHECKED+x}" ]; then
+    if sccache --start-server >/dev/null 2>&1 || sccache --show-stats >/dev/null 2>&1; then
+        export _SCCACHE_CHECKED=ok
+    else
+        export _SCCACHE_CHECKED=fail
+    fi
+fi
+if [ "$_SCCACHE_CHECKED" = "ok" ]; then
+    exec sccache "${SCCACHE_CC_REAL:-gcc}" "$@"
+else
+    exec "${SCCACHE_CC_REAL:-gcc}" "$@"
+fi
 WRAPPER
     chmod +x /usr/local/bin/sccache-cc
 
     cat > /usr/local/bin/sccache-cxx <<'WRAPPER'
 #!/bin/sh
-exec sccache "${SCCACHE_CXX_REAL:-g++}" "$@"
+if [ -z "${_SCCACHE_CHECKED+x}" ]; then
+    if sccache --start-server >/dev/null 2>&1 || sccache --show-stats >/dev/null 2>&1; then
+        export _SCCACHE_CHECKED=ok
+    else
+        export _SCCACHE_CHECKED=fail
+    fi
+fi
+if [ "$_SCCACHE_CHECKED" = "ok" ]; then
+    exec sccache "${SCCACHE_CXX_REAL:-g++}" "$@"
+else
+    exec "${SCCACHE_CXX_REAL:-g++}" "$@"
+fi
 WRAPPER
     chmod +x /usr/local/bin/sccache-cxx
 
