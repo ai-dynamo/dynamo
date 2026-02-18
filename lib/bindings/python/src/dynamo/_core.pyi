@@ -76,7 +76,8 @@ class DistributedRuntime:
             Endpoint: The requested endpoint
 
         Raises:
-            ValueError: If path format is invalid
+            ValueError: If path format is invalid (not 3 parts separated by dots)
+            Exception: If namespace or component creation fails
 
         Example:
             endpoint = runtime.endpoint("demo.backend.generate")
@@ -235,9 +236,14 @@ class Endpoint:
         Returns:
             Component: The parent component
 
+        Note:
+            To avoid duplicate metrics registries, reuse the returned Component for
+            multiple endpoints: component.endpoint("ep1"), component.endpoint("ep2")
+
         Example:
             endpoint = runtime.endpoint("demo.backend.generate")
-            component = endpoint.component()  # Get parent component
+            component = endpoint.component()
+            health_endpoint = component.endpoint("health")  # Reuse component
         """
         ...
 

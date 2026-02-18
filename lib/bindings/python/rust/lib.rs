@@ -657,8 +657,8 @@ impl DistributedRuntime {
 
     /// Get an endpoint directly by path (e.g., "namespace.component.endpoint" or "dyn://...").
     fn endpoint(&self, path: String) -> PyResult<Endpoint> {
-        let path = path.trim_start_matches("dyn://");
-        let parts: Vec<&str> = path.split('.').collect();
+        let trimmed_path = path.trim_start_matches("dyn://");
+        let parts: Vec<&str> = trimmed_path.split('.').collect();
 
         if parts.len() != 3 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -939,6 +939,9 @@ impl Endpoint {
     }
 
     /// Get the parent Component.
+    ///
+    /// Note: To avoid duplicate metrics registries, reuse the returned Component for
+    /// multiple endpoints: `component.endpoint("ep1")`, `component.endpoint("ep2")`.
     fn component(&self) -> Component {
         Component {
             inner: self.inner.component().clone(),

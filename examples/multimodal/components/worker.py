@@ -438,10 +438,8 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    clear_endpoint = runtime.endpoint(
-        f"{config.namespace}.{config.component}.clear_kv_blocks"
-    )
     component = generate_endpoint.component()
+    clear_endpoint = component.endpoint("clear_kv_blocks")
 
     if args.worker_type in ["prefill", "encode_prefill"]:
         handler: VllmBaseWorker = VllmPDWorker(
