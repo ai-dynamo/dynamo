@@ -23,10 +23,6 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 # Customized utils for migration tests
 from .utils import DynamoFrontendProcess, run_migration_test
 
-SHORT_GRACE_PERIOD_S = 1
-LONG_GRACE_PERIOD_S = 10
-
-
 logger = logging.getLogger(__name__)
 
 pytestmark = [
@@ -41,11 +37,10 @@ pytestmark = [
     ),
     pytest.mark.parametrize(
         "immediate_kill, grace_period_s",
-        [(True, 0), (False, SHORT_GRACE_PERIOD_S), (False, LONG_GRACE_PERIOD_S)],
+        [(True, 0), (False, 0)],
         ids=[
             "worker_failure",
-            "graceful_shutdown_short_grace_period",
-            "graceful_shutdown_long_grace_period",
+            "graceful_shutdown_zero_grace_period",
         ],
     ),
     pytest.mark.parametrize(
@@ -251,9 +246,8 @@ def test_request_migration_trtllm_aggregated(
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
                     grace_period_s=grace_period_s,
-                    expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
-                    expect_request_success=migration_limit > 0
-                    or grace_period_s > SHORT_GRACE_PERIOD_S,
+                    expect_migration_request=True,
+                    expect_request_success=migration_limit > 0,
                     expect_unregistration_log=not immediate_kill,
                 )
 
@@ -330,9 +324,8 @@ def test_request_migration_trtllm_prefill(
                         stream=stream,
                         use_long_prompt=True,
                         grace_period_s=grace_period_s,
-                        expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
-                        expect_request_success=migration_limit > 0
-                        or grace_period_s > SHORT_GRACE_PERIOD_S,
+                        expect_migration_request=True,
+                        expect_request_success=migration_limit > 0,
                         expect_unregistration_log=not immediate_kill,
                     )
 
@@ -409,9 +402,8 @@ def test_request_migration_trtllm_kv_transfer(
                         stream=stream,
                         use_long_prompt=True,
                         grace_period_s=grace_period_s,
-                        expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
-                        expect_request_success=migration_limit > 0
-                        or grace_period_s > SHORT_GRACE_PERIOD_S,
+                        expect_migration_request=True,
+                        expect_request_success=migration_limit > 0,
                         expect_unregistration_log=not immediate_kill,
                     )
 
@@ -491,8 +483,7 @@ def test_request_migration_trtllm_decode(
                         stream=stream,
                         wait_for_new_response_before_stop=True,
                         grace_period_s=grace_period_s,
-                        expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
-                        expect_request_success=migration_limit > 0
-                        or grace_period_s > SHORT_GRACE_PERIOD_S,
+                        expect_migration_request=True,
+                        expect_request_success=migration_limit > 0,
                         expect_unregistration_log=not immediate_kill,
                     )

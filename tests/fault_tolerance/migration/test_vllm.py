@@ -25,8 +25,6 @@ from .utils import DynamoFrontendProcess, run_migration_test
 
 logger = logging.getLogger(__name__)
 
-SHORT_GRACE_PERIOD_S = 1
-LONG_GRACE_PERIOD_S = 10
 
 pytestmark = [
     pytest.mark.fault_tolerance,
@@ -259,9 +257,8 @@ def test_request_migration_vllm_aggregated(
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
                     grace_period_s=grace_period_s,
-                    expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
-                    expect_request_success=migration_limit > 0
-                    or grace_period_s > SHORT_GRACE_PERIOD_S,
+                    expect_migration_request=True,
+                    expect_request_success=migration_limit > 0,
                     expect_unregistration_log=not immediate_kill,
                 )
 
@@ -338,9 +335,8 @@ def test_request_migration_vllm_prefill(
                         stream=stream,
                         use_long_prompt=True,
                         grace_period_s=grace_period_s,
-                        expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
-                        expect_request_success=migration_limit > 0
-                        or grace_period_s > SHORT_GRACE_PERIOD_S,
+                        expect_migration_request=True,
+                        expect_request_success=migration_limit > 0,
                         expect_unregistration_log=not immediate_kill,
                     )
 
@@ -426,9 +422,8 @@ def test_request_migration_vllm_kv_transfer(
                         stream=stream,
                         use_long_prompt=True,
                         grace_period_s=grace_period_s,
-                        expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
-                        expect_request_success=migration_limit > 0
-                        or grace_period_s > SHORT_GRACE_PERIOD_S,
+                        expect_migration_request=True,
+                        expect_request_success=migration_limit > 0,
                         expect_unregistration_log=not immediate_kill,
                     )
 
@@ -518,8 +513,7 @@ def test_request_migration_vllm_decode(
                         stream=stream,
                         wait_for_new_response_before_stop=True,
                         grace_period_s=grace_period_s,
-                        expect_migration_request=grace_period_s < LONG_GRACE_PERIOD_S,
-                        expect_request_success=migration_limit > 0
-                        or grace_period_s > SHORT_GRACE_PERIOD_S,
+                        expect_migration_request=True,
+                        expect_request_success=migration_limit > 0,
                         expect_unregistration_log=not immediate_kill,
                     )

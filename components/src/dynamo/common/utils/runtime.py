@@ -11,9 +11,8 @@ Provides:
 """
 
 import asyncio
-import logging
 import os
-from typing import Optional, Tuple
+from typing import Tuple
 
 from dynamo.runtime import DistributedRuntime
 
@@ -42,30 +41,11 @@ def parse_endpoint(endpoint: str) -> Tuple[str, str, str]:
     return namespace, component, endpoint_name
 
 
-async def graceful_shutdown(
-    runtime: DistributedRuntime,
-    shutdown_event: Optional[asyncio.Event] = None,
-) -> None:
-    """Shutdown DistributedRuntime with optional event signaling.
-
-    Args:
-        runtime: The DistributedRuntime instance to shut down.
-        shutdown_event: Optional event to set before shutting down,
-            signaling in-flight handlers to finish.
-    """
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    if shutdown_event is not None:
-        shutdown_event.set()
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
-
-
 def create_runtime(
     discovery_backend: str,
     request_plane: str,
     event_plane: str,
     use_kv_events: bool,
-    shutdown_event: Optional[asyncio.Event] = None,
 ) -> Tuple[DistributedRuntime, asyncio.AbstractEventLoop]:
     """Create a DistributedRuntime.
 
@@ -77,7 +57,6 @@ def create_runtime(
         request_plane: Request distribution method (nats, http, tcp).
         event_plane: Event publishing method (nats, zmq).
         use_kv_events: Whether KV events are enabled.
-        shutdown_event: Optional event to set on shutdown signal.
 
     Returns:
         Tuple of (runtime, event_loop).

@@ -36,16 +36,11 @@ pytestmark = [
         "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
     ),
     pytest.mark.parametrize(
-        "immediate_kill",
-        [
-            pytest.param(True, id="worker_failure"),
-            pytest.param(
-                False,
-                id="graceful_shutdown",
-                marks=pytest.mark.xfail(
-                    strict=False, reason="SGLang graceful shutdown not yet implemented"
-                ),
-            ),
+        "immediate_kill, grace_period_s",
+        [(True, 0), (False, 0)],
+        ids=[
+            "worker_failure",
+            "graceful_shutdown_zero_grace_period",
         ],
     ),
     pytest.mark.parametrize(
@@ -91,6 +86,7 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
+        grace_period_s: int,
         disagg_mode: str | None = None,
     ):
         self.worker_id = worker_id
@@ -140,6 +136,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
 
         env["DYN_LOG"] = "debug"
+        env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = str(grace_period_s)
         # Disable canary health check - these tests expect full control over requests
         # sent to the workers where canary health check intermittently sends dummy
         # requests to workers interfering with the test process which may cause
@@ -214,6 +211,7 @@ def test_request_migration_sglang_aggregated(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    grace_period_s,
     immediate_kill,
     request_api,
     stream,
@@ -233,13 +231,19 @@ def test_request_migration_sglang_aggregated(
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers
-        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
+        with DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            grace_period_s=grace_period_s,
+        ) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
             with DynamoWorkerProcess(
                 request,
                 "worker2",
                 frontend.frontend_port,
+                grace_period_s=grace_period_s,
             ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
@@ -253,6 +257,7 @@ def test_request_migration_sglang_aggregated(
                     immediate_kill=immediate_kill,
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
+                    grace_period_s=grace_period_s,
                 )
 
 
@@ -265,6 +270,7 @@ def test_request_migration_sglang_prefill(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    grace_period_s,
     immediate_kill,
     request_api,
     stream,
@@ -292,6 +298,7 @@ def test_request_migration_sglang_prefill(
             request,
             "worker0",
             frontend.frontend_port,
+            grace_period_s=grace_period_s,
             disagg_mode="decode",
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
@@ -301,6 +308,7 @@ def test_request_migration_sglang_prefill(
                 request,
                 "worker1",
                 frontend.frontend_port,
+                grace_period_s=grace_period_s,
                 disagg_mode="prefill",
             ) as prefill1:
                 logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
@@ -309,6 +317,7 @@ def test_request_migration_sglang_prefill(
                     request,
                     "worker2",
                     frontend.frontend_port,
+                    grace_period_s=grace_period_s,
                     disagg_mode="prefill",
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
@@ -324,6 +333,7 @@ def test_request_migration_sglang_prefill(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
+                        grace_period_s=grace_period_s,
                     )
 
 
@@ -335,6 +345,7 @@ def test_request_migration_sglang_kv_transfer(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    grace_period_s,
     immediate_kill,
     request_api,
     stream,
@@ -362,6 +373,7 @@ def test_request_migration_sglang_kv_transfer(
             request,
             "worker0",
             frontend.frontend_port,
+            grace_period_s=grace_period_s,
             disagg_mode="prefill",
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -371,6 +383,7 @@ def test_request_migration_sglang_kv_transfer(
                 request,
                 "worker1",
                 frontend.frontend_port,
+                grace_period_s=grace_period_s,
                 disagg_mode="decode",
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -379,6 +392,7 @@ def test_request_migration_sglang_kv_transfer(
                     request,
                     "worker2",
                     frontend.frontend_port,
+                    grace_period_s=grace_period_s,
                     disagg_mode="decode",
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
@@ -394,6 +408,7 @@ def test_request_migration_sglang_kv_transfer(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
+                        grace_period_s=grace_period_s,
                     )
 
 
@@ -404,6 +419,7 @@ def test_request_migration_sglang_decode(
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    grace_period_s,
     immediate_kill,
     request_api,
     stream,
@@ -435,6 +451,7 @@ def test_request_migration_sglang_decode(
             request,
             "worker0",
             frontend.frontend_port,
+            grace_period_s=grace_period_s,
             disagg_mode="prefill",
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -444,6 +461,7 @@ def test_request_migration_sglang_decode(
                 request,
                 "worker1",
                 frontend.frontend_port,
+                grace_period_s=grace_period_s,
                 disagg_mode="decode",
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -452,6 +470,7 @@ def test_request_migration_sglang_decode(
                     request,
                     "worker2",
                     frontend.frontend_port,
+                    grace_period_s=grace_period_s,
                     disagg_mode="decode",
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
@@ -467,4 +486,5 @@ def test_request_migration_sglang_decode(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         wait_for_new_response_before_stop=True,
+                        grace_period_s=grace_period_s,
                     )

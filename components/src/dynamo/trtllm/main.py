@@ -37,7 +37,6 @@ async def worker():
         request_plane=config.request_plane,
         event_plane=config.event_plane,
         use_kv_events=config.use_kv_events,
-        shutdown_event=shutdown_event,
     )
 
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
