@@ -298,6 +298,7 @@ class BasePlanner:
                 or PrometheusAPIClient(
                     config.metric_pulling_prometheus_endpoint,
                     config.namespace,
+                    metrics_source=config.throughput_metrics_source,
                 )
             )
 
