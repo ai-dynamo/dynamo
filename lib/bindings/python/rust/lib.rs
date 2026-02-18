@@ -941,17 +941,6 @@ impl Endpoint {
 }
 
 #[pymethods]
-impl Namespace {
-    fn component(&self, name: String) -> PyResult<Component> {
-        let inner = self.inner.component(name).map_err(to_pyerr)?;
-        Ok(Component {
-            inner,
-            event_loop: self.event_loop.clone(),
-        }
-    }
-}
-
-#[pymethods]
 impl ModelCardInstanceId {
     // (namespace, component, endpoint)
     // TODO: Can these be borrowed as &str?
