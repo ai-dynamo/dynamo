@@ -89,22 +89,19 @@ impl PinnedStorage {
                     .allocate_pinned_for_gpu(len, gpu_id)
                     .map_err(StorageError::AllocationFailed)? as usize
             }
-            _ => {
-                unsafe {
-                    ctx.bind_to_thread().map_err(StorageError::Cuda)?;
+            _ => unsafe {
+                ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-                    let ptr =
-                        cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_DEVICEMAP)
-                            .map_err(StorageError::Cuda)?;
+                let ptr = cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_DEVICEMAP)
+                    .map_err(StorageError::Cuda)?;
 
-                    let ptr = ptr as *mut u8;
-                    assert!(!ptr.is_null(), "Failed to allocate pinned memory");
-                    assert!(ptr.is_aligned(), "Pinned memory is not aligned");
-                    assert!(len < isize::MAX as usize);
+                let ptr = ptr as *mut u8;
+                assert!(!ptr.is_null(), "Failed to allocate pinned memory");
+                assert!(ptr.is_aligned(), "Pinned memory is not aligned");
+                assert!(len < isize::MAX as usize);
 
-                    ptr as usize
-                }
-            }
+                ptr as usize
+            },
         };
 
         Ok(Self { ptr, len, ctx })
