@@ -59,7 +59,7 @@ spec:
             specific performance and resource constraints, enabling SLA-driven deployments.
 
             Lifecycle:
-             1. Initial → Pending: Validates spec and prepares for profiling
+             1. Initializing → Pending: Validates spec and prepares for profiling
              2. Pending → Profiling: Creates and runs profiling job (online or AIC)
              3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
              4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
@@ -422,10 +422,18 @@ spec:
                       description: Namespace is the namespace of the created DynamoGraphDeployment.
                       type: string
                     state:
+                      default: initializing
                       description: |-
                         State is the current state of the DynamoGraphDeployment.
                         This value is mirrored from the DGD's status.state field.
+                      enum:
+                        - initializing
+                        - pending
+                        - successful
+                        - failed
                       type: string
+                  required:
+                    - state
                   type: object
                 generatedDeployment:
                   description: |-
@@ -449,11 +457,19 @@ spec:
                     Format: "configmap/\<name\>"
                   type: string
                 state:
-                  description: |-
-                    State is a high-level textual status of the deployment request lifecycle.
-                    Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"
-                    Empty string ("") represents the initial state before initialization.
+                  default: Initializing
+                  description: State is a high-level textual status of the deployment request lifecycle.
+                  enum:
+                    - Initializing
+                    - Pending
+                    - Profiling
+                    - Deploying
+                    - Ready
+                    - DeploymentDeleted
+                    - Failed
                   type: string
+              required:
+                - state
               type: object
           type: object
       served: true

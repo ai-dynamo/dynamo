@@ -20,14 +20,14 @@ import uvloop
 
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.trtllm.utils.trtllm_utils import cmd_line_args
+from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.workers import init_worker
 
 configure_dynamo_logging()
 
 
 async def worker():
-    config = cmd_line_args()
+    config = parse_args()
 
     shutdown_event = asyncio.Event()
     runtime, _ = create_runtime(

@@ -1,0 +1,268 @@
+{
+  "$defs": {
+    "PlannerPreDeploymentSweepMode": {
+      "enum": [
+        "none",
+        "rapid",
+        "thorough"
+      ],
+      "title": "PlannerPreDeploymentSweepMode",
+      "type": "string"
+    }
+  },
+  "description": "Pydantic configuration for the Dynamo Planner.\n\nReplaces the argparse-based CLI. All fields mirror the former CLI flags\nwith defaults sourced from SLAPlannerDefaults.",
+  "properties": {
+    "plannerPreDeploymentSweeping": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlannerPreDeploymentSweepMode"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "rapid",
+      "description": "PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling. \"none\" means no pre-deployment sweep (only load-based scaling). \"rapid\" uses AI Configurator to simulate engine performance. \"thorough\" uses real GPUs to measure engine performance (takes several hours)."
+    },
+    "environment": {
+      "default": "kubernetes",
+      "enum": [
+        "kubernetes",
+        "virtual",
+        "global-planner"
+      ],
+      "title": "Environment",
+      "type": "string"
+    },
+    "namespace": {
+      "title": "Namespace",
+      "type": "string"
+    },
+    "backend": {
+      "default": "vllm",
+      "enum": [
+        "vllm",
+        "sglang",
+        "trtllm",
+        "mocker"
+      ],
+      "title": "Backend",
+      "type": "string"
+    },
+    "mode": {
+      "default": "disagg",
+      "enum": [
+        "disagg",
+        "prefill",
+        "decode",
+        "agg"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "no_operation": {
+      "default": false,
+      "title": "No Operation",
+      "type": "boolean"
+    },
+    "log_dir": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Log Dir"
+    },
+    "throughput_adjustment_interval": {
+      "default": 180,
+      "title": "Throughput Adjustment Interval",
+      "type": "integer"
+    },
+    "max_gpu_budget": {
+      "default": 8,
+      "title": "Max Gpu Budget",
+      "type": "integer"
+    },
+    "min_endpoint": {
+      "default": 1,
+      "title": "Min Endpoint",
+      "type": "integer"
+    },
+    "decode_engine_num_gpu": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Decode Engine Num Gpu"
+    },
+    "prefill_engine_num_gpu": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Prefill Engine Num Gpu"
+    },
+    "profile_results_dir": {
+      "default": "profiling_results",
+      "title": "Profile Results Dir",
+      "type": "string"
+    },
+    "ttft": {
+      "default": 500.0,
+      "title": "Ttft",
+      "type": "number"
+    },
+    "itl": {
+      "default": 50.0,
+      "title": "Itl",
+      "type": "number"
+    },
+    "load_predictor": {
+      "default": "arima",
+      "title": "Load Predictor",
+      "type": "string"
+    },
+    "load_predictor_log1p": {
+      "default": false,
+      "title": "Load Predictor Log1P",
+      "type": "boolean"
+    },
+    "prophet_window_size": {
+      "default": 50,
+      "title": "Prophet Window Size",
+      "type": "integer"
+    },
+    "load_predictor_warmup_trace": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Load Predictor Warmup Trace"
+    },
+    "kalman_q_level": {
+      "default": 1.0,
+      "title": "Kalman Q Level",
+      "type": "number"
+    },
+    "kalman_q_trend": {
+      "default": 0.1,
+      "title": "Kalman Q Trend",
+      "type": "number"
+    },
+    "kalman_r": {
+      "default": 10.0,
+      "title": "Kalman R",
+      "type": "number"
+    },
+    "kalman_min_points": {
+      "default": 5,
+      "title": "Kalman Min Points",
+      "type": "integer"
+    },
+    "metric_pulling_prometheus_endpoint": {
+      "title": "Metric Pulling Prometheus Endpoint",
+      "type": "string"
+    },
+    "metric_reporting_prometheus_port": {
+      "title": "Metric Reporting Prometheus Port",
+      "type": "integer"
+    },
+    "no_correction": {
+      "default": false,
+      "title": "No Correction",
+      "type": "boolean"
+    },
+    "model_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Name"
+    },
+    "global_planner_namespace": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Global Planner Namespace"
+    },
+    "enable_throughput_scaling": {
+      "default": true,
+      "title": "Enable Throughput Scaling",
+      "type": "boolean"
+    },
+    "enable_load_scaling": {
+      "default": false,
+      "title": "Enable Load Scaling",
+      "type": "boolean"
+    },
+    "load_router_metrics_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Load Router Metrics Url"
+    },
+    "load_adjustment_interval": {
+      "default": 5,
+      "title": "Load Adjustment Interval",
+      "type": "integer"
+    },
+    "load_learning_window": {
+      "default": 50,
+      "title": "Load Learning Window",
+      "type": "integer"
+    },
+    "load_scaling_down_sensitivity": {
+      "default": 80,
+      "title": "Load Scaling Down Sensitivity",
+      "type": "integer"
+    },
+    "load_metric_samples": {
+      "default": 10,
+      "title": "Load Metric Samples",
+      "type": "integer"
+    },
+    "load_min_observations": {
+      "default": 5,
+      "title": "Load Min Observations",
+      "type": "integer"
+    }
+  },
+  "title": "PlannerConfig",
+  "type": "object"
+}
