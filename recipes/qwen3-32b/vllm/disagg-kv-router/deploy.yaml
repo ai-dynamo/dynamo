@@ -40,26 +40,32 @@ spec:
       envFromSecret: hf-token-secret
       extraPodSpec:
         mainContainer:
-          args:
-          - --model
-          - Qwen/Qwen3-32B
-          - --tensor-parallel-size
-          - '2'
-          - --disable-log-requests
-          - --gpu-memory-utilization
-          - '0.90'
-          - --no-enable-prefix-caching
-          - --async-scheduling
-          - --block-size
-          - '64'
-          - --hf-overrides
-          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-          - --max-model-len
-          - '131072'
+          # UCX/NIXL RDMA-based KV cache transfers require unlimited locked memory.
+          # runAsUser 0 is needed so that IPC_LOCK and SYS_RESOURCE capabilities
+          # are effective (non-root users don't get effective capabilities).
+          # IPC_LOCK: allows the process to lock memory for RDMA buffers.
+          # SYS_RESOURCE: allows raising the memlock rlimit to unlimited at startup.
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
           command:
-          - python3
-          - -m
-          - dynamo.vllm
+          - /bin/bash
+          - -c
+          - >-
+            ulimit -l unlimited &&
+            exec python3 -m dynamo.vllm
+            --model Qwen/Qwen3-32B
+            --tensor-parallel-size 2
+            --disable-log-requests
+            --gpu-memory-utilization 0.90
+            --no-enable-prefix-caching
+            --async-scheduling
+            --block-size 64
+            --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+            --max-model-len 131072
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace
           env:
@@ -92,26 +98,32 @@ spec:
           prometheus.io/path: "/metrics"
       extraPodSpec:
         mainContainer:
-          args:
-          - --model
-          - Qwen/Qwen3-32B
-          - --is-prefill-worker
-          - --tensor-parallel-size
-          - '2'
-          - --disable-log-requests
-          - --gpu-memory-utilization
-          - '0.90'
-          - --async-scheduling
-          - --block-size
-          - '64'
-          - --hf-overrides
-          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-          - --max-model-len
-          - '131072'
+          # UCX/NIXL RDMA-based KV cache transfers require unlimited locked memory.
+          # runAsUser 0 is needed so that IPC_LOCK and SYS_RESOURCE capabilities
+          # are effective (non-root users don't get effective capabilities).
+          # IPC_LOCK: allows the process to lock memory for RDMA buffers.
+          # SYS_RESOURCE: allows raising the memlock rlimit to unlimited at startup.
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
           command:
-          - python3
-          - -m
-          - dynamo.vllm
+          - /bin/bash
+          - -c
+          - >-
+            ulimit -l unlimited &&
+            exec python3 -m dynamo.vllm
+            --model Qwen/Qwen3-32B
+            --is-prefill-worker
+            --tensor-parallel-size 2
+            --disable-log-requests
+            --gpu-memory-utilization 0.90
+            --async-scheduling
+            --block-size 64
+            --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+            --max-model-len 131072
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
