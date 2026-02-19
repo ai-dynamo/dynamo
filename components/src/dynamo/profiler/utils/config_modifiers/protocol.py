@@ -159,6 +159,11 @@ class BaseConfigModifier:
         """Configure decode engine limits. No-op by default; override in backends that need it."""
         return config
 
+    @classmethod
+    def normalize_output_service_names(cls, config_dict: dict) -> None:
+        """Rename service names in an output DGD config dict (in-place). No-op by default."""
+        pass
+
     # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
     WORKER_MODEL_PATH_ARG: str = "--model-path"
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"

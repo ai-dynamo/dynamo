@@ -207,18 +207,16 @@ def generate_prefill_decode_services_config_preview(
         best_decode_mapping=best_decode_mapping,
         num_gpus_per_node=num_gpus_per_node,
     )
-    prefill_service_name = _find_service_name_for_subcomponent(
-        config, SubComponentType.PREFILL
-    )
-    decode_service_name = _find_service_name_for_subcomponent(
-        config, SubComponentType.DECODE
-    )
     config_dict = config.model_dump(exclude_unset=False)
-    services = {
-        prefill_service_name: config_dict["spec"]["services"][prefill_service_name],
-        decode_service_name: config_dict["spec"]["services"][decode_service_name],
+    config_modifier.normalize_output_service_names(config_dict)
+    # Service names may have been renamed; select workers by subComponentType.
+    services = config_dict["spec"]["services"]
+    return {
+        svc_name: svc_val
+        for svc_name, svc_val in services.items()
+        if svc_val.get("subComponentType")
+        in (SubComponentType.PREFILL, SubComponentType.DECODE)
     }
-    return services
 
 
 def generate_dgd_config_with_planner(
@@ -295,6 +293,11 @@ def generate_dgd_config_with_planner(
     # because those fields are stored as "extra" and aren't exposed as pydantic attributes.
     planner_dict = planner_config.model_dump(exclude_unset=False)
     config_dict = config.model_dump(exclude_unset=False)
+
+    # Rename service names for deployability: Grove's 45-char limit for multinode services
+    # is len(DGD) + 2*len(service) + 4 <= 45. Long backend-specific names (e.g.,
+    # TRTLLMDecodeWorker, 18 chars) leave only 5 chars for the DGD name.
+    config_modifier.normalize_output_service_names(config_dict)
 
     config_map_obj: Optional[dict] = None
     prefill_json = None

@@ -65,6 +65,24 @@ class TrtllmConfigModifier(BaseConfigModifier):
         return update_image(config, image)
 
     @classmethod
+    def normalize_output_service_names(cls, config_dict: dict) -> None:
+        """Rename long TRTLLM service names to shorter names in output DGD configs (in-place).
+
+        Grove's 45-char naming limit for multinode services:
+            len(DGD) + 2*len(service) + 4 <= 45
+        TRTLLMDecodeWorker (18 chars) leaves only 5 chars for the DGD name.
+        DecodeWorker (12 chars) leaves 17 chars for the DGD name.
+        """
+        renames = {
+            "TRTLLMDecodeWorker": "DecodeWorker",
+            "TRTLLMPrefillWorker": "PrefillWorker",
+        }
+        services = config_dict.get("spec", {}).get("services", {})
+        for old_name, new_name in renames.items():
+            if old_name in services:
+                services[new_name] = services.pop(old_name)
+
+    @classmethod
     def convert_config(
         cls,
         config: dict,
@@ -81,19 +99,16 @@ class TrtllmConfigModifier(BaseConfigModifier):
             del cfg.spec.services["Planner"]
 
         # Rename services to shorter names to avoid Grove 45-char naming limit for multinode
-        # TRTLLMDecodeWorker (18 chars) -> dec (3 chars)
-        # TRTLLMPrefillWorker (18 chars) -> pre (3 chars)
-        old_decode_name = "TRTLLMDecodeWorker"
-        old_prefill_name = "TRTLLMPrefillWorker"
-        new_decode_name = "dec"
-        new_prefill_name = "pre"
-
-        if old_decode_name in cfg.spec.services:
-            cfg.spec.services[new_decode_name] = cfg.spec.services.pop(old_decode_name)
-        if old_prefill_name in cfg.spec.services:
-            cfg.spec.services[new_prefill_name] = cfg.spec.services.pop(
-                old_prefill_name
-            )
+        # TRTLLMDecodeWorker (18 chars) or DecodeWorker (12 chars) -> dec (3 chars)
+        # TRTLLMPrefillWorker (19 chars) or PrefillWorker (13 chars) -> pre (3 chars)
+        for old_decode_name in ("TRTLLMDecodeWorker", "DecodeWorker"):
+            if old_decode_name in cfg.spec.services:
+                cfg.spec.services["dec"] = cfg.spec.services.pop(old_decode_name)
+                break
+        for old_prefill_name in ("TRTLLMPrefillWorker", "PrefillWorker"):
+            if old_prefill_name in cfg.spec.services:
+                cfg.spec.services["pre"] = cfg.spec.services.pop(old_prefill_name)
+                break
 
         if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
