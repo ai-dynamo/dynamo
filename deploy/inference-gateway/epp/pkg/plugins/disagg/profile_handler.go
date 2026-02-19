@@ -30,7 +30,6 @@ import (
 )
 
 const (
-	// DisaggProfileHandlerType is the plugin type registered in the plugin registry.
 	DisaggProfileHandlerType = "disagg-profile-handler"
 )
 
@@ -60,12 +59,40 @@ func NewDisaggProfileHandler() *DisaggProfileHandler {
 
 // DisaggProfileHandler is a ProfileHandler that orchestrates prefill/decode disaggregated serving.
 //
+// # Disaggregated mode detection
+//
+// In Dynamo's native architecture, disaggregated mode is determined by whether prefill workers
+// actually exist at runtime (the is_disaggregated flag in the Rust KV router). However, the
+// GAIE EPP framework determines profile availability at configuration time, not at runtime.
+// To bridge this gap, DisaggProfileHandler uses the EPP profile mechanism as a proxy:
+// it checks whether a "prefill" scheduling profile is registered in the config. If prefill
+// workers are configured but none are actually running, the prefill profile's label-filter
+// will find zero pods, causing the profile to fail — and the handler gracefully degrades
+// to aggregated mode (see below).
+//
+// # Scheduling flow
+//
 // On each scheduling cycle it:
-//  1. Determines if prefill is enabled (by checking whether a "prefill" profile is registered).
-//  2. Writes a PrefillEnabledState into CycleState so scorers in both profiles can read it.
-//  3. If prefill is enabled: runs the "prefill" profile first, then the "decode" profile.
-//     The "decode" profile is designated as the primary (the pod the request is ultimately sent to).
-//  4. If prefill is not enabled: runs only the "decode" profile, which becomes the primary.
+//  1. Checks whether a "prefill" profile is registered in the config.
+//  2. Writes PrefillEnabledState into CycleState so scorer plugins can read it.
+//  3. If a prefill profile exists: runs the "prefill" profile first, then the "decode" profile.
+//     The "decode" profile is the primary (the pod the request is ultimately sent to).
+//  4. If no prefill profile exists: runs only the "decode" profile (pure aggregated mode).
+//
+// # Graceful degradation
+//
+// When a prefill profile is configured but no prefill workers are available at runtime,
+// the handler degrades gracefully to aggregated mode on a per-request basis:
+//
+//  1. Pick (iteration 1): prefill profile exists → writes PrefillEnabled=true → runs prefill profile.
+//  2. Prefill profile runs: label-filter finds 0 prefill pods → profile fails → result is nil.
+//  3. Pick (iteration 2): sees prefill result is nil → overwrites PrefillEnabled=false → runs decode profile.
+//  4. Decode scorer runs: reads PrefillEnabled=false → passes isDisaggregated=false to the Rust
+//     decode router → full KV cache overlap scoring is used (overlap_score_weight=1.0).
+//
+// This means the same YAML config works transparently for both aggregated and disaggregated
+// deployments. If prefill workers come up later, subsequent requests automatically use
+// disaggregated routing. If they go down, requests fall back to aggregated mode.
 type DisaggProfileHandler struct {
 	typedName plugins.TypedName
 }

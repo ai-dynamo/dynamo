@@ -17,8 +17,12 @@
 
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
+# This config uses the same disagg-profile-handler as disaggregated deployments.
+# With no "prefill" profile defined, the handler runs only the "decode" profile
+# and the decode scorer receives isDisaggregated=false, enabling full KV cache
+# overlap scoring for aggregated mode. Adding prefill workers and a prefill
+# profile would automatically switch to disaggregated routing.
 plugins:
-  # Disagg profile handler: works for both aggregated and disaggregated modes
   - type: disagg-profile-handler
 
   # Label filter: restricts pods to decode workers

@@ -47,16 +47,9 @@ import (
 
 func main() {
 	// Register Dynamo custom plugins:
-
-	// - label-filter: Filters pods by a configured label key/value pair
 	plugins.Register("label-filter", labelfilter.LabelFilterFactory)
-
-	// Disaggregated serving plugins (also handles aggregated mode transparently):
-	// - disagg-profile-handler: Orchestrates prefill→decode profile execution
 	plugins.Register(disagg.DisaggProfileHandlerType, disagg.DisaggProfileHandlerFactory)
-	// - dyn-prefill-scorer: Selects prefill workers via Dynamo FFI
 	plugins.Register(disagg.DynPrefillScorerType, disagg.DynPrefillScorerFactory)
-	// - dyn-decode-scorer: Selects decode workers via Dynamo FFI, handles request lifecycle
 	plugins.Register(disagg.DynDecodeScorerType, disagg.DynDecodeScorerFactory)
 
 	// Run using standard GAIE runner (it registers built-in plugins automatically)

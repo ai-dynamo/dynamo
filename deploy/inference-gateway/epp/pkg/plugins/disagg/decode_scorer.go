@@ -34,7 +34,6 @@ import (
 )
 
 const (
-	// DynDecodeScorerType is the plugin type registered in the plugin registry.
 	DynDecodeScorerType = "dyn-decode-scorer"
 
 	WorkerIDHeader        = "x-worker-instance-id"
