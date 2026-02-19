@@ -922,6 +922,7 @@ class ModelType:
     TensorBased: ModelType
     Prefill: ModelType
     Images: ModelType
+    Audios: ModelType
     Videos: ModelType
     ...
 
@@ -1296,37 +1297,6 @@ class KvbmRequest:
     """
 
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
-        ...
-
-class ZmqKvEventListener:
-    """
-    A ZMQ-based key-value cache event listener that operates independently
-    of the dynamo runtime or event plane infrastructure.
-    """
-
-    def __init__(
-        self, zmq_endpoint: str, zmq_topic: str, kv_block_size: int
-    ) -> None:
-        """
-        Create a new ZmqKvEventListener instance.
-
-        Args:
-            zmq_endpoint: ZeroMQ endpoint to connect to (e.g., "tcp://127.0.0.1:5557")
-            zmq_topic: ZeroMQ topic to subscribe to
-            kv_block_size: Size of KV cache blocks
-        """
-        ...
-
-    async def get_events(self) -> List[str]:
-        """
-        Get all available KV cache events from the ZMQ listener.
-
-        Returns:
-            List of JSON-serialized KV cache events as strings
-
-        Raises:
-            ValueError: If events cannot be serialized to JSON
-        """
         ...
 
 class KvRouter:
