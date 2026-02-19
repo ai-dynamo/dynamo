@@ -123,5 +123,45 @@ def test_synthesize_requests_normalizes_hash_ids():
     os.unlink(tmp.name)
 
 
+def test_constant_rate_mode():
+    """Test that constant_rate produces evenly-spaced, single-request timestamps."""
+    block_size = 512
+
+    # Create a trace with enough records for the synthesizer to learn from
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
+        dump_record(tmp, [0, 1])
+        dump_record(tmp, [0, 1, 2, 3, 4])
+        dump_record(tmp, [0, 1, 2, 3, 4, 5, 6])
+        dump_record(tmp, [7, 8])
+        dump_record(tmp, [7, 8, 9, 10])
+        dump_record(tmp, [11, 12])
+
+    synthesizer = Synthesizer(tmp.name, block_size=block_size)
+
+    # 2 req/s for 5 seconds -> expect 10 requests at 500ms intervals
+    rate_schedule = [(5000, 2.0)]
+    requests = synthesizer.synthesize_requests(
+        rate_schedule=rate_schedule, constant_rate=True
+    )
+
+    timestamps = [r["timestamp"] for r in requests]
+
+    assert len(requests) == 10, f"Expected 10 requests, got {len(requests)}"
+
+    # All timestamps should be unique (no batching)
+    assert len(set(timestamps)) == len(timestamps), "Timestamps should be unique"
+
+    # All inter-arrival deltas should be exactly 500ms
+    deltas = [b - a for a, b in zip(timestamps, timestamps[1:])]
+    assert all(
+        d == 500 for d in deltas
+    ), f"Expected all deltas=500ms, got {set(deltas)}"
+
+    # First timestamp should be 0
+    assert timestamps[0] == 0, f"Expected first timestamp=0, got {timestamps[0]}"
+
+    os.unlink(tmp.name)
+
+
 if __name__ == "__main__":
     unittest.main()

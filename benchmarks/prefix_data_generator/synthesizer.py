@@ -274,13 +274,54 @@ class Synthesizer:
     def _get_current_rate(
         timestamp_ms: int, rate_schedule: list[tuple[int, float]]
     ) -> float:
-        """Return the rate multiplier for the given timestamp based on the schedule."""
+        """Return the rate for the given timestamp based on the schedule.
+
+        The rate value is either a multiplier (default mode) or an absolute
+        req/s value (constant-rate mode), depending on the caller's context.
+        """
         elapsed = 0
         for duration_ms, rate in rate_schedule:
             if timestamp_ms < elapsed + duration_ms:
                 return rate
             elapsed += duration_ms
         return rate_schedule[-1][1]
+
+    def _build_request(
+        self,
+        timestamp: int,
+        max_isl: Optional[int],
+        min_isl: Optional[int],
+        min_osl: Optional[int],
+        max_osl: Optional[int],
+    ) -> Optional[dict[str, Any]]:
+        """Build a single request dict, returning None if ISL filters exclude it."""
+        path, leaf_flag, context_len = self.synthesize_path()
+        if leaf_flag:
+            input_len = (
+                len(path) - 1
+            ) * self.block_size + self.input_lens_mod_sampler.sample()
+        else:
+            input_len = len(path) * self.block_size
+        output_len = int(self.output_lens_sampler.sample() * self.osl_multiplier)
+
+        if max_isl is not None and input_len > max_isl:
+            return None
+        if min_isl is not None and input_len < min_isl:
+            return None
+
+        if min_osl is not None and output_len < min_osl:
+            output_len = min_osl
+        if max_osl is not None and output_len > max_osl:
+            output_len = max_osl
+
+        return {
+            "timestamp": int(timestamp),
+            "input_length": int(input_len),
+            "output_length": int(output_len),
+            "hash_ids": path,
+            "context_len": int(context_len),
+            "unique_user_prompt_len": int(input_len - context_len),
+        }
 
     def synthesize_requests(
         self,
@@ -290,6 +331,7 @@ class Synthesizer:
         min_osl: Optional[int] = None,
         max_osl: Optional[int] = None,
         rate_schedule: Optional[list[tuple[int, float]]] = None,
+        constant_rate: bool = False,
     ) -> list[dict[str, Any]]:
         """Synthesize requests with either a fixed count or a time-based rate schedule.
 
@@ -300,15 +342,22 @@ class Synthesizer:
             min_isl: Filter out requests with input length below this value.
             min_osl: Clip output lengths below this value.
             max_osl: Clip output lengths above this value.
-            rate_schedule: List of (duration_ms, rate_multiplier) tuples defining
-                a time-varying request rate. When provided, generation stops when
-                the schedule duration is exhausted. Each rate_multiplier acts as a
-                speedup ratio for that time window (higher = faster arrivals).
+            rate_schedule: List of (duration_ms, rate) tuples defining a
+                time-varying request rate. When provided, generation stops when
+                the schedule duration is exhausted. In default mode each rate
+                acts as a speedup multiplier; in constant-rate mode each rate
+                is an absolute req/s value.
+            constant_rate: When True, interpret rate_schedule values as absolute
+                req/s and emit exactly 1 request per timestamp with
+                deterministic, evenly-spaced inter-arrival times. Requires
+                rate_schedule.
         """
         if num_requests is None and rate_schedule is None:
             raise ValueError(
                 "At least one of num_requests or rate_schedule must be provided"
             )
+        if constant_rate and rate_schedule is None:
+            raise ValueError("constant_rate requires rate_schedule")
 
         total_duration_ms = (
             sum(duration for duration, _ in rate_schedule)
@@ -326,51 +375,36 @@ class Synthesizer:
             if total_duration_ms is not None and timestamp >= total_duration_ms:
                 break
 
-            requests_per_interval = self.request_counts_sampler.sample()
-
-            for _ in range(requests_per_interval):
-                path, leaf_flag, context_len = self.synthesize_path()
-                if leaf_flag:
-                    input_len = (
-                        len(path) - 1
-                    ) * self.block_size + self.input_lens_mod_sampler.sample()
-                else:
-                    input_len = len(path) * self.block_size
-                output_len = int(
-                    self.output_lens_sampler.sample() * self.osl_multiplier
-                )
-
-                # Apply filtering for ISL
-                if max_isl is not None and input_len > max_isl:
-                    continue
-                if min_isl is not None and input_len < min_isl:
-                    continue
-
-                # Apply clipping for OSL (not filtering)
-                if min_osl is not None and output_len < min_osl:
-                    output_len = min_osl
-                if max_osl is not None and output_len > max_osl:
-                    output_len = max_osl
-                requests.append(
-                    {
-                        "timestamp": int(timestamp),
-                        "input_length": int(input_len),
-                        "output_length": int(output_len),
-                        "hash_ids": path,
-                        "context_len": int(context_len),
-                        "unique_user_prompt_len": int(input_len - context_len),
-                    }
-                )
-                request_id += 1
-                if num_requests is not None and request_id >= num_requests:
-                    break
-
-            # Advance timestamp using rate schedule or global speedup ratio
-            if rate_schedule is not None:
+            if constant_rate:
+                # Constant-rate mode: exactly 1 request per timestamp,
+                # deterministic inter-arrival time
                 rate = self._get_current_rate(timestamp, rate_schedule)
+                request = self._build_request(
+                    timestamp, max_isl, min_isl, min_osl, max_osl
+                )
+                if request is not None:
+                    requests.append(request)
+                    request_id += 1
+                timestamp += round(1000 / rate)
             else:
-                rate = self.speedup_ratio
-            timestamp += round(self.timedeltas_sampler.sample() / rate)
+                # Default mode: sample batch size and inter-arrival from trace
+                requests_per_interval = self.request_counts_sampler.sample()
+
+                for _ in range(requests_per_interval):
+                    request = self._build_request(
+                        timestamp, max_isl, min_isl, min_osl, max_osl
+                    )
+                    if request is not None:
+                        requests.append(request)
+                        request_id += 1
+                    if num_requests is not None and request_id >= num_requests:
+                        break
+
+                if rate_schedule is not None:
+                    rate = self._get_current_rate(timestamp, rate_schedule)
+                else:
+                    rate = self.speedup_ratio
+                timestamp += round(self.timedeltas_sampler.sample() / rate)
 
         # Adjust hash_ids if num_copies > 1
         if self.num_copies > 1:
@@ -509,7 +543,15 @@ def main():
         "--step-rates",
         type=str,
         default=None,
-        help="Comma-separated rate multipliers for staircase load pattern (e.g., '1,2,4,2,1')",
+        help="Comma-separated rate values for staircase load pattern (e.g., '1,2,4,2,1'). "
+        "Values are multipliers on the base trace rate by default, or absolute req/s with --constant-rate.",
+    )
+    parser.add_argument(
+        "--constant-rate",
+        action="store_true",
+        default=False,
+        help="Interpret --step-rates as absolute req/s and emit evenly-spaced requests "
+        "(requires --step-duration and --step-rates)",
     )
     args = parser.parse_args()
 
@@ -520,6 +562,11 @@ def main():
             parser.error("--step-duration and --step-rates must be used together")
         if args.speedup_ratio != 1:
             parser.error("--speedup-ratio cannot be used with --step-rates")
+    if args.constant_rate:
+        if not has_schedule:
+            parser.error("--constant-rate requires --step-duration and --step-rates")
+        if args.speedup_ratio != 1:
+            parser.error("--constant-rate cannot be used with --speedup-ratio")
 
     rate_schedule = None
     if args.step_rates is not None:
@@ -544,7 +591,8 @@ def main():
         ]
         if rate_schedule is not None:
             rates_str = "-".join(f"{r:g}" for _, r in rate_schedule)
-            suffix_parts.append(f"staircase_{args.step_duration}s_{rates_str}")
+            prefix = "constant" if args.constant_rate else "staircase"
+            suffix_parts.append(f"{prefix}_{args.step_duration}s_{rates_str}")
         else:
             suffix_parts.append(f"speedup{args.speedup_ratio}")
         if args.max_isl is not None:
@@ -574,9 +622,10 @@ def main():
 
     if rate_schedule is not None:
         total_duration_s = sum(d for d, _ in rate_schedule) / 1000
+        mode = "constant req/s" if args.constant_rate else "multiplier"
         print(
-            f"Rate schedule: {len(rate_schedule)} steps of {args.step_duration}s each "
-            f"({total_duration_s:.0f}s total)"
+            f"Rate schedule ({mode}): {len(rate_schedule)} steps of "
+            f"{args.step_duration}s each ({total_duration_s:.0f}s total)"
         )
         print(f"Step rates: {[r for _, r in rate_schedule]}")
     print("synthesizing requests...", flush=True)
@@ -587,6 +636,7 @@ def main():
         min_osl=args.min_osl,
         max_osl=args.max_osl,
         rate_schedule=rate_schedule,
+        constant_rate=args.constant_rate,
     )
     print(f"synthesized {len(requests)} requests")
 
