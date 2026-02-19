@@ -37,7 +37,6 @@ import (
 )
 
 const (
-	// Profile names
 	PrefillProfileName = "prefill"
 	DecodeProfileName  = "decode"
 
@@ -56,8 +55,6 @@ type PrefillEnabledState struct {
 func (s *PrefillEnabledState) Clone() plugins.StateData {
 	return &PrefillEnabledState{Enabled: s.Enabled}
 }
-
-// --------------------------- shared scorer helpers ---------------------------
 
 // readPrefillEnabled reads the PrefillEnabledState from CycleState.
 // Returns false if the state is not found or not set.

@@ -186,8 +186,6 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	return uniformScores(pods, 1.0)
 }
 
-// --------------------------- lifecycle hooks ---------------------------
-
 // PreRequest is called after scheduling is finalized and before the request is sent to the worker.
 // This registers the request with the Dynamo router's bookkeeping.
 func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.LLMRequest, _ *schedtypes.SchedulingResult) {

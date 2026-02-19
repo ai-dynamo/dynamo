@@ -104,8 +104,6 @@ import (
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
 )
 
-// --------------------------- FFI integration ---------------------------
-
 var (
 	ffiOnce sync.Once
 	ffiErr  error
@@ -490,17 +488,4 @@ func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated
 	C.free_routing_result(&result)
 
 	return &RoutingResult{WorkerID: workerID, TokenData: tokens64}, nil
-}
-
-func cleanupDynamo() error {
-	routerHandlesMutex.Lock()
-	defer routerHandlesMutex.Unlock()
-
-	if routerHandles != nil {
-		C.destroy(routerHandles)
-		routerHandles = nil
-	}
-
-	routerInitialized = false
-	return nil
 }

@@ -46,7 +46,7 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 ### 1. Install Dynamo Platform ###
 
-[See Quickstart Guide](../../docs/pages/kubernetes/README.md) to install Dynamo Kubernetes Platform.
+[See Quickstart Guide](./README.md) to install Dynamo Kubernetes Platform.
 
 ### 2. Deploy Inference Gateway ###
 
@@ -188,7 +188,7 @@ Before deploying you must enable the `--direct-route` flag in the FrontEnd cli i
       - direct
 ```
 
-Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+Follow the steps in [model deployment](../../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
 Sample commands to deploy model:
 
@@ -227,7 +227,7 @@ Key configurations include:
 
 
 **Configuration**
-You can configure the plugin by setting environment variables in the EPP component of your DGD in case of the operator-managed installation or in your [values.yaml](standalone/helm/dynamo-gaie/values.yaml).
+You can configure the plugin by setting environment variables in the EPP component of your DGD in case of the operator-managed installation or in your [values.yaml](../../../deploy/inference-gateway/standalone/helm/dynamo-gaie/values.yaml).
 
 Common Vars for Routing Configuration:
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
@@ -239,7 +239,7 @@ Common Vars for Routing Configuration:
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
 - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
-- See the [KV cache routing design](../../docs/pages/design-docs/router-design.md) for details.
+- See the [KV cache routing design](../design-docs/router-design.md) for details.
 
 Stand-Alone installation only:
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
