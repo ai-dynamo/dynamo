@@ -175,6 +175,8 @@ class MultiModalGroup(BaseModel):
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    # LoRA adapter name (matches the name used in load_lora)
+    model: Optional[str] = None
     # Decode-only worker can have None for multimodal_inputs
     multimodal_inputs: Optional[List[MultiModalGroup]] = Field(default_factory=list)
     # Add these fields for Qwen VL (mRoPE) decode-only worker
