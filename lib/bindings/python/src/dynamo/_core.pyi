@@ -85,12 +85,6 @@ class DistributedRuntime:
         """
         ...
 
-    def child_token(self) -> CancellationToken:
-        """
-        Get a child cancellation token that can be passed to async tasks
-        """
-        ...
-
     def register_engine_route(
         self,
         route_name: str,
@@ -117,19 +111,18 @@ class DistributedRuntime:
         """
         ...
 
-class CancellationToken:
-    def cancel(self) -> None:
+class Namespace:
+    """
+    A namespace is a collection of components
+    """
+
+    ...
+
+    def component(self, name: str) -> Component:
         """
-        Cancel the token and all its children
+        Create a `Component` object
         """
         ...
-
-    async def cancelled(self) -> None:
-        """
-        Await until the token is cancelled
-        """
-        ...
-
 
 class Component:
     """
@@ -780,7 +773,29 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    ...
+    def __init__(self, port: Optional[int] = None) -> None:
+        """
+        Create a new HTTP service.
+
+        Args:
+            port: Optional port number to bind the service to (default: 8080)
+        """
+        ...
+
+    async def run(self, runtime: DistributedRuntime) -> None:
+        """
+        Run the HTTP service.
+
+        Args:
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the HTTP service by cancelling its internal token.
+        """
+        ...
 
 class PythonAsyncEngine:
     """
@@ -921,12 +936,18 @@ class KserveGrpcService:
         """
         ...
 
-    async def run(self, token: CancellationToken) -> None:
+    async def run(self, runtime: DistributedRuntime) -> None:
         """
         Run the KServe gRPC service.
 
         Args:
-            token: Cancellation token to stop the service
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the KServe gRPC service by cancelling its internal token.
         """
         ...
 
