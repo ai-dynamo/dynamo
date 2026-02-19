@@ -130,13 +130,13 @@ impl KvEventPublisher {
 
         // Use endpoint parameter (component parameter removed)
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::from_endpoint(
-                &endpoint.inner,
-                kv_block_size as u32,
-                source_config,
-                enable_local_indexer,
-                dp_rank,
-            )
-            .map_err(to_pyerr)?;
+            &endpoint.inner,
+            kv_block_size as u32,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+        )
+        .map_err(to_pyerr)?;
 
         Ok(Self {
             inner: inner.into(),

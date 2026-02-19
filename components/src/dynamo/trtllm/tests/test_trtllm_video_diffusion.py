@@ -582,7 +582,6 @@ class TestVideoHandlerConcurrency:
         )
 
         handler = VideoGenerationHandler(
-            component=MagicMock(),
             engine=mock_engine,
             config=config,
         )
