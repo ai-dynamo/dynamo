@@ -272,32 +272,24 @@ def generate_dgd_config_with_planner(
     # and planner-specific args (with planner_ prefix)
     planner_args = build_planner_args_from_namespace(args, prefix="planner_")
 
-    # Override profiling-specific arguments with results from profiling
-    # Remove and re-add to ensure correct values from profiling context
-    planner_args = [
-        arg
-        for arg in planner_args
-        if not any(
-            arg.startswith(f"--{key}=")
-            for key in [
-                "namespace",
-                "prefill-engine-num-gpu",
-                "decode-engine-num-gpu",
-                "profile-results-dir",
-            ]
-        )
-    ]
+    # Merge profiling-determined values into the --config JSON.
+    # build_planner_args_from_namespace returns ["--config", "<json>"], so we
+    # parse the JSON, override the relevant keys, and re-serialize.
+    config_idx = planner_args.index("--config")
+    planner_config_dict = json.loads(planner_args[config_idx + 1])
 
-    # Add arguments determined by profiling results
-    cm_mount_path = f"{get_workspace_dir()}/profiling_results"
     if best_prefill_mapping is not None:
-        planner_args.append(
-            f"--prefill-engine-num-gpu={best_prefill_mapping.get_num_gpus()}"
+        planner_config_dict["prefill_engine_num_gpu"] = (
+            best_prefill_mapping.get_num_gpus()
         )
     if best_decode_mapping is not None:
-        planner_args.append(
-            f"--decode-engine-num-gpu={best_decode_mapping.get_num_gpus()}"
+        planner_config_dict["decode_engine_num_gpu"] = (
+            best_decode_mapping.get_num_gpus()
         )
+
+    planner_args[config_idx + 1] = json.dumps(planner_config_dict)
+
+    cm_mount_path = f"{get_workspace_dir()}/profiling_results"
 
     # Work with plain dicts for PodSpec/Container extras (e.g. volumes, volumeMounts)
     # because those fields are stored as "extra" and aren't exposed as pydantic attributes.
@@ -351,7 +343,10 @@ def generate_dgd_config_with_planner(
 
     if prefill_json is not None and decode_json is not None:
         # Only override planner profile directory when we actually have data to mount.
-        planner_args.append(f"--profile-results-dir={cm_mount_path}")
+        config_idx = planner_args.index("--config")
+        planner_config_dict = json.loads(planner_args[config_idx + 1])
+        planner_config_dict["profile_results_dir"] = cm_mount_path
+        planner_args[config_idx + 1] = json.dumps(planner_config_dict)
 
         config_map_obj = {
             "apiVersion": "v1",
