@@ -2,7 +2,6 @@
 # Builds custom EPP image with Dynamo KV-aware routing plugins
 
 # Image configuration
-# Image lives in local cache only, not pushed to any registry
 DOCKER_SERVER ?= dynamo
 IMAGE_NAME := dynamo-epp
 GIT_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -11,8 +10,7 @@ IMAGE_REPO ?= $(DOCKER_SERVER)/$(IMAGE_NAME)
 IMAGE_TAG ?= $(IMAGE_REPO):$(GIT_TAG)
 
 # Build configuration
-# Auto-detect host architecture for consistent builds with Dynamo library
-# The Dynamo library is built for the host arch, so Docker must match
+# Auto-detect host architecture
 HOST_ARCH := $(shell uname -m)
 ifeq ($(HOST_ARCH),x86_64)
     PLATFORMS ?= linux/amd64
@@ -24,11 +22,11 @@ else
     PLATFORMS ?= linux/amd64
 endif
 # Docker proxy for avoiding rate limits (e.g., ECR mirror)
-# Set DOCKER_PROXY to prefix base images, e.g., DOCKER_PROXY=my-registry.com/dockerhub/
 DOCKER_PROXY ?=
 
 DOCKER_BUILDX_CMD ?= docker buildx
 IMAGE_BUILD_CMD ?= $(DOCKER_BUILDX_CMD) build
+RUST_IMAGE ?= $(DOCKER_PROXY)rust:1.90
 BUILDER_IMAGE ?= $(DOCKER_PROXY)golang:1.24
 BASE_IMAGE ?= $(DOCKER_PROXY)ubuntu:24.04
 
@@ -41,9 +39,10 @@ KIND_CLUSTER ?= kind
 # Project directory
 PROJECT_DIR := $(shell pwd)
 
-# Dynamo directories
-# Default: assume we're in dynamo/deploy/inference-gateway/epp
+# Dynamo repository root (build context for Docker)
 DYNAMO_DIR ?= $(shell cd $(PROJECT_DIR)/../../.. && pwd)
+
+# Local development paths (for host-native builds only, not used by Docker)
 DYNAMO_LIB_DIR := $(PROJECT_DIR)/pkg/plugins/dynamo_kv_scorer/lib
 DYNAMO_INCLUDE_DIR := $(PROJECT_DIR)/pkg/plugins/dynamo_kv_scorer/include
 
@@ -79,9 +78,11 @@ build: dynamo-lib-check ## Build the EPP binary locally (requires CGO and Dynamo
 build-with-lib: dynamo-lib build ## Build Dynamo library and EPP binary
 
 .PHONY: image-build
-image-build: dynamo-lib-check ## Build the Docker image using buildx
+image-build: ## Build the Docker image (self-contained, no host prerequisites)
 	$(IMAGE_BUILD_CMD) -t $(IMAGE_TAG) \
 		--platform=$(PLATFORMS) \
+		--build-context dynamo=$(DYNAMO_DIR) \
+		--build-arg RUST_IMAGE=$(RUST_IMAGE) \
 		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
 		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
@@ -118,18 +119,12 @@ image-local-push: image-local-build
 image-local-load: LOAD=--load ## Build and load using local buildx builder
 image-local-load: image-local-build
 
-##@ Dynamo Library Build
+##@ Dynamo Library (for local host-native builds only)
 
 .PHONY: dynamo-lib
-dynamo-lib: ## Build Dynamo static library and copy to project
+dynamo-lib: ## Build Dynamo static library and copy to project (for local dev)
 	@echo "Building Dynamo static library..."
 	cd "$(DYNAMO_DIR)" && cargo build --release -p libdynamo_llm
-	@echo "Generating C header..."
-	@mkdir -p "$(DYNAMO_DIR)/lib/bindings/c/include/nvidia/dynamo_llm"
-	cd "$(DYNAMO_DIR)" && \
-		(cbindgen --config lib/bindings/c/cbindgen.toml --crate libdynamo_llm \
-			--output lib/bindings/c/include/nvidia/dynamo_llm/llm_engine.h || \
-		cp lib/bindings/c/src/fallback_header.h lib/bindings/c/include/nvidia/dynamo_llm/llm_engine.h)
 	@echo "Copying files to EPP project..."
 	@mkdir -p "$(DYNAMO_LIB_DIR)"
 	@mkdir -p "$(DYNAMO_INCLUDE_DIR)"
@@ -138,7 +133,7 @@ dynamo-lib: ## Build Dynamo static library and copy to project
 	@echo "Dynamo library ready!"
 
 .PHONY: dynamo-lib-check
-dynamo-lib-check: ## Check if Dynamo library files exist
+dynamo-lib-check: ## Check if Dynamo library files exist (for local dev)
 	@if [ ! -f "$(DYNAMO_LIB_DIR)/libdynamo_llm_capi.a" ]; then \
 		echo "ERROR: Dynamo library not found. Run 'make dynamo-lib' first."; \
 		exit 1; \
@@ -159,13 +154,13 @@ clean: ## Clean build artifacts
 ##@ All-in-one Build
 
 .PHONY: all
-all: dynamo-lib image-local-load ## Build Dynamo lib and Docker image, load locally
+all: image-local-load ## Build Docker image and load locally
 
 .PHONY: all-push
-all-push: dynamo-lib image-push ## Build Dynamo lib and Docker image, push to registry
+all-push: image-push ## Build Docker image and push to registry
 
 .PHONY: all-kind
-all-kind: dynamo-lib image-kind ## Build Dynamo lib and Docker image, load to kind
+all-kind: image-kind ## Build Docker image and load to kind
 
 ##@ Info
 
@@ -176,9 +171,7 @@ info: ## Show build info
 	@echo "Git Tag: $(GIT_TAG)"
 	@echo "Platforms: $(PLATFORMS)"
 	@echo "Docker Proxy: $(DOCKER_PROXY)"
+	@echo "Rust Image: $(RUST_IMAGE)"
 	@echo "Builder Image: $(BUILDER_IMAGE)"
 	@echo "Base Image: $(BASE_IMAGE)"
 	@echo "Dynamo Dir: $(DYNAMO_DIR)"
-	@echo "Dynamo Lib Dir: $(DYNAMO_LIB_DIR)"
-	@echo "Dynamo Include Dir: $(DYNAMO_INCLUDE_DIR)"
-
