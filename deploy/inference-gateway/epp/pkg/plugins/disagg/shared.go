@@ -27,7 +27,13 @@ limitations under the License.
 package disagg
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
+	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
+
+	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 )
 
 const (
@@ -49,4 +55,51 @@ type PrefillEnabledState struct {
 // Clone implements plugins.StateData.
 func (s *PrefillEnabledState) Clone() plugins.StateData {
 	return &PrefillEnabledState{Enabled: s.Enabled}
+}
+
+// --------------------------- shared scorer helpers ---------------------------
+
+// readPrefillEnabled reads the PrefillEnabledState from CycleState.
+// Returns false if the state is not found or not set.
+func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
+	state, err := schedtypes.ReadCycleStateKey[*PrefillEnabledState](cycleState, PrefillEnabledStateKey)
+	if err == nil && state != nil {
+		return state.Enabled
+	}
+	return false
+}
+
+// buildRequestJSON builds an OpenAI-compatible JSON string from a GAIE LLMRequest.
+func buildRequestJSON(req *schedtypes.LLMRequest) (string, error) {
+	requestBody, err := dynscorer.BuildOpenAIRequest(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to build OpenAI request: %w", err)
+	}
+	data, err := json.Marshal(requestBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request JSON: %w", err)
+	}
+	return string(data), nil
+}
+
+// serializePods converts pods to a JSON string for the FFI filter.
+// Returns an empty string if serialization fails or pods is empty.
+func serializePods(pods []schedtypes.Pod) string {
+	if len(pods) == 0 {
+		return ""
+	}
+	pj, err := dynscorer.SerializePodsToJSON(pods)
+	if err != nil {
+		return ""
+	}
+	return pj
+}
+
+// uniformScores returns a score map with the same score for every pod.
+func uniformScores(pods []schedtypes.Pod, score float64) map[schedtypes.Pod]float64 {
+	out := make(map[schedtypes.Pod]float64, len(pods))
+	for _, p := range pods {
+		out[p] = score
+	}
+	return out
 }

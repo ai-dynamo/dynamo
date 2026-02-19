@@ -34,13 +34,14 @@ import (
 )
 
 const (
+	// DynDecodeScorerType is the plugin type registered in the plugin registry.
 	DynDecodeScorerType = "dyn-decode-scorer"
 
 	WorkerIDHeader        = "x-worker-instance-id"
 	PrefillWorkerIDHeader = "x-prefill-instance-id"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
 
-	// stateKey is the key used to store routing state in PluginState
+	// decodeStateKey is the key used to store routing state in PluginState
 	decodeStateKey = "dynamo-decode-routing-state"
 )
 
@@ -133,49 +134,20 @@ func (s *DynDecodeScorer) WithName(name string) *DynDecodeScorer {
 func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.LLMRequest, pods []schedtypes.Pod) map[schedtypes.Pod]float64 {
 	logger := log.FromContext(ctx)
 
-	// Check if prefill is enabled from CycleState (written by DisaggProfileHandler).
-	isDisaggregated := false
-	state, err := schedtypes.ReadCycleStateKey[*PrefillEnabledState](cycleState, PrefillEnabledStateKey)
-	if err == nil && state != nil {
-		isDisaggregated = state.Enabled
+	isDisaggregated := readPrefillEnabled(cycleState)
+
+	requestJSON, err := buildRequestJSON(req)
+	if err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer: failed to build request")
+		return uniformScores(pods, 1.0)
 	}
 
-	out := make(map[schedtypes.Pod]float64, len(pods))
+	podsJSON := serializePods(pods)
 
-	// Build request JSON
-	requestBody, buildErr := dynscorer.BuildOpenAIRequest(req)
-	if buildErr != nil {
-		logger.V(logutil.DEFAULT).Error(buildErr, "DynDecodeScorer: failed to build request")
-		for _, p := range pods {
-			out[p] = 1.0
-		}
-		return out
-	}
-	requestJSON, marshalErr := json.Marshal(requestBody)
-	if marshalErr != nil {
-		logger.V(logutil.DEFAULT).Error(marshalErr, "DynDecodeScorer: failed to marshal request")
-		for _, p := range pods {
-			out[p] = 1.0
-		}
-		return out
-	}
-
-	// Serialize pods for the FFI filter
-	podsJSON := ""
-	if len(pods) > 0 {
-		if pj, serErr := dynscorer.SerializePodsToJSON(pods); serErr == nil {
-			podsJSON = pj
-		}
-	}
-
-	// Call the decode router via FFI
-	result, routeErr := dynscorer.CallRouteDecodeRequest(string(requestJSON), podsJSON, isDisaggregated)
-	if routeErr != nil {
-		logger.V(logutil.DEFAULT).Error(routeErr, "DynDecodeScorer: FFI decode routing failed")
-		for _, p := range pods {
-			out[p] = 1.0
-		}
-		return out
+	result, err := dynscorer.CallRouteDecodeRequest(requestJSON, podsJSON, isDisaggregated)
+	if err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer: FFI decode routing failed")
+		return uniformScores(pods, 1.0)
 	}
 
 	workerIDStr := fmt.Sprintf("%d", result.WorkerID)
@@ -211,11 +183,10 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 
 	// Score: all decode pods get 1.0 since the router's internal selection is authoritative
 	// and the worker ID is communicated via headers.
-	for _, p := range pods {
-		out[p] = 1.0
-	}
-	return out
+	return uniformScores(pods, 1.0)
 }
+
+// --------------------------- lifecycle hooks ---------------------------
 
 // PreRequest is called after scheduling is finalized and before the request is sent to the worker.
 // This registers the request with the Dynamo router's bookkeeping.

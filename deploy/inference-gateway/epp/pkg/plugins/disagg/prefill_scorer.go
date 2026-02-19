@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
@@ -72,11 +71,9 @@ func NewDynPrefillScorer() *DynPrefillScorer {
 //  1. Reads PrefillEnabledState from CycleState (written by DisaggProfileHandler).
 //  2. If prefill is NOT enabled, returns zero scores.
 //  3. If prefill IS enabled, calls the Dynamo FFI prefill router to select the best prefill worker.
-//  4. Assigns score 1.0 to the pod matching the selected worker, 0.0 to all others.
+//  4. Assigns score 1.0 to all pods (the router's selection is authoritative, communicated via headers).
 type DynPrefillScorer struct {
-	typedName  plugins.TypedName
-	warmupOnce sync.Once
-	warmupErr  error
+	typedName plugins.TypedName
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -94,75 +91,31 @@ func (s *DynPrefillScorer) WithName(name string) *DynPrefillScorer {
 func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.LLMRequest, pods []schedtypes.Pod) map[schedtypes.Pod]float64 {
 	logger := log.FromContext(ctx)
 
-	// Check if prefill is enabled from CycleState (written by DisaggProfileHandler).
-	prefillEnabled := false
-	state, err := schedtypes.ReadCycleStateKey[*PrefillEnabledState](cycleState, PrefillEnabledStateKey)
-	if err == nil && state != nil {
-		prefillEnabled = state.Enabled
-	}
-
-	out := make(map[schedtypes.Pod]float64, len(pods))
-	if !prefillEnabled {
+	if !readPrefillEnabled(cycleState) {
 		logger.V(logutil.VERBOSE).Info("DynPrefillScorer: prefill not enabled, returning zero scores")
-		for _, p := range pods {
-			out[p] = 0
-		}
-		return out
+		return uniformScores(pods, 0)
 	}
 
-	// Build request JSON
-	requestBody, err := dynscorer.BuildOpenAIRequest(req)
+	requestJSON, err := buildRequestJSON(req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: failed to build request")
-		for _, p := range pods {
-			out[p] = 0
-		}
-		return out
-	}
-	requestJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: failed to marshal request")
-		for _, p := range pods {
-			out[p] = 0
-		}
-		return out
+		return uniformScores(pods, 0)
 	}
 
-	// Serialize pods for the FFI filter
-	podsJSON := ""
-	if len(pods) > 0 {
-		if pj, err := dynscorer.SerializePodsToJSON(pods); err == nil {
-			podsJSON = pj
-		}
-	}
+	podsJSON := serializePods(pods)
 
-	// Call the prefill router via FFI
-	result, err := dynscorer.CallRoutePrefillRequest(string(requestJSON), podsJSON)
+	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, podsJSON)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
-		for _, p := range pods {
-			out[p] = 0
-		}
-		return out
+		return uniformScores(pods, 0)
 	}
 
-	workerIDStr := fmt.Sprintf("%d", result.WorkerID)
 	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker selected",
-		"prefillWorkerID", workerIDStr,
+		"prefillWorkerID", fmt.Sprintf("%d", result.WorkerID),
 		"tokenCount", len(result.TokenData))
 
-	// Score: 1.0 for the selected worker, 0.0 for all others.
-	// The picker will then select the highest-scoring pod.
-	for _, p := range pods {
-		out[p] = 0
-	}
-	// Note: In the prefill profile, the label-filter has already restricted pods to prefill workers.
-	// The FFI router selected a worker by ID; we give score 1.0 to all pods
-	// since the router's internal selection is authoritative and pods have already been filtered.
+	// Score: 1.0 for all pods. The label-filter has already restricted to prefill workers,
+	// and the FFI router's internal selection is authoritative.
 	// In the future, we could match worker IDs to pod names for precise scoring.
-	for _, p := range pods {
-		out[p] = 1.0
-	}
-
-	return out
+	return uniformScores(pods, 1.0)
 }
