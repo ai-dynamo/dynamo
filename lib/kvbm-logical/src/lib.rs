@@ -32,8 +32,8 @@ pub use blocks::{
     BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, WeakBlock,
 };
 pub use integrations::{
-    ApplyError, DecodeOutcome, RequestSequence, SchedulableSequence, ScheduleError,
-    SequenceDelegate, SequenceEvent, SequenceState,
+    ApplyError, DecodeOutcome, NoopDelegate, RequestSequence, SchedulableSequence,
+    SchedulableSequenceBuilder, ScheduleError, SequenceDelegate, SequenceEvent, SequenceState,
 };
 pub use manager::BlockManager;
 pub use registry::BlockRegistry;

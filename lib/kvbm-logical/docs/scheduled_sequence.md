@@ -47,7 +47,12 @@ token as a precondition.
 use kvbm_logical::SchedulableSequence;
 
 let tokens: Vec<u32> = (0..8).collect();
-let mut seq = SchedulableSequence::<MyMeta>::new(tokens, 10, 4);
+let mut seq = SchedulableSequence::<MyMeta>::builder()
+    .tokens(tokens)
+    .max_output_tokens(10)
+    .block_size(4)
+    .delegate(my_delegate)  // optional — defaults to NoopDelegate
+    .build()?;
 
 // 1. Optional prefix matching
 let matched = seq.match_and_add_prefix(&manager)?;
@@ -126,10 +131,13 @@ seq.schedule_decode(&manager)?;
 | `ApplyError::MissingTokenOnFinalChunk` | Final prefill chunk missing token    |
 | `ApplyError::AcceptedExceedsScheduled` | More accepted than draft tokens     |
 
-## Event history
+## Event delegate
 
-Every lifecycle transition is recorded in an append-only
-`Vec<SequenceEvent>`, accessible via `history()`. Events include
-`Created`, `PrefillScheduled`, `PrefillApplied`, `DecodeScheduled`,
+Every lifecycle transition is dispatched to a caller-provided
+[`SequenceDelegate`] via `on_event`. Events include `Created`,
+`PrefillScheduled`, `PrefillApplied`, `DecodeScheduled`,
 `DecodeApplied`, `SpeculativeScheduled`, `SpeculativeApplied`,
 `ScheduleReverted`, `UnassignedDropped`, `Released`, and `Reacquired`.
+
+When no delegate is provided (via the builder or `new(None)`), a
+[`NoopDelegate`] is used that silently discards all events.

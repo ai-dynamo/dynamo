@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use derive_builder::Builder;
+
 use crate::blocks::BlockMetadata;
 use crate::manager::BlockManager;
 
@@ -104,6 +106,52 @@ pub trait SequenceDelegate: Send + Sync {
     fn on_event(&self, event: &SequenceEvent);
 }
 
+/// No-op delegate that silently discards all events.
+///
+/// Used as the default when no delegate is provided to
+/// [`SchedulableSequenceBuilder`].
+pub struct NoopDelegate;
+
+impl SequenceDelegate for NoopDelegate {
+    fn on_event(&self, _event: &SequenceEvent) {}
+}
+
+// =============================================================================
+// Builder
+// =============================================================================
+
+#[doc(hidden)]
+#[derive(Builder)]
+#[builder(
+    name = "SchedulableSequenceBuilder",
+    pattern = "owned",
+    build_fn(private, name = "build_params", error = "anyhow::Error")
+)]
+pub struct SchedulableSequenceParams {
+    tokens: Vec<Token>,
+    max_output_tokens: usize,
+    block_size: u32,
+    #[builder(default, setter(custom))]
+    delegate: Option<Arc<dyn SequenceDelegate>>,
+}
+
+impl SchedulableSequenceBuilder {
+    pub fn delegate(mut self, delegate: Arc<dyn SequenceDelegate>) -> Self {
+        self.delegate = Some(Some(delegate));
+        self
+    }
+
+    pub fn build<T: BlockMetadata>(self) -> anyhow::Result<SchedulableSequence<T>> {
+        let params = self.build_params()?;
+        Ok(SchedulableSequence::new(
+            params.tokens,
+            params.max_output_tokens,
+            params.block_size,
+            params.delegate,
+        ))
+    }
+}
+
 // =============================================================================
 // Errors
 // =============================================================================
@@ -173,14 +221,22 @@ impl<T: BlockMetadata> SchedulableSequence<T> {
     // Construction
     // =====================================================================
 
+    /// Returns a builder for configuring a `SchedulableSequence`.
+    pub fn builder() -> SchedulableSequenceBuilder {
+        SchedulableSequenceBuilder::default()
+    }
+
     /// Creates a new `SchedulableSequence` wrapping a fresh `RequestSequence`.
+    ///
+    /// If `delegate` is `None`, a [`NoopDelegate`] is used.
     pub fn new(
         tokens: Vec<Token>,
         max_output_tokens: usize,
         block_size: u32,
-        delegate: Arc<dyn SequenceDelegate>,
+        delegate: Option<Arc<dyn SequenceDelegate>>,
     ) -> Self {
         let inner = RequestSequence::new(tokens, max_output_tokens, block_size);
+        let delegate = delegate.unwrap_or_else(|| Arc::new(NoopDelegate));
         delegate.on_event(&SequenceEvent::Created {
             num_input_tokens: inner.num_input_tokens(),
             max_output_tokens,
@@ -883,8 +939,8 @@ mod tests {
         }
     }
 
-    fn noop_delegate() -> Arc<dyn SequenceDelegate> {
-        Arc::new(CollectingDelegate::new())
+    fn noop_delegate() -> Option<Arc<dyn SequenceDelegate>> {
+        None
     }
 
     fn make_tokens(n: usize) -> Vec<Token> {
@@ -898,8 +954,12 @@ mod tests {
     #[test]
     fn test_new_starts_idle() {
         let delegate = Arc::new(CollectingDelegate::new());
-        let seq =
-            SchedulableSequence::<TestMeta>::new(make_tokens(8), 10, BLOCK_SIZE, delegate.clone());
+        let seq = SchedulableSequence::<TestMeta>::new(
+            make_tokens(8),
+            10,
+            BLOCK_SIZE,
+            Some(delegate.clone()),
+        );
 
         assert_eq!(seq.state(), SequenceState::Idle);
         assert_eq!(seq.prefill_position(), 0);
@@ -1280,7 +1340,8 @@ mod tests {
     fn test_speculative_partial_accept() {
         let manager = create_test_manager::<TestMeta>(20);
         let delegate = Arc::new(CollectingDelegate::new());
-        let mut seq = SchedulableSequence::new(make_tokens(4), 10, BLOCK_SIZE, delegate.clone());
+        let mut seq =
+            SchedulableSequence::new(make_tokens(4), 10, BLOCK_SIZE, Some(delegate.clone()));
         seq.schedule_prefill(4, &manager).unwrap();
         seq.apply_prefill(Some(1000), &manager).unwrap();
         // After prefill: total=5, assigned=1, unassigned=0
@@ -1510,8 +1571,12 @@ mod tests {
         let manager = create_test_manager::<TestMeta>(20);
         let delegate = Arc::new(CollectingDelegate::new());
         // max_output=3: 1 from prefill + 2 decodes
-        let mut seq =
-            SchedulableSequence::<TestMeta>::new(make_tokens(4), 3, BLOCK_SIZE, delegate.clone());
+        let mut seq = SchedulableSequence::<TestMeta>::new(
+            make_tokens(4),
+            3,
+            BLOCK_SIZE,
+            Some(delegate.clone()),
+        );
 
         // Prefill
         seq.schedule_prefill(4, &manager).unwrap();
@@ -1895,5 +1960,70 @@ mod tests {
         assert_eq!(seq.unassigned_blocks(), 1); // gen block
         assert_eq!(seq.kv_position(), 8);
         assert_eq!(seq.tail_tokens(), 1);
+    }
+
+    // =========================================================================
+    // Builder
+    // =========================================================================
+
+    #[test]
+    fn test_builder_basic() {
+        let seq = SchedulableSequence::<TestMeta>::builder()
+            .tokens(make_tokens(8))
+            .max_output_tokens(10)
+            .block_size(BLOCK_SIZE)
+            .build::<TestMeta>()
+            .unwrap();
+
+        assert_eq!(seq.state(), SequenceState::Idle);
+        assert_eq!(seq.num_input_tokens(), 8);
+        assert_eq!(seq.max_output_tokens(), 10);
+        assert_eq!(seq.block_size(), BLOCK_SIZE as usize);
+    }
+
+    #[test]
+    fn test_builder_with_delegate() {
+        let delegate = Arc::new(CollectingDelegate::new());
+        let seq = SchedulableSequence::<TestMeta>::builder()
+            .tokens(make_tokens(4))
+            .max_output_tokens(5)
+            .block_size(BLOCK_SIZE)
+            .delegate(delegate.clone())
+            .build::<TestMeta>()
+            .unwrap();
+
+        assert_eq!(seq.num_input_tokens(), 4);
+
+        let events = delegate.events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], SequenceEvent::Created { .. }));
+    }
+
+    #[test]
+    fn test_builder_missing_required_field() {
+        let result = SchedulableSequence::<TestMeta>::builder()
+            .tokens(make_tokens(4))
+            // missing max_output_tokens and block_size
+            .build::<TestMeta>();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_builder_default_noop_delegate() {
+        let manager = create_test_manager::<TestMeta>(20);
+        let mut seq = SchedulableSequence::<TestMeta>::builder()
+            .tokens(make_tokens(4))
+            .max_output_tokens(10)
+            .block_size(BLOCK_SIZE)
+            .build::<TestMeta>()
+            .unwrap();
+
+        // Verify the noop delegate doesn't panic — exercise the full lifecycle
+        seq.schedule_prefill(4, &manager).unwrap();
+        seq.apply_prefill(Some(1000), &manager).unwrap();
+        seq.schedule_decode(&manager).unwrap();
+        seq.apply_decode(100, &manager).unwrap();
+        seq.release().unwrap();
     }
 }
