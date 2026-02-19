@@ -37,10 +37,6 @@ spec:
       resources:
         limits:
           gpu: "1"
-      # To enable dynamic LoRA loading on multimodal workers, uncomment the following environment variables:
-      #   env:
-      #     - name: DYN_LORA_ENABLED
-      #       value: "true"
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
