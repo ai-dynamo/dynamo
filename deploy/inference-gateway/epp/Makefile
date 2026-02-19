@@ -117,8 +117,7 @@ image-multiarch: ## Build multi-arch image (requires --push ; --load not support
 		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
 		--build-arg BUILD_REF=$(GIT_TAG) \
-		$(PUSH) \
-		.
+		$(PUSH) .
 
 .PHONY: image-multiarch-push
 image-multiarch-push: PUSH=--push ## Build and push multi-arch image to registry
