@@ -11369,6 +11369,10 @@ spec:
                       - type
                     type: object
                   type: array
+                observedGeneration:
+                  description: ObservedGeneration is the most recent generation observed by the controller.
+                  format: int64
+                  type: integer
                 restart:
                   description: Restart contains the status of the restart of the graph deployment.
                   properties:

@@ -16,7 +16,6 @@ from dynamo._core import Context as Context
 from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
-from dynamo._core import Namespace as Namespace
 
 
 def dynamo_worker(enable_nats: bool = True):

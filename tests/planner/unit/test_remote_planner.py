@@ -30,14 +30,10 @@ pytestmark = [
 def mock_runtime():
     """Create a mock DistributedRuntime."""
     runtime = MagicMock()
-    namespace_mock = MagicMock()
-    component_mock = MagicMock()
     endpoint_mock = MagicMock()
     client_mock = AsyncMock()
 
-    runtime.namespace.return_value = namespace_mock
-    namespace_mock.component.return_value = component_mock
-    component_mock.endpoint.return_value = endpoint_mock
+    runtime.endpoint.return_value = endpoint_mock
     endpoint_mock.client = AsyncMock(return_value=client_mock)
     client_mock.wait_for_instances = AsyncMock()
 
@@ -82,21 +78,17 @@ async def test_send_scale_request_success(mock_runtime):
     assert response.current_replicas["decode"] == 5
     # Verify lazy init happened
     assert client._client is not None
-    runtime.namespace.assert_called_once_with("central-ns")
+    runtime.endpoint.assert_called_once_with("central-ns.Planner.scale_request")
 
 
 @pytest.mark.asyncio
 async def test_send_scale_request_error():
     """Test scale request error handling."""
     runtime = MagicMock()
-    namespace_mock = MagicMock()
-    component_mock = MagicMock()
     endpoint_mock = MagicMock()
     client_mock = AsyncMock()
 
-    runtime.namespace.return_value = namespace_mock
-    namespace_mock.component.return_value = component_mock
-    component_mock.endpoint.return_value = endpoint_mock
+    runtime.endpoint.return_value = endpoint_mock
     endpoint_mock.client = AsyncMock(return_value=client_mock)
     client_mock.wait_for_instances = AsyncMock()
 
@@ -132,14 +124,10 @@ async def test_send_scale_request_error():
 async def test_send_scale_request_no_response():
     """Test scale request when no response is received."""
     runtime = MagicMock()
-    namespace_mock = MagicMock()
-    component_mock = MagicMock()
     endpoint_mock = MagicMock()
     client_mock = AsyncMock()
 
-    runtime.namespace.return_value = namespace_mock
-    namespace_mock.component.return_value = component_mock
-    component_mock.endpoint.return_value = endpoint_mock
+    runtime.endpoint.return_value = endpoint_mock
     endpoint_mock.client = AsyncMock(return_value=client_mock)
     client_mock.wait_for_instances = AsyncMock()
 
