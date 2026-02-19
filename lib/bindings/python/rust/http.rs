@@ -84,12 +84,25 @@ impl HttpService {
     }
 
     fn run<'p>(&self, py: Python<'p>, runtime: &DistributedRuntime) -> PyResult<Bound<'p, PyAny>> {
+        // Check if run() was already called to avoid creating unnecessary token
+        if self.cancel_token.get().is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "HttpService.run() has already been called on this instance"
+            ));
+        }
+
         let service = self.inner.clone();
-        // Create a child token from the runtime
+        // Only create token if we passed the check above
         let token = runtime.inner().child_token();
 
-        // Store the token for shutdown (OnceLock ensures it's only set once)
-        let _ = self.cancel_token.set(CancellationToken { inner: token.clone() });
+        // Store the token for shutdown - should always succeed after the check above
+        self.cancel_token
+            .set(CancellationToken { inner: token.clone() })
+            .map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Race condition detected in HttpService.run()"
+                )
+            })?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             service.run(token).await.map_err(to_pyerr)?;
