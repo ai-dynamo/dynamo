@@ -17,10 +17,14 @@ use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
 use llm_rs::kv_router::protocols::*;
-use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks, start_zmq_listener};
+use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use serde_json::json;
+
+fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BlockExtraInfo>>> {
+    depythonize(obj).map_err(to_pyerr)
+}
 
 #[pyfunction]
 #[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None))]
@@ -36,21 +40,12 @@ pub fn compute_block_hash_for_seq_py(
         ));
     }
 
-    // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
-    let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
+    let mm_infos = block_mm_infos
         .as_ref()
-        .map(|infos_py| {
-            depythonize::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Failed to convert block_mm_infos: {}",
-                    e
-                ))
-            })
-        })
+        .map(depythonize_block_mm_infos)
         .transpose()?;
 
-    let hashes =
-        compute_block_hash_for_seq(&tokens, kv_block_size as u32, mm_infos_rust.as_deref());
+    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size as u32, mm_infos.as_deref());
 
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }
@@ -98,79 +93,6 @@ impl WorkerMetricsPublisher {
         self.inner
             .publish(dp_rank, active_decode_blocks)
             .map_err(to_pyerr)
-    }
-}
-
-/// A ZMQ-based key-value cache event listener that operates independently
-/// of the dynamo runtime or event plane infrastructure.
-#[pyclass]
-pub(crate) struct ZmqKvEventListener {
-    event_receiver: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<KvCacheEvent>>>,
-    shutdown_token: tokio_util::sync::CancellationToken,
-}
-
-#[pymethods]
-impl ZmqKvEventListener {
-    #[new]
-    #[pyo3(signature = (zmq_endpoint, zmq_topic, kv_block_size))]
-    fn new(zmq_endpoint: String, zmq_topic: String, kv_block_size: usize) -> PyResult<Self> {
-        if kv_block_size == 0 {
-            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
-        }
-
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<KvCacheEvent>();
-            let shutdown_token = tokio_util::sync::CancellationToken::new();
-            // Standalone listener needs its own event ID counter
-            let next_event_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-            tokio::spawn(start_zmq_listener(
-                zmq_endpoint,
-                zmq_topic,
-                tx,
-                shutdown_token.clone(),
-                kv_block_size as u32,
-                next_event_id,
-            ));
-
-            Ok(Self {
-                event_receiver: Arc::new(tokio::sync::Mutex::new(rx)),
-                shutdown_token,
-            })
-        })
-    }
-
-    fn get_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let receiver = self.event_receiver.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut rx = receiver.lock().await;
-            let mut events = Vec::new();
-
-            // Drain all available events
-            while let Ok(event) = rx.try_recv() {
-                events.push(event);
-            }
-
-            // Convert events to JSON strings
-            let json_events: Result<Vec<String>, _> =
-                events.iter().map(serde_json::to_string).collect();
-
-            match json_events {
-                Ok(json_strings) => Ok(json_strings),
-                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Failed to serialize events to JSON: {}",
-                    e
-                ))),
-            }
-        })
-    }
-}
-
-// manual shutdown needed as it's not tied to the dynamo DRT
-impl Drop for ZmqKvEventListener {
-    fn drop(&mut self) {
-        self.shutdown_token.cancel();
     }
 }
 
@@ -243,17 +165,9 @@ impl KvEventPublisher {
         // Use shared monotonic event_id counter from the inner publisher
         let event_id = inner.next_event_id();
 
-        // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
-        let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
+        let mm_infos = block_mm_infos
             .as_ref()
-            .map(|infos_py| {
-                depythonize::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Failed to convert block_mm_infos: {}",
-                        e
-                    ))
-                })
-            })
+            .map(depythonize_block_mm_infos)
             .transpose()?;
 
         py.allow_threads(|| {
@@ -269,7 +183,7 @@ impl KvEventPublisher {
                         &block_hashes_u64,
                         lora_id,
                         &warning_count,
-                        mm_infos_rust.as_deref(),
+                        mm_infos.as_deref(),
                     ),
                 }),
                 dp_rank,
@@ -862,12 +776,9 @@ impl KvRouter {
             None
         };
 
-        let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> = if let Some(obj) = block_mm_infos
-        {
-            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-        } else {
-            None
-        };
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
 
         let multi_modal_data: Option<llm_rs::protocols::common::preprocessor::MultimodalDataMap> =
             if let Some(obj) = multi_modal_data {
@@ -962,12 +873,9 @@ impl KvRouter {
             None
         };
 
-        let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> = if let Some(obj) = block_mm_infos
-        {
-            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-        } else {
-            None
-        };
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
 
         let chooser = self.inner.chooser.clone();
         let update_states = request_id.is_some();
