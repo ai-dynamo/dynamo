@@ -63,14 +63,17 @@ jobs:
     name: Build Frontend Image
     needs: changed-files
     if: needs.changed-files.outputs.frontend == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     runs-on: prod-builder-v3
     env:
       IMAGE_REGISTRY: ai-dynamo
       IMAGE_REPOSITORY: dynamo
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
       TARGET: frontend
-      PLATFORMS: amd64,arm64
-      CUDA_VERSION: 12.9
+      CUDA_VERSION: "12.9"
       FRAMEWORK: dynamo
     steps:
       - name: Checkout repository
@@ -88,57 +91,56 @@ jobs:
           python ./container/render.py \
               --target=${{ env.TARGET }} \
               --framework=${{ env.FRAMEWORK }} \
-              --platform=arm64 \
+              --platform=${{ matrix.arch }} \
               --cuda-version=${{ env.CUDA_VERSION }} \
               --show-result \
               --output-short-filename
-      - name: Generate Dockerfile
+      - name: Calculate target tag
+        id: calculate-target-tag
         shell: bash
         run: |
-          echo "Generating Dockerfile for target: ${{ env.TARGET }} and framework: ${{ env.FRAMEWORK }} "
-          python ./container/render.py \
-              --target=${{ env.TARGET }} \
-              --framework=${{ env.FRAMEWORK }} \
-              --platform=amd64 \
-              --cuda-version=${{ env.CUDA_VERSION }} \
-              --show-result \
-              --output-short-filename
-      # - name: Docker Login
-      #   uses: ./.github/actions/docker-login
-      #   with:
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      # - name: Build Frontend Container
-      #   id: build-image
-      #   timeout-minutes: ${{ inputs.build_timeout_minutes }}
-      #   uses: ./.github/actions/docker-remote-build
-      #   with:
-      #     image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
-      #     framework: ${{ inputs.framework }}
-      #     target: ${{ inputs.target }}
-      #     platform: ${{ inputs.platform }}
-      #     cuda_version: ${{ inputs.cuda_version }}
-      #     ci_token: ${{ secrets.CI_TOKEN }}
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #     no_cache: ${{ inputs.no_cache }}
-      #     extra_tags: ${{ steps.extra-tags.outputs.tags }}
-      #     push_image: ${{ inputs.push_image }}
-      #     no_load: ${{ inputs.no_load }}
-      # - name: Show summary
-      #   shell: bash
-      #   if: ${{ inputs.push_image && inputs.show_summary }}
-      #   run: |
-      #     echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }} Default Image" >> $GITHUB_STEP_SUMMARY
-      #     echo "" >> $GITHUB_STEP_SUMMARY
-      #     echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-      #     echo "|-----|" >> $GITHUB_STEP_SUMMARY
-      #     echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          TARGET_TAG="${{ github.sha }}-${{ env.TARGET }}-${{ matrix.arch }}"
+          DEFAULT_TARGET_IMAGE_URI="${{ env.ECR_HOSTNAME }}/{{ env.IMAGE_REGISTRY }}/{{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}"
+          echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/{{ env.IMAGE_REGISTRY }}/{{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
+          
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
+      - name: Build Frontend Container
+        id: build-image
+        timeout-minutes: ${{ inputs.build_timeout_minutes }}
+        uses: ./.github/actions/docker-remote-build
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
+          framework: ${{ env.FRAMEWORK }}
+          target: ${{ env.TARGET }}
+          platform: ${{ matrix.arch }}
+          cuda_version: ${{ env.CUDA_VERSION }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}
+          push_image: true
 
+      - name: Show summary
+        shell: bash
+        run: |
+          echo "### 🐳 ${{ env.FRAMEWORK }}-cuda${{ env.CUDA_VERSION }}-${{ matrix.arch }} Default Image" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
 
   frontend-status-check:
     runs-on: ubuntu-latest
