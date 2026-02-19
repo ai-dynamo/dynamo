@@ -76,11 +76,8 @@ impl NaiveNestedMapInner {
                     worker_set.insert(block.tokens_hash);
                 }
             }
-            KvCacheEventData::Removed(_) => {
-                unimplemented!(
-                    "NaiveNestedMap does not support Remove events; increase --num-gpu-blocks to avoid evictions"
-                );
-            }
+            KvCacheEventData::Removed(_) => {}
+
             KvCacheEventData::Cleared => {
                 self.index.remove(&worker);
             }
@@ -284,11 +281,8 @@ impl InvertedIndexInner {
                         .insert(worker);
                 }
             }
-            KvCacheEventData::Removed(_) => {
-                unimplemented!(
-                    "InvertedIndex does not support Remove events; increase --num-gpu-blocks to avoid evictions"
-                );
-            }
+            KvCacheEventData::Removed(_) => {}
+
             KvCacheEventData::Cleared => {
                 self.clear_worker(worker);
             }

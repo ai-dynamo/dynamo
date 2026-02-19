@@ -302,14 +302,18 @@ The insight: reads don't conflict with each other. If we can make the tree threa
 The upgrade is mechanical:
 
 - `Rc<RefCell<T>>` → `Arc<RwLock<T>>`: atomic reference counting + reader-writer lock. Multiple threads can hold read locks simultaneously; writes take an exclusive lock.
-- `HashMap` lookup → `DashMap`: a sharded concurrent hash map. Each shard has its own lock, distributing contention.
+- `HashMap` → `RwLock<HashMap<...>>` for the per-worker lookup table. Each value has interior mutability (its own `RwLock`), so the outer map only needs a write lock when inserting a new worker---not when modifying an existing worker's data. An alternative is `DashMap`, which shards the map internally across multiple locks to reduce contention.
+
+> **A note on `parking_lot` and `FxHashMap`.** Throughout the indexer we use `parking_lot::RwLock` instead of `std::sync::RwLock`---it avoids the OS syscall on the fast path by implementing locking entirely in userspace with atomic CAS, making uncontended reads roughly 2--3× faster. We also swap the standard `HashMap` for `FxHashMap`, which replaces the DoS-resistant `SipHash` with a single multiply-xor step. Our keys are `u64` hashes and worker IDs, not user-controlled input, so the cheaper hash is safe and measurably faster.
 
 ```rust
 type SharedBlock = Arc<RwLock<Block>>;
 
 struct ConcurrentRadixTree {
     root: SharedBlock,
-    lookup: DashMap<WorkerWithDpRank, RwLock<HashMap<ExternalHash, SharedBlock>>>,
+    // Outer RwLock protects the worker map structure (rarely mutated);
+    // inner RwLock per worker protects that worker's block-hash map.
+    lookup: RwLock<HashMap<WorkerWithDpRank, RwLock<HashMap<ExternalHash, SharedBlock>>>>,
 }
 ```
 
@@ -354,13 +358,15 @@ async fn apply_event(&self, event: RouterEvent) {
 
 Since events for a given worker are serialized on one thread, there is no write-write contention on that worker's subtree. This means the inner `RwLock<HashMap<...>>` per worker in the lookup table almost never contends on writes---we chose `RwLock` over `Mutex` precisely because the access pattern, by construction, has no write contention. Reads (from `find_matches`) can proceed in parallel with writes to different workers.
 
+> **A note on `flume`.** The worker threads receive events via `flume` channels rather than `tokio::sync::mpsc`. `flume` provides a blocking `recv()` that works naturally on plain OS threads without a Tokio runtime, keeps the threads off the async executor entirely, and benchmarks slightly faster for this single-producer/single-consumer pattern.
+
 The actor pattern is gone for reads. `find_matches` touches the shared `Arc<ConcurrentRadixTree>` directly, on the caller's thread, with zero channel overhead.
 
 ### The Read-Write Tension
 
 There is a fundamental tension here worth calling out. Events and requests are competing for the same data structure, and optimizing for one can hurt the other. A data structure that is maximally efficient for reads (flat, cache-friendly, minimal indirection) may be expensive to update; one that is easy to mutate (tree-structured, with localized writes) may be slow to traverse.
 
-The `RwLock` itself embodies this tension. A reader-biased `RwLock` (like Rust's standard `std::sync::RwLock`) can starve writers under heavy read load---`find_matches` calls pile up and event processing falls behind, making the index go stale. A writer-biased lock risks the opposite: events get priority but request latency spikes. A fair lock avoids starvation but adds overhead to every acquisition. The right choice depends on the workload mix, and in practice we lean toward reader-biased semantics because request latency is user-facing while events can tolerate a small amount of queuing---but only up to a point, beyond which staleness degrades routing quality. This balancing act is something we revisit with each new indexer design.
+The `RwLock` itself embodies this tension. A reader-biased lock can starve writers under heavy read load---`find_matches` calls pile up and event processing falls behind, making the index go stale. A writer-biased lock risks the opposite: events get priority but request latency spikes. `parking_lot::RwLock` is task-fair by default: it processes waiters in order rather than unconditionally favoring readers or writers. Combined with the sticky routing guarantee that each worker's events are serialized on a single thread, write contention is minimal and the fairness policy prevents starvation in either direction.
 
 ---
 
@@ -372,30 +378,35 @@ Unless you rethink the data structure entirely.
 
 ### Position as a First-Class Dimension
 
-What if, instead of encoding parent-child relationships in a tree, we used a flat map with a compound key: `(position, local_hash)`, where `position` is the block's depth from the root---i.e., its index in the sequence (0 for the first block, 1 for the second, and so on)?
+What if, instead of encoding parent-child relationships in a tree, we used position directly as an array index? A `Vec<DashMap<LocalHash, SeqEntry>>` pre-allocated to the maximum sequence depth, where `index[position]` is a concurrent map from local hash to sequence entry:
 
 ```rust
+enum SeqEntry {
+    // Common case: one seq_hash at this (position, local_hash) slot
+    Single(ExternalHash, HashSet<WorkerWithDpRank>),
+    // Rare case: multiple prefixes produce the same chunk hash at this position
+    Multi(HashMap<ExternalHash, HashSet<WorkerWithDpRank>>),
+}
+
+// Per-worker reverse lookup: seq_hash -> (position, local_hash)
+type LevelIndex = RwLock<HashMap<ExternalHash, (usize, LocalHash)>>;
+
 struct PositionalIndexer {
-    // (position, local_hash) -> SeqEntry
-    index: DashMap<(usize, LocalHash), SeqEntry>,
-    // Per-worker reverse lookup for event processing
-    worker_blocks: DashMap<WorkerWithDpRank, RwLock<HashMap<SeqHash, (usize, LocalHash)>>>,
+    // index[position] -> { local_hash -> SeqEntry }
+    index: Vec<DashMap<LocalHash, SeqEntry>>,
+    // Outer RwLock only needs a write lock when inserting a new worker.
+    worker_blocks: RwLock<HashMap<WorkerWithDpRank, LevelIndex>>,
     jump_size: usize,
 }
 ```
 
-With position in the key, you can look up *any* position in O(1)---no traversal required. Position 0, position 64, position 128: all equally cheap. This is **spatial indexing**: treating the block sequence as a coordinate space rather than a linked structure.
+With position as an array index, you can look up *any* position in O(1)---no traversal required, no hashing the position component. Position 0, position 64, position 128: all equally cheap. This is **spatial indexing**: treating the block sequence as a coordinate space rather than a linked structure.
+
+The `Vec` layout also improves cache locality for the access pattern that matters most. In practice, the early positions (shared system prompts, common preambles) are the hot path: nearly every query hits position 0, most hit position 1, and so on. These early `DashMap` instances live at the front of the `Vec`---contiguous in memory---and stay warm in cache because they're accessed so frequently. The long tail of deep positions (unique suffixes where queries diverge) is rarely touched and lives further back in the array, naturally sorted by access frequency. Compared to a single giant `DashMap<(usize, LocalHash), SeqEntry>` where hot and cold entries are interleaved across shards, the `Vec` layout keeps the working set compact.
+
+The `worker_blocks` reverse lookup uses the same `RwLock<HashMap<...>>` pattern as the concurrent radix tree for the same reason: workers are added rarely and the hot path is reads.
 
 The `SeqEntry` enum handles the collision story from earlier. In the common case, a given `(position, local_hash)` pair has exactly one sequence hash---so we store it inline without allocating a `HashMap`. Only when multiple prefixes produce the same chunk hash at the same position do we upgrade to a multi-entry map.
-
-```rust
-enum SeqEntry {
-    // Common case: one seq_hash, no HashMap allocation
-    Single(ExternalHash, HashSet<WorkerWithDpRank>),
-    // Rare case: multiple prefixes share the same chunk hash at this position
-    Multi(HashMap<ExternalHash, HashSet<WorkerWithDpRank>>),
-}
-```
 
 ### Jump Search
 
@@ -455,9 +466,9 @@ In the best case (all workers share the full prefix), `find_matches` does `D / J
 
 ### Lazy Hash Computation
 
-One more trick. Most `(position, local_hash)` entries are `SeqEntry::Single`---only one sequence hash at that slot. When we look up a position and find a `Single` entry, we *know* it's the right one (or it's a miss). We can skip computing the query's sequence hash for that position entirely. The sequence hash only needs to be computed---lazily, on demand---when we encounter a `Multi` entry and need to disambiguate.
+One more trick. Most `(position, local_hash)` entries are `SeqEntry::Single`---only one sequence hash at that slot. When we look up a position and find a `Single` entry, we *know* it's the right one (or it's a miss). If the indexer is queried by sequence hash (as opposed to chunk hash), we can skip computing the query's sequence hash for that position entirely---the sequence hash only needs to be computed, lazily on demand, when we encounter a `Multi` entry and need to disambiguate. In the current implementation the indexer is queried by chunk hash, so it always verifies the sequence hash to guard against divergent queries; but the `Single`/`Multi` split still pays off by avoiding the `HashMap` allocation and lookup overhead in the common case.
 
-Since `Multi` entries are rare (they require chunk hash collisions at the same position with different prefixes), this saves hash computation on nearly every position check.
+Since `Multi` entries are rare (they require chunk hash collisions at the same position with different prefixes), the enum avoids per-entry `HashMap` overhead on nearly every position.
 
 The complexity drops from `O(D × W)` to `O(D/J + W)`, where `J` is the jump size and `W` accounts for the drain bookkeeping. For typical workloads with high prefix sharing, the jump optimization skips the vast majority of positions.
 
@@ -471,11 +482,11 @@ Claims are cheap; numbers aren't. We maintain a benchmark harness (`mooncake_ben
 
 The benchmark works in two phases:
 
-1. **Event generation.** The trace is a JSONL file of timestamped requests, each carrying a sequence of block-level hash IDs. We randomly partition these requests across `N` simulated workers, then replay each worker's partition through a mock engine (with configurable GPU block count, block size, and prefix caching enabled). The mock engine processes requests in real-time and emits the same KV cache events (store, remove, clear) that a real engine would produce---complete with eviction pressure and prefix reuse patterns. These events are collected and timestamped.
+1. **Event generation.** The trace is a JSONL file of timestamped requests, each carrying a sequence of block-level hash IDs. We randomly partition these requests across `N` simulated workers, then replay each worker's partition through a mock engine (with configurable GPU block count---defaulting to 16,384 blocks to produce realistic eviction pressure---block size, and prefix caching enabled). The mock engine processes requests in real-time and emits the same KV cache events (store, remove, clear) that a real engine would produce---complete with eviction pressure and prefix reuse patterns. These events are collected and timestamped.
 
-2. **Benchmark replay.** Each worker's request trace and event trace are merged into a single time-ordered sequence and rescaled to fit the benchmark duration. Workers are spawned as concurrent tasks, each replaying its merged trace at the original inter-entry timing. Every `find_matches` call is timed (via `minstant` for nanosecond-precision monotonic timestamps), and every KV event is applied to the indexer under test. After all workers finish, the event queue is flushed and we verify that the indexer kept up (if more than 5% of events remain in the queue at the end, the run is invalid).
+2. **Benchmark replay.** Each worker's request trace and event trace are merged into a single time-ordered sequence and rescaled to fit the benchmark duration. Workers are spawned as concurrent tasks, each replaying its merged trace at the original inter-entry timing. Every `find_matches` call is timed (via `minstant` for nanosecond-precision monotonic timestamps), and every KV event is applied to the indexer under test. After all workers finish, the event queue is flushed.
 
-The harness supports all indexer backends (`RadixTree`, `RadixTreeSharded`, `ConcurrentRadixTree`, `NestedMap`) and allows tuning worker count, duplication factor, jump size, and event worker threads from the CLI.
+The harness supports all six indexer backends (`NaiveNestedMap`, `InvertedIndex`, `RadixTree`, `RadixTreeSharded`, `ConcurrentRadixTree`, `NestedMap`) and allows tuning worker count, trace duplication/length factors, jump size, and event worker threads from the CLI. The naive backends (sections 2 and 3) silently ignore Remove events and their throughput is computed from requests only, since they do no meaningful work on events.
 
 ### What We Measure
 
@@ -495,7 +506,7 @@ The Flash Indexer is already far from being the bottleneck---even a single insta
 
 2. **Hierarchical routing.** A sparse indexer at the top level that tracks coarse-grained prefix coverage across groups of deployments, with full indexers at the bottom each serving a subset. Queries hit the sparse layer first to narrow down which group to probe, avoiding a broadcast to every indexer.
 
-3. **Stack-allocated position arrays.** The `DashMap<(usize, LocalHash), SeqEntry>` uses heap-allocated hash map entries. If we know the maximum sequence depth up front---which we can derive from the block size and the model's maximum sequence length---we can replace the hash map with a fixed-size array on the stack, eliminating hashing and allocation overhead entirely for the position dimension.
+3. **Inline bitset for worker sets.** Today each tree node or `SeqEntry` stores its worker set in a `HashSet`, which is a heap-allocated hash table---every membership check is a hash + pointer chase into a separate allocation. Replacing this with a fixed-width bitset (one bit per worker) would store the set inline in the node's memory, eliminating the pointer chase entirely and turning membership tests into a single bit operation. The tradeoff is that the bitset size caps the number of workers a single indexer instance can track. This ties directly into hierarchical routing above: by splitting workers across indexer tiers, each leaf indexer serves a bounded subset and the bitset stays small enough to fit in a cache line.
 
 For now, network latency, tokenization, and hashing dominate the end-to-end cost. But when deployments grow large enough that those stop being the bottleneck, these are the levers we'll pull.
 
@@ -509,8 +520,8 @@ The journey from a Python dictionary to the Flash Indexer spans six iterations, 
 2. **Rust + actor pattern** --- fast language, correct concurrency, but single-threaded bottleneck.
 3. **Inverted index** --- O(D + W) per query by flipping the key structure; secondary seq_hash layer for chunk-hash collision safety.
 4. **Radix tree** --- tree structure replaces giant flat map; per-node children maps stay small; dual-key design (local hash for traversal, seq hash for event processing); `Rc<RefCell<>>` for single-threaded shared ownership.
-5. **Concurrent radix tree** --- `Arc<RwLock<>>` + `DashMap`; reads bypass the actor entirely; sticky routing serializes writes per worker with zero contention.
-6. **Positional indexer with jump search** --- spatial indexing with `(position, local_hash)` compound keys; O(1) random-position access enables jump optimization; lazy hash computation skips work in the common case.
+5. **Concurrent radix tree** --- `Arc<parking_lot::RwLock<>>` replaces `Rc<RefCell<>>`; `RwLock<HashMap<>>` replaces `DashMap` for the per-worker lookup (rare mutations, read-heavy hot path); reads bypass the actor entirely; sticky routing serializes writes per worker with zero contention.
+6. **Positional indexer with jump search** --- `Vec<DashMap<>>` indexed by position for cache-friendly spatial indexing; O(1) random-position access enables jump optimization; hot prefix positions cluster at the front of the `Vec` and stay warm in cache; lazy hash computation skips work in the common case.
 
 The result: a sustained ops throughput of over **10 million operations per second**---events and requests combined---with achieved throughput tracking offered throughput all the way to the limit.
 
