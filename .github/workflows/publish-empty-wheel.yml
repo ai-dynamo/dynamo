@@ -122,6 +122,7 @@ jobs:
 
       - name: Publish wheel to Artifactory
         env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
           ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           TWINE_NON_INTERACTIVE: "1"
@@ -129,7 +130,6 @@ jobs:
           PKG_VERSION: ${{ inputs.package_version }}
         run: |
           set -euo pipefail
-          ARTIFACTORY_URL="https://artifactory.nvidia.com/artifactory/sw-dynamo-ops-pypi-local/"
 
           echo "Publishing wheel to Artifactory..."
           python3 -m twine upload \
@@ -142,7 +142,7 @@ jobs:
           echo "Artifactory upload complete."
 
           echo "### Artifactory Upload" >> $GITHUB_STEP_SUMMARY
-          echo "- **Repository**: \`${ARTIFACTORY_URL}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository**: Artifactory (via secret)" >> $GITHUB_STEP_SUMMARY
           echo "- **Package**: \`${PKG_NAME}==${PKG_VERSION}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Summary
