@@ -81,9 +81,11 @@ async def init_video_diffusion_worker(
         enable_async_cpu_offload=config.enable_async_cpu_offload,
     )
 
-    # Get the component and endpoint from the runtime
-    component = runtime.namespace(config.namespace).component(config.component)
-    endpoint = component.endpoint(config.endpoint)
+    # Get the endpoint from the runtime
+    endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    component = endpoint.component()
 
     # Initialize the diffusion engine (auto-detects pipeline from model_index.json)
     engine = DiffusionEngine(diffusion_config)

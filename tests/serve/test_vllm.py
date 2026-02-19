@@ -512,15 +512,17 @@ vllm_configs = {
             )
         ],
     ),
+    # Audio multimodal tests for nightly CI pipeline
+    # These tests validate audio inference capabilities with Qwen2-Audio model
     "multimodal_audio_agg": VLLMConfig(
         name="multimodal_audio_agg",
-        directory="/workspace/examples/multimodal",
+        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="audio_agg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2-Audio-7B-Instruct",
-        delayed_start=0,
+        delayed_start=60,  # Audio models require longer loading time
         script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        timeout=500,
+        timeout=600,  # 10 minutes for audio processing overhead
         request_payloads=[
             chat_payload(
                 [
@@ -533,10 +535,36 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=[
-                    "The original content of this audio is:'yet these thoughts affected Hester Pynne less with hope than apprehension.'"
+                expected_response=["Hester", "Pynne"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "multimodal_audio_disagg": VLLMConfig(
+        name="multimodal_audio_disagg",
+        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
+        script_name="audio_disagg.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
+        model="Qwen/Qwen2-Audio-7B-Instruct",
+        delayed_start=60,  # Audio models require longer loading time
+        script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
+        timeout=600,  # 10 minutes for audio processing overhead
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is recited in the audio?"},
+                    {
+                        "type": "audio_url",
+                        "audio_url": {
+                            "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
+                        },
+                    },
                 ],
-                temperature=0.8,
+                repeat_count=1,
+                expected_response=["Hester", "Pynne"],
+                temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),

@@ -21,8 +21,8 @@ from .multimodal_handlers import (
 
 logger = logging.getLogger(__name__)
 
-# (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir)
-EngineSetupResult = tuple[Any, Any, Any, Any]
+# (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
+EngineSetupResult = tuple[Any, Any, Any, Any, Any]
 
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
 SetupKvEventPublisherFn = Callable[..., Optional[Any]]
@@ -88,9 +88,10 @@ class WorkerFactory:
         - Aggregated (P+D): Prefill and decode on same worker
         - Disaggregated (P→D): Prefill forwards to separate decode worker
         """
-        component = runtime.namespace(config.namespace).component(config.component)
-
-        generate_endpoint = component.endpoint(config.endpoint)
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        component = generate_endpoint.component()
         clear_endpoint = component.endpoint("clear_kv_blocks")
 
         lora_enabled = config.engine_args.enable_lora
@@ -120,12 +121,9 @@ class WorkerFactory:
         # Set up encode worker client when routing to encoder is enabled
         encode_worker_client = None
         if config.route_to_encoder:
-            encode_worker_client = (
-                await runtime.namespace(config.namespace)
-                .component("encoder")
-                .endpoint("generate")
-                .client()
-            )
+            encode_worker_client = await runtime.endpoint(
+                f"{config.namespace}.encoder.generate"
+            ).client()
             logger.info("Waiting for Encoder Worker Instances ...")
             await encode_worker_client.wait_for_instances()
             logger.info("Connected to encoder workers")
@@ -133,12 +131,9 @@ class WorkerFactory:
         # Set up decode worker client for disaggregated mode
         decode_worker_client = None
         if config.is_prefill_worker:
-            decode_worker_client = (
-                await runtime.namespace(config.namespace)
-                .component("decoder")
-                .endpoint("generate")
-                .client()
-            )
+            decode_worker_client = await runtime.endpoint(
+                f"{config.namespace}.decoder.generate"
+            ).client()
             await decode_worker_client.wait_for_instances()
             logger.info("Connected to decode worker for disaggregated mode")
 
@@ -233,8 +228,9 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
     ) -> None:
         """Initialize standalone multimodal encode worker."""
-        component = runtime.namespace(config.namespace).component(config.component)
-        generate_endpoint = component.endpoint(config.endpoint)
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
 
         handler = EncodeWorkerHandler(config.engine_args)
         await handler.async_init(runtime)
