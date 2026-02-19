@@ -89,9 +89,7 @@ image-build: ## Build the Docker image (self-contained, no host prerequisites)
 		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
 		--build-arg BUILD_REF=$(GIT_TAG) \
-		$(PUSH) \
-		$(LOAD) \
-		.
+		$(PUSH) $(LOAD) .
 
 .PHONY: image-push
 image-push: PUSH=--push ## Build and push the Docker image
