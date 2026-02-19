@@ -28,7 +28,7 @@ from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import RequestStateStats
 
-import dynamo.nixl_connect as connect
+from dynamo.common.multimodal.embedding_transfer import TransferRequest
 
 
 class Request(BaseModel):
@@ -170,38 +170,18 @@ class MultiModalGroup(BaseModel):
     embeddings_shape: Optional[
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
-    serialized_request: Optional[connect.RdmaMetadata | str] = None
+    serialized_request: Optional[TransferRequest] = None
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    # LoRA adapter name (matches the name used in load_lora)
+    model: Optional[str] = None
     # Decode-only worker can have None for multimodal_inputs
     multimodal_inputs: Optional[List[MultiModalGroup]] = Field(default_factory=list)
     # Add these fields for Qwen VL (mRoPE) decode-only worker
     image_grid_thw: Optional[List[List[int]]] = None
     embeddings_shape: Optional[List[int]] = None
-
-
-class VLLMNativeEncoderRequest(BaseModel):
-    """Request for vLLM-native encoder worker using ECConnector"""
-
-    request_id: str
-    token_ids: List[
-        int
-    ]  # Pre-tokenized prompt with placeholder tokens (for TokensPrompt)
-    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
-    modality: Optional[
-        Literal["image", "video", "audio"]
-    ] = None  # Can be inferred from inputs
-
-
-class VLLMNativeEncoderResponse(BaseModel):
-    """Response from vLLM-native encoder worker (ECConnector mode)"""
-
-    request_id: str
-    mm_hash: str  # vLLM's multimodal hash identifier
-    modality: str  # "image", "video", "audio"
-    connector_metadata: dict[str, Any]  # ECConnector config info for PD workers
 
 
 class MyRequestOutput(BaseModel):

@@ -47,20 +47,12 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 )
 
 const (
-	// DGDR state constants
-	DGDRStateEmpty             = ""
-	DGDRStatePending           = "Pending"
-	DGDRStateProfiling         = "Profiling"
-	DGDRStateDeploying         = "Deploying"
-	DGDRStateReady             = "Ready"
-	DGDRStateDeploymentDeleted = "DeploymentDeleted"
-	DGDRStateFailed            = "Failed"
-
 	// Condition types
 	ConditionTypeValidation      = "Validation"
 	ConditionTypeProfiling       = "Profiling"
@@ -169,12 +161,26 @@ const (
 	BackendSGLang = "sglang"
 	BackendTRTLLM = "trtllm"
 
-	// Profiling config field names
-	ConfigKeyDeployment = "deployment"
-	ConfigKeyModelCache = "modelCache"
-	ConfigKeyPVCName    = "pvcName"
-	ConfigKeyPVCPath    = "pvcPath"
-	ConfigKeyMountPath  = "mountPath"
+	// Profiling config field names for v1alpha1; note: will be removed in v1beta1
+	ConfigKeyDeployment       = "deployment"
+	ConfigKeyModelCache       = "modelCache"
+	ConfigKeyPVCName          = "pvcName"
+	ConfigKeyPVCPath          = "pvcPath"
+	ConfigKeyMountPath        = "mountPath"
+	ConfigKeyHardware         = "hardware"
+	ConfigKeyEngine           = "engine"
+	ConfigKeyOutputDir        = "output_dir"
+	ConfigKeyNumGpusPerNode   = "numGpusPerNode"
+	ConfigKeyGPUModel         = "gpuModel"
+	ConfigKeyGPUVramMib       = "gpuVramMib"
+	ConfigKeySystem           = "system"
+	ConfigKeyMinNumGpusPerEng = "minNumGpusPerEngine"
+	ConfigKeyMaxNumGpusPerEng = "maxNumGpusPerEngine"
+	ConfigKeyBackend          = "backend"
+	ConfigKeyConfig           = "config"
+	ConfigKeyNamespace        = "namespace"
+	ConfigKeyModel            = "model"
+	ConfigKeyDGDImage         = "dgd_image"
 )
 
 // shell script template for the output copier sidecar
@@ -358,8 +364,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	// Check for spec changes (immutability enforcement)
 	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
 		// Spec changed after initial processing
-		if dgdr.Status.State == DGDRStateProfiling || dgdr.Status.State == DGDRStateDeploying ||
-			dgdr.Status.State == DGDRStateReady || dgdr.Status.State == DGDRStateDeploymentDeleted {
+		if dgdr.Status.State == nvidiacomv1alpha1.DGDRStateProfiling || dgdr.Status.State == nvidiacomv1alpha1.DGDRStateDeploying ||
+			dgdr.Status.State == nvidiacomv1alpha1.DGDRStateReady || dgdr.Status.State == nvidiacomv1alpha1.DGDRStateDeploymentDeleted {
 			logger.Info("Spec change detected in immutable state",
 				"state", dgdr.Status.State,
 				"observedGeneration", dgdr.Status.ObservedGeneration,
@@ -375,23 +381,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	}
 	// State machine: handle different states
 	switch dgdr.Status.State {
-	case DGDRStateEmpty:
+	case nvidiacomv1alpha1.DGDRStateInitializing, "":
 		return r.handleInitialState(ctx, dgdr)
-	case DGDRStatePending:
+	case nvidiacomv1alpha1.DGDRStatePending:
 		return r.handlePendingState(ctx, dgdr)
-	case DGDRStateProfiling:
+	case nvidiacomv1alpha1.DGDRStateProfiling:
 		return r.handleProfilingState(ctx, dgdr)
-	case DGDRStateDeploying:
+	case nvidiacomv1alpha1.DGDRStateDeploying:
 		return r.handleDeployingState(ctx, dgdr)
-	case DGDRStateReady:
+	case nvidiacomv1alpha1.DGDRStateReady:
 		return r.handleReadyState(ctx, dgdr)
-	case DGDRStateDeploymentDeleted:
+	case nvidiacomv1alpha1.DGDRStateDeploymentDeleted:
 		return r.handleDeploymentDeletedState(ctx, dgdr)
-	case DGDRStateFailed:
+	case nvidiacomv1alpha1.DGDRStateFailed:
 		return r.handleFailedState(ctx, dgdr)
 	default:
 		logger.Info("Unknown state", "state", dgdr.Status.State)
-		return r.updateStateAndRequeue(ctx, dgdr, DGDRStateFailed, MessageInvalidState)
+		return r.updateStateAndRequeue(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, MessageInvalidState)
 	}
 }
 
@@ -403,7 +409,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 	// Validate the spec
 	if err := r.validateSpec(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonValidationFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeValidation, metav1.ConditionFalse, EventReasonValidationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeValidation, metav1.ConditionFalse, EventReasonValidationFailed, err.Error())
 	}
 
 	// Set observedGeneration to track the spec we're processing
@@ -414,7 +420,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 
 	// Initialize status
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonInitialized, MessageInitialized)
-	return r.updateStateAndRequeue(ctx, dgdr, DGDRStatePending, MessageInitialized)
+	return r.updateStateAndRequeue(ctx, dgdr, nvidiacomv1alpha1.DGDRStatePending, MessageInitialized)
 }
 
 // handlePendingState starts the profiling process
@@ -425,7 +431,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	// Create profiling job (online or AIC)
 	if err := r.createProfilingJob(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonProfilingJobFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
 
 	// Record event with appropriate message
@@ -436,7 +442,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	}
 
 	// Update to Profiling state with Running status
-	return r.updateStateWithCondition(ctx, dgdr, DGDRStateProfiling, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
+	return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateProfiling, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingRunning", MessageProfilingInProgress)
 }
 
 // handleProfilingState monitors profiling progress and generates spec when complete
@@ -450,7 +456,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	if err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, err.Error())
 		// Job failed - transition to Failed state
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, "ProfilingFailed", err.Error())
 	}
 
 	if !completed {
@@ -471,7 +477,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// Retrieve profiling results and generate spec
 	if err := r.generateDGDSpec(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateFailed, ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
 	}
 
 	// Record spec generation event
@@ -493,11 +499,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// If autoApply is enabled, transition to Deploying state
 	if dgdr.Spec.AutoApply {
 		logger.Info("AutoApply enabled, transitioning to Deploying state")
-		return r.updateStateWithCondition(ctx, dgdr, DGDRStateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
+		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateDeploying, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecGenerated)
 	}
 
 	// Otherwise, transition to Ready state
-	return r.updateStateWithCondition(ctx, dgdr, DGDRStateReady, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecAvailable)
+	return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateReady, ConditionTypeSpecGenerated, metav1.ConditionTrue, EventReasonSpecGenerated, MessageSpecAvailable)
 }
 
 // handleReadyState handles DGDR in Ready state
@@ -530,20 +536,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyState(ctx context.Co
 	dgdr.Status.Deployment.State = dgd.Status.State
 
 	// Check if DGD degraded from Ready
-	if dgd.Status.State != string(DGDStateReady) {
+	if dgd.Status.State != nvidiacomv1alpha1.DGDStateSuccessful {
 		logger.Info("DGD degraded, transitioning back to Deploying",
 			"dgdState", dgd.Status.State)
 
-		dgdr.Status.State = DGDRStateDeploying
+		dgdr.Status.State = nvidiacomv1alpha1.DGDRStateDeploying
 
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDegraded,
-			fmt.Sprintf(MessageDeploymentDegraded, dgd.Name, dgd.Status.State))
+			fmt.Sprintf(MessageDeploymentDegraded, dgd.Name, string(dgd.Status.State)))
 
 		meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 			Type:    ConditionTypeDeploymentReady,
 			Status:  metav1.ConditionFalse,
 			Reason:  EventReasonDeploymentDegraded,
-			Message: fmt.Sprintf("Deployment degraded to %s", dgd.Status.State),
+			Message: fmt.Sprintf("Deployment degraded to %s", string(dgd.Status.State)),
 		})
 	}
 
@@ -558,7 +564,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	if !dgdr.Spec.AutoApply {
 		// Shouldn't be in this state without autoApply
 		logger.Info("AutoApply not enabled, transitioning to Ready")
-		dgdr.Status.State = DGDRStateReady
+		dgdr.Status.State = nvidiacomv1alpha1.DGDRStateReady
 		return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 	}
 
@@ -587,9 +593,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 	dgdr.Status.Deployment.State = dgd.Status.State
 
 	// Check if DGD is Ready
-	if dgd.Status.State == string(DGDStateReady) {
+	if dgd.Status.State == nvidiacomv1alpha1.DGDStateSuccessful {
 		logger.Info("DGD is Ready, transitioning to Ready state")
-		dgdr.Status.State = DGDRStateReady
+		dgdr.Status.State = nvidiacomv1alpha1.DGDRStateReady
 
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonDeploymentReady,
 			fmt.Sprintf(MessageDeploymentReady, dgd.Name))
@@ -617,11 +623,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	logger := log.FromContext(ctx)
 	logger.Info("DGD was deleted by user, transitioning to DeploymentDeleted state")
 
-	dgdr.Status.State = DGDRStateDeploymentDeleted
-	dgdr.Status.Deployment.State = ""
+	dgdr.Status.State = nvidiacomv1alpha1.DGDRStateDeploymentDeleted
 
 	r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonDeploymentDeleted,
 		fmt.Sprintf(MessageDeploymentDeleted, dgdr.Status.Deployment.Name))
+
+	dgdr.Status.Deployment = nil
 
 	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 		Type:    ConditionTypeDeploymentReady,
@@ -730,7 +737,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 				Name:      dgdName,
 				Namespace: dgdNamespace,
-				State:     string(DGDStatePending),
+				State:     nvidiacomv1alpha1.DGDStatePending,
 				Created:   true,
 			}
 			return ctrl.Result{}, r.Status().Update(ctx, dgdr)
@@ -743,7 +750,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 		Name:      dgdName,
 		Namespace: dgdNamespace,
-		State:     string(DGDStatePending),
+		State:     nvidiacomv1alpha1.DGDStatePending,
 		Created:   true,
 	}
 
@@ -886,7 +893,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 	// Use the validator for simple validation (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		isClusterWide := r.Config.RestrictedNamespace == ""
-		validator := webhookvalidation.NewDynamoGraphDeploymentRequestValidator(dgdr, isClusterWide)
+		validator := webhookvalidation.NewDynamoGraphDeploymentRequestValidator(dgdr, isClusterWide, r.Config.GPUDiscoveryEnabled)
 		warnings, err := validator.Validate()
 		if err != nil {
 			return err
@@ -946,8 +953,116 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		}
 	}
 
+	if err := r.validateGPUHardwareInfo(ctx, dgdr); err != nil {
+		return err
+	}
+
 	// The profiler will validate the rest of the configuration
 	return nil
+}
+
+// toFloat64 converts a numeric value (int or float64) to float64.
+// Returns 0 if the value is neither int nor float64.
+func toFloat64(val interface{}) float64 {
+	switch v := val.(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	default:
+		return 0
+	}
+}
+
+// validateGPUHardwareInfo ensures GPU hardware information is available when required for profiling
+func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
+	logger := log.FromContext(ctx)
+
+	// Check for hardware info and GPU ranges
+	// TODO: will be cleaner once we swap to new DGDR schema (#6130)
+	var config map[string]interface{}
+	if dgdr.Spec.ProfilingConfig.Config != nil {
+		if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+			// Config parse errors will be caught later, skip validation here
+			return nil
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+
+	hardwareVal, hasHardware := config[ConfigKeyHardware]
+	var hasManualHardwareConfig bool
+	if hasHardware && hardwareVal != nil {
+		if hardwareConfig, ok := hardwareVal.(map[string]interface{}); ok {
+			_, hasGPUModel := hardwareConfig[ConfigKeyGPUModel]
+			_, hasGPUVram := hardwareConfig[ConfigKeyGPUVramMib]
+			_, hasNumGPUs := hardwareConfig[ConfigKeyNumGpusPerNode]
+			hasManualHardwareConfig = hasGPUModel || hasGPUVram || hasNumGPUs
+		}
+	}
+
+	var hasExplicitGPURanges bool
+	if engineVal, hasEngine := config[ConfigKeyEngine]; hasEngine && engineVal != nil {
+		if engineConfig, ok := engineVal.(map[string]interface{}); ok {
+			minGPUs, hasMin := engineConfig[ConfigKeyMinNumGpusPerEng]
+			maxGPUs, hasMax := engineConfig[ConfigKeyMaxNumGpusPerEng]
+			if hasMin && hasMax {
+				minVal := toFloat64(minGPUs)
+				maxVal := toFloat64(maxGPUs)
+
+				// Validate that min <= max
+				if minVal > maxVal {
+					return fmt.Errorf("invalid GPU range: %s (%v) cannot be greater than %s (%v)",
+						ConfigKeyMinNumGpusPerEng, minVal, ConfigKeyMaxNumGpusPerEng, maxVal)
+				}
+
+				hasExplicitGPURanges = minVal > 0 && maxVal > 0
+			}
+		}
+	}
+
+	// If manual config or explicit ranges are provided, validation passes
+	if hasManualHardwareConfig || hasExplicitGPURanges {
+		return nil
+	}
+
+	_, err := gpu.DiscoverGPUs(ctx, r.Client)
+	if err == nil {
+		// GPU discovery is available, validation passes
+		return nil
+	}
+
+	logger.Info("GPU discovery not available", "reason", err.Error())
+
+	isNamespaceScoped := r.Config.RestrictedNamespace != ""
+	if isNamespaceScoped {
+		tmpl := template.Must(template.New("nsGPUErr").Parse(
+			`GPU hardware info required but cannot be auto-discovered.` +
+				"\n\nOptions to resolve:" +
+				"\n\n1. Re-enable GPU discovery (if it was disabled during Helm install):" +
+				"\n   helm upgrade ... --set dynamo-operator.gpuDiscovery.enabled=true" +
+				"\n\n2. Add hardware config to profilingConfig.config.{{.Hardware}}:" +
+				"\n   {{.NumGPUs}}: 8" +
+				"\n   {{.GPUModel}}: \"H100-SXM5-80GB\"" +
+				"\n   {{.GPUVram}}: 81920" +
+				"\n\n3. Or specify {{.Engine}}.{{.MinGPUs}} and {{.Engine}}.{{.MaxGPUs}} for explicit GPU search ranges.",
+		))
+		var buf bytes.Buffer
+		_ = tmpl.Execute(&buf, map[string]string{
+			"Hardware": ConfigKeyHardware,
+			"NumGPUs":  ConfigKeyNumGpusPerNode,
+			"GPUModel": ConfigKeyGPUModel,
+			"GPUVram":  ConfigKeyGPUVramMib,
+			"Engine":   ConfigKeyEngine,
+			"MinGPUs":  ConfigKeyMinNumGpusPerEng,
+			"MaxGPUs":  ConfigKeyMaxNumGpusPerEng,
+		})
+		return fmt.Errorf("%s", buf.String())
+	}
+
+	return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s",
+		ConfigKeyHardware, ConfigKeyNumGpusPerNode, ConfigKeyGPUModel, ConfigKeyGPUVramMib,
+		ConfigKeyEngine, ConfigKeyMinNumGpusPerEng, ConfigKeyEngine, ConfigKeyMaxNumGpusPerEng)
 }
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource
@@ -989,13 +1104,29 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 	}
 
+	// Run GPU discovery before creating job (cluster-wide and namespace-restricted operators if they have node read permissions)
+	var gpuInfo *gpu.GPUInfo
+	logger.Info("Attempting GPU discovery for profiling job")
+	discoveredInfo, err := gpu.DiscoverGPUs(ctx, r.Client)
+	if err != nil {
+		// This path is expected for namespace-restricted operators without node read permissions
+		logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
+			"reason", err.Error())
+	} else {
+		gpuInfo = discoveredInfo
+		logger.Info("GPU discovery completed successfully",
+			"gpusPerNode", gpuInfo.GPUsPerNode,
+			"model", gpuInfo.Model,
+			"vramMiB", gpuInfo.VRAMPerGPU,
+			"system", gpuInfo.System)
+	}
+
 	// Use SyncResource to create/update the job
 	modified, job, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*batchv1.Job, bool, error) {
 		jobName := getProfilingJobName(dgdr)
 		outputConfigMapName := getOutputConfigMapName(dgdr)
 
-		// Parse and prepare profiling config
-		configYAML, err := r.prepareProfilingConfig(dgdr)
+		configYAML, err := r.prepareProfilingConfig(dgdr, gpuInfo)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1067,12 +1198,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// Profiler args: pass the config as an inline YAML string via --profile-config
 		profilerArgs := []string{
 			"--profile-config", string(configYAML),
-		}
-
-		// Add --enable-gpu-discovery flag based on DGDR spec
-		// GPU discovery requires cluster-wide node access
-		if dgdr.Spec.EnableGpuDiscovery {
-			profilerArgs = append(profilerArgs, "--enable-gpu-discovery")
 		}
 
 		// Use profiler image from profilingConfig
@@ -1212,6 +1337,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			podSpec.Tolerations = dgdr.Spec.ProfilingConfig.Tolerations
 		}
 
+		// Apply nodeSelector if specified in the DGDR
+		if len(dgdr.Spec.ProfilingConfig.NodeSelector) > 0 {
+			podSpec.NodeSelector = dgdr.Spec.ProfilingConfig.NodeSelector
+		}
+
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
@@ -1245,7 +1375,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 }
 
 // prepareProfilingConfig parses and modifies the profiling config
-func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) ([]byte, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, gpuInfo *gpu.GPUInfo) ([]byte, error) {
 	// Parse the profiling config from JSON
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
@@ -1253,53 +1383,84 @@ func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nv
 	}
 
 	// Set deployment.namespace if not already set
-	deploymentVal, hasDeployment := config["deployment"]
+	deploymentVal, hasDeployment := config[ConfigKeyDeployment]
 	var deploymentConfig map[string]interface{}
 	if !hasDeployment || deploymentVal == nil {
 		deploymentConfig = make(map[string]interface{})
-		config["deployment"] = deploymentConfig
+		config[ConfigKeyDeployment] = deploymentConfig
 	} else {
 		var ok bool
 		deploymentConfig, ok = deploymentVal.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("profilingConfig.config.deployment must be an object, got %T", deploymentVal)
+			return nil, fmt.Errorf("profilingConfig.config.%s must be an object, got %T", ConfigKeyDeployment, deploymentVal)
 		}
 	}
-	if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
-		deploymentConfig["namespace"] = dgdr.Namespace
+	if _, hasNamespace := deploymentConfig[ConfigKeyNamespace]; !hasNamespace {
+		deploymentConfig[ConfigKeyNamespace] = dgdr.Namespace
 	}
 
 	// Set deployment.model from spec.model
-	deploymentConfig["model"] = dgdr.Spec.Model
+	deploymentConfig[ConfigKeyModel] = dgdr.Spec.Model
 
 	// Set deployment.dgd_image from deploymentOverrides.workersImage if provided
 	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
-		deploymentConfig["dgd_image"] = dgdr.Spec.DeploymentOverrides.WorkersImage
+		deploymentConfig[ConfigKeyDGDImage] = dgdr.Spec.DeploymentOverrides.WorkersImage
 	}
 
 	// Set output_dir if not already set
-	if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
-		config["output_dir"] = ProfilingOutputPath
+	if _, hasOutputDir := config[ConfigKeyOutputDir]; !hasOutputDir {
+		config[ConfigKeyOutputDir] = ProfilingOutputPath
 	}
 
 	// Set engine.backend from spec.backend
-	engineVal, hasEngine := config["engine"]
+	engineVal, hasEngine := config[ConfigKeyEngine]
 	var engineConfig map[string]interface{}
 	if !hasEngine || engineVal == nil {
 		engineConfig = make(map[string]interface{})
-		config["engine"] = engineConfig
+		config[ConfigKeyEngine] = engineConfig
 	} else {
 		var ok bool
 		engineConfig, ok = engineVal.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("profilingConfig.config.engine must be an object, got %T", engineVal)
+			return nil, fmt.Errorf("profilingConfig.config.%s must be an object, got %T", ConfigKeyEngine, engineVal)
 		}
 	}
-	engineConfig["backend"] = dgdr.Spec.Backend
+	engineConfig[ConfigKeyBackend] = dgdr.Spec.Backend
 
 	// If ConfigMapRef is provided, set engine.config path
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
-		engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
+		engineConfig[ConfigKeyConfig] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
+	}
+
+	// User-specified values take precedence over auto-discovered values
+	if gpuInfo != nil {
+		hardwareVal, hasHardware := config["hardware"]
+		var hardwareConfig map[string]interface{}
+		if !hasHardware || hardwareVal == nil {
+			hardwareConfig = make(map[string]interface{})
+			config["hardware"] = hardwareConfig
+		} else {
+			var ok bool
+			hardwareConfig, ok = hardwareVal.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("profilingConfig.config.hardware must be an object, got %T", hardwareVal)
+			}
+		}
+
+		if _, hasNumGpus := hardwareConfig[ConfigKeyNumGpusPerNode]; !hasNumGpus {
+			hardwareConfig[ConfigKeyNumGpusPerNode] = gpuInfo.GPUsPerNode
+		}
+		if _, hasGpuModel := hardwareConfig[ConfigKeyGPUModel]; !hasGpuModel {
+			hardwareConfig[ConfigKeyGPUModel] = gpuInfo.Model
+		}
+		if _, hasGpuVram := hardwareConfig[ConfigKeyGPUVramMib]; !hasGpuVram {
+			hardwareConfig[ConfigKeyGPUVramMib] = gpuInfo.VRAMPerGPU
+		}
+		if gpuInfo.System != "" {
+			if _, hasSystem := hardwareConfig[ConfigKeySystem]; !hasSystem {
+				hardwareConfig[ConfigKeySystem] = gpuInfo.System
+			}
+		}
 	}
 
 	// Serialize config to YAML for passing to profiler
@@ -1575,7 +1736,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent 
 }
 
 // updateStateAndRequeue updates the DGDR state and requeues
-func (r *DynamoGraphDeploymentRequestReconciler) updateStateAndRequeue(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, state, _ string) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) updateStateAndRequeue(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, state nvidiacomv1alpha1.DGDRState, _ string) (ctrl.Result, error) {
 	dgdr.Status.State = state
 	if err := r.Status().Update(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
@@ -1587,7 +1748,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updateStateAndRequeue(ctx conte
 func (r *DynamoGraphDeploymentRequestReconciler) updateStateWithCondition(
 	ctx context.Context,
 	dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest,
-	state string,
+	state nvidiacomv1alpha1.DGDRState,
 	conditionType string,
 	status metav1.ConditionStatus,
 	reason string,

@@ -26,6 +26,7 @@ from tests.fault_tolerance.deploy.scenarios import (
     scenarios,
 )
 from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+from tests.utils.test_output import resolve_test_output_path
 
 
 @pytest.fixture
@@ -271,8 +272,8 @@ def validation_context(request, scenario):  # noqa: F811
 
     if hasattr(scenario.load, "mixed_token_test") and scenario.load.mixed_token_test:
         # For mixed token tests, we have separate overflow and recovery directories
-        overflow_dir = f"{request.node.name}{OVERFLOW_SUFFIX}"
-        recovery_dir = f"{request.node.name}{RECOVERY_SUFFIX}"
+        overflow_dir = resolve_test_output_path(f"{request.node.name}{OVERFLOW_SUFFIX}")
+        recovery_dir = resolve_test_output_path(f"{request.node.name}{RECOVERY_SUFFIX}")
         log_paths = [overflow_dir, recovery_dir]
 
         logging.info("Mixed token test detected. Looking for results in:")
@@ -280,7 +281,7 @@ def validation_context(request, scenario):  # noqa: F811
         logging.info(f"  - Recovery phase: {recovery_dir}")
     else:
         # Standard test with single directory
-        log_paths = [request.node.name]
+        log_paths = [resolve_test_output_path(request.node.name)]
 
     # Use factory to auto-detect and parse results
     try:
@@ -321,7 +322,7 @@ def validation_context(request, scenario):  # noqa: F811
                     # Create ValidationContext for all checkers
                     validation_ctx = ValidationContext(
                         scenario=scenario,
-                        log_dir=test_name,
+                        log_dir=resolve_test_output_path(test_name),
                         metrics=metrics,
                         deployment=context.get("deployment"),
                         namespace=context.get("namespace"),

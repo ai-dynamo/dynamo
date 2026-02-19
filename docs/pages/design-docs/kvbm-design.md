@@ -250,7 +250,7 @@ flowchart TD
     A["Distributed Inference Engine"] --> B["Dynamo KV Block Manager"]
 
     B --> C["NIXL Storage Agent<br/>- Volume registration<br/>- get()/put() abstraction"]
-    B --> D["Event Plane<br/>- NATS-based Pub/Sub<br/>- StoreEvent / RemoveEvent"]
+    B --> D["Event Plane<br/>- Pub/Sub (NATS or ZMQ)<br/>- StoreEvent / RemoveEvent"]
 
     C --> E["G4 Storage Infrastructure<br/>(SSD, Object store, etc.)<br/>- Store KV blocks"]
     D --> F["Storage Provider Subscriber<br/>- Parse Events<br/>- Build fast tree/index<br/>- Optimize G4 tiering"]
@@ -268,7 +268,7 @@ These abstractions allow backends to be integrated without tying into the host's
 
 #### Dynamo Event Plane (Pub/Sub Coordination Layer)
 
-To support external storage optimizations without modifying KVBM logic, we provide an **event plane** built on NATS.io that emits lifecycle events for all block operations:
+To support external storage optimizations without modifying KVBM logic, we provide an **event plane** (supporting NATS and ZMQ transports) that emits lifecycle events for all block operations:
 
 - **StoreEvent**: Emitted when a KV block is registered
 - **RemoveEvent**: Emitted when a KV block is released or evicted
@@ -295,7 +295,7 @@ External storage systems are not tightly coupled with Dynamo's execution pipelin
 1. Storage volumes are pre-provisioned and mounted by the storage provider
 2. These volumes are registered with Dynamo through the NIXL Storage Agent using `registerVolume()` APIs
 3. Dynamo KV Block Manager interacts only with logical block-level APIs (`get()` and `put()`)
-4. The Event Plane asynchronously broadcasts KV lifecycle events using a NATS-based pub/sub channel
+4. The Event Plane asynchronously broadcasts KV lifecycle events via pub/sub (NATS or ZMQ)
 5. Storage vendors implement a lightweight subscriber process that listens to these events
 
 To enable fast lookup and dynamic tiering, storage vendors may build internal data structures using the received event stream:

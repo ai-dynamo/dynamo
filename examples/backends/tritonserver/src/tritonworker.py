@@ -12,7 +12,7 @@ import uvloop
 from google.protobuf import text_format
 from tritonclient.utils import triton_to_np_dtype
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -99,13 +99,10 @@ async def triton_worker(runtime: DistributedRuntime, args: argparse.Namespace):
     )
     logger.info(f"Environment: NATS_SERVER={os.environ.get('NATS_SERVER', 'NOT SET')}")
     logger.info(
-        f"Environment: DYN_STORE_KV={os.environ.get('DYN_STORE_KV', 'NOT SET')}"
+        f"Environment: DYN_DISCOVERY_BACKEND={os.environ.get('DYN_DISCOVERY_BACKEND', 'NOT SET')}"
     )
 
-    component = runtime.namespace("triton").component("tritonserver")
-    logger.info("✓ Created component: triton/tritonserver")
-
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("triton.tritonserver.generate")
     logger.info("✓ Created endpoint: triton/tritonserver/generate")
 
     model_repository = args.model_repository
@@ -147,8 +144,8 @@ async def triton_worker(runtime: DistributedRuntime, args: argparse.Namespace):
     runtime_config.set_tensor_model_config(model_config)
 
     logger.info("Attempting to register model with Dynamo runtime...")
-    # Use register_llm for tensor-based models (skips HuggingFace downloads)
-    await register_llm(
+    # Use register_model for tensor-based models (skips HuggingFace downloads)
+    await register_model(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,

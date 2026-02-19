@@ -90,16 +90,13 @@ pub struct KvScheduler {
 }
 
 impl KvScheduler {
-    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
         workers_with_configs: RuntimeConfigWatch,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
-        replica_sync: bool,
-        router_id: u64,
+        kv_router_config: &KvRouterConfig,
         worker_type: &'static str,
-        queue_threshold: Option<f64>,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
@@ -108,12 +105,13 @@ impl KvScheduler {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
+        let router_id = component.drt().discovery().instance_id();
         let slots = Arc::new(
             ActiveSequencesMultiWorker::new(
                 component.clone(),
                 block_size as usize,
                 initial_workers,
-                replica_sync,
+                kv_router_config.router_replica_sync,
                 router_id,
                 worker_type,
             )
@@ -163,7 +161,7 @@ impl KvScheduler {
             slots.clone(),
             workers_with_configs.clone(),
             ready_notify.clone(),
-            queue_threshold,
+            kv_router_config.router_queue_threshold,
         ));
         let queue_clone = queue.clone();
 

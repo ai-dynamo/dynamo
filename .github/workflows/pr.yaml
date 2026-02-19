@@ -184,6 +184,7 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: true
       test_gpu_timeout_minutes: 35
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
@@ -204,6 +205,7 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: true
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
@@ -223,6 +225,7 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: true
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
@@ -315,7 +318,8 @@ jobs:
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ steps.operator-tag.outputs.tag }} \
-          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+          --set dynamo-operator.gpuDiscovery.enabled=false \
+          --debug
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
     - name: 🔍 Report Unhealthy Pods

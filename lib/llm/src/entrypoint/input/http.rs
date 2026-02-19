@@ -49,6 +49,8 @@ pub async fn run(
         http_service_builder = http_service_builder.host(http_host);
     }
     http_service_builder =
+        http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
+    http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
 
     let http_service = match engine_config {
@@ -56,8 +58,9 @@ pub async fn run(
             ref model,
             ref chat_engine_factory,
         } => {
-            // This allows the /health endpoint to query store for active instances
-            http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
+            // Pass the discovery client so the /health endpoint can query active instances
+            http_service_builder =
+                http_service_builder.discovery(Some(distributed_runtime.discovery()));
             let http_service = http_service_builder.build()?;
 
             let router_config = model.router_config();

@@ -41,7 +41,7 @@ class DistributedRuntime:
     def __new__(
         cls,
         event_loop: Any,
-        store_kv: str,
+        discovery_backend: str,
         request_plane: str,
         enable_nats: Optional[bool] = None,
     ) -> "DistributedRuntime":
@@ -50,7 +50,7 @@ class DistributedRuntime:
 
         Args:
             event_loop: The asyncio event loop
-            store_kv: Key-value store backend ("etcd", "file", or "mem")
+            discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp", "http", or "nats")
             enable_nats: Whether to enable NATS for KV events. Defaults to True.
                         If request_plane is "nats", NATS is always enabled.
@@ -58,9 +58,24 @@ class DistributedRuntime:
         """
         ...
 
-    def namespace(self, name: str) -> Namespace:
+    def endpoint(self, path: str) -> Endpoint:
         """
-        Create a `Namespace` object
+        Get an endpoint directly by path.
+
+        Args:
+            path: Endpoint path in format 'namespace.component.endpoint'
+                  or 'dyn://namespace.component.endpoint'
+
+        Returns:
+            Endpoint: The requested endpoint
+
+        Raises:
+            ValueError: If path format is invalid (not 3 parts separated by dots)
+            Exception: If namespace or component creation fails
+
+        Example:
+            endpoint = runtime.endpoint("demo.backend.generate")
+            endpoint = runtime.endpoint("dyn://demo.backend.generate")
         """
         ...
 
@@ -115,19 +130,6 @@ class CancellationToken:
         """
         ...
 
-
-class Namespace:
-    """
-    A namespace is a collection of components
-    """
-
-    ...
-
-    def component(self, name: str) -> Component:
-        """
-        Create a `Component` object
-        """
-        ...
 
 class Component:
     """
@@ -205,6 +207,24 @@ class Endpoint:
         This adds the endpoint back to the instances bucket, allowing the router
         to send requests to this worker again. Use this when a worker wakes up
         and should start receiving requests.
+        """
+        ...
+
+    def component(self) -> Component:
+        """
+        Get the parent Component that this endpoint belongs to.
+
+        Returns:
+            Component: The parent component
+
+        Note:
+            To avoid duplicate metrics registries, reuse the returned Component for
+            multiple endpoints: component.endpoint("ep1"), component.endpoint("ep2")
+
+        Example:
+            endpoint = runtime.endpoint("demo.backend.generate")
+            component = endpoint.component()
+            health_endpoint = component.endpoint("health")  # Reuse component
         """
         ...
 
@@ -922,6 +942,7 @@ class ModelType:
     TensorBased: ModelType
     Prefill: ModelType
     Images: ModelType
+    Audios: ModelType
     Videos: ModelType
     ...
 
@@ -1011,7 +1032,7 @@ class KvRouterConfig:
         """
         ...
 
-async def register_llm(
+async def register_model(
     model_input: ModelInput,
     model_type: ModelType,
     endpoint: Endpoint,
@@ -1040,7 +1061,7 @@ async def register_llm(
     """
     ...
 
-async def unregister_llm(
+async def unregister_model(
     endpoint: Endpoint,
     lora_name: Optional[str] = None,
 ) -> None:
@@ -1055,13 +1076,18 @@ def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
-async def fetch_llm(remote_name: str, ignore_weights: bool = False) -> str:
+async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
     """
-    Download a model from Hugging Face, returning it's local path.
+    Download a model from Hugging Face, returning its local path.
     If `ignore_weights` is True, only fetches tokenizer and config files.
-    Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
+    Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
     """
     ...
+
+# Backward-compatible aliases (deprecated, use new names)
+fetch_llm = fetch_model
+register_llm = register_model
+unregister_llm = unregister_model
 
 class EngineConfig:
     """Holds internal configuration for a Dynamo engine."""
@@ -1293,37 +1319,6 @@ class KvbmRequest:
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
-class ZmqKvEventListener:
-    """
-    A ZMQ-based key-value cache event listener that operates independently
-    of the dynamo runtime or event plane infrastructure.
-    """
-
-    def __init__(
-        self, zmq_endpoint: str, zmq_topic: str, kv_block_size: int
-    ) -> None:
-        """
-        Create a new ZmqKvEventListener instance.
-
-        Args:
-            zmq_endpoint: ZeroMQ endpoint to connect to (e.g., "tcp://127.0.0.1:5557")
-            zmq_topic: ZeroMQ topic to subscribe to
-            kv_block_size: Size of KV cache blocks
-        """
-        ...
-
-    async def get_events(self) -> List[str]:
-        """
-        Get all available KV cache events from the ZMQ listener.
-
-        Returns:
-            List of JSON-serialized KV cache events as strings
-
-        Raises:
-            ValueError: If events cannot be serialized to JSON
-        """
-        ...
-
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.
@@ -1355,6 +1350,10 @@ class KvRouter:
         router_config_override: Optional[JsonLike] = None,
         worker_id: Optional[int] = None,
         dp_rank: Optional[int] = None,
+        extra_args: Optional[JsonLike] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        multi_modal_data: Optional[JsonLike] = None,
+        mm_routing_info: Optional[JsonLike] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -1373,6 +1372,16 @@ class KvRouter:
                     the request will be routed to the specific (worker_id, dp_rank) pair.
                     If only dp_rank is set, the router will select the best worker but
                     force routing to the specified dp_rank.
+            extra_args: Optional extra request arguments to include in the
+                       PreprocessedRequest.
+            block_mm_infos: Optional block-level multimodal metadata aligned to
+                           request blocks. Backward-compatible shortcut; this is
+                           converted to mm_routing_info with routing_token_ids=token_ids.
+            multi_modal_data: Optional multimodal payload map to preserve image/video
+                             data for downstream model execution.
+            mm_routing_info: Optional structured routing-only multimodal payload
+                            (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
+                            used by router selection without changing execution token_ids.
 
         Returns:
             An async iterator yielding generation responses
@@ -1391,6 +1400,7 @@ class KvRouter:
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -1401,6 +1411,9 @@ class KvRouter:
             request_id: Optional request ID. If provided, router states will be updated
                        to track this request (active blocks, lifecycle events). If not
                        provided, this is a query-only operation that doesn't affect state.
+            block_mm_infos: Optional block-level multimodal metadata aligned to request
+                           blocks. When provided, this is used in block hash computation
+                           to enable MM-aware worker selection.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
