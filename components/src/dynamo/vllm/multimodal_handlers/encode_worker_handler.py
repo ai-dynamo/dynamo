@@ -30,8 +30,10 @@ from ..multimodal_utils import (
     load_vision_model,
     vLLMMultimodalRequest,
 )
+from ..multimodal_utils.audio_loader import AudioLoader
 from ..multimodal_utils.embedding_cache import EmbeddingCache
 from ..multimodal_utils.model import is_qwen_vl_model
+from ..multimodal_utils.video_loader import VideoLoader
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +291,8 @@ class VLLMEncodeWorkerHandler:
         self.config = config
         self.temp_dirs = []
         self.image_loader = ImageLoader()
+        self.video_loader = VideoLoader()
+        self.audio_loader = AudioLoader()
 
         logger.info(
             f"VLLMNativeEncoderWorkerHandler initialized with "
@@ -327,27 +331,40 @@ class VLLMEncodeWorkerHandler:
             f"for request_id={request.request_id}"
         )
 
-        # Load all images
-        # TODO: support video and audio encoding later
-        media_list = []
-        modality = "image"
+        media_list: list = []
+        modality: str | None = None
         for idx, mm_group in enumerate(request.multimodal_inputs):
             mm_input = mm_group.multimodal_input
             if mm_input.image_url:
-                media = await self.image_loader.load_image(mm_input.image_url)
-                media_list.append(media)
+                detected = "image"
+                media_list.append(
+                    await self.image_loader.load_image(mm_input.image_url)
+                )
             elif mm_input.video_url:
-                raise NotImplementedError("Video encoding not yet supported")
+                detected = "video"
+                media_list.append(
+                    await self.video_loader.load_video(mm_input.video_url)
+                )
+            elif mm_input.audio_url:
+                detected = "audio"
+                audio, sr = await self.audio_loader.load_audio(mm_input.audio_url)
+                media_list.append((audio, sr))
             else:
+                raise ValueError(f"No media URL provided in multimodal_input[{idx}].")
+
+            if modality is None:
+                modality = detected
+            elif modality != detected:
                 raise ValueError(
-                    f"No media URL provided in multimodal_input[{idx}]. "
-                    "Specify image_url or video_url."
+                    f"Mixed modalities in single request: expected {modality}, "
+                    f"got {detected} at index {idx}."
                 )
 
-        # Process all images in one vLLM request
+        assert modality is not None, "modality must be set after processing inputs"
+
         prompt_dict = TokensPrompt(
             prompt_token_ids=request.token_ids,
-            multi_modal_data={"image": media_list},
+            multi_modal_data={modality: media_list},
         )
 
         try:
@@ -362,20 +379,20 @@ class VLLMEncodeWorkerHandler:
                 pass
 
             logger.info(
-                f"[{request.request_id}] Encoder execution completed for all {len(media_list)} image(s)"
+                f"[{request.request_id}] Encoder execution completed for all {len(media_list)} {modality}(s)"
             )
 
         except Exception as e:
             logger.error(f"[{request.request_id}] Encoder execution failed: {e}")
             raise
 
-        # Compute mm_hash for each image and yield responses
+        # Compute mm_hash for each media item and yield responses
         for idx, media in enumerate(media_list):
             item_request_id = f"{request.request_id}_mm_{idx}"
 
             try:
                 mm_hash = MultiModalHasher.hash_kwargs(
-                    model_id=self.config.model, image=media
+                    model_id=self.config.model, **{modality: media}
                 )
                 logger.debug(f"[{item_request_id}] Computed mm_hash: {mm_hash}")
             except Exception as e:

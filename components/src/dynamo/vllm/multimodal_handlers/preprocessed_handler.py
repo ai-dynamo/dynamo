@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
 VIDEO_URL_KEY: Final = "video_url"
+AUDIO_URL_KEY: Final = "audio_url"
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
 
@@ -85,10 +86,6 @@ class PreprocessedHandler(ProcessMixIn):
         multimodal_inputs,
         context,
     ):
-        # [gluo NOTE] panic for now as encoder here is for image only
-        if VIDEO_URL_KEY in multimodal_inputs or multimodal_inputs[VIDEO_URL_KEY]:
-            raise ValueError("Video URL not supported in encode worker yet")
-
         request_id = str(uuid.uuid4().hex)
 
         # Build sampling params from request using shared utility
@@ -123,8 +120,8 @@ class PreprocessedHandler(ProcessMixIn):
                     multimodal_input.image_url = url
                 elif mm_type == VIDEO_URL_KEY:
                     multimodal_input.video_url = url
-                    # [gluo NOTE] should not reach here due to earlier check
-                    continue
+                elif mm_type == AUDIO_URL_KEY:
+                    multimodal_input.audio_url = url
                 encode_request.multimodal_inputs.append(
                     MultiModalGroup(multimodal_input=multimodal_input)
                 )
@@ -242,7 +239,7 @@ class PreprocessedHandler(ProcessMixIn):
         mm_map = request["multi_modal_data"]
         multimodal_inputs = defaultdict(list)
 
-        for mm_type in [IMAGE_URL_KEY, VIDEO_URL_KEY]:
+        for mm_type in [IMAGE_URL_KEY, VIDEO_URL_KEY, AUDIO_URL_KEY]:
             for item in mm_map.get(mm_type, []):
                 if isinstance(item, dict) and URL_VARIANT_KEY in item:
                     multimodal_inputs[mm_type].append(item[URL_VARIANT_KEY])
@@ -264,10 +261,12 @@ class PreprocessedHandler(ProcessMixIn):
         multimodal_inputs = self._extract_multimodal_data(request)
 
         if not multimodal_inputs:
-            raise ValueError("Either image URL or video URL is required")
+            raise ValueError(
+                "At least one media URL (image, video, or audio) is required"
+            )
         elif len(multimodal_inputs) > 1:
             raise ValueError(
-                "Only one of image URL or video URL is supported per request"
+                "Only one modality (image, video, or audio) is supported per request"
             )
 
         async for response in self._generate(request, multimodal_inputs, context):
@@ -328,13 +327,8 @@ class ECProcessorHandler(PreprocessedHandler):
             f"Sample: {token_ids[:min(20, len(token_ids))]}"
         )
 
-        # Check video not supported yet
-        if VIDEO_URL_KEY in multimodal_inputs and multimodal_inputs[VIDEO_URL_KEY]:
-            raise ValueError("Video URL not supported in ECConnector encoder yet")
-
         request_id = str(uuid.uuid4().hex)
 
-        # Build sampling params from request
         sampling_params = build_sampling_params(
             raw_request, self.default_sampling_params
         )
@@ -348,6 +342,8 @@ class ECProcessorHandler(PreprocessedHandler):
                     multimodal_input.image_url = url
                 elif mm_type == VIDEO_URL_KEY:
                     multimodal_input.video_url = url
+                elif mm_type == AUDIO_URL_KEY:
+                    multimodal_input.audio_url = url
                 multimodal_groups.append(
                     MultiModalGroup(multimodal_input=multimodal_input)
                 )
