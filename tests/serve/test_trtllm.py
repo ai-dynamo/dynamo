@@ -221,7 +221,7 @@ trtllm_configs = {
         request_payloads=[
             multimodal_payload_default(
                 text="Describe what you see in this image.",
-                expected_response=["image"],
+                expected_response=["mountain", "rock", "trees", "road"],
             )
         ],
         env={
