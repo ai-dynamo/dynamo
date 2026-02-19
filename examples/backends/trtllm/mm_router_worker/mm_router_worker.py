@@ -28,8 +28,13 @@ import uvloop
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from transformers import AutoProcessor
 
-from dynamo._core import KvIndexer
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import (
+    KvRouter,
+    KvRouterConfig,
+    ModelInput,
+    ModelType,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 from .handler import MMRouterHandler
@@ -112,8 +117,8 @@ async def worker(runtime: DistributedRuntime) -> None:
     """
     Main worker function.
 
-    Sets up connections to downstream TRT-LLM workers, creates KvIndexer
-    for tracking their cache states, and serves the MM router endpoint.
+    Sets up connections to downstream TRT-LLM workers, creates KvRouter
+    for KV-aware routing, and serves the MM router endpoint.
     """
     args = parse_args()
 
@@ -145,17 +150,13 @@ async def worker(runtime: DistributedRuntime) -> None:
     instance_ids = await downstream_client.wait_for_instances()
     logger.info(f"Found {len(instance_ids)} workers: {list(instance_ids)}")
 
-    # Create KvIndexer to track workers' cache states via NATS
-    downstream_component = runtime.namespace(args.namespace).component(
-        args.downstream_component
+    # Create KvRouter to select workers based on KV overlap
+    kv_router = KvRouter(
+        endpoint=downstream_endpoint,
+        block_size=args.block_size,
+        kv_router_config=KvRouterConfig(),
     )
-    try:
-        indexer = KvIndexer(downstream_component, args.block_size)
-        logger.info("KvIndexer created successfully")
-    except Exception as e:
-        logger.warning(f"Failed to create KvIndexer: {e}")
-        logger.warning("Routing will fall back to first available worker")
-        indexer = None
+    logger.info("KvRouter created successfully")
 
     # Initialize tokenizer and processor for MM processing
     logger.info(f"Loading tokenizer from {args.model}...")
@@ -171,9 +172,7 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     # Create handler
     handler = MMRouterHandler(
-        client=downstream_client,
-        indexer=indexer,
-        instance_ids=list(instance_ids),
+        kv_router=kv_router,
         tokenizer=tokenizer,
         processor=processor,
         model=args.model,

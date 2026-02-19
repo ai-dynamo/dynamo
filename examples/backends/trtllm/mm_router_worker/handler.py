@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-MM Router Handler - Routes requests to best worker based on KV cache overlap.
+MM Router Handler - Routes requests to best TRT-LLM worker based on KV cache overlap.
 """
 
 import logging
 from typing import Any, AsyncGenerator
 
-from dynamo._core import KvIndexer, compute_block_hash_for_seq_py
-from dynamo.runtime import Client
+from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .mm_processor import build_block_mm_infos, extract_image_urls, process_multimodal
@@ -26,9 +25,7 @@ class MMRouterHandler:
 
     def __init__(
         self,
-        client: Client,
-        indexer: KvIndexer,
-        instance_ids: list[int],
+        kv_router: KvRouter,
         tokenizer: Any,
         processor: Any,
         model: str,
@@ -39,18 +36,14 @@ class MMRouterHandler:
         Initialize the MM Router Handler.
 
         Args:
-            client: Dynamo client for downstream TRT-LLM workers
-            indexer: KvIndexer for querying worker cache states
-            instance_ids: List of available worker instance IDs
+            kv_router: KvRouter for KV-aware worker selection and routing
             tokenizer: TRT-LLM tokenizer
             processor: HuggingFace AutoProcessor (optional)
             model: Model path/name
             model_type: Model type (e.g., "qwen2_vl")
             block_size: KV cache block size
         """
-        self.client = client
-        self.indexer = indexer
-        self.instance_ids = instance_ids
+        self.kv_router = kv_router
         self.tokenizer = tokenizer
         self.processor = processor
         self.model = model
@@ -73,7 +66,7 @@ class MMRouterHandler:
             request: Preprocessed request from Frontend
 
         Yields:
-            Response chunks from the downstream TRT-LLM worker
+            Response chunks from the downstream TRT-LLM worker via KvRouter
         """
         # Extract messages from extra_args (set by Frontend preprocessor)
         messages = request.get("extra_args", {}).get("messages", [])
@@ -81,6 +74,8 @@ class MMRouterHandler:
 
         if image_urls:
             # Process multimodal: download images, compute mm_hash
+            # Do not reuse request["token_ids"] for MM routing: those are placeholder-level
+            # tokens from frontend. We need processor-expanded tokens to build block_mm_infos.
             processed = process_multimodal(
                 messages=messages,
                 image_urls=image_urls,
@@ -97,121 +92,63 @@ class MMRouterHandler:
                 mm_hashes=processed.mm_hashes,
                 image_ranges=processed.image_ranges,
             )
+            if block_mm_infos is None:
+                raise ValueError(
+                    "Failed to build block_mm_infos for multimodal request"
+                )
 
-            # Compute block hashes WITH mm_info
-            local_hashes = compute_block_hash_for_seq_py(
-                processed.tokens, self.block_size, block_mm_infos
-            )
-
+            routing_tokens = processed.tokens
+            routing_blocks = (
+                len(routing_tokens) + self.block_size - 1
+            ) // self.block_size
             logger.debug(
-                f"MM request: {len(processed.tokens)} tokens, "
-                f"{len(image_urls)} images, {len(local_hashes)} blocks"
+                f"MM request: {len(routing_tokens)} routing tokens, "
+                f"{len(image_urls)} images, {routing_blocks} routing blocks"
             )
         else:
-            # Text-only: tokenize messages for routing
-            tokens = request.get("token_ids", [])
-            if not tokens:
-                # Tokenize from messages if token_ids not provided
-                prompt = self._apply_chat_template(messages)
-                tokens = self.tokenizer.encode(prompt)
-                logger.debug(f"Tokenized text-only prompt: {len(tokens)} tokens")
+            # Text-only: rely on frontend-preprocessed token_ids (ModelInput.Tokens contract)
+            token_ids = request.get("token_ids")
+            if not token_ids:
+                raise ValueError(
+                    "Missing or empty token_ids in preprocessed request for text-only routing"
+                )
 
-            local_hashes = compute_block_hash_for_seq_py(tokens, self.block_size, None)
-
+            routing_tokens = token_ids
+            routing_blocks = (
+                len(routing_tokens) + self.block_size - 1
+            ) // self.block_size
             logger.debug(
-                f"Text request: {len(tokens)} tokens, {len(local_hashes)} blocks"
+                f"Text request: {len(routing_tokens)} routing tokens, "
+                f"{routing_blocks} routing blocks"
             )
+            # Text-only routing has no multimodal objects; provide per-block None entries.
+            block_mm_infos = [None] * routing_blocks
 
-        # Find best worker based on KV cache overlap
-        best_worker_id = await self._find_best_worker(local_hashes)
+        # Route and generate through KvRouter with explicit fields.
+        # We pass:
+        # - execution payload (token_ids + multi_modal_data)
+        # - routing payload (mm_routing_info: routing_token_ids + block_mm_infos)
+        # so generate() can select worker internally while preserving MM correctness.
+        token_ids = request.get("token_ids")
+        if not token_ids:
+            raise ValueError("Missing or empty token_ids in preprocessed request")
 
-        logger.info(
-            f"Routing to worker {best_worker_id} "
-            f"(mm={'yes' if image_urls else 'no'})"
+        mm_routing_info: dict[str, Any] = {
+            "routing_token_ids": routing_tokens,
+            "block_mm_infos": block_mm_infos,
+        }
+
+        stream = await self.kv_router.generate(
+            token_ids=token_ids,
+            model=request["model"],
+            stop_conditions=request.get("stop_conditions"),
+            sampling_options=request.get("sampling_options"),
+            output_options=request.get("output_options"),
+            router_config_override=request.get("router_config_override"),
+            extra_args=request.get("extra_args"),
+            multi_modal_data=request.get("multi_modal_data"),
+            mm_routing_info=mm_routing_info,
         )
 
-        # Forward ORIGINAL request to the selected worker
-        # TRT-LLM worker will process images itself
-        async for response in await self.client.direct(request, best_worker_id):
-            yield response.data()
-
-    async def _find_best_worker(self, local_hashes: list[int]) -> int:
-        """
-        Find the worker with the highest KV cache overlap.
-
-        Args:
-            local_hashes: Block hashes for the current request
-
-        Returns:
-            Instance ID of the best worker
-        """
-        if not self.instance_ids:
-            raise ValueError("No workers available")
-
-        if self.indexer is None:
-            logger.warning("No indexer available, using first worker")
-            return self.instance_ids[0]
-
-        try:
-            # Query indexer for overlap scores
-            logger.info(f"Querying indexer with {len(local_hashes)} block hashes")
-            logger.info(f"First 5 hashes: {local_hashes[:5]}")
-            overlap_scores = await self.indexer.find_matches(local_hashes)
-            scores_dict = overlap_scores.scores
-            # Check tree_sizes to see if indexer has any blocks stored
-            tree_sizes = getattr(overlap_scores, "tree_sizes", {})
-            logger.info(f"Indexer returned scores_dict: {scores_dict}")
-            logger.info(f"Indexer tree_sizes (total blocks per worker): {tree_sizes}")
-
-            # Find worker with highest overlap
-            best_worker_id = self.instance_ids[0]
-            best_score = 0
-
-            # Build a map from worker_id to score
-            # scores_dict keys are (worker_id, dp_rank) tuples, not just worker_id
-            worker_id_to_score = {}
-            for key, score in scores_dict.items():
-                if isinstance(key, tuple):
-                    wid = key[0]  # Extract worker_id from (worker_id, dp_rank)
-                else:
-                    wid = key  # Backwards compatibility with int keys
-                # Sum scores across dp_ranks for same worker
-                worker_id_to_score[wid] = worker_id_to_score.get(wid, 0) + score
-
-            # Log all worker scores for debugging
-            worker_scores = []
-            for worker_id in self.instance_ids:
-                score = worker_id_to_score.get(worker_id, 0)
-                worker_scores.append(f"worker_{worker_id}={score}")
-                if score > best_score:
-                    best_score = score
-                    best_worker_id = worker_id
-
-            # Always log routing decision at INFO level for visibility
-            logger.info(
-                f"[ROUTING] Scores: [{', '.join(worker_scores)}] | "
-                f"Best: worker_{best_worker_id} with {best_score}/{len(local_hashes)} blocks overlap"
-            )
-
-            return best_worker_id
-
-        except Exception as e:
-            logger.warning(f"Indexer query failed: {e}, using first worker")
-            return self.instance_ids[0]
-
-    def _apply_chat_template(self, messages: list[dict]) -> str:
-        """Apply chat template to messages for tokenization."""
-        try:
-            # Try using tokenizer's chat template if available
-            if hasattr(self.tokenizer, "apply_chat_template"):
-                return self.tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-        except Exception as e:
-            logger.debug(f"Chat template failed: {e}")
-            return None
-
-    def update_instance_ids(self, instance_ids: list[int]) -> None:
-        """Update the list of available worker instance IDs."""
-        self.instance_ids = instance_ids
-        logger.info(f"Updated instance IDs: {instance_ids}")
+        async for response in stream:
+            yield response

@@ -13,8 +13,8 @@ This worker sits between the Dynamo frontend and TRT-LLM workers, providing MM-a
 
 1. **Receives** OpenAI-format requests from the frontend
 2. **Downloads** images and computes `mm_hash` (for routing decision only)
-3. **Queries** KvIndexer to find the worker with best KV cache overlap
-4. **Routes** the original request to the selected TRT-LLM worker
+3. **Builds** multimodal routing metadata (`mm_routing_info`)
+4. **Uses** KvRouter to select and route to the best TRT-LLM worker
 5. **Streams** responses back to the frontend
 
 ## Architecture
@@ -24,8 +24,8 @@ Frontend (standard)      MM Router Worker (this)        TRT-LLM Worker (standard
 ┌──────────────┐        ┌─────────────────────┐        ┌───────────────────┐
 │              │───────>│ 1. Download images  │───────>│ python -m         │
 │  round-robin │        │ 2. Compute mm_hash  │        │ dynamo.trtllm     │
-│  to mm_router│<───────│ 3. Find best worker │<───────│ --modality mm     │
-└──────────────┘        │ 4. Forward request  │        │ (processes images)│
+│  to mm_router│<───────│ 3. Build routing    │<───────│ --modality mm     │
+└──────────────┘        │ 4. KvRouter route   │        │ (processes images)│
                         └─────────────────────┘        └───────────────────┘
                                   │
                                   │ Subscribe KV events
@@ -119,12 +119,13 @@ The worker uses TRT-LLM's `apply_mm_hashes()` function to compute a hash of each
 
 ### KV-Aware Routing
 
-The worker queries `KvIndexer` which tracks each TRT-LLM worker's KV cache state via NATS events. When a request comes in:
+The worker uses `KvRouter.generate(...)` with explicit multimodal routing hints.
+When a request comes in:
 
-1. Compute block hashes (including mm_hash for image blocks)
-2. Query `indexer.find_matches(block_hashes)` to get overlap scores
-3. Select the worker with the highest overlap score
-4. Route using `client.direct(request, worker_id)`
+1. Build routing tokens (`routing_token_ids`) for the request
+2. Build `block_mm_infos` with per-block image `mm_hash` metadata
+3. Pass both as `mm_routing_info` to `KvRouter.generate(...)`
+4. KvRouter computes overlap internally and routes to the best worker
 
 ### Block MM Info Structure
 
@@ -139,7 +140,7 @@ block_mm_infos = [
 ]
 ```
 
-This is passed to `compute_block_hash_for_seq_py()` to compute MM-aware block hashes.
+This is included in `mm_routing_info` so KvRouter can compute MM-aware overlap.
 
 ## Files
 
@@ -155,7 +156,7 @@ This is passed to `compute_block_hash_for_seq_py()` to compute MM-aware block ha
 
 - `tensorrt_llm >= 1.2.0rc6` - For `apply_mm_hashes()` and `default_multimodal_input_loader()`. Earlier versions may not include multimodal hash support in KV events.
 - `transformers` - For `AutoProcessor`
-- `dynamo` - For runtime, KvIndexer, and compute_block_hash_for_seq_py
+- `dynamo` - For runtime and KvRouter
 
 ## Known Limitations
 

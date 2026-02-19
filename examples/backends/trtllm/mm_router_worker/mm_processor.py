@@ -70,7 +70,8 @@ def process_multimodal(
     model: str,
     model_type: str,
 ) -> ProcessedInput:
-    """Process multimodal request: load images, get expanded tokens and mm_hashes."""
+    """Process multimodal request: load images, get expanded tokens and mm_hashes.
+    """
     try:
         prompt = build_prompt_from_messages(messages)
 
@@ -101,13 +102,9 @@ def process_multimodal(
         return ProcessedInput(
             tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges
         )
-
     except Exception as e:
-        logger.warning(f"MM processing failed: {e}, falling back to text-only")
-        prompt = build_prompt_from_messages(messages)
-        return ProcessedInput(
-            tokens=tokenizer.encode(prompt), mm_hashes=None, image_ranges=None
-        )
+        logger.error(f"MM processing failed: {e}", exc_info=True)
+        raise
 
 
 def build_block_mm_infos(
