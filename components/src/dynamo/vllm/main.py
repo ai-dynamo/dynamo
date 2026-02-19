@@ -539,9 +539,10 @@ async def init_prefill(
     """
     Instantiate and serve
     """
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    component = generate_endpoint.component()
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
@@ -681,9 +682,10 @@ async def init(
     Instantiate and serve
     """
 
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    component = generate_endpoint.component()
     clear_endpoint = component.endpoint("clear_kv_blocks")
     load_lora_endpoint = component.endpoint("load_lora")
     unload_lora_endpoint = component.endpoint("unload_lora")
@@ -931,8 +933,10 @@ async def init_omni(
     # Lazy import to avoid loading vllm-omni unless explicitly needed
     from dynamo.vllm.omni import OmniHandler
 
-    component = runtime.namespace(config.namespace).component(config.component)
-    generate_endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    component = generate_endpoint.component()
 
     # Initialize OmniHandler with Omni orchestrator
     handler = OmniHandler(

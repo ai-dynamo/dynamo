@@ -507,9 +507,9 @@ def test_kv_router_bindings(
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(mockers.namespace)
-        component = namespace.component(mockers.component_name)
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(
+            f"{mockers.namespace}.{mockers.component_name}.generate"
+        )
 
         # Run Python router bindings test
         _test_python_router_bindings(
@@ -697,9 +697,7 @@ def test_router_decisions(
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the mockers
-        namespace = runtime.namespace(mockers.namespace)
-        component = namespace.component("mocker")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{mockers.namespace}.mocker.generate")
 
         _test_router_decisions(
             mockers,

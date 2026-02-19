@@ -5,11 +5,10 @@ import logging
 import os
 from typing import Any, Dict, List
 
-import safetensors
 import torch
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
 
-import dynamo.nixl_connect as connect
+from dynamo.common.multimodal.embedding_transfer import AbstractEmbeddingReceiver
 from dynamo.runtime import Client
 
 from .model import construct_mm_data
@@ -25,15 +24,18 @@ logger = logging.getLogger(__name__)
 IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 
-TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
+# Whether to split the multimodal items into smaller batches for encoding. This can help if multimodal items can be speed up
+# by separately encodeded with multiple workers.
+# Need to experiment with this setting to see if it brings benefits when concurrency > encoder count.
+SPLIT_ENCODE = int(os.getenv("SPLIT_ENCODE", 1))
 
 
 async def load_embeddings(
     mi: MultiModalGroup,
-    embeddings_dtype: torch.dtype,
-    embeddings_device: str,
-    connector: connect.Connector | None,
-) -> torch.Tensor:
+    _embeddings_dtype: torch.dtype,
+    _embeddings_device: str,
+    receiver: AbstractEmbeddingReceiver,
+) -> tuple[int, torch.Tensor]:
     """Load pre-computed embedding tensor via local safetensors or NIXL RDMA.
 
     Args:
@@ -41,30 +43,14 @@ async def load_embeddings(
             contains either a local file path or NIXL RDMA metadata.
         embeddings_dtype: Torch dtype for the tensor (used for RDMA path).
         embeddings_device: Device string for the tensor (used for RDMA path).
-        connector: NIXL Connector for RDMA reads (required when TRANSFER_LOCAL=0).
+        receiver: AbstractEmbeddingReceiver for tensor reads.
 
     Returns:
-        The embedding tensor loaded into CPU memory.
+        A tuple of (tensor_id, embeddings), where tensor_id is an integer identifier for the loaded tensor (used for later release),
+        and the embeddings tensor loaded into CPU memory.
     """
-    if TRANSFER_LOCAL:
-        logger.info("PD: Loading local safetensors file")
-        return safetensors.torch.load_file(mi.serialized_request)["ec_cache"]
-
-    embeddings = torch.empty(
-        mi.embeddings_shape,
-        dtype=embeddings_dtype,
-        device=embeddings_device,
-    )
-    descriptor = connect.Descriptor(embeddings)
-
-    if descriptor is None:
-        raise RuntimeError(
-            "Descriptor is None in PD worker - cannot process embeddings"
-        )
-
-    read_op = await connector.begin_read(mi.serialized_request, descriptor)
-    await read_op.wait_for_completion()
-    return embeddings
+    tensor_id, embeddings = await receiver.receive_embeddings(mi.serialized_request)
+    return tensor_id, embeddings
 
 
 def accumulate_embeddings(
@@ -142,7 +128,11 @@ async def fetch_embeddings_from_encode_workers(
     if encode_worker_count == 0:
         raise RuntimeError("No encode workers available to process multimodal input")
 
-    encode_batch_size = max(1, len(image_urls) // encode_worker_count)
+    encode_batch_size = (
+        max(1, len(image_urls) // encode_worker_count)
+        if SPLIT_ENCODE
+        else len(image_urls)
+    )
 
     encode_request = vLLMMultimodalRequest(
         engine_prompt=PatchedTokensPrompt(prompt_token_ids=[]),
