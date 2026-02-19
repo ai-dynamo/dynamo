@@ -111,12 +111,11 @@ fi
 # Dry-run overrides
 # ---------------------------------------------------------------------------
 if [[ "$DRY_RUN" == "true" ]]; then
-    MODEL="Qwen/Qwen3-0.6B"
     CONCURRENCIES="1"
     echo "=== DRY RUN MODE ==="
     echo "  Model:        $MODEL"
     echo "  Concurrencies: $CONCURRENCIES"
-    echo "  (lightweight validation -- small model, minimal requests)"
+    echo "  (lightweight validation -- minimal requests)"
     echo "===================="
 fi
 
