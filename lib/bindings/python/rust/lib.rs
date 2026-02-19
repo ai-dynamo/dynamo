@@ -773,7 +773,6 @@ impl DistributedRuntime {
     }
 }
 
-
 #[pymethods]
 impl Component {
     fn endpoint(&self, name: String) -> PyResult<Endpoint> {

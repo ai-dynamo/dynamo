@@ -8,7 +8,10 @@ use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use llm_rs::model_type::{ModelInput, ModelType};
 use pyo3::prelude::*;
 
-use crate::{CancellationToken, DistributedRuntime, engine::*, llm::local_model::ModelRuntimeConfig, to_pyerr};
+use crate::{
+    CancellationToken, DistributedRuntime, engine::*, llm::local_model::ModelRuntimeConfig,
+    to_pyerr,
+};
 
 pub use dynamo_llm::grpc::service::kserve;
 
@@ -137,7 +140,7 @@ impl KserveGrpcService {
         // Check if run() was already called to avoid creating unnecessary token
         if self.cancel_token.get().is_some() {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "KserveGrpcService.run() has already been called on this instance"
+                "KserveGrpcService.run() has already been called on this instance",
             ));
         }
 
@@ -147,10 +150,12 @@ impl KserveGrpcService {
 
         // Store the token for shutdown - should always succeed after the check above
         self.cancel_token
-            .set(CancellationToken { inner: token.clone() })
+            .set(CancellationToken {
+                inner: token.clone(),
+            })
             .map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "Race condition detected in KserveGrpcService.run()"
+                    "Race condition detected in KserveGrpcService.run()",
                 )
             })?;
 

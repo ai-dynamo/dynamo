@@ -87,7 +87,7 @@ impl HttpService {
         // Check if run() was already called to avoid creating unnecessary token
         if self.cancel_token.get().is_some() {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "HttpService.run() has already been called on this instance"
+                "HttpService.run() has already been called on this instance",
             ));
         }
 
@@ -97,10 +97,12 @@ impl HttpService {
 
         // Store the token for shutdown - should always succeed after the check above
         self.cancel_token
-            .set(CancellationToken { inner: token.clone() })
+            .set(CancellationToken {
+                inner: token.clone(),
+            })
             .map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "Race condition detected in HttpService.run()"
+                    "Race condition detected in HttpService.run()",
                 )
             })?;
 
