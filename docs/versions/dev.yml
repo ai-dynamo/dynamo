@@ -211,10 +211,9 @@ navigation:
 
   # ==================== Blog ====================
   - section: Blog
-    contents:
-      - page: All Posts
-        path: ../blogs/index.mdx
-        slug: blog
+    path: ../blogs/index.mdx
+    slug: blog
+    contents: []
 
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.
