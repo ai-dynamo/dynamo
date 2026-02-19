@@ -29,3 +29,4 @@ kv_cache_config:
 
 cache_transceiver_config:
   backend: DEFAULT
+  max_tokens_in_buffer: 10240

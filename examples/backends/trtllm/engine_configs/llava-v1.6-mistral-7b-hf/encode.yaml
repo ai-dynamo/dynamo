@@ -28,3 +28,4 @@ disable_overlap_scheduler: true
 
 cache_transceiver_config:
   backend: DEFAULT
+  max_tokens_in_buffer: 10240
