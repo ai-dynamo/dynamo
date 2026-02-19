@@ -543,6 +543,13 @@ impl Slot for VllmConnectorSlot {
         num_scheduled_tokens: usize,
         priorities: Option<&[u32]>,
     ) -> Result<(), SlotError> {
+        tracing::debug!(
+            "ENTRY: apply_scheduler_output: tokens.len={}, block_ids.len={}, computed={}, scheduled={}, \
+             has_priorities={}, current_pos={}, evaluated_blocks={}, device_blocks_len={}",
+            tokens.len(), block_ids.len(), num_computed_tokens, num_scheduled_tokens,
+            priorities.is_some(), self.current_position, self.evaluated_blocks, self.device_blocks.len()
+        );
+
         // Validate contract: priorities must match block_ids length when provided
         if let Some(prios) = priorities {
             assert_eq!(
@@ -570,10 +577,31 @@ impl Slot for VllmConnectorSlot {
         self.current_position = max(self.current_position, num_computed_tokens);
         self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
 
-        // apply new block_ids
+        // apply new block_ids — with dedup guard to prevent double-add
+        // when update_state_after_alloc already registered the same blocks via append_mutable_device_blocks
         if !block_ids.is_empty() {
-            tracing::debug!("assigning {} new device blocks slot", block_ids.len());
-            self.device_blocks.extend(block_ids);
+            let already_present = block_ids.len() <= self.device_blocks.len()
+                && self.device_blocks[self.device_blocks.len() - block_ids.len()..] == *block_ids;
+            if already_present {
+                tracing::debug!(
+                    "DEDUP: skipping extend: {} block_ids already at tail, device_blocks_len={}",
+                    block_ids.len(),
+                    self.device_blocks.len()
+                );
+            } else {
+                tracing::debug!(
+                    "EXTEND: device_blocks BEFORE extend: len={}, block_ids.len={}, block_ids={:?}",
+                    self.device_blocks.len(),
+                    block_ids.len(),
+                    &block_ids[..std::cmp::min(10, block_ids.len())]
+                );
+                self.device_blocks.extend(block_ids);
+                tracing::debug!(
+                    "EXTEND: device_blocks AFTER extend: len={}, first_10={:?}",
+                    self.device_blocks.len(),
+                    &self.device_blocks[..std::cmp::min(10, self.device_blocks.len())]
+                );
+            }
         }
 
         // Early exit if offload has been permanently terminated.
@@ -646,6 +674,14 @@ impl Slot for VllmConnectorSlot {
                 let new_blocks_start = self.device_blocks.len() - block_ids.len();
                 let candidate_start = self.evaluated_blocks;
 
+                tracing::debug!(
+                    "PRIORITY_CALC: new_blocks_start={}, candidate_start={}, device_blocks_len={}, \
+                     block_ids_len={}, prios_len={}, will_use_real_priorities={}",
+                    new_blocks_start, candidate_start,
+                    self.device_blocks.len(), block_ids.len(), prios.len(),
+                    candidate_start >= new_blocks_start
+                );
+
                 if candidate_start >= new_blocks_start {
                     let prio_offset = candidate_start - new_blocks_start;
                     debug_assert!(
@@ -690,6 +726,16 @@ impl Slot for VllmConnectorSlot {
             } else {
                 num_candidate_blocks
             };
+
+            tracing::debug!(
+                "OFFLOAD_DECISION: num_candidate={}, num_to_offload={}, threshold={}, \
+                 candidate_block_ids={:?}, candidate_priorities={:?}",
+                num_candidate_blocks,
+                num_blocks_to_offload,
+                self.offload_min_priority,
+                &candidate_block_ids[..std::cmp::min(10, candidate_block_ids.len())],
+                &candidate_priorities[..std::cmp::min(10, candidate_priorities.len())]
+            );
 
             if num_blocks_to_offload > 0 {
                 if self.offload_min_priority > 0 {
@@ -1093,12 +1139,15 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id))]
     fn append_mutable_device_blocks(&mut self, block_ids: &[BlockId]) -> Result<(), SlotError> {
+        let len_before = self.device_blocks.len();
         let count = block_ids.len();
         self.device_blocks.extend(block_ids);
         tracing::debug!(
-            "appended {} mutable device blocks to slot; total device blocks: {}",
+            "APPEND_MUTABLE: adding {} blocks, len_before={}, len_after={}, block_ids={:?}",
             count,
-            self.num_device_blocks_allocated()
+            len_before,
+            self.device_blocks.len(),
+            &block_ids[..std::cmp::min(10, block_ids.len())]
         );
 
         Ok(())
