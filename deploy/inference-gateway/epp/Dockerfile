@@ -46,6 +46,7 @@ ARG TARGETARCH
 # etcd-client crate requires protoc to compile proto files
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
+    libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /dynamo
@@ -92,7 +93,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy go mod files first for better caching (from default context = epp/)
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Copy Go source (from default context = epp/)
 COPY . .
@@ -101,7 +103,9 @@ COPY . .
 COPY --from=rust-builder /out/libdynamo_llm_capi.a pkg/plugins/dynamo_kv_scorer/lib/
 COPY --from=rust-builder /out/llm_engine.h pkg/plugins/dynamo_kv_scorer/include/
 
-RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags="-X sigs.k8s.io/gateway-api-inference-extension/version.GitVersion=${BUILD_REF} \
               -X sigs.k8s.io/gateway-api-inference-extension/version.GitCommit=${COMMIT_SHA}" \
     -o epp ./cmd/epp
