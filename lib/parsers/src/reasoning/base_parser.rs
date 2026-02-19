@@ -33,7 +33,8 @@ impl BasicReasoningParser {
 
 impl ReasoningParser for BasicReasoningParser {
     fn detect_and_parse_reasoning(&mut self, text: &str, _token_ids: &[u32]) -> ParserResult {
-        let in_reasoning = self._in_reasoning || text.contains(&self.think_start_token);
+        let has_think_tag = text.contains(&self.think_start_token);
+        let in_reasoning = self._in_reasoning || has_think_tag;
         if !in_reasoning {
             return ParserResult {
                 normal_text: text.to_string(),
@@ -41,24 +42,48 @@ impl ReasoningParser for BasicReasoningParser {
             };
         }
 
-        // The text is considered to be in a reasoning block.
-        let processed_text = text.replace(&self.think_start_token, "").trim().to_string();
-
-        if !processed_text.contains(&self.think_end_token) {
-            // Assume reasoning was truncated before `think_end_token`
+        // If force_reasoning and no start tag, treat entire text as reasoning
+        if self._in_reasoning && !has_think_tag && !text.contains(&self.think_end_token) {
             return ParserResult {
                 normal_text: String::new(),
-                reasoning_text: processed_text,
+                reasoning_text: text.to_string(),
             };
         }
 
-        // Extract reasoning content
-        let splits: Vec<&str> = processed_text.splitn(2, &self.think_end_token).collect();
-        let reasoning_text = splits.first().unwrap_or(&"").to_string();
-        let normal_text = splits
-            .get(1)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+        // Extract all <think>...</think> pairs using cursor-based iteration
+        let mut reasoning_parts = Vec::new();
+        let mut normal_parts = Vec::new();
+        let mut cursor = 0;
+        let mut currently_reasoning = self._in_reasoning;
+
+        while cursor < text.len() {
+            if currently_reasoning {
+                // We're inside a reasoning block — look for end token
+                if let Some(end_offset) = text[cursor..].find(&self.think_end_token) {
+                    reasoning_parts.push(&text[cursor..cursor + end_offset]);
+                    cursor += end_offset + self.think_end_token.len();
+                    currently_reasoning = false;
+                } else {
+                    // No end token — rest is reasoning (truncated)
+                    reasoning_parts.push(&text[cursor..]);
+                    cursor = text.len();
+                }
+            } else {
+                // We're in normal text — look for start token
+                if let Some(start_offset) = text[cursor..].find(&self.think_start_token) {
+                    normal_parts.push(&text[cursor..cursor + start_offset]);
+                    cursor += start_offset + self.think_start_token.len();
+                    currently_reasoning = true;
+                } else {
+                    // No more think blocks — rest is normal text
+                    normal_parts.push(&text[cursor..]);
+                    cursor = text.len();
+                }
+            }
+        }
+
+        let reasoning_text = reasoning_parts.join("").trim().to_string();
+        let normal_text = normal_parts.join("").trim().to_string();
 
         ParserResult {
             normal_text,
@@ -74,12 +99,11 @@ impl ReasoningParser for BasicReasoningParser {
         // Incrementally parse the streaming text
         self._buffer.push_str(text);
         let mut current_text = self._buffer.to_string();
-        // If the current text is a prefix of the think token, keep buffering.
-        // Only buffer for start token if we haven't found it yet.
-        // Only buffer for end token if we're currently inside a reasoning block.
-        // After reasoning ends, all content passes through as normal text.
 
+        // Buffer partial start token prefixes (only if >= 2 chars to avoid
+        // buffering lone `<` which could be tool call XML like `<invoke>`).
         if !self.stripped_think_start
+            && current_text.len() >= 2
             && self.think_start_token.starts_with(&current_text)
             && self.think_start_token.as_str() != current_text.as_str()
         {
@@ -88,6 +112,8 @@ impl ReasoningParser for BasicReasoningParser {
                 reasoning_text: String::new(),
             };
         }
+
+        // Buffer partial end token prefixes while inside a reasoning block.
         if self._in_reasoning
             && self.think_end_token.starts_with(&current_text)
             && self.think_end_token.as_str() != current_text.as_str()
@@ -98,13 +124,17 @@ impl ReasoningParser for BasicReasoningParser {
             };
         }
 
-        // Strip `<think>` token if present
-        if !self.stripped_think_start && current_text.contains(&self.think_start_token) {
-            current_text = current_text.replace(&self.think_start_token, "");
+        // Strip `<think>` token if present at the start of the text and enter reasoning mode.
+        // Only match starts_with so that mid-text `<think>` (e.g. "answer <think>reasoning")
+        // falls through to the positional else-if branch below which correctly preserves the
+        // normal-text prefix.
+        if !self.stripped_think_start && current_text.starts_with(self.think_start_token.as_str()) {
+            current_text = current_text[self.think_start_token.len()..].to_string();
             self._buffer = current_text.to_string();
             self.stripped_think_start = true;
             self._in_reasoning = true;
         }
+
         // Handle end of reasoning block
         let mut think_end_idx = current_text.len();
         if self._in_reasoning {
@@ -116,20 +146,35 @@ impl ReasoningParser for BasicReasoningParser {
             let reasoning_text = &current_text[..think_end_idx];
             self._buffer.clear();
             self._in_reasoning = false;
+            self.stripped_think_start = false; // Allow detecting next <think> block
             let start_idx = think_end_idx + self.think_end_token.len();
-            let normal_text = if start_idx < current_text.len() {
+            let remainder = if start_idx < current_text.len() {
                 &current_text[start_idx..]
             } else {
                 ""
             };
+
+            // Check if remainder contains a new <think> block (mid-chunk transition)
+            if let Some(next_think_pos) = remainder.find(&self.think_start_token) {
+                let normal_text = &remainder[..next_think_pos];
+                let after_think = &remainder[next_think_pos + self.think_start_token.len()..];
+                self._in_reasoning = true;
+                self.stripped_think_start = true;
+                self._buffer = after_think.to_string();
+                return ParserResult {
+                    normal_text: normal_text.to_string(),
+                    reasoning_text: reasoning_text.to_string(),
+                };
+            }
+
             return ParserResult {
-                normal_text: normal_text.to_string(),
+                normal_text: remainder.to_string(),
                 reasoning_text: reasoning_text.to_string(),
             };
         }
+
         // Continue with reasoning content
         if self._in_reasoning && self.stream_reasoning {
-            // Stream the content immediately
             let reasoning_text = current_text;
             self._buffer.clear();
             ParserResult {
@@ -137,7 +182,34 @@ impl ReasoningParser for BasicReasoningParser {
                 reasoning_text,
             }
         } else if !self._in_reasoning {
-            // If we're not in a reasoning block return as normal text
+            // Not in a reasoning block — check if a new <think> starts in this text
+            if let Some(think_pos) = current_text.find(&self.think_start_token) {
+                let normal_text = &current_text[..think_pos];
+                let after_think = &current_text[think_pos + self.think_start_token.len()..];
+
+                // Check if the reasoning block is also closed in this same chunk
+                if let Some(end_pos) = after_think.find(&self.think_end_token) {
+                    let reasoning_text = &after_think[..end_pos];
+                    let after_end = &after_think[end_pos + self.think_end_token.len()..];
+                    self._in_reasoning = false;
+                    self.stripped_think_start = false;
+                    self._buffer.clear();
+                    // Combine pre-<think> and post-</think> normal text into one result
+                    return ParserResult {
+                        normal_text: format!("{}{}", normal_text, after_end),
+                        reasoning_text: reasoning_text.to_string(),
+                    };
+                }
+
+                // No </think> yet — buffer the reasoning content for later
+                self._in_reasoning = true;
+                self.stripped_think_start = true;
+                self._buffer = after_think.to_string();
+                return ParserResult {
+                    normal_text: normal_text.to_string(),
+                    reasoning_text: String::new(),
+                };
+            }
             let normal_text = current_text;
             self._buffer.clear();
             ParserResult {
@@ -145,7 +217,7 @@ impl ReasoningParser for BasicReasoningParser {
                 reasoning_text: String::new(),
             }
         } else {
-            // If we are in a reasoning block but no end token is found, return the current buffer
+            // In a reasoning block but no end token found, keep buffering
             ParserResult {
                 normal_text: String::new(),
                 reasoning_text: String::new(),
@@ -222,9 +294,8 @@ mod tests {
             "<think>first reasoning</think> middle <think>second reasoning</think> end",
             &[],
         );
-        // The current implementation only handles the first occurrence properly
-        assert_eq!(result.normal_text, "middle second reasoning</think> end");
-        assert_eq!(result.reasoning_text, "first reasoning");
+        assert_eq!(result.normal_text, "middle  end");
+        assert_eq!(result.reasoning_text, "first reasoningsecond reasoning");
     }
 
     #[test]
@@ -236,11 +307,11 @@ mod tests {
         assert_eq!(result1.normal_text, " middle");
         assert_eq!(result1.reasoning_text, "first reasoning");
 
-        // Basic parser assumes only one reasoning block at a time
+        // Second reasoning block: space before <think> is normal prefix, reasoning extracted
         let result2 = parser
             .parse_reasoning_streaming_incremental(" <think>second reasoning</think> end", &[]);
-        assert_eq!(result2.normal_text, " <think>second reasoning</think> end");
-        assert_eq!(result2.reasoning_text, "");
+        assert_eq!(result2.reasoning_text, "second reasoning");
+        assert_eq!(result2.normal_text, "  end"); // " " prefix + " end" suffix
     }
 
     #[test]
@@ -334,10 +405,11 @@ mod tests {
             "<think>outer <think>inner</think> reasoning</think> normal",
             &[],
         );
-        // Current implementation should handle this by finding the first closing tag
+        // Cursor-based parsing: first <think> starts reasoning, first </think> ends it.
+        // "outer <think>inner" is reasoning (inner <think> is just text within reasoning).
+        // " reasoning</think> normal" is normal text (stray </think> passes through).
+        assert_eq!(result.reasoning_text, "outer <think>inner");
         assert_eq!(result.normal_text, "reasoning</think> normal");
-        // All <think> tags are stripped, so <think>inner is not included
-        assert_eq!(result.reasoning_text, "outer inner");
     }
 
     #[test]
@@ -364,9 +436,10 @@ mod tests {
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
         let result = parser
             .detect_and_parse_reasoning("<think>first <think>second reasoning</think> normal", &[]);
-        // Should handle by replacing all opening tags and using first closing tag
+        // Cursor-based: first <think> opens reasoning, finds first </think>.
+        // Inner <think> is just text within the reasoning block.
+        assert_eq!(result.reasoning_text, "first <think>second reasoning");
         assert_eq!(result.normal_text, "normal");
-        assert_eq!(result.reasoning_text, "first second reasoning");
     }
 
     #[test]
@@ -399,7 +472,7 @@ mod tests {
     #[test]
     fn test_streaming_reset_state_after_complete_block() {
         let mut parser =
-            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
         // Process complete reasoning block
         let result1 =
@@ -412,12 +485,28 @@ mod tests {
         assert_eq!(result2.normal_text, " more normal text");
         assert_eq!(result2.reasoning_text, "");
 
-        // Basic parser does not expect more than one reasoning block at a time
-        // So this should not affect the state
+        // Subsequent reasoning blocks should now be parsed (interleaved thinking)
+        // The leading " " before <think> is normal-text prefix; " final" is suffix.
         let result3 = parser
             .parse_reasoning_streaming_incremental(" <think>new reasoning</think> final", &[]);
-        assert_eq!(result3.normal_text, " <think>new reasoning</think> final");
-        assert_eq!(result3.reasoning_text, "");
+        assert_eq!(result3.reasoning_text, "new reasoning");
+        assert_eq!(result3.normal_text, "  final"); // " " prefix + " final" suffix
+
+        // Same test with separate chunks for clarity
+        let mut parser2 =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser2.parse_reasoning_streaming_incremental("<think>first</think> normal", &[]);
+        assert_eq!(r1.reasoning_text, "first");
+        assert_eq!(r1.normal_text, " normal");
+
+        let r2 = parser2.parse_reasoning_streaming_incremental(" between", &[]);
+        assert_eq!(r2.normal_text, " between");
+        assert_eq!(r2.reasoning_text, "");
+
+        let r3 = parser2.parse_reasoning_streaming_incremental("<think>second</think> final", &[]);
+        assert_eq!(r3.reasoning_text, "second");
+        assert_eq!(r3.normal_text, " final");
     }
 
     #[test]
@@ -473,5 +562,135 @@ mod tests {
 
         let r6 = parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
         assert_eq!(r6.normal_text, "invoke name=\"get_weather\">");
+    }
+
+    #[test]
+    fn test_interleaved_streaming_across_chunks() {
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("<think>thought 1</think>", &[]);
+        assert_eq!(r1.reasoning_text, "thought 1");
+        assert_eq!(r1.normal_text, "");
+
+        let r2 = parser.parse_reasoning_streaming_incremental(" answer 1 ", &[]);
+        assert_eq!(r2.normal_text, " answer 1 ");
+        assert_eq!(r2.reasoning_text, "");
+
+        let r3 = parser.parse_reasoning_streaming_incremental("<think>thought 2</think>", &[]);
+        assert_eq!(r3.reasoning_text, "thought 2");
+        assert_eq!(r3.normal_text, "");
+
+        let r4 = parser.parse_reasoning_streaming_incremental(" answer 2", &[]);
+        assert_eq!(r4.normal_text, " answer 2");
+        assert_eq!(r4.reasoning_text, "");
+
+        let r5 = parser.parse_reasoning_streaming_incremental("<think>thought 3</think>", &[]);
+        assert_eq!(r5.reasoning_text, "thought 3");
+        assert_eq!(r5.normal_text, "");
+
+        let r6 = parser.parse_reasoning_streaming_incremental(" final answer", &[]);
+        assert_eq!(r6.normal_text, " final answer");
+        assert_eq!(r6.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_three_reasoning_blocks_non_streaming() {
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let result = parser.detect_and_parse_reasoning(
+            "<think>A</think> one <think>B</think> two <think>C</think> three",
+            &[],
+        );
+        assert_eq!(result.reasoning_text, "ABC");
+        assert_eq!(result.normal_text, "one  two  three");
+    }
+
+    #[test]
+    fn test_streaming_transition_chunk() {
+        // </think> and <think> arrive in the same chunk
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("<think>first", &[]);
+        assert_eq!(r1.reasoning_text, "first");
+
+        // Mid-chunk transition: end of one block, normal text, start of next
+        let r2 = parser.parse_reasoning_streaming_incremental("</think> middle <think>second", &[]);
+        assert_eq!(r2.reasoning_text, "");
+        assert_eq!(r2.normal_text, " middle ");
+
+        let r3 = parser.parse_reasoning_streaming_incremental(" more</think> end", &[]);
+        assert_eq!(r3.reasoning_text, "second more");
+        assert_eq!(r3.normal_text, " end");
+    }
+
+    #[test]
+    fn test_interleaved_with_force_reasoning() {
+        // deepseek_r1 mode: force_reasoning=true, first tokens are reasoning without <think>
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
+
+        // No <think> tag — treated as reasoning because force_reasoning=true
+        let r1 = parser.parse_reasoning_streaming_incremental("initial reasoning", &[]);
+        assert_eq!(r1.reasoning_text, "initial reasoning");
+        assert_eq!(r1.normal_text, "");
+
+        // End of forced reasoning block
+        let r2 = parser.parse_reasoning_streaming_incremental("</think> answer", &[]);
+        assert_eq!(r2.reasoning_text, "");
+        assert_eq!(r2.normal_text, " answer");
+
+        // Second reasoning block with explicit <think>
+        let r3 =
+            parser.parse_reasoning_streaming_incremental("<think>second thought</think> done", &[]);
+        assert_eq!(r3.reasoning_text, "second thought");
+        assert_eq!(r3.normal_text, " done");
+    }
+
+    #[test]
+    fn test_interleaved_partial_think_tag_between_blocks() {
+        // After first reasoning block, partial <think> tag arrives across chunks
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("<think>first</think> normal", &[]);
+        assert_eq!(r1.reasoning_text, "first");
+        assert_eq!(r1.normal_text, " normal");
+
+        // Partial <think> prefix: "<th" (2 chars, meets threshold)
+        let r2 = parser.parse_reasoning_streaming_incremental("<th", &[]);
+        assert_eq!(r2.normal_text, "");
+        assert_eq!(r2.reasoning_text, "");
+
+        // Complete the tag
+        let r3 = parser.parse_reasoning_streaming_incremental("ink>second</think> end", &[]);
+        assert_eq!(r3.reasoning_text, "second");
+        assert_eq!(r3.normal_text, " end");
+    }
+
+    #[test]
+    fn test_lone_angle_bracket_between_reasoning_blocks() {
+        // A lone `<` between reasoning blocks should pass through (not buffer)
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("<think>thought</think>", &[]);
+        assert_eq!(r1.reasoning_text, "thought");
+
+        // Lone `<` must not be buffered — could be a tool call
+        let r2 = parser.parse_reasoning_streaming_incremental("<", &[]);
+        assert_eq!(r2.normal_text, "<");
+        assert_eq!(r2.reasoning_text, "");
+
+        let r3 = parser.parse_reasoning_streaming_incremental("tool_call>", &[]);
+        assert_eq!(r3.normal_text, "tool_call>");
+        assert_eq!(r3.reasoning_text, "");
+
+        // But a real <think> should still work after
+        let r4 =
+            parser.parse_reasoning_streaming_incremental("<think>more thought</think> done", &[]);
+        assert_eq!(r4.reasoning_text, "more thought");
+        assert_eq!(r4.normal_text, " done");
     }
 }
