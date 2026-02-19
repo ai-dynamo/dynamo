@@ -96,14 +96,6 @@ dynamo-operator:
     # -- How long to wait before forcefully terminating Grove instances
     groveTerminationDelay: 4h
 
-    # Internal utility images used by the platform
-    internalImages:
-      # -- Debugger image for troubleshooting deployments
-      debugger: python:3.12-slim
-
-    # -- Whether to enable restricted security contexts for enhanced security
-    enableRestrictedSecurityContext: false
-
     # Docker registry configuration for private repositories
     dockerRegistry:
       # -- Whether to use Kubernetes secrets for registry authentication
