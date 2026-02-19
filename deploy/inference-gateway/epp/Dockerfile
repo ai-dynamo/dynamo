@@ -43,6 +43,11 @@ FROM ${RUST_IMAGE} AS rust-builder
 # Used here only for per-platform cache isolation.
 ARG TARGETARCH
 
+# etcd-client crate requires protoc to compile proto files
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /dynamo
 
 # Copy Cargo workspace manifests, lockfile, and README (some crates inherit
