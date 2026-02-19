@@ -16,6 +16,22 @@ COLORS = [
     "#8c564b",
 ]
 
+PLOT_ORDER = [
+    "naive-nested-map",
+    "inverted-index",
+    "radix-tree",
+    "concurrent-radix-tree",
+    "nested-map",
+]
+
+DISPLAY_NAMES = {
+    "naive-nested-map": "naive nested map",
+    "inverted-index": "inverted indexer",
+    "radix-tree": "radix tree",
+    "concurrent-radix-tree": "concurrent radix tree",
+    "nested-map": "concurrent inverted indexer",
+}
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -58,12 +74,26 @@ def main():
         label="_nolegend_",
     )
 
-    for i, (name, steps) in enumerate(data.items()):
+    ordered = [(k, data[k]) for k in PLOT_ORDER if k in data]
+    for k in data:
+        if k not in PLOT_ORDER:
+            ordered.append((k, data[k]))
+
+    for i, (name, steps) in enumerate(ordered):
         color = COLORS[i % len(COLORS)]
         offered = [s["offered_block_throughput"] for s in steps]
         achieved = [s["block_throughput"] for s in steps]
 
-        ax.plot(offered, achieved, "-o", color=color, label=name, markersize=5)
+        display = DISPLAY_NAMES.get(name, name.replace("-", " "))
+        ax.plot(
+            offered,
+            achieved,
+            "-o",
+            color=color,
+            label=display,
+            markersize=6,
+            linewidth=2.5,
+        )
 
     ax.set_xscale("log")
     ax.set_yscale("log")
