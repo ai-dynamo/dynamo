@@ -212,7 +212,7 @@ navigation:
   # ==================== Blog ====================
   - section: Blog
     contents:
-      - page: Blog
+      - page: All Posts
         path: ../blogs/index.mdx
         slug: blog
 

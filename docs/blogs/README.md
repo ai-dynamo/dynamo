@@ -1,12 +1,12 @@
 # Adding a Blog Post
 
-Follow these three steps to publish a new blog post on the Dynamo docs site.
+Follow these steps to publish a new blog post on the Dynamo docs site.
 
 ## Step 1: Write the Blog Post
 
 Create a new Markdown file in this folder (`docs/blogs/`):
 
-```
+```text
 docs/blogs/my-post-slug.md
 ```
 
@@ -29,7 +29,7 @@ Open `docs/versions/dev.yml` and add a page entry under the **Blog** section:
 ```yaml
   - section: Blog
     contents:
-      - page: Blog
+      - page: All Posts
         path: ../blogs/index.mdx
       - page: Your Blog Post Title
         path: ../blogs/my-post-slug.md
@@ -40,13 +40,9 @@ value is the display name in the sidebar; the `path` points to your file.
 
 ## Step 3: Add a Card to the Landing Page
 
-Open `docs/blogs/index.mdx` and add a `<Card>` inside the `<CardGroup>`:
-
-Add a summary line below the page heading:
+Open `docs/blogs/index.mdx` and add a `<Card>` inside the existing `<CardGroup>`:
 
 ```mdx
-Technical deep dives, announcements, and updates from the Dynamo team.
-
 <Card
   title="Your Blog Post Title"
   icon="regular newspaper"
@@ -65,11 +61,12 @@ Technical deep dives, announcements, and updates from the Dynamo team.
 | href   | Yes      | URL path starting with `/dynamo/blog/`                   |
 | (body) | Yes      | Short summary text inside the Card tags                  |
 
-Wrap multiple cards in `<CardGroup cols={2}>...</CardGroup>` for a grid layout.
+The `<CardGroup cols={2}>` wrapper is already in `index.mdx`. Just add your
+`<Card>` inside it.
 
 Browse icons at https://fontawesome.com/icons (Free tier).
 
-## Step 4: Add the Post to the Navbar Dropdown
+## Step 4 (Optional): Add the Post to the Navbar Dropdown
 
 Open `docs/docs.yml` and add a link under the Blog dropdown in `navbar-links`:
 
