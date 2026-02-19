@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Publish Empty Wheel to S3 and Artifactory
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: 'Python package name for the wheel'
+        required: false
+        type: string
+        default: 'ai-dynamo-test'
+      package_version:
+        description: 'Package version (e.g., 0.0.1)'
+        required: false
+        type: string
+        default: '0.0.1'
+      s3_bucket:
+        description: 'S3 bucket to upload the wheel'
+        required: false
+        type: string
+        default: 'dynamo-infra-utils'
+      s3_prefix:
+        description: 'S3 key prefix for the wheel'
+        required: false
+        type: string
+        default: 'wheels/'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    name: Build and Publish Empty Wheel
+    runs-on: cpu-amd-m5-4xlarge
+    environment: automated-release
+    steps:
+      - name: Set up Python and build tools
+        run: |
+          apt-get update && apt-get install -y python3 python3-pip python3-venv
+          python3 -m venv /tmp/wheel-venv
+          source /tmp/wheel-venv/bin/activate
+          pip install --upgrade pip wheel setuptools twine
+          echo "/tmp/wheel-venv/bin" >> $GITHUB_PATH
+
+      - name: Validate inputs
+        env:
+          PKG_NAME: ${{ inputs.package_name }}
+          PKG_VERSION: ${{ inputs.package_version }}
+          S3_BUCKET: ${{ inputs.s3_bucket }}
+          S3_PREFIX: ${{ inputs.s3_prefix }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${PKG_NAME}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            echo "::error::Invalid package name: must be alphanumeric with hyphens/underscores only"
+            exit 1
+          fi
+          if [[ ! "${PKG_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version: must follow PEP 440 (e.g., 0.0.1)"
+            exit 1
+          fi
+          if [[ ! "${S3_BUCKET}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "::error::Invalid S3 bucket name"
+            exit 1
+          fi
+          if [[ ! "${S3_PREFIX}" =~ ^[a-zA-Z0-9/_-]*$ ]]; then
+            echo "::error::Invalid S3 prefix"
+            exit 1
+          fi
+
+      - name: Generate empty wheel
+        env:
+          PKG_NAME: ${{ inputs.package_name }}
+          PKG_VERSION: ${{ inputs.package_version }}
+        run: |
+          set -euo pipefail
+          PKG_DIR="${PKG_NAME//-/_}"
+
+          mkdir -p "${PKG_DIR}"
+          cat > "${PKG_DIR}/__init__.py" <<'PYEOF'
+          __version__ = "0.0.0"
+          PYEOF
+          sed -i "s/0.0.0/${PKG_VERSION}/" "${PKG_DIR}/__init__.py"
+
+          cat > pyproject.toml <<TOMLEOF
+          [project]
+          name = "${PKG_NAME}"
+          version = "${PKG_VERSION}"
+          description = "Empty test wheel for Artifactory PrivateLink validation"
+          requires-python = ">=3.10"
+
+          [build-system]
+          requires = ["setuptools>=64", "wheel"]
+          build-backend = "setuptools.build_meta"
+          TOMLEOF
+
+          python3 -m pip wheel . --no-deps --wheel-dir dist/
+          echo "Generated wheel:"
+          ls -la dist/
+
+      - name: Upload wheel to S3
+        env:
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ inputs.s3_bucket }}
+          S3_PREFIX: ${{ inputs.s3_prefix }}
+        run: |
+          set -euo pipefail
+          WHEEL_FILE=$(ls dist/*.whl)
+          WHEEL_BASENAME=$(basename "${WHEEL_FILE}")
+          S3_KEY="${S3_PREFIX}${WHEEL_BASENAME}"
+
+          echo "Uploading ${WHEEL_BASENAME} to s3://${S3_BUCKET}/${S3_KEY}"
+          aws s3 cp "${WHEEL_FILE}" "s3://${S3_BUCKET}/${S3_KEY}" --no-progress
+          echo "S3 upload complete."
+
+          echo "### S3 Upload" >> $GITHUB_STEP_SUMMARY
+          echo "- **Bucket**: \`${S3_BUCKET}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Key**: \`${S3_KEY}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Publish wheel to Artifactory
+        env:
+          ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          TWINE_NON_INTERACTIVE: "1"
+          PKG_NAME: ${{ inputs.package_name }}
+          PKG_VERSION: ${{ inputs.package_version }}
+        run: |
+          set -euo pipefail
+          ARTIFACTORY_URL="https://artifactory.nvidia.com/artifactory/sw-dynamo-ops-pypi-local/"
+
+          echo "Publishing wheel to Artifactory..."
+          python3 -m twine upload \
+            --repository-url "${ARTIFACTORY_URL}" \
+            --username "${ARTIFACTORY_USER}" \
+            --password "${ARTIFACTORY_TOKEN}" \
+            --disable-progress-bar \
+            dist/*.whl
+
+          echo "Artifactory upload complete."
+
+          echo "### Artifactory Upload" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository**: \`${ARTIFACTORY_URL}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package**: \`${PKG_NAME}==${PKG_VERSION}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary
+        env:
+          PKG_NAME: ${{ inputs.package_name }}
+          PKG_VERSION: ${{ inputs.package_version }}
+        run: |
+          WHEEL_FILE=$(basename dist/*.whl)
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Wheel Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **File**: \`${WHEEL_FILE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package**: \`${PKG_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: \`${PKG_VERSION}\`" >> $GITHUB_STEP_SUMMARY
