@@ -4,6 +4,9 @@
 name: Publish Empty Wheel to S3 and Artifactory
 
 on:
+  push:
+    branches:
+      - 'pvijayakrish/publish-rc-wheels'
   workflow_dispatch:
     inputs:
       package_name:
