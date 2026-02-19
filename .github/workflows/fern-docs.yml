@@ -213,6 +213,13 @@ jobs:
             cp -r source-checkout/docs/components docs-checkout/fern/components
           fi
 
+          # Sync blogs/ directory
+          if [ -d source-checkout/docs/blogs ]; then
+            echo "Syncing blogs/ to docs-website branch..."
+            rm -rf docs-checkout/fern/blogs
+            cp -r source-checkout/docs/blogs docs-checkout/fern/blogs
+          fi
+
           # Sync main.css
           if [ -f source-checkout/docs/main.css ]; then
             echo "Syncing main.css to docs-website branch..."

@@ -209,6 +209,12 @@ navigation:
       - page: Planner Design
         path: ../pages/design-docs/planner-design.md
 
+  # ==================== Blog ====================
+  - section: Blog
+    path: ../blogs/index.mdx
+    slug: blog
+    contents: []
+
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.
   # Matches Sphinx hidden_toctree.rst -- pages linked from within content
