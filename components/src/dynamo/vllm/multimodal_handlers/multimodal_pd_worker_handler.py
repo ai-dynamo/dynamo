@@ -56,6 +56,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         encode_worker_client: Client | None = None,
         decode_worker_client: Client | None = None,
         shutdown_event=None,
+        generate_endpoint=None,
     ):
         # Get default_sampling_params from config
         default_sampling_params = (
@@ -69,6 +70,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            config=config,
             shutdown_event=shutdown_event,
         )
 
@@ -318,6 +321,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         received_tensor_ids: list[int],
     ):
         """Run prefill and decode on this worker (aggregated mode)."""
+        lora_request = self._resolve_lora_request(request.model)
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=request.engine_prompt["prompt_token_ids"],
@@ -325,6 +329,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ),
             sampling_params=request.sampling_params,
             request_id=request.request_id,
+            lora_request=lora_request,
         )
 
         for tensor_id in received_tensor_ids:
@@ -358,6 +363,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         prefill_only_request.sampling_params.min_tokens = 1
         logger.debug("Prefill request: %s", prefill_only_request)
 
+        lora_request = self._resolve_lora_request(request.model)
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=prefill_only_request.engine_prompt["prompt_token_ids"],
@@ -365,6 +371,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ),
             sampling_params=prefill_only_request.sampling_params,
             request_id=prefill_only_request.request_id,
+            lora_request=lora_request,
         )
 
         for tensor_id in received_tensor_ids:
@@ -400,6 +407,14 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # embeddings_shape).  Heavy multimodal data was consumed locally by
         # engine_client.generate() and multimodal_inputs was cleared by
         # `_finalize_request_metadata`.
+        #
+        # request.model (LoRA name) is preserved in the serialized request
+        # so the decode worker can resolve the same LoRA adapter.
+        if lora_request and request.model:
+            logger.debug(
+                f"Forwarding disaggregated decode with LoRA '{request.model}' "
+                f"— ensure the same adapter is loaded on the decode worker."
+            )
         async for (
             decode_response
         ) in await self.decode_worker_client.round_robin(  # type: ignore[union-attr]

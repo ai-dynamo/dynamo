@@ -458,6 +458,16 @@ class BaseWorkerHandler(ABC):
         if temp_dir is not None:
             self.temp_dirs.append(temp_dir)
 
+    def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
+        """Return a LoRARequest if model_name is a loaded adapter, else None."""
+        if model_name and model_name in self.lora_id_for_name:
+            return LoRARequest(
+                lora_name=model_name,
+                lora_int_id=self.lora_id_for_name[model_name],
+                lora_path=self.lora_name_to_path[model_name],
+            )
+        return None
+
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
         with self._lora_load_locks_guard:
