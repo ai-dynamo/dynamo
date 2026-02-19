@@ -17,7 +17,15 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
 from dynamo._core import Endpoint
-from dynamo.prometheus_names import kvstats, labels, model_info, name_prefix
+from dynamo.prometheus_names import kvstats, labels, name_prefix
+
+try:
+    from dynamo.prometheus_names import model_info
+except ImportError:
+    # Fallback when the installed dynamo package has an older prometheus_names without model_info
+    class model_info:
+        LOAD_TIME_SECONDS = "model_load_time_seconds"
+
 
 # Import CollectorRegistry and Gauge only for type hints to avoid importing prometheus_client at module load time.
 # prometheus_client must be imported AFTER set_prometheus_multiproc_dir() is called.

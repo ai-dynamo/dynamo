@@ -12,7 +12,7 @@ dynamo.common.backend/
     args.py              # BackendCommonConfig, BackendCommonArgGroup, WorkerModeConfig
 ```
 
-A minimal sample backend lives in `dynamo/worker/myengine/`. It echoes the request's input tokens repeated 5 times with no hook overrides — useful as a starting point for new backends.
+A minimal sample backend lives in `dynamo/worker/myengine/`. It always replies with "Hello World!" (tokenized via the model's tokenizer) with no hook overrides — useful as a starting point for new backends.
 
 ## Core Classes
 
@@ -196,22 +196,34 @@ async def run(self):
 
 Implement `generate()` as an async generator that yields response chunks.
 
-Here is the simplest possible handler (from `dynamo/worker/myengine/handlers.py`) — it echoes input tokens 5 times, one token per yield:
+Here is the simplest possible handler (from `dynamo/worker/myengine/handlers.py`) — it encodes a fixed reply using the model's tokenizer and streams the token IDs one at a time:
 
 ```python
 from dynamo.common.backend import BaseHandler
 
-_REPEAT_COUNT = 5
+_FALLBACK_REPLY_IDS = [0]
+_REPLY_TEXT = "Hello World!"
+
+def _encode_reply(model: str) -> list[int]:
+    """Encode reply text using the model's tokenizer."""
+    try:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+        return tokenizer.encode(_REPLY_TEXT, add_special_tokens=False)
+    except Exception:
+        return _FALLBACK_REPLY_IDS
 
 class MyEngineHandler(BaseHandler):
-    """Echoes the request's input tokens repeated 5 times, one token at a time."""
+    """Returns 'Hello World!' streamed token by token."""
 
     async def generate(self, request, context):
-        input_ids = request.get("input_ids", [])
-        output_ids = input_ids * _REPEAT_COUNT
-        total = len(output_ids)
+        model = request.get("model", "")
+        reply_ids = _encode_reply(model) if model else _FALLBACK_REPLY_IDS
+        if not reply_ids:
+            reply_ids = _FALLBACK_REPLY_IDS
+        total = len(reply_ids)
 
-        for i, token_id in enumerate(output_ids):
+        for i, token_id in enumerate(reply_ids):
             out = {"token_ids": [token_id]}
             if i == total - 1:
                 out["finish_reason"] = "stop"
@@ -280,18 +292,40 @@ Users can override the payload at runtime with the `DYN_HEALTH_CHECK_PAYLOAD` en
 
 ### 6. Entry Point Integration
 
-Register your backend in `dynamo/worker/main.py`:
+The worker entry point (`dynamo/worker/main.py`) uses **convention-based discovery**. It expects every backend to follow this module layout:
+
+- `dynamo.worker.<name>.args.parse_args` — callable that returns a config object
+- `dynamo.worker.<name>.backends` — module containing exactly one `BaseBackend` subclass
+
+To register a new backend:
+
+1. Add your backend name to `SUPPORTED_BACKENDS` in `main.py`.
+2. Place your code under `dynamo/worker/<name>/` following the convention above.
+
+No `if/elif` branch is needed — the entry point imports dynamically:
 
 ```python
-elif engine_type == "myengine":
-    from dynamo.worker.myengine_v2.args import parse_args
-    from dynamo.worker.myengine_v2.backends import MyEngineBackend
-
-    config = parse_args()
-    backend_cls = MyEngineBackend
+SUPPORTED_BACKENDS = ("trtllm", "vllm", "sglang", "myengine")
 ```
 
-And add `"myengine"` to `SUPPORTED_ENGINES`.
+#### Backend Auto-Detection
+
+When `--backend` is omitted, `main.py` auto-detects the backend by checking for installed Python packages using `importlib.util.find_spec()`. The mapping is defined in `_BACKEND_PACKAGE`:
+
+```python
+_BACKEND_PACKAGE = {
+    "trtllm": "tensorrt_llm",
+    "vllm": "vllm",
+    "sglang": "sglang",
+}
+```
+
+Restrictions:
+
+- **Order matters** — packages are checked in dict insertion order (`trtllm` → `vllm` → `sglang`). The **first** installed package wins. If multiple packages are installed, only the first match is used; pass `--backend` explicitly to override.
+- **Only real framework packages participate** — sample/test backends like `myengine` are intentionally excluded from `_BACKEND_PACKAGE` since they have no external package to detect. They can only be selected via `--backend myengine`.
+- **`find_spec` checks importability, not functionality** — a package that is installed but broken (e.g., missing native libraries) will still match. The actual import error will surface later during engine creation.
+- **Adding auto-detection for a new backend** — add an entry to `_BACKEND_PACKAGE` mapping your backend name to its pip-installable package name. The backend must also be listed in `SUPPORTED_BACKENDS`.
 
 ## Common Patterns
 

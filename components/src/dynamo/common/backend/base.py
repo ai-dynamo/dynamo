@@ -14,7 +14,7 @@ import os
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from prometheus_client import CollectorRegistry
 
@@ -477,8 +477,7 @@ class BaseBackend(ABC):
 
         # Post-process: disable local indexer for decode workers
         runtime_config.enable_local_indexer = (
-            getattr(self.config, "enable_local_indexer", True)
-            and not self._is_decode()
+            getattr(self.config, "enable_local_indexer", True) and not self._is_decode()
         )
 
         # Determine input and model type
@@ -497,17 +496,17 @@ class BaseBackend(ABC):
         if input_type == ModelInput.Text and model_type != ModelType.Embedding:
             model_type = ModelType.Chat
 
-        # Log runtime config
+        # Log runtime config (use getattr: some bindings expose setters only)
         logger.info(
-            f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}"
+            f"Set runtime config max_num_seqs: {getattr(runtime_config, 'max_num_seqs', None)}"
         )
         logger.info(
             f"Set runtime config max_num_batched_tokens: "
-            f"{runtime_config.max_num_batched_tokens}"
+            f"{getattr(runtime_config, 'max_num_batched_tokens', None)}"
         )
         logger.info(
             f"Set runtime config data_parallel_size: "
-            f"{runtime_config.data_parallel_size}"
+            f"{getattr(runtime_config, 'data_parallel_size', None)}"
         )
 
         await register_llm(

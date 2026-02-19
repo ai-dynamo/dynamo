@@ -304,9 +304,7 @@ class BaseHandler(ABC):
         Yields:
             The cancellation monitoring task.
         """
-        task = asyncio.create_task(
-            self._handle_cancellation(context, abort_callback)
-        )
+        task = asyncio.create_task(self._handle_cancellation(context, abort_callback))
         try:
             yield task
         finally:

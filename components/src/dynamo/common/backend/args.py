@@ -36,6 +36,7 @@ class BackendCommonConfig(ConfigBase):
     store_kv: str
     request_plane: str
     event_plane: str
+    use_kv_events: bool = False
     connector: list[str]
     enable_local_indexer: bool
     durable_kv_events: bool
@@ -53,6 +54,8 @@ class BackendCommonConfig(ConfigBase):
         """Validate and normalize the configuration."""
         # Derive enable_local_indexer from durable_kv_events
         self.enable_local_indexer = not self.durable_kv_events
+        # use_kv_events drives runtime NATS KV behavior; align with durable_kv_events
+        self.use_kv_events = self.durable_kv_events
 
         # Validate and expand custom Jinja template path
         if self.custom_jinja_template:
