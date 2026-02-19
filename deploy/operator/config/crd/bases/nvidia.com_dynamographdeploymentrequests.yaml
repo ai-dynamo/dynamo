@@ -664,8 +664,14 @@ spec:
                         to use as the base for the generated deployment. Fields from profiling results
                         are merged on top. Use this to override backend worker images.
 
-                        Note: runtime.RawExtension is used instead of a direct *v1alpha1.DynamoGraphDeployment
-                        to avoid a circular import: v1alpha1 already imports v1beta1 as the conversion hub.
+                        The field is stored as a raw embedded resource rather than a typed
+                        *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already
+                        imports v1beta1 as the conversion hub and Go does not allow import cycles.
+
+                        The EmbeddedResource marker tells the API server to validate that the value is a
+                        well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it
+                        is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,
+                        kind, and field schema) is performed by the controller during reconciliation.
                       type: object
                       x-kubernetes-embedded-resource: true
                       x-kubernetes-preserve-unknown-fields: true
