@@ -407,7 +407,7 @@ def test_router_decisions_trtllm_attention_dp(
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
-        # Use the namespace from the vLLM workers
+        # Use the namespace from the TRT-LLM workers
         endpoint = runtime.endpoint(f"{trtllm_workers.namespace}.tensorrt_llm.generate")
 
         _test_router_decisions(

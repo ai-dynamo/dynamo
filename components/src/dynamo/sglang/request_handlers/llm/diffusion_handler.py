@@ -28,7 +28,6 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         """Initialize diffusion worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: SGLang engine with diffusion algorithm configured.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher.

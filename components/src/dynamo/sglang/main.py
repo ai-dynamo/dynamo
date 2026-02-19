@@ -504,9 +504,7 @@ async def init_embedding(
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = EmbeddingWorkerHandler(
-        None, engine, config, publisher, shutdown_event  # Component not used by handler
-    )
+    handler = EmbeddingWorkerHandler(engine, config, publisher, shutdown_event)
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()
@@ -657,7 +655,6 @@ async def init_video_generation(runtime: DistributedRuntime, config: Config):
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
     handler = VideoGenerationWorkerHandler(
-        None,  # Component not used by handler
         generator,
         config,
         publisher=None,

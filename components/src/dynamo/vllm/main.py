@@ -10,6 +10,7 @@ from typing import Optional
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
+from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -43,7 +44,7 @@ except ImportError:
     MediaFetcher = None
     MEDIA_DECODER_AVAILABLE = False
 
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
@@ -264,8 +265,8 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
 
 def setup_kv_event_publisher(
     config: Config,
-    generate_endpoint,
-    vllm_config,
+    generate_endpoint: Endpoint,
+    vllm_config: VllmConfig,
     consolidator_enabled: bool = False,
     consolidator_port: Optional[int] = 5558,
 ) -> Optional[KvEventPublisher]:

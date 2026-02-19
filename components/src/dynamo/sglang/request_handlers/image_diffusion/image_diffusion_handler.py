@@ -41,7 +41,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         """Initialize diffusion worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             generator: The SGLang DiffGenerator instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher (not used for diffusion currently).
