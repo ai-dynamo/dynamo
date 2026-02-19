@@ -211,11 +211,11 @@ def generate_prefill_decode_services_config_preview(
     config_modifier.normalize_output_service_names(config_dict)
     # Service names may have been renamed; select workers by subComponentType.
     services = config_dict["spec"]["services"]
+    worker_sub_types = (SubComponentType.PREFILL, SubComponentType.DECODE)
     return {
         svc_name: svc_val
         for svc_name, svc_val in services.items()
-        if svc_val.get("subComponentType")
-        in (SubComponentType.PREFILL, SubComponentType.DECODE)
+        if svc_val.get("subComponentType") in worker_sub_types
     }
 
 
