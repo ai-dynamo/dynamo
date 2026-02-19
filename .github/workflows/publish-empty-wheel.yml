@@ -113,17 +113,20 @@ jobs:
           mkdir -p "${PKG_DIR}"
           printf '__version__ = "%s"\n' "${PKG_VERSION}" > "${PKG_DIR}/__init__.py"
 
-          cat > pyproject.toml <<EOF
-[project]
-name = "${PKG_NAME}"
-version = "${PKG_VERSION}"
-description = "Empty test wheel for Artifactory PrivateLink validation"
-requires-python = ">=3.10"
+          cat > pyproject.toml <<'TOMLEOF'
+          [project]
+          name = "PLACEHOLDER_NAME"
+          version = "PLACEHOLDER_VERSION"
+          description = "Empty test wheel for Artifactory PrivateLink validation"
+          requires-python = ">=3.10"
 
-[build-system]
-requires = ["setuptools>=64", "wheel"]
-build-backend = "setuptools.build_meta"
-EOF
+          [build-system]
+          requires = ["setuptools>=64", "wheel"]
+          build-backend = "setuptools.build_meta"
+          TOMLEOF
+          sed -i "s/PLACEHOLDER_NAME/${PKG_NAME}/" pyproject.toml
+          sed -i "s/PLACEHOLDER_VERSION/${PKG_VERSION}/" pyproject.toml
+          sed -i 's/^          //' pyproject.toml
 
           python3 -m pip wheel . --no-deps --wheel-dir dist/
 
