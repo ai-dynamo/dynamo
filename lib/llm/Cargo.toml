@@ -170,7 +170,7 @@ json-five = { version = "0.3" }
 reqwest = { workspace = true }
 base64 = { version = "0.22" }
 image = { version = "0.25", features = ["serde"] }
-video-rs = { version = "0.10.5", optional = true }
+video-rs = { version = "0.10.5", optional = true, features = ["ndarray"] }
 ffmpeg-next = { version = "7.1.0", optional = true }
 memfile = { version = "0.3.2", optional = true }
 tokio-rayon = {version = "2" }
