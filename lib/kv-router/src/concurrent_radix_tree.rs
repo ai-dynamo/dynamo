@@ -25,14 +25,14 @@
 //!   per-worker write concurrency.
 //! - Deadlock prevention: always lock parent before child, hand-over-hand locking
 
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet, FxBuildHasher};
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::indexer::SyncIndexer;
+use crate::indexer::{SyncIndexer, WorkerTask};
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Block.
@@ -506,13 +506,28 @@ impl ConcurrentRadixTree {
 
 impl SyncIndexer for ConcurrentRadixTree {
 
-    fn worker(&self, event_receiver: flume::Receiver<Option<RouterEvent>>) -> anyhow::Result<()> {
+    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
-        while let Ok(Some(event)) = event_receiver.recv() {
-            if let Err(e) = self.apply_event(&mut lookup, event) {
-                tracing::warn!("Failed to apply event: {:?}", e);
+
+        while let Ok(task) = event_receiver.recv() {
+            match task {
+                WorkerTask::Event(event) => {
+                    if let Err(e) = self.apply_event(&mut lookup, event) {
+                        tracing::warn!("Failed to apply event: {:?}", e);
+                    }
+                }
+                WorkerTask::DumpEvents(sender) => {
+                    let events = self.dump_tree_as_events();
+                    if let Err(e) = sender.send(Ok(events)) {
+                        tracing::warn!("Failed to send events: {:?}", e);
+                    }
+                }
+                WorkerTask::Terminate => {
+                    break;
+                }
             }
         }
+
         tracing::debug!("ConcurrentRadixTree worker thread shutting down");
         Ok(())
     }
@@ -520,10 +535,6 @@ impl SyncIndexer for ConcurrentRadixTree {
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         // Delegate to the existing find_matches method
         self.find_matches_impl(sequence, early_exit)
-    }
-
-    fn dump_events(&self) -> Vec<RouterEvent> {
-        self.dump_tree_as_events()
     }
 }
 

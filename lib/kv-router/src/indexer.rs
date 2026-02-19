@@ -359,6 +359,12 @@ pub trait KvIndexerInterface {
     async fn flush(&self) -> usize;
 }
 
+pub enum WorkerTask {
+    Event(RouterEvent),
+    DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
+    Terminate
+}
+
 // ============================================================================
 // SyncIndexer trait and ThreadPoolIndexer generic wrapper
 // ============================================================================
@@ -373,13 +379,10 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
-    fn worker(&self, event_receiver: flume::Receiver<Option<RouterEvent>>) -> anyhow::Result<()>;
+    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()>;
 
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
-
-    /// Dump the data structure as router events for reconstruction.
-    fn dump_events(&self) -> Vec<RouterEvent>;
 }
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
@@ -413,7 +416,7 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
     /// Channels to send events to worker threads (one per thread).
     /// Sending `None` signals the thread to shut down.
-    worker_event_channels: Vec<flume::Sender<Option<RouterEvent>>>,
+    worker_event_channels: Vec<flume::Sender<WorkerTask>>,
 
     /// Number of worker threads.
     num_workers: usize,
@@ -446,7 +449,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let mut worker_event_senders = Vec::new();
         let mut thread_handles = Vec::new();
         for _ in 0..num_workers {
-            let (event_sender, event_receiver) = flume::unbounded::<Option<RouterEvent>>();
+            let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
 
             let backend = Arc::clone(&backend);
@@ -521,7 +524,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         });
 
         // Send event to the assigned worker thread
-        if let Err(e) = self.worker_event_channels[thread_idx].send(Some(event)) {
+        if let Err(e) = self.worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
             tracing::error!(
                 "Failed to send event to worker thread {}: {:?}",
                 thread_idx,
@@ -542,7 +545,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     fn shutdown(&self) {
         // Send shutdown signal (None) to all worker threads
         for channel in self.worker_event_channels.iter() {
-            let _ = channel.send(None);
+            let _ = channel.send(WorkerTask::Terminate);
         }
 
         // Take ownership of thread handles and join them
@@ -560,8 +563,30 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        // Execute inline - the backend is thread-safe
-        Ok(self.backend.dump_events())
+        let mut receivers = Vec::new();
+
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel::<anyhow::Result<Vec<RouterEvent>>>();
+            let dump_req = WorkerTask::DumpEvents(resp_tx);
+
+            channel.send(dump_req).map_err(|_| KvRouterError::IndexerOffline)?;
+            receivers.push(resp_rx);
+        }
+
+        let mut event_id_counter = 0;
+
+        let mut all_events = Vec::new();
+
+        for resp_rx in receivers {
+            let mut events = resp_rx.await.map_err(|_| KvRouterError::IndexerDroppedRequest)?.map_err(|_| KvRouterError::IndexerOffline)?;
+            for event in &mut events {
+                event.event.event_id = event_id_counter;
+                event_id_counter += 1;
+            }
+            all_events.extend(events);
+        }
+
+        Ok(all_events)
     }
 
     async fn process_routing_decision_for_request(
