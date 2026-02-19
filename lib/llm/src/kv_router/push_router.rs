@@ -13,11 +13,13 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde_json::json;
+use tokio::sync::OnceCell;
 use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter,
+        CacheControlClient, KvRouter,
+        cache_control::{create_cache_control_client, spawn_pin_prefix},
         metrics::RouterRequestMetrics,
         protocols::{BlockExtraInfo, TokensWithHashes, WorkerWithDpRank},
     },
@@ -31,6 +33,8 @@ use crate::{
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    /// Lazily initialized on first PIN request. `None` when cache_control is disabled.
+    cache_control_cell: Option<OnceCell<CacheControlClient>>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -54,6 +58,15 @@ struct RequestGuard {
     cumulative_osl: usize,
     metrics_recorded: bool,
     freed: bool,
+    // PIN state: set when cache_control TTL is present and a cc_client exists
+    pin_state: Option<PinState>,
+}
+
+struct PinState {
+    token_ids: Vec<u32>,
+    cc_client: CacheControlClient,
+    instance_id: u64,
+    ttl_seconds: u64,
 }
 
 impl RequestGuard {
@@ -63,6 +76,16 @@ impl RequestGuard {
             tracing::warn!("Failed to free request {}: {e}", self.context_id);
         }
         self.freed = true;
+
+        if let Some(ref pin) = self.pin_state {
+            spawn_pin_prefix(
+                Some(&pin.cc_client),
+                &pin.token_ids,
+                pin.instance_id,
+                &self.context_id,
+                pin.ttl_seconds,
+            );
+        }
     }
 
     fn record_metrics(&mut self) {
@@ -105,7 +128,17 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
-        KvPushRouter { inner, chooser }
+        let cache_control_cell = if chooser.kv_router_config().router_enable_cache_control {
+            tracing::info!("Cache control enabled for PIN operations (lazy init)");
+            Some(OnceCell::new())
+        } else {
+            None
+        };
+        KvPushRouter {
+            inner,
+            chooser,
+            cache_control_cell,
+        }
     }
 
     fn routing_inputs(
@@ -359,6 +392,33 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
+        // Extract pin state: lazily init cache_control client on first PIN request
+        let pin_state =
+            if let Some(ttl) = request.routing.as_ref().and_then(|r| r.cache_control_ttl) {
+                if let Some(cell) = &self.cache_control_cell {
+                    let component = self.chooser.client().endpoint.component().clone();
+                    match cell
+                        .get_or_try_init(|| create_cache_control_client(&component))
+                        .await
+                    {
+                        Ok(client) => Some(PinState {
+                            token_ids: request.token_ids.clone(),
+                            cc_client: client.clone(),
+                            instance_id,
+                            ttl_seconds: ttl,
+                        }),
+                        Err(e) => {
+                            tracing::warn!("Failed to create cache_control client: {e}");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
@@ -396,6 +456,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 cumulative_osl: 0,
                 metrics_recorded: false,
                 freed: false,
+                pin_state,
             };
             let mut prefill_marked = false;
             let mut first_token_recorded = false;
