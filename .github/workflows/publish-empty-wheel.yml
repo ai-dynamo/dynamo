@@ -36,7 +36,7 @@ permissions:
 jobs:
   build-and-publish:
     name: Build and Publish Empty Wheel
-    runs-on: prod-default-v1
+    runs-on: cpu-amd-m5-4xlarge
     environment: automated-release
     steps:
       - name: Set up Python and build tools
