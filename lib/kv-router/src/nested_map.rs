@@ -24,10 +24,10 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use crate::indexer::SyncIndexer;
+use crate::indexer::{SyncIndexer, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank, KvCacheEvent, KvCacheStoredBlockData
 };
 
 /// Entry for the innermost level of the index.
@@ -137,26 +137,34 @@ impl PositionalIndexer {
 // ============================================================================
 
 impl SyncIndexer for PositionalIndexer {
-    fn worker(&self, event_receiver: flume::Receiver<Option<RouterEvent>>) -> anyhow::Result<()> {
+    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
         let mut worker_blocks = FxHashMap::default();
-        while let Ok(Some(event)) = event_receiver.recv() {
-            if let Err(e) = self.apply_event(
-                &mut worker_blocks,
-                event,
-            ) {
-                tracing::warn!("Failed to apply event: {:?}", e);
+
+        while let Ok(task) = event_receiver.recv() {
+            match task {
+                WorkerTask::Event(event) => {
+                    if let Err(e) = self.apply_event(&mut worker_blocks, event) {
+                        tracing::warn!("Failed to apply event: {:?}", e);
+                    }
+                }
+                WorkerTask::DumpEvents(sender) => {
+                    let events = self.dump_events(&worker_blocks);
+                    if let Err(e) = sender.send(Ok(events)) {
+                        tracing::warn!("Failed to send events: {:?}", e);
+                    }
+                }
+                WorkerTask::Terminate => {
+                    break;
+                }
             }
         }
+
         tracing::debug!("PositionalIndexer worker thread shutting down");
         Ok(())
     }
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.jump_search_matches(sequence, early_exit)
-    }
-
-    fn dump_events(&self) -> Vec<RouterEvent> {
-        unimplemented!()
     }
 }
 
@@ -357,6 +365,64 @@ impl PositionalIndexer {
                 worker_blocks.insert(worker, FxHashMap::default());
             }
         }
+    }
+
+    fn dump_events(&self, worker_blocks: &FxHashMap<WorkerWithDpRank, LevelIndex>) -> Vec<RouterEvent> {
+        let mut events = Vec::new();
+        let mut event_id = 0u64;
+
+        for (worker, worker_map) in worker_blocks.iter() {
+            // Collect (position, local_hash, seq_hash) and sort by position
+            // so parents are emitted before children during replay.
+            let mut blocks: Vec<_> = worker_map
+                .iter()
+                .map(|(seq_hash, (pos, local_hash))| (*pos, *local_hash, *seq_hash))
+                .collect();
+            blocks.sort_unstable_by_key(|(pos, _, _)| *pos);
+
+            // Track one valid seq_hash per position for parent_hash synthesis.
+            let mut last_at_position: FxHashMap<usize, ExternalSequenceBlockHash> =
+                FxHashMap::default();
+
+            for (pos, local_hash, seq_hash) in blocks {
+                let parent_hash = if pos == 0 {
+                    None
+                } else {
+                    match last_at_position.get(&(pos - 1)) {
+                        Some(&parent) => Some(parent),
+                        None => {
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                position = pos,
+                                "Orphaned block at position with no parent; skipping in dump"
+                            );
+                            continue;
+                        }
+                    }
+                };
+
+                events.push(RouterEvent {
+                    worker_id: worker.worker_id,
+                    event: KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash,
+                            blocks: vec![KvCacheStoredBlockData {
+                                block_hash: seq_hash,
+                                tokens_hash: local_hash,
+                                mm_extra_info: None,
+                            }],
+                        }),
+                        dp_rank: worker.dp_rank,
+                    },
+                });
+                event_id += 1;
+                last_at_position.insert(pos, seq_hash);
+            }
+        }
+
+        events
     }
 }
 
