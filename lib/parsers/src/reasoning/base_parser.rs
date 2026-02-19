@@ -85,6 +85,11 @@ impl ReasoningParser for BasicReasoningParser {
         let reasoning_text = reasoning_parts.join("").trim().to_string();
         let normal_text = normal_parts.join("").trim().to_string();
 
+        // Note: self._in_reasoning is intentionally NOT updated here. This method is
+        // documented to "reset or ignore internal streaming state" (see trait doc). Callers
+        // should not mix detect_and_parse_reasoning with parse_reasoning_streaming_incremental
+        // on the same parser instance.
+
         ParserResult {
             normal_text,
             reasoning_text,
@@ -692,5 +697,102 @@ mod tests {
             parser.parse_reasoning_streaming_incremental("<think>more thought</think> done", &[]);
         assert_eq!(r4.reasoning_text, "more thought");
         assert_eq!(r4.normal_text, " done");
+    }
+
+    #[test]
+    fn test_force_reasoning_stream_false_buffers_until_end_token() {
+        // force_reasoning=true, stream_reasoning=false: content is buffered until </think>
+        // arrives, then returned as a single chunk. This is the expected behavior.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, false);
+
+        // No <think> — forced into reasoning, stream_reasoning=false means buffer silently
+        let r1 = parser.parse_reasoning_streaming_incremental("chunk one", &[]);
+        assert_eq!(r1.reasoning_text, "");
+        assert_eq!(r1.normal_text, "");
+
+        let r2 = parser.parse_reasoning_streaming_incremental(" chunk two", &[]);
+        assert_eq!(r2.reasoning_text, "");
+        assert_eq!(r2.normal_text, "");
+
+        // </think> arrives — entire buffered reasoning is flushed
+        let r3 = parser.parse_reasoning_streaming_incremental("</think> answer", &[]);
+        assert_eq!(r3.reasoning_text, "chunk one chunk two");
+        assert_eq!(r3.normal_text, " answer");
+    }
+
+    #[test]
+    fn test_multiple_full_blocks_in_single_streaming_chunk() {
+        // Two complete <think>...</think> blocks arrive in one chunk.
+        // The first block is returned immediately. The mid-chunk transition handler buffers
+        // "B</think> end" (everything after the second <think>) and returns " mid " as normal.
+        // An empty follow-up call flushes the buffer and emits the second block.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental(
+            "<think>A</think> mid <think>B</think> end",
+            &[],
+        );
+        assert_eq!(r1.reasoning_text, "A");
+        assert_eq!(r1.normal_text, " mid ");
+
+        // Buffer holds "B</think> end" from the mid-chunk transition; empty call flushes it
+        let r2 = parser.parse_reasoning_streaming_incremental("", &[]);
+        assert_eq!(r2.reasoning_text, "B");
+        assert_eq!(r2.normal_text, " end");
+    }
+
+    #[test]
+    fn test_partial_end_token_stream_reasoning_true() {
+        // Partial </think> split across chunks with stream_reasoning=true.
+        // The partial-end-token buffer check only fires when the parser is ALREADY in
+        // reasoning mode from a prior call. If <think> and </th arrive in the same chunk,
+        // stream_reasoning=true emits the reasoning content immediately (including </th).
+        // So <think> must arrive as its own chunk first.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("<think>reasoning", &[]);
+        assert_eq!(r1.reasoning_text, "reasoning");
+        assert_eq!(r1.normal_text, "");
+
+        // Partial end token while already in reasoning — buffered, nothing emitted
+        let r2 = parser.parse_reasoning_streaming_incremental("</th", &[]);
+        assert_eq!(r2.reasoning_text, "");
+        assert_eq!(r2.normal_text, "");
+
+        // Complete the end token
+        let r3 = parser.parse_reasoning_streaming_incremental("ink> normal", &[]);
+        assert_eq!(r3.reasoning_text, "");
+        assert_eq!(r3.normal_text, " normal");
+    }
+
+    #[test]
+    fn test_empty_string_input_various_states() {
+        // Empty string input should always return empty results without changing state
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        // State: idle
+        let r1 = parser.parse_reasoning_streaming_incremental("", &[]);
+        assert_eq!(r1.reasoning_text, "");
+        assert_eq!(r1.normal_text, "");
+
+        // Enter reasoning
+        parser.parse_reasoning_streaming_incremental("<think>content", &[]);
+
+        // State: in reasoning
+        let r2 = parser.parse_reasoning_streaming_incremental("", &[]);
+        assert_eq!(r2.reasoning_text, "");
+        assert_eq!(r2.normal_text, "");
+
+        // Complete and exit reasoning
+        parser.parse_reasoning_streaming_incremental("</think>", &[]);
+
+        // State: post-reasoning (normal text)
+        let r3 = parser.parse_reasoning_streaming_incremental("", &[]);
+        assert_eq!(r3.reasoning_text, "");
+        assert_eq!(r3.normal_text, "");
     }
 }
