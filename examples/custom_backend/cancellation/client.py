@@ -2,23 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Simple client demonstration of request cancellation using context.stop_generating()
+Simple client demonstration of request cancellation using stream.cancel()
 """
 
 import asyncio
 import sys
 
-from dynamo._core import Context, DistributedRuntime
+from dynamo.runtime import DistributedRuntime
 
 
 async def demo_cancellation(client):
     """Perform the generation request with cancellation demonstration"""
-    # Create context for cancellation control
-    context = Context()
-
     # Start streaming request
     print("Starting streaming request...")
-    stream = await client.generate("dummy_request", context=context)
+    stream = await client.generate("dummy_request")
 
     iteration_count = 0
     async for response in stream:
@@ -28,7 +25,7 @@ async def demo_cancellation(client):
         # Cancel after receiving 3 responses
         if iteration_count >= 2:
             print("Client: Cancelling after 3 responses...")
-            context.stop_generating()
+            stream.cancel()
             break
 
         iteration_count += 1

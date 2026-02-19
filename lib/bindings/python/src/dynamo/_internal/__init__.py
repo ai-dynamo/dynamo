@@ -11,8 +11,10 @@ For public APIs, use dynamo.runtime and dynamo.llm.
 """
 
 # Re-export from _core
+from dynamo._core import Context as Context
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 
 __all__ = [
+    "Context",
     "ModelDeploymentCard",
 ]

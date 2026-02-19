@@ -16,7 +16,8 @@ from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
 import dynamo.nixl_connect as connect
-from dynamo._core import Client, Component, Context
+from dynamo._core import Client, Component
+from dynamo._internal import Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import SglangMultimodalRequest

@@ -6,7 +6,7 @@ OpenTelemetry tracing header utilities for Dynamo components.
 """
 
 
-from dynamo._core import Context
+from dynamo._internal import Context
 
 
 def build_trace_headers(context: Context) -> dict[str, str] | None:

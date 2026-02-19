@@ -29,7 +29,7 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
-from dynamo._core import Context
+from dynamo._internal import Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector

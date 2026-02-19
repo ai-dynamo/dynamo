@@ -7,7 +7,8 @@ from typing import Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Component
+from dynamo._internal import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher

@@ -44,7 +44,7 @@ impl Context {
 impl Context {
     #[new]
     #[pyo3(signature = (id=None))]
-    fn py_new(id: Option<String>) -> Self {
+    pub fn py_new(id: Option<String>) -> Self {
         let controller = match id {
             Some(id) => Controller::new(id),
             None => Controller::default(),

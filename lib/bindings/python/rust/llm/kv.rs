@@ -670,7 +670,8 @@ impl KvRouter {
                 }
             });
 
-            Ok(crate::AsyncResponseStream::new(rx, false))
+            let internal_context = crate::context::Context::py_new(None);
+            Ok(crate::AsyncResponseStream::new(rx, false, internal_context))
         })
     }
 }

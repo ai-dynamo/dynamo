@@ -309,6 +309,11 @@ class Context:
     """
     Context wrapper around AsyncEngineContext for Python bindings.
     Provides tracing and cancellation capabilities for request handling.
+
+    .. warning::
+        This class is internal API and should only be imported from ``dynamo._internal``.
+        It is used by Dynamo handler implementations and is not part of the stable public API.
+        For request cancellation in client code, use the ``cancel()`` method on the stream object.
     """
 
     def __init__(self, id: Optional[str] = None) -> None:

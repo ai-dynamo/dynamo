@@ -5,8 +5,6 @@ import asyncio
 
 import pytest
 
-from dynamo.runtime import Context
-
 pytestmark = pytest.mark.pre_merge
 
 
@@ -168,8 +166,7 @@ async def client(runtime, namespace):
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_context_cancel(temp_file_store, server, client):
     _, handler = server
-    context = Context()
-    stream = await client.generate("_generate_until_context_cancelled", context=context)
+    stream = await client.generate("_generate_until_context_cancelled")
 
     iteration_count = 0
     async for annotated in stream:
@@ -182,7 +179,7 @@ async def test_client_context_cancel(temp_file_store, server, client):
         # Break after receiving 2 responses
         if iteration_count >= 2:
             print("Cancelling after 2 responses...")
-            context.stop_generating()
+            stream.cancel()
             break
 
         iteration_count += 1
@@ -289,10 +286,9 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_context_already_cancelled(temp_file_store, server, client):
     _, handler = server
-    context = Context()
-    context.stop_generating()
+    stream = await client.generate("_generate_until_context_cancelled")
+    stream.cancel()
     # TODO: (DIS-830) The outgoing call should raise if context is cancelled
-    stream = await client.generate("_generate_until_context_cancelled", context=context)
 
     async for _ in stream:
         raise AssertionError(
@@ -314,11 +310,10 @@ async def test_client_context_cancel_before_await_request(
     temp_file_store, server, client
 ):
     _, handler = server
-    context = Context()
-    request = client.generate("_generate_until_context_cancelled", context=context)
-    context.stop_generating()
-    # TODO: (DIS-830) The outgoing call should raise if context is cancelled
+    request = client.generate("_generate_until_context_cancelled")
     stream = await request
+    stream.cancel()
+    # TODO: (DIS-830) The outgoing call should raise if context is cancelled
 
     async for _ in stream:
         raise AssertionError(

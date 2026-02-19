@@ -10,7 +10,8 @@ from typing import Any, Dict, Optional
 
 from transformers import AutoTokenizer
 
-from dynamo._core import Client, Component, Context
+from dynamo._core import Client, Component
+from dynamo._internal import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.multimodal_utils import (
     multimodal_request_to_sglang,

@@ -11,7 +11,8 @@ from typing import Any, AsyncGenerator, Optional
 
 import torch
 
-from dynamo._core import Component, Context
+from dynamo._core import Component
+from dynamo._internal import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     CreateVideoRequest,

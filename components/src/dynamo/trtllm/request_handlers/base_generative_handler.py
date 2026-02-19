@@ -10,7 +10,7 @@ It provides a common base class for LLM, video diffusion, and image diffusion ha
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator
 
-from dynamo._core import Context
+from dynamo._internal import Context
 
 
 class BaseGenerativeHandler(ABC):

@@ -172,7 +172,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
-    m.add_class::<context::Context>()?;
+    m.add_class::<context::Context>()?; // Internal: only in _internal, not public API
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::KvRouter>()?;
@@ -958,123 +958,100 @@ impl Client {
     }
 
     /// Issue a request to the endpoint using the default routing strategy.
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         annotated: Option<bool>,
-        context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        self.random(py, request, annotated, context)
+        self.random(py, request, annotated)
     }
 
     /// Send a request to the next endpoint in a round-robin fashion.
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING))]
     fn round_robin<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         annotated: Option<bool>,
-        context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let internal_context = context::Context::py_new(None);
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
-        let request_ctx = create_request_context(request, &context);
+        let request_ctx = create_request_context(request, &Some(internal_context.clone()));
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = match context {
-                Some(context) => {
-                    // Always instrument with appropriate span (none if no trace context)
-                    let span = get_span_for_context(&context, "round_robin");
-                    client
-                        .round_robin(request_ctx)
-                        .instrument(span)
-                        .await
-                        .map_err(to_pyerr)?
-                }
-                _ => client.round_robin(request_ctx).await.map_err(to_pyerr)?,
-            };
+            let span = get_span_for_context(&internal_context, "round_robin");
+            let stream = client
+                .round_robin(request_ctx)
+                .instrument(span)
+                .await
+                .map_err(to_pyerr)?;
             tokio::spawn(process_stream(stream, tx));
-            Ok(AsyncResponseStream::new(rx, annotated))
+            Ok(AsyncResponseStream::new(rx, annotated, internal_context))
         })
     }
 
     /// Send a request to a random endpoint.
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING))]
     fn random<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         annotated: Option<bool>,
-        context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let internal_context = context::Context::py_new(None);
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
-        let request_ctx = create_request_context(request, &context);
+        let request_ctx = create_request_context(request, &Some(internal_context.clone()));
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = match context {
-                Some(context) => {
-                    // Always instrument with appropriate span (none if no trace context)
-                    let span = get_span_for_context(&context, "random");
-                    client
-                        .random(request_ctx)
-                        .instrument(span)
-                        .await
-                        .map_err(to_pyerr)?
-                }
-                _ => client.random(request_ctx).await.map_err(to_pyerr)?,
-            };
+            let span = get_span_for_context(&internal_context, "random");
+            let stream = client
+                .random(request_ctx)
+                .instrument(span)
+                .await
+                .map_err(to_pyerr)?;
             tokio::spawn(process_stream(stream, tx));
-            Ok(AsyncResponseStream::new(rx, annotated))
+            Ok(AsyncResponseStream::new(rx, annotated, internal_context))
         })
     }
 
     /// Directly send a request to a specific endpoint.
-    #[pyo3(signature = (request, instance_id, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
+    #[pyo3(signature = (request, instance_id, annotated=DEFAULT_ANNOTATED_SETTING))]
     fn direct<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         instance_id: u64,
         annotated: Option<bool>,
-        context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let internal_context = context::Context::py_new(None);
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
-        let request_ctx = create_request_context(request, &context);
+        let request_ctx = create_request_context(request, &Some(internal_context.clone()));
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = match context {
-                Some(context) => {
-                    // Always instrument with appropriate span (none if no trace context)
-                    let span =
-                        get_span_for_direct_context(&context, "direct", &instance_id.to_string());
-                    client
-                        .direct(request_ctx, instance_id)
-                        .instrument(span)
-                        .await
-                        .map_err(to_pyerr)?
-                }
-                _ => client
-                    .direct(request_ctx, instance_id)
-                    .await
-                    .map_err(to_pyerr)?,
-            };
+            let span = get_span_for_direct_context(&internal_context, "direct", &instance_id.to_string());
+            let stream = client
+                .direct(request_ctx, instance_id)
+                .instrument(span)
+                .await
+                .map_err(to_pyerr)?;
 
             tokio::spawn(process_stream(stream, tx));
 
-            Ok(AsyncResponseStream::new(rx, annotated))
+            Ok(AsyncResponseStream::new(rx, annotated, internal_context))
         })
     }
 }
@@ -1112,22 +1089,40 @@ async fn process_stream(
 pub(crate) struct AsyncResponseStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
     annotated: bool,
+    context: context::Context,
 }
 
 impl AsyncResponseStream {
     pub(crate) fn new(
         rx: tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>,
         annotated: bool,
+        context: context::Context,
     ) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
             annotated,
+            context,
         }
     }
 }
 
 #[pymethods]
 impl AsyncResponseStream {
+    /// Cancel the ongoing request.
+    fn cancel(&self) {
+        self.context.inner().stop_generating();
+    }
+
+    /// Check if the request has been cancelled.
+    fn is_cancelled(&self) -> bool {
+        self.context.inner().is_stopped() || self.context.inner().is_killed()
+    }
+
+    /// Get the request ID.
+    fn request_id(&self) -> String {
+        self.context.inner().id().to_string()
+    }
+
     /// This method is required to implement the `AsyncIterator` protocol.
     #[pyo3(name = "__aiter__")]
     fn aiter(slf: PyRef<Self>, py: Python) -> PyResult<Py<PyAny>> {

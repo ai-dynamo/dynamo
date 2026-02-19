@@ -6,7 +6,7 @@
 import logging
 from typing import Optional
 
-from dynamo._core import Context
+from dynamo._internal import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
