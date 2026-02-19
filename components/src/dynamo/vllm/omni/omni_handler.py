@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import logging
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -71,8 +72,8 @@ class OmniHandler(BaseOmniHandler):
         config,
         default_sampling_params: Dict[str, Any],
         shutdown_event: asyncio.Event | None = None,
-        media_fs: Optional[DirFileSystem] = None,
-        media_base_url: Optional[str] = None,
+        media_output_fs: Optional[DirFileSystem] = None,
+        media_output_http_url: Optional[str] = None,
     ):
         """Initialize the unified Omni handler.
 
@@ -82,8 +83,8 @@ class OmniHandler(BaseOmniHandler):
             config: Parsed Config object from args.py.
             default_sampling_params: Default sampling parameters dict.
             shutdown_event: Optional asyncio event for graceful shutdown.
-            media_fs: Filesystem for storing generated images/videos.
-            media_base_url: Base URL for rewriting media paths in responses.
+            media_output_fs: Filesystem for storing generated images/videos.
+            media_output_http_url: Base URL for rewriting media paths in responses.
         """
         super().__init__(
             runtime=runtime,
@@ -92,8 +93,8 @@ class OmniHandler(BaseOmniHandler):
             default_sampling_params=default_sampling_params,
             shutdown_event=shutdown_event,
         )
-        self.media_fs = media_fs
-        self.media_base_url = media_base_url
+        self.media_output_fs = media_output_fs
+        self.media_output_http_url = media_output_http_url
 
     async def generate(
         self, request: Dict[str, Any], context
@@ -331,7 +332,10 @@ class OmniHandler(BaseOmniHandler):
             if response_format == "url":
                 storage_path = f"images/{request_id}/{uuid.uuid4()}.png"
                 url = await upload_to_fs(
-                    self.media_fs, storage_path, image_bytes, self.media_base_url
+                    self.media_output_fs,
+                    storage_path,
+                    image_bytes,
+                    self.media_output_http_url,
                 )
                 outlist.append(url)
             elif response_format == "b64_json" or response_format is None:
@@ -434,22 +438,18 @@ class OmniHandler(BaseOmniHandler):
                 f"(fps={fps})"
             )
 
-            # Encode to MP4 bytes in memory
-            video_buffer = BytesIO()
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                export_to_video,
-                frame_list,
-                video_buffer,
-                fps,
-            )
-            video_bytes = video_buffer.getvalue()
+            # Encode frames to MP4 via temp file, then read bytes for upload
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
+                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
+                video_bytes = tmp.read()
 
             # Upload via filesystem
             storage_path = f"videos/{request_id}.mp4"
             video_url = await upload_to_fs(
-                self.media_fs, storage_path, video_bytes, self.media_base_url
+                self.media_output_fs,
+                storage_path,
+                video_bytes,
+                self.media_output_http_url,
             )
 
             logger.info(f"Video uploaded to {video_url} for request {request_id}")

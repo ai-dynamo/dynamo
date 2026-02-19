@@ -56,8 +56,12 @@ class VideoGenerationHandler(BaseGenerativeHandler):
         self.component = component
         self.engine = engine
         self.config = config
-        self.media_fs = get_fs(config.media_fs_url) if config.media_fs_url else None
-        self.media_base_url = config.media_base_url
+        if not config.media_output_fs_url:
+            raise ValueError(
+                "media_output_fs_url must be set; use --media-output-fs-url or DYN_MEDIA_OUTPUT_FS_URL."
+            )
+        self.media_output_fs = get_fs(config.media_output_fs_url)
+        self.media_output_http_url = config.media_output_http_url
         # Serialize pipeline access — visual_gen is not thread-safe (global
         # singleton configs, mutable instance state, unprotected CUDA graph cache).
         # asyncio.Lock suspends waiting coroutines cooperatively so the event
@@ -228,7 +232,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 # Upload via filesystem
                 storage_path = f"videos/{request_id}.mp4"
                 video_url = await upload_to_fs(
-                    self.media_fs, storage_path, video_bytes, self.media_base_url
+                    self.media_output_fs,
+                    storage_path,
+                    video_bytes,
+                    self.media_output_http_url,
                 )
                 video_data = VideoData(url=video_url)
             else:

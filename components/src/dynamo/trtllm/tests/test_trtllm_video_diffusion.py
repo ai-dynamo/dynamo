@@ -99,8 +99,8 @@ class TestDiffusionConfig:
         assert config.default_guidance_scale == 5.0
 
         # Media storage defaults
-        assert config.media_fs_url == "file:///tmp/dynamo_media"
-        assert config.media_base_url is None
+        assert config.media_output_fs_url == "file:///tmp/dynamo_media"
+        assert config.media_output_http_url is None
 
         # Optimization defaults
         assert config.enable_teacache is False
@@ -130,12 +130,12 @@ class TestDiffusionConfig:
     def test_custom_media_storage(self):
         """Test that media storage fields can be overridden."""
         config = DiffusionConfig(
-            media_fs_url="s3://my-bucket/videos",
-            media_base_url="https://cdn.example.com/videos",
+            media_output_fs_url="s3://my-bucket/videos",
+            media_output_http_url="https://cdn.example.com/videos",
         )
 
-        assert config.media_fs_url == "s3://my-bucket/videos"
-        assert config.media_base_url == "https://cdn.example.com/videos"
+        assert config.media_output_fs_url == "s3://my-bucket/videos"
+        assert config.media_output_http_url == "https://cdn.example.com/videos"
 
     def test_str_representation(self):
         """Test that __str__ includes key fields."""
@@ -587,7 +587,7 @@ class TestVideoHandlerConcurrency:
         mock_engine.generate = tracker.generate
 
         config = DiffusionConfig(
-            media_fs_url="file:///tmp/test_media",
+            media_output_fs_url="file:///tmp/test_media",
             default_fps=24,
             default_seconds=4,
         )
@@ -673,8 +673,8 @@ class TestVideoHandlerResponseFormats:
         )
 
         config = DiffusionConfig(
-            media_fs_url="file:///tmp/test_media",
-            media_base_url="https://cdn.example.com/media",
+            media_output_fs_url="file:///tmp/test_media",
+            media_output_http_url="https://cdn.example.com/media",
             default_fps=24,
             default_seconds=4,
         )

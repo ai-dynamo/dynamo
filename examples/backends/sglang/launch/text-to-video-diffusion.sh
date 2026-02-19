@@ -139,7 +139,7 @@ python3 -m dynamo.sglang \
     --served-model-name "$MODEL_PATH" \
     --tp "$TP_SIZE" \
     --video-generation-worker \
-    --media-fs-url "$FS_URL" \
+    --media-output-fs-url "$FS_URL" \
     --trust-remote-code \
     --skip-tokenizer-init \
     --enable-metrics \

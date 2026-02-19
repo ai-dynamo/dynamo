@@ -916,7 +916,9 @@ async def init_omni(
     component = generate_endpoint.component()
 
     # Initialize media filesystem for storing generated images/videos
-    media_fs = get_fs(config.media_fs_url) if config.media_fs_url else None
+    media_fs = (
+        get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
+    )
 
     # Initialize unified OmniHandler
     handler = OmniHandler(
@@ -925,8 +927,8 @@ async def init_omni(
         config=config,
         default_sampling_params={},
         shutdown_event=shutdown_event,
-        media_fs=media_fs,
-        media_base_url=config.media_base_url,
+        media_output_fs=media_fs,
+        media_output_http_url=config.media_output_http_url,
     )
 
     logger.info(f"Omni worker initialized for model: {config.model}")

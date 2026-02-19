@@ -162,8 +162,8 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 | `--output-modalities <modality>` | Output modality: `text`, `image`, `video`, or `audio` |
 | `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
 | `--connector none` | Disable KV connector (recommended for omni workers) |
-| `--media-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
-| `--media-base-url <url>` | Base URL for rewriting media paths in responses (optional) |
+| `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
+| `--media-output-http-url <url>` | Base URL for rewriting media paths in responses (optional) |
 
 ## Storage Configuration
 
@@ -173,11 +173,11 @@ By default, media is written to the local filesystem at `file:///tmp/dynamo_medi
 
 ```bash
 bash examples/backends/vllm/launch/agg_omni_video.sh \
-  --media-fs-url s3://my-bucket/media \
-  --media-base-url https://cdn.example.com/media
+  --media-output-fs-url s3://my-bucket/media \
+  --media-output-http-url https://cdn.example.com/media
 ```
 
-When `--media-base-url` is set, response URLs are rewritten as `{base-url}/{storage-path}` (e.g., `https://cdn.example.com/media/videos/req-id.mp4`). When unset, the raw filesystem path is returned.
+When `--media-output-http-url` is set, response URLs are rewritten as `{base-url}/{storage-path}` (e.g., `https://cdn.example.com/media/videos/req-id.mp4`). When unset, the raw filesystem path is returned.
 
 For S3 credential configuration, set the standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) or use IAM roles. See the [fsspec S3 docs](https://s3fs.readthedocs.io/en/latest/#credentials) for details.
 

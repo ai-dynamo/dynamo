@@ -19,23 +19,26 @@ pytestmark = [
 class TestGetFs:
     """Tests for get_fs() filesystem initialization."""
 
-    def test_local_file_url(self):
+    def test_local_file_url(self, tmp_path):
         """Test file:// URL returns DirFileSystem with correct path."""
-        fs = get_fs("file:///tmp/test_media")
-        assert fs.path == "/tmp/test_media"
+        media_dir = tmp_path / "test_media"
+        fs = get_fs(f"file://{media_dir}")
+        assert fs.path == str(media_dir)
         protocol = fs.fs.protocol
         if isinstance(protocol, (list, tuple)):
             protocol = protocol[0]
         assert protocol == "file"
 
-    def test_local_file_url_auto_mkdir(self):
+    def test_local_file_url_auto_mkdir(self, tmp_path):
         """Test file:// URL enables auto_mkdir on underlying filesystem."""
-        fs = get_fs("file:///tmp/test_media")
+        media_dir = tmp_path / "test_media"
+        fs = get_fs(f"file://{media_dir}")
         assert fs.fs.auto_mkdir is True
 
-    def test_no_protocol_defaults_to_file(self):
+    def test_no_protocol_defaults_to_file(self, tmp_path):
         """Test URL without protocol defaults to file."""
-        fs = get_fs("/tmp/test_media")
+        media_dir = tmp_path / "test_media"
+        fs = get_fs(str(media_dir))
         protocol = fs.fs.protocol
         if isinstance(protocol, (list, tuple)):
             protocol = protocol[0]
@@ -71,7 +74,7 @@ class TestGetFs:
 class TestGetMediaUrl:
     """Tests for get_media_url() URL construction."""
 
-    def _make_fs(self, protocol="file", path="/tmp/media"):
+    def _make_fs(self, protocol="file", path="/tmp/media"):  # noqa: S108
         """Create a mock DirFileSystem."""
         fs = MagicMock()
         fs.fs.protocol = protocol
@@ -80,7 +83,7 @@ class TestGetMediaUrl:
 
     def test_base_url_rewrite(self):
         """Test that base_url takes precedence over protocol fallback."""
-        fs = self._make_fs(protocol="file", path="/tmp/media")
+        fs = self._make_fs()
         url = get_media_url(
             fs, "videos/req-123.mp4", base_url="https://cdn.example.com/media"
         )
@@ -94,7 +97,7 @@ class TestGetMediaUrl:
 
     def test_protocol_fallback_file(self):
         """Test URL construction from file:// protocol when no base_url."""
-        fs = self._make_fs(protocol="file", path="/tmp/dynamo_media")
+        fs = self._make_fs(protocol="file", path="/tmp/dynamo_media")  # noqa: S108
         url = get_media_url(fs, "videos/req-123.mp4")
         assert url == "file:///tmp/dynamo_media/videos/req-123.mp4"
 
@@ -122,13 +125,13 @@ class TestGetMediaUrl:
 
     def test_base_url_none_falls_back_to_protocol(self):
         """Test that None base_url triggers protocol fallback."""
-        fs = self._make_fs(protocol="file", path="/tmp/media")
+        fs = self._make_fs()
         url = get_media_url(fs, "test.png", base_url=None)
         assert url == "file:///tmp/media/test.png"
 
     def test_base_url_empty_string_falls_back_to_protocol(self):
         """Test that empty string base_url triggers protocol fallback."""
-        fs = self._make_fs(protocol="file", path="/tmp/media")
+        fs = self._make_fs()
         url = get_media_url(fs, "test.png", base_url="")
         assert url == "file:///tmp/media/test.png"
 
@@ -136,7 +139,7 @@ class TestGetMediaUrl:
 class TestUploadToFs:
     """Tests for upload_to_fs() async upload + URL construction."""
 
-    def _make_fs(self, protocol="file", path="/tmp/media"):
+    def _make_fs(self, protocol="file", path="/tmp/media"):  # noqa: S108
         """Create a mock DirFileSystem."""
         fs = MagicMock()
         fs.fs.protocol = protocol
