@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import socket
+import warnings
 from typing import Any, Dict, Optional
 
 from vllm.config import KVTransferConfig
@@ -343,6 +344,15 @@ def create_kv_events_config(
 
     # Create default events config for prefix caching
     # TODO: move this to configuration system.
+    warnings.warn(
+        "Automatic KV events configuration is deprecated and will be removed in "
+        "the next release. After that, KV events will be disabled by default "
+        "(matching upstream vLLM). To preserve current behavior, pass "
+        "--kv-events-config explicitly. See docs/pages/backends/vllm/README.md "
+        "for details.",
+        FutureWarning,
+        stacklevel=2,
+    )
     port = envs.DYN_VLLM_KV_EVENT_PORT
     logger.info(
         f"Using env-var DYN_VLLM_KV_EVENT_PORT={port} to create kv_events_config"
