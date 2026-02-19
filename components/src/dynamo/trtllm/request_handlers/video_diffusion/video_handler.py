@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.protocols.video_protocol import (
@@ -44,18 +44,15 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: DiffusionEngine,
         config: DiffusionConfig,
     ):
         """Initialize the handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The DiffusionEngine instance.
             config: Diffusion generation configuration.
         """
-        self.component = component
         self.engine = engine
         self.config = config
         # Serialize pipeline access — visual_gen is not thread-safe (global

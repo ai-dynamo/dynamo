@@ -20,7 +20,6 @@ class OmniHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
-        component,
         config,
         default_sampling_params: Dict[str, Any],
         shutdown_event: asyncio.Event | None = None,

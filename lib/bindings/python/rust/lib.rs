@@ -150,7 +150,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
-    m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
@@ -458,13 +457,6 @@ impl DistributedRuntime {
 #[derive(Clone)]
 struct CancellationToken {
     inner: rs::CancellationToken,
-}
-
-#[pyclass]
-#[derive(Clone)]
-struct Component {
-    inner: rs::component::Component,
-    event_loop: PyObject,
 }
 
 #[pyclass]
@@ -795,17 +787,6 @@ impl CancellationToken {
 }
 
 #[pymethods]
-impl Component {
-    fn endpoint(&self, name: String) -> PyResult<Endpoint> {
-        let inner = self.inner.endpoint(name);
-        Ok(Endpoint {
-            inner,
-            event_loop: self.event_loop.clone(),
-        })
-    }
-}
-
-#[pymethods]
 impl Endpoint {
     #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
@@ -926,17 +907,6 @@ impl Endpoint {
             inner.register_endpoint_instance().await.map_err(to_pyerr)?;
             Ok(())
         })
-    }
-
-    /// Get the parent Component.
-    ///
-    /// Note: To avoid duplicate metrics registries, reuse the returned Component for
-    /// multiple endpoints: `component.endpoint("ep1")`, `component.endpoint("ep2")`.
-    fn component(&self) -> Component {
-        Component {
-            inner: self.inner.component().clone(),
-            event_loop: self.event_loop.clone(),
-        }
     }
 }
 

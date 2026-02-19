@@ -260,7 +260,6 @@ class BaseWorkerHandler(ABC):
     def __init__(
         self,
         runtime,
-        component,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
@@ -272,7 +271,6 @@ class BaseWorkerHandler(ABC):
         enable_frontend_decoding: bool = False,
     ):
         self.runtime = runtime
-        self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.kv_publishers: list[KvEventPublisher] | None = None
@@ -1277,7 +1275,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
-        component,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
@@ -1290,7 +1287,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ):
         super().__init__(
             runtime,
-            component,
             engine,
             default_sampling_params,
             model_max_len,
@@ -1495,7 +1491,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
-        component,
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
@@ -1508,7 +1503,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     ):
         super().__init__(
             runtime,
-            component,
             engine,
             default_sampling_params,
             model_max_len,

@@ -20,7 +20,7 @@ use zeromq::{Socket, SocketRecv, SubSocket};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::{
-    component::{Component, Namespace},
+    component::{Component, Endpoint, Namespace},
     transports::nats::{NatsQueue, Slug},
 };
 
@@ -267,6 +267,38 @@ impl KvEventPublisher {
             tx,
             next_event_id,
         })
+    }
+
+    /// Create a new KvEventPublisher from an Endpoint.
+    ///
+    /// This is the preferred constructor that accepts an Endpoint and extracts
+    /// the Component internally. This simplifies the API by eliminating the need
+    /// for users to explicitly call `.component()`.
+    ///
+    /// # Arguments
+    /// * `endpoint` - The endpoint to create the publisher for
+    /// * `kv_block_size` - Size of KV cache blocks
+    /// * `source_config` - Optional configuration for KV event source (e.g., ZMQ)
+    /// * `enable_local_indexer` - Whether to enable local KV indexer
+    /// * `dp_rank` - Data parallel rank
+    pub fn from_endpoint(
+        endpoint: &Endpoint,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+    ) -> Result<Self> {
+        // Extract component from endpoint
+        let component = endpoint.component().clone();
+
+        // Delegate to existing constructor
+        Self::new_with_local_indexer(
+            component,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+        )
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {

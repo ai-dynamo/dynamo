@@ -91,8 +91,9 @@ class WorkerFactory:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
-        component = generate_endpoint.component()
-        clear_endpoint = component.endpoint("clear_kv_blocks")
+        clear_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.clear_kv_blocks"
+        )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         if pre_created_engine is not None:
@@ -134,12 +135,11 @@ class WorkerFactory:
         # Choose handler based on worker type
         if config.multimodal_decode_worker:
             handler = MultimodalDecodeWorkerHandler(
-                runtime, component, engine_client, config, shutdown_event
+                runtime, engine_client, config, shutdown_event
             )
         else:
             handler = MultimodalPDWorkerHandler(
                 runtime,
-                component,
                 engine_client,
                 config,
                 encode_worker_client,
@@ -152,7 +152,7 @@ class WorkerFactory:
 
         # Set up KV event publisher for prefix caching if enabled
         kv_publisher = self.setup_kv_event_publisher(
-            config, component, generate_endpoint, vllm_config
+            config, generate_endpoint, vllm_config
         )
         if kv_publisher:
             handler.kv_publisher = kv_publisher

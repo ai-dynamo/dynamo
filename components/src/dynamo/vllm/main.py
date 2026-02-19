@@ -264,7 +264,6 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
 
 def setup_kv_event_publisher(
     config: Config,
-    component,
     generate_endpoint,
     vllm_config,
     consolidator_enabled: bool = False,
@@ -275,7 +274,6 @@ def setup_kv_event_publisher(
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
     Args:
         config: Worker configuration
-        component: Component for runtime integration
         generate_endpoint: Endpoint for worker ID
         vllm_config: vLLM configuration
         consolidator_enabled: If True, subscribe to kv eventconsolidator's ZMQ endpoint
@@ -324,7 +322,7 @@ def setup_kv_event_publisher(
             )
 
         kv_publisher = KvEventPublisher(
-            component=component,
+            endpoint=generate_endpoint,
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
             zmq_topic="",
@@ -542,8 +540,9 @@ async def init_prefill(
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = generate_endpoint.component()
-    clear_endpoint = component.endpoint("clear_kv_blocks")
+    clear_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.clear_kv_blocks"
+    )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
@@ -565,7 +564,6 @@ async def init_prefill(
 
     handler = PrefillWorkerHandler(
         runtime,
-        component,
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
@@ -596,7 +594,6 @@ async def init_prefill(
     # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
         config,
-        component,
         generate_endpoint,
         vllm_config,
         consolidator_enabled=consolidator_enabled,
@@ -685,11 +682,18 @@ async def init(
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = generate_endpoint.component()
-    clear_endpoint = component.endpoint("clear_kv_blocks")
-    load_lora_endpoint = component.endpoint("load_lora")
-    unload_lora_endpoint = component.endpoint("unload_lora")
-    list_loras_endpoint = component.endpoint("list_loras")
+    clear_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.clear_kv_blocks"
+    )
+    load_lora_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.load_lora"
+    )
+    unload_lora_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.unload_lora"
+    )
+    list_loras_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.list_loras"
+    )
 
     model_name = config.served_model_name or config.model
 
@@ -704,7 +708,7 @@ async def init(
         ) = pre_created_engine
         # Factory is created after unpack so component_gauges is available
         factory = StatLoggerFactory(
-            component,
+            endpoint=generate_endpoint,
             component_gauges=component_gauges,
             dp_rank=config.engine_args.data_parallel_rank or 0,
             metrics_labels=[("model", model_name)],
@@ -714,7 +718,7 @@ async def init(
         # create the gauges after setup_multiprocess_prometheus() and set them
         # on the factory before vLLM calls create_stat_logger().
         factory = StatLoggerFactory(
-            component,
+            endpoint=generate_endpoint,
             dp_rank=config.engine_args.data_parallel_rank or 0,
             metrics_labels=[("model", model_name)],
         )
@@ -732,7 +736,6 @@ async def init(
 
     handler = DecodeWorkerHandler(
         runtime,
-        component,
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
@@ -763,7 +766,6 @@ async def init(
     # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
         config,
-        component,
         generate_endpoint,
         vllm_config,
         consolidator_enabled=consolidator_enabled,
@@ -936,12 +938,10 @@ async def init_omni(
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = generate_endpoint.component()
 
     # Initialize OmniHandler with Omni orchestrator
     handler = OmniHandler(
         runtime=runtime,
-        component=component,
         config=config,
         default_sampling_params={},
         shutdown_event=shutdown_event,

@@ -332,7 +332,6 @@ async def init_llm_worker(
         endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
-        component = endpoint.component()
 
         # should ideally call get_engine_runtime_config
         # this is because we don't have a good way to
@@ -413,7 +412,6 @@ async def init_llm_worker(
 
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
-            component=component,
             engine=engine,
             default_sampling_params=default_sampling_params,
             publisher=None,
@@ -449,7 +447,6 @@ async def init_llm_worker(
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
-            kv_listener = endpoint.component()
             # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [
@@ -469,7 +466,7 @@ async def init_llm_worker(
             if consolidator_output_endpoint:
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_publisher = KvEventPublisher(
-                    component,
+                    endpoint=endpoint,
                     kv_block_size=config.kv_block_size,
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",
@@ -480,9 +477,8 @@ async def init_llm_worker(
                 )
 
             async with get_publisher(
-                component,
+                endpoint,
                 engine,
-                kv_listener,
                 int(endpoint.connection_id()),
                 config.kv_block_size,
                 metrics_labels,

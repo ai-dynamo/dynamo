@@ -21,7 +21,7 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
-from dynamo.runtime import Component, Endpoint
+from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
 
 
@@ -63,7 +63,6 @@ class DynamoSglangPublisher:
         self,
         engine: sgl.Engine,
         config: Config,
-        component: Component,
         generate_endpoint: Endpoint,
         component_gauges: LLMBackendMetrics,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
@@ -73,7 +72,6 @@ class DynamoSglangPublisher:
         Args:
             engine: The SGLang engine instance.
             config: SGLang configuration including server args.
-            component: The Dynamo runtime component.
             generate_endpoint: The Dynamo endpoint for generation requests.
             metrics_labels: Optional list of label key-value pairs for metrics.
             component_gauges: LLM backend metrics instance (created via LLMBackendMetrics()).
@@ -82,7 +80,6 @@ class DynamoSglangPublisher:
         self.server_args = config.server_args
         self.dynamo_args = config.dynamo_args
         self.generate_endpoint = generate_endpoint
-        self.component = component
         self.metrics_publisher = WorkerMetricsPublisher()
         self.component_gauges = component_gauges
         # Endpoint creation is deferred to async context in setup_sgl_metrics
@@ -257,7 +254,7 @@ class DynamoSglangPublisher:
                     f"(connecting to {zmq_ep})"
                 )
                 publisher = KvEventPublisher(
-                    component=self.component,
+                    endpoint=self.generate_endpoint,
                     kv_block_size=self.server_args.page_size,
                     zmq_endpoint=zmq_ep,
                     zmq_topic="",
@@ -322,7 +319,6 @@ def setup_prometheus_registry(
 async def setup_sgl_metrics(
     engine: sgl.Engine,
     config: Config,
-    component: Component,
     generate_endpoint: Endpoint,
 ) -> tuple[DynamoSglangPublisher, asyncio.Task, list[tuple[str, str]]]:
     """Create publisher, initialize metrics, and start the metrics publishing loop.
@@ -330,7 +326,6 @@ async def setup_sgl_metrics(
     Args:
         engine: The SGLang engine instance.
         config: SGLang configuration including server args.
-        component: The Dynamo runtime component.
         generate_endpoint: The Dynamo endpoint for generation requests.
 
     Returns:
@@ -366,13 +361,12 @@ async def setup_sgl_metrics(
     publisher = DynamoSglangPublisher(
         engine,
         config,
-        component,
         generate_endpoint,
         component_gauges=component_gauges,
         metrics_labels=metrics_labels,
     )
     # Create endpoint in async context (must await before publishing)
-    await publisher.metrics_publisher.create_endpoint(component)
+    await publisher.metrics_publisher.create_endpoint(generate_endpoint)
     logging.debug("SGLang metrics publisher endpoint created")
 
     publisher.init_engine_metrics_publish()
