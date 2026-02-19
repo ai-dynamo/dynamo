@@ -20,25 +20,30 @@
 # business hours) gets the HEAVIEST workload (vllm/sglang-cuda12).
 #
 # Flavors are routed to BuildKit pods using modulo 3 on the pod index:
-#   - Pool 0 (idx % 3 == 0): trtllm-cuda13, general      (lightest - offsets overnight fallback load)
-#   - Pool 1 (idx % 3 == 1): vllm-cuda13, sglang-cuda13  (share cuda-dl-base + wheel_builder cache)
-#   - Pool 2 (idx % 3 == 2): vllm-cuda12, sglang-cuda12  (heaviest - only active during business hours)
+#   - Pool 0 (idx % 3 == 0): trtllm (any CUDA), general   (lightest - offsets overnight fallback load)
+#   - Pool 1 (idx % 3 == 1): vllm-cuda13, sglang-cuda13   (share cuda-dl-base + wheel_builder cache)
+#   - Pool 2 (idx % 3 == 2): vllm-cuda12, sglang-cuda12   (heaviest - only active during business hours)
+#   Note: Unrecognized route keys (e.g. trtllm-cuda12) fall through to pool 0 via wildcard.
+#
+# SELECTION: From the candidate pool, ONE pod is randomly selected and its
+# tcp:// address is written to $GITHUB_OUTPUT.
 #
 # FALLBACK: If no pods match the target pool, the highest available index is used.
 #
-# EXPECTED ROUTING TABLE (pod indices returned for each flavor):
-# +------+---------------+---------+-------------+---------------+-------------+---------------+
-# | Pods | trtllm-cuda13 | general | vllm-cuda13 | sglang-cuda13 | vllm-cuda12 | sglang-cuda12 |
-# |      | (mod 0)       | (mod 0) | (mod 1)     | (mod 1)       | (mod 2)     | (mod 2)       |
-# +------+---------------+---------+-------------+---------------+-------------+---------------+
-# |  1   | 0             | 0       | 0 (fb)      | 0 (fb)        | 0 (fb)      | 0 (fb)        |
-# |  2   | 0             | 0       | 1           | 1             | 1 (fb)      | 1 (fb)        |
-# |  3   | 0             | 0       | 1           | 1             | 2           | 2             |
-# |  4   | 0, 3          | 0, 3    | 1           | 1             | 2           | 2             |
-# |  5   | 0, 3          | 0, 3    | 1, 4        | 1, 4          | 2           | 2             |
-# |  6   | 0, 3          | 0, 3    | 1, 4        | 1, 4          | 2, 5        | 2, 5          |
-# +------+---------------+---------+-------------+---------------+-------------+---------------+
-# (fb) = fallback - no pods matched target pool, returns max available index
+# CANDIDATE POOL TABLE (one pod is randomly selected from the candidate set):
+# +------+---------------------+---------+---------------+---------------+---------------+---------------+
+# | Pods | trtllm (any cuda)   | general | vllm-cuda13   | sglang-cuda13 | vllm-cuda12   | sglang-cuda12 |
+# |      | (pool 0, mod 0)     | (pool 0)| (pool 1,mod 1)| (pool 1,mod 1)| (pool 2,mod 2)| (pool 2,mod 2)|
+# +------+---------------------+---------+---------------+---------------+---------------+---------------+
+# |  1   | {0}                 | {0}     | {0} (fb)      | {0} (fb)      | {0} (fb)      | {0} (fb)      |
+# |  2   | {0}                 | {0}     | {1}           | {1}           | {1} (fb)      | {1} (fb)      |
+# |  3   | {0}                 | {0}     | {1}           | {1}           | {2}           | {2}           |
+# |  4   | {0, 3}              | {0, 3}  | {1}           | {1}           | {2}           | {2}           |
+# |  5   | {0, 3}              | {0, 3}  | {1, 4}        | {1, 4}        | {2}           | {2}           |
+# |  6   | {0, 3}              | {0, 3}  | {1, 4}        | {1, 4}        | {2, 5}        | {2, 5}        |
+# +------+---------------------+---------+---------------+---------------+---------------+---------------+
+# {x, y} = candidate pool; ONE pod is randomly selected from this set
+# (fb)    = no pods in target pool; falls back to highest available index
 #
 # =============================================================================
 
@@ -142,7 +147,7 @@ if ! command -v nslookup &> /dev/null; then
 fi
 
 # --- RETRY CONFIGURATION ---
-MAX_RETRIES=${MAX_RETRIES:-8}
+MAX_RETRIES=${MAX_RETRIES:-2}
 RETRY_DELAY=${RETRY_DELAY:-30}
 # ---------------------------
 
@@ -274,16 +279,15 @@ for ARCH in "${ARCHS[@]}"; do
     TARGET_INDICES=($(get_target_indices "$flavor" "$CUDA_VERSION" "${ACTIVE_INDICES[@]}"))
 
     ADDRS=""
-    for idx in "${TARGET_INDICES[@]}"; do
-      POD_NAME="${POD_PREFIX}-${idx}"
-      ADDR="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
-      if [ -z "$ADDRS" ]; then
-        ADDRS="$ADDR"
-      else
-        ADDRS="${ADDRS},${ADDR}"
-      fi
-    done
+    # 2. Get the number of elements in the array
+    TARGET_INDICES_LENGTH=${#TARGET_INDICES[@]}
 
+    # 3. Generate a random index between 0 and length-1
+    # The $RANDOM variable provides a number between 0 and 32767.
+    RANDOM_INDEX=$(($RANDOM % $TARGET_INDICES_LENGTH))
+    RANDOM_VALUE="${TARGET_INDICES[$RANDOM_INDEX]}"
+    POD_NAME="${POD_PREFIX}-${RANDOM_VALUE}"
+    ADDRS="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
     echo "    -> Routing ${flavor}_${ARCH} to pod indices: ${TARGET_INDICES[*]}"
 
     # Write to GitHub Output

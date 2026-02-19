@@ -43,6 +43,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        # TODO: Replace hardcoded port with allocate_ports() for xdist-safe parallel execution
         env["DYN_SYSTEM_PORT"] = "9345"
 
         # TODO: Have the managed process take a command name explicitly to distinguish

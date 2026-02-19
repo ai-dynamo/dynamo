@@ -19,7 +19,7 @@ limitations under the License.
 
 The Dynamo KVBM is a distributed KV-cache block management system designed for scalable LLM inference. It cleanly separates memory management from inference runtimes (vLLM, TensorRT-LLM, and SGLang), enabling GPU↔CPU↔Disk/Remote tiering, asynchronous block offload/onboard, and efficient block reuse.
 
-![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../../../docs/images/kvbm-architecture.png)
+![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../../../docs/assets/img/kvbm-architecture.png)
 
 
 ## Feature Highlights
@@ -35,7 +35,7 @@ The Dynamo KVBM is a distributed KV-cache block management system designed for s
 pip install kvbm
 ```
 
-See the [support matrix](../../../docs/reference/support-matrix.md) for version compatibility questions.
+See the [support matrix](../../../docs/pages/reference/support-matrix.md) for version compatibility questions.
 
 ## Build from Source
 
@@ -43,7 +43,7 @@ The pip wheel is built through a Docker build process:
 
 ```bash
 # Render and build the Docker image with KVBM enabled (from the dynamo repo root)
-python container/render.py --framework=dynamo --target==runtime --output-short-filename
+python container/render.py --framework dynamo --target runtime --output-short-filename
 docker build --build-arg ENABLE_KVBM="true" -f container/rendered.Dockerfile .
 ```
 
@@ -115,7 +115,7 @@ DYN_KVBM_CPU_CACHE_GB=100 vllm serve \
   Qwen/Qwen3-8B
 ```
 
-For more detailed integration with dynamo, disaggregated serving support and benchmarking, please check [vllm-setup](../../../docs/components/kvbm/kvbm_guide.md#run-kvbm-in-dynamo-with-vllm)
+For more detailed integration with dynamo, disaggregated serving support and benchmarking, please check [vllm-setup](../../../docs/pages/components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-vllm)
 
 ### TensorRT-LLM
 
@@ -137,11 +137,11 @@ DYN_KVBM_CPU_CACHE_GB=100 trtllm-serve Qwen/Qwen3-8B \
   --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
 ```
 
-For more detailed integration with dynamo and benchmarking, please check [trtllm-setup](../../../docs/components/kvbm/kvbm_guide.md#run-kvbm-in-dynamo-with-tensorrt-llm)
+For more detailed integration with dynamo and benchmarking, please check [trtllm-setup](../../../docs/pages/components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm)
 
 
 ## 📚 Docs
 
-- [Architecture](../../../docs/components/kvbm/README.md#architecture)
-- [Design Deepdive](../../../docs/design_docs/kvbm_design.md)
+- [Architecture](../../../docs/pages/components/kvbm/README.md#architecture)
+- [Design Deepdive](../../../docs/pages/design-docs/kvbm-design.md)
 - [NIXL Overview](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)

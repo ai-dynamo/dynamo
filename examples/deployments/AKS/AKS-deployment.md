@@ -39,7 +39,7 @@ gpu-operator  nvidia-driver-daemonset-xxxxx                                 1/1 
 
 ## Step 3: Deploy Dynamo Kubernetes Operator
 
-Follow the [Deploying Inference Graphs to Kubernetes](../../../docs/kubernetes/README.md) guide to install Dynamo on your AKS cluster.
+Follow the [Deploying Inference Graphs to Kubernetes](../../../docs/pages/kubernetes/README.md) guide to install Dynamo on your AKS cluster.
 
 Validate that the Dynamo pods are running:
 
@@ -56,7 +56,7 @@ kubectl get pods -n dynamo-system
 
 ## Step 4: Deploy and Test a Model
 
-Follow the [Deploy Model/Workflow](../../../docs/kubernetes/installation_guide.md#next-steps) guide to deploy and test a model on your AKS cluster.
+Follow the [Deploy Model/Workflow](../../../docs/pages/kubernetes/installation-guide.md#next-steps) guide to deploy and test a model on your AKS cluster.
 
 ## AKS Storage options for Model Caching and Runtime Data
 

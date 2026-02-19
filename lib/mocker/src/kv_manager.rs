@@ -119,10 +119,6 @@ impl KvManager {
             return;
         }
 
-        let Some(ref sink) = self.kv_event_sink else {
-            return;
-        };
-
         if *KV_CACHE_TRACE_ENABLED {
             let timestamp_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -148,6 +144,10 @@ impl KvManager {
                 "KV cache trace"
             );
         }
+
+        let Some(ref sink) = self.kv_event_sink else {
+            return;
+        };
 
         let event_data = if is_store {
             let num_blocks = full_blocks.len();
@@ -236,9 +236,8 @@ impl KvManager {
 
                     // Now insert the new block in active blocks with reference count 1
                     self.active_blocks.insert(hash.clone(), 1);
-                    if self.kv_event_sink.is_some()
-                        && let UniqueBlock::FullBlock(stored_full_block) = hash
-                    {
+                    // Track blocks for trace/event
+                    if let UniqueBlock::FullBlock(stored_full_block) = hash {
                         blocks_stored.push(*stored_full_block);
                     }
                 }
@@ -259,9 +258,7 @@ impl KvManager {
                     self.active_blocks.remove(hash).unwrap();
 
                     // Track blocks for batch sending
-                    if self.kv_event_sink.is_some()
-                        && let UniqueBlock::FullBlock(destroyed_full_block) = hash
-                    {
+                    if let UniqueBlock::FullBlock(destroyed_full_block) = hash {
                         blocks_destroyed.push(*destroyed_full_block);
                     }
                 }

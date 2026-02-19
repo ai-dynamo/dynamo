@@ -76,13 +76,11 @@ spec:
           securityContext:
             privileged: true
           env:
+            # Dynamic values from Kubernetes downward API
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            # Agent mode: use "watcher" to watch for labeled pods
-            - name: CHECKPOINT_SIGNAL_FROM
-              value: "watcher"
             {{- if .Values.rbac.namespaceRestricted }}
             # Restrict pod watching to this namespace (namespace-scoped RBAC)
             - name: RESTRICTED_NAMESPACE
@@ -90,34 +88,11 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             {{- end }}
-            # Checkpoint storage directory
-            - name: CHECKPOINT_DIR
-              value: {{ .Values.storage.pvc.basePath | quote }}
-            # Host proc mount point for CRIU operations
-            - name: HOST_PROC
-              value: "/host/proc"
-            # Containerd socket path
-            - name: CONTAINERD_SOCKET
-              value: {{ .Values.daemonset.containerRuntimeSocket }}
-            {{- if .Values.daemonset.criu.cudaPluginDir }}
-            # CUDA plugin directory for GPU checkpoint support
-            - name: CUDA_PLUGIN_DIR
-              value: {{ .Values.daemonset.criu.cudaPluginDir | quote }}
-            {{- end }}
-            {{- if .Values.daemonset.criu.ghostLimit }}
-            # CRIU ghost file size limit in bytes
-            - name: CRIU_GHOST_LIMIT
-              value: {{ .Values.daemonset.criu.ghostLimit | quote }}
-            {{- end }}
-            {{- if .Values.daemonset.criu.timeout }}
-            # CRIU timeout in seconds
-            - name: CRIU_TIMEOUT
-              value: {{ .Values.daemonset.criu.timeout | quote }}
-            {{- end }}
-            # Storage type (for future S3/OCI support)
-            - name: DYN_CHECKPOINT_STORAGE_TYPE
-              value: {{ .Values.storage.type | quote }}
           volumeMounts:
+            # Mount configuration ConfigMap
+            - name: config
+              mountPath: /etc/chrek
+              readOnly: true
             {{- if eq .Values.storage.type "pvc" }}
             # Mount the checkpoint PVC (only for PVC storage type)
             - name: checkpoints
@@ -155,6 +130,10 @@ spec:
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
       volumes:
+        # Configuration ConfigMap
+        - name: config
+          configMap:
+            name: {{ include "chrek.fullname" . }}-config
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles

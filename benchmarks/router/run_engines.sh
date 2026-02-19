@@ -14,6 +14,7 @@ USE_MOCKERS=false
 USE_TRTLLM=false
 MODE="agg"  # Options: agg (default), decode, prefill
 BASE_GPU_OFFSET=0
+REASONING=""
 EXTRA_ARGS=()
 
 # Parse arguments
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --base-gpu-offset)
             BASE_GPU_OFFSET="$2"
+            shift 2
+            ;;
+        --reasoning)
+            REASONING="$2"
             shift 2
             ;;
         --)
@@ -191,6 +196,9 @@ if [ "$USE_MOCKERS" = true ]; then
 
     if [ "$DATA_PARALLEL_SIZE" -gt 1 ]; then
         MOCKER_ARGS+=("--data-parallel-size" "$DATA_PARALLEL_SIZE")
+    fi
+    if [ -n "$REASONING" ]; then
+        MOCKER_ARGS+=("--reasoning" "$REASONING")
     fi
     MOCKER_ARGS+=("${EXTRA_ARGS[@]}")
 

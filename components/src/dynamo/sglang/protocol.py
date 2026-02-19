@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
@@ -14,7 +14,6 @@ TokenIdType = int
 # ============================================================================
 # Standard LLM Protocol Types
 # ============================================================================
-# TODO: move these to common for all LLMs once we adopt dynamo-run
 # derived from lib/llm/src/protocols/common/preprocessor.rs
 class StopConditions(BaseModel):
     max_tokens: Optional[int] = None
@@ -122,9 +121,12 @@ class SglangMultimodalRequest(BaseModel):
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
-        Union[Tuple[int, int, int], Tuple[int, int, int, int]]
+        Union[Tuple[int, int], Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
+    # Processor metadata (e.g. image_grid_thw) carried from encode worker
+    # to PD/prefill worker for building the format="processor_output" mm_item.
+    processor_output: Optional[Dict[str, Any]] = None
 
 
 class DisaggSglangMultimodalRequest(BaseModel):
@@ -174,3 +176,52 @@ class ImagesResponse(BaseModel):
 
     created: int  # Unix timestamp
     data: list[ImageData]
+
+
+# ============================================================================
+# Video Generation Protocol Types
+# ============================================================================
+
+
+class VideoNvExt(BaseModel):
+    """NVIDIA extensions for video generation requests."""
+
+    annotations: Optional[list[str]] = None
+    fps: Optional[int] = 24
+    num_frames: Optional[int] = None  # Override: if set, ignores fps * seconds
+    negative_prompt: Optional[str] = None
+    num_inference_steps: Optional[int] = 50
+    guidance_scale: float = 5.0
+    seed: Optional[int] = None
+
+
+class CreateVideoRequest(BaseModel):
+    """Request for /v1/videos endpoint"""
+
+    prompt: str
+    model: str
+    input_reference: Optional[str] = None  # For I2V (image-to-video) - image path/url
+    seconds: Optional[int] = 4
+    size: Optional[str] = "832x480"  # WxH format (Wan default: 832x480)
+    user: Optional[str] = None
+    response_format: Optional[str] = "url"  # url or b64_json
+    nvext: Optional[VideoNvExt] = None
+
+
+class VideoData(BaseModel):
+    url: Optional[str] = None
+    b64_json: Optional[str] = None
+
+
+class VideoGenerationResponse(BaseModel):
+    """Response for video generation"""
+
+    id: str
+    object: str = "video"
+    model: str
+    status: str = "completed"
+    progress: int = 100
+    created: int
+    data: list[VideoData] = []
+    error: Optional[str] = None
+    inference_time_s: Optional[float] = None

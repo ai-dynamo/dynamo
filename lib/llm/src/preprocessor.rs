@@ -13,6 +13,7 @@
 
 pub mod media;
 pub mod prompt;
+pub mod speculative_prefill;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
@@ -274,13 +275,15 @@ impl OpenAIPreprocessor {
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
+            let hints = nvext.agent_hints.as_ref();
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
-                enable_local_updates: nvext.enable_local_updates,
-                expected_output_tokens: nvext.expected_output_tokens,
+                expected_output_tokens: hints.and_then(|h| h.osl),
+                priority_jump: hints.and_then(|h| h.latency_sensitivity),
+                priority: hints.and_then(|h| h.priority),
                 lora_name,
             };
             builder.routing(Some(routing));
@@ -1163,6 +1166,15 @@ impl
         } else {
             transformed_stream
         };
+
+        // Step 5: Speculative next-turn prefill
+        let final_stream = speculative_prefill::maybe_wrap_stream(
+            final_stream,
+            &request,
+            &next,
+            &self.formatter,
+            &self.tokenizer,
+        );
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);

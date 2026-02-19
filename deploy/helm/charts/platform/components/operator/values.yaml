@@ -31,6 +31,13 @@ namespaceRestriction:
     duration: 30s
     # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
     renewInterval: 10s
+# -- GPU discovery configuration (only applies when namespaceRestriction.enabled=true)
+gpuDiscovery:
+  # -- Whether to provision a ClusterRole for the namespace-scoped operator to read GPU node labels.
+  # When true (default), Helm creates a ClusterRole/ClusterRoleBinding granting node read access.
+  # Set to false if your installer lacks ClusterRole creation permissions; you must then provide
+  # hardware config manually in each DynamoGraphDeploymentRequest.
+  enabled: true
 controllerManager:
   tolerations: []
   affinity: {}
@@ -157,6 +164,14 @@ checkpoint:
   # Defaults to busybox:latest if not specified
   initContainerImage: "busybox:latest"
 
+  # Path written by worker when model is loaded and ready for checkpointing
+  # Must match the path expected by checkpoint-enabled runtime images
+  readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
+
+  # Path written by restore-entrypoint after successful CRIU restore
+  # Must match the path expected by checkpoint-enabled runtime images
+  restoreMarkerFilePath: "/tmp/dynamo-restored"
+
   # Storage configuration
   # These settings tell the operator where to find checkpoint storage
   # Must match the configuration in the chrek chart
@@ -195,14 +210,6 @@ checkpoint:
       uri: ""
       # Reference to a docker config secret for registry authentication
       credentialsSecretRef: ""
-
-  # CRIU timeout configuration (shared across checkpoint and restore)
-  criu:
-    # CRIU operation timeout in seconds
-    # Maximum time to wait for checkpoint/restore to complete
-    # Increase for models with very large memory footprints
-    # 21600s (6 hours) is recommended for large LLMs (70B+)
-    timeout: "21600"
 
 # Webhook configuration
 webhook:
@@ -280,4 +287,3 @@ webhook:
 
         # Time before expiration to renew root CA (e.g., "720h" for 30 days)
         renewBefore: "720h"
-

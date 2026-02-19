@@ -5,4 +5,4 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo Service Discovery
 
-For documentation on Dynamo's service discovery system, see the [Service Discovery Guide](../../docs/kubernetes/service_discovery.md).
+For documentation on Dynamo's service discovery system, see the [Service Discovery Guide](../../docs/pages/kubernetes/service-discovery.md).

@@ -20,6 +20,7 @@ from dynamo.trtllm.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
     VideoData,
+    VideoNvExt,
 )
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
 from dynamo.trtllm.request_handlers.video_diffusion.video_utils import (
@@ -118,36 +119,37 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 f"To allow larger sizes, increase --max-width and/or --max-height."
             )
 
-    def _compute_num_frames(self, req: NvCreateVideoRequest) -> int:
+    def _compute_num_frames(self, req: NvCreateVideoRequest, nvext: VideoNvExt) -> int:
         """Compute num_frames from request parameters.
 
         Priority:
-        1. num_frames if explicitly set
-        2. seconds * fps
+        1. nvext.num_frames if explicitly set
+        2. req.seconds * nvext.fps
         3. config defaults
 
         Args:
-            req: The video generation request.
+            req: The video generation request (contains seconds).
+            nvext: The NVIDIA extension parameters (contains fps, num_frames).
 
         Returns:
             Number of frames to generate.
         """
         # Priority 1: Explicit num_frames takes precedence
-        if req.num_frames is not None:
-            return req.num_frames
+        if nvext.num_frames is not None:
+            return nvext.num_frames
 
         # Priority 2: If user provided seconds and/or fps, calculate frame count
         # Use config defaults for any unspecified value
         seconds = (
             req.seconds if req.seconds is not None else self.config.default_seconds
         )
-        fps = req.fps if req.fps is not None else self.config.default_fps
+        fps = nvext.fps if nvext.fps is not None else self.config.default_fps
         computed = seconds * fps
 
         # Priority 3: If user provided NEITHER seconds NOR fps, use config default
         # This allows config.default_num_frames to take effect only when the user
         # didn't specify any duration-related parameters
-        if req.seconds is None and req.fps is None:
+        if req.seconds is None and nvext.fps is None:
             return self.config.default_num_frames
 
         # User provided at least one of (seconds, fps), so use computed value
@@ -175,18 +177,19 @@ class VideoGenerationHandler(BaseGenerativeHandler):
         try:
             # Parse request
             req = NvCreateVideoRequest(**request)
+            nvext = req.nvext or VideoNvExt()
 
             # Parse parameters
             width, height = self._parse_size(req.size)
-            num_frames = self._compute_num_frames(req)
+            num_frames = self._compute_num_frames(req, nvext)
             num_inference_steps = (
-                req.num_inference_steps
-                if req.num_inference_steps is not None
+                nvext.num_inference_steps
+                if nvext.num_inference_steps is not None
                 else self.config.default_num_inference_steps
             )
             guidance_scale = (
-                req.guidance_scale
-                if req.guidance_scale is not None
+                nvext.guidance_scale
+                if nvext.guidance_scale is not None
                 else self.config.default_guidance_scale
             )
 
@@ -205,18 +208,18 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 frames = await asyncio.to_thread(
                     self.engine.generate,
                     prompt=req.prompt,
-                    negative_prompt=req.negative_prompt,
+                    negative_prompt=nvext.negative_prompt,
                     height=height,
                     width=width,
                     num_frames=num_frames,
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
-                    seed=req.seed,
+                    seed=nvext.seed,
                 )
 
             # Determine output format
             response_format = req.response_format or "url"
-            fps = req.fps or self.config.default_fps
+            fps = nvext.fps or self.config.default_fps
 
             if response_format == "url":
                 # Encode to MP4 and save to file

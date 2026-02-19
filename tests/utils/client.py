@@ -52,6 +52,7 @@ def send_request(
     timeout: float = 30.0,
     method: str = "POST",
     log_level: int = 20,
+    stream: bool = False,
 ) -> requests.Response:
     """
     Send an HTTP request to the engine with detailed logging.
@@ -97,7 +98,7 @@ def send_request(
         if method_upper == "GET":
             response = requests.get(url, params=payload, timeout=timeout)
         elif method_upper == "POST":
-            response = requests.post(url, json=payload, timeout=timeout)
+            response = requests.post(url, json=payload, timeout=timeout, stream=stream)
         else:
             # Fallback for other methods if needed
             response = requests.request(
@@ -117,20 +118,26 @@ def send_request(
         logger.debug("Response headers: %s", dict(response.headers))
 
         # Try to log response body (truncated if too long)
-        try:
-            if response.headers.get("content-type", "").startswith("application/json"):
-                response_data = response.json()
-                response_str = json.dumps(response_data, indent=2)
-                if len(response_str) > 1000:
-                    response_str = response_str[:1000] + "... (truncated)"
-                logger.debug("Response body: %s", response_str)
-            else:
-                response_text = response.text
-                if len(response_text) > 1000:
-                    response_text = response_text[:1000] + "... (truncated)"
-                logger.debug("Response body: %s", response_text)
-        except Exception as e:
-            logger.debug("Could not parse response body: %s", e)
+        # Skip body logging for streaming responses to avoid consuming the stream
+        if stream:
+            logger.debug("Response body: <streaming, not logged>")
+        else:
+            try:
+                if response.headers.get("content-type", "").startswith(
+                    "application/json"
+                ):
+                    response_data = response.json()
+                    response_str = json.dumps(response_data, indent=2)
+                    if len(response_str) > 1000:
+                        response_str = response_str[:1000] + "... (truncated)"
+                    logger.debug("Response body: %s", response_str)
+                else:
+                    response_text = response.text
+                    if len(response_text) > 1000:
+                        response_text = response_text[:1000] + "... (truncated)"
+                    logger.debug("Response body: %s", response_text)
+            except Exception as e:
+                logger.debug("Could not parse response body: %s", e)
 
         return response
 

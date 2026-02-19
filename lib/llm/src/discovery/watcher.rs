@@ -40,6 +40,7 @@ use crate::{
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
+            videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
@@ -70,8 +71,10 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Chat,
     ModelType::Completions,
     ModelType::Embedding,
-    ModelType::TensorBased,
     ModelType::Images,
+    ModelType::Audios,
+    ModelType::Videos,
+    ModelType::TensorBased,
     ModelType::Prefill,
 ];
 
@@ -284,15 +287,17 @@ impl ModelWatcher {
         let chat_model_remove_err = self.manager.remove_chat_completions_model(&model_name);
         let completions_model_remove_err = self.manager.remove_completions_model(&model_name);
         let embeddings_model_remove_err = self.manager.remove_embeddings_model(&model_name);
-        let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
         let images_model_remove_err = self.manager.remove_images_model(&model_name);
+        let videos_model_remove_err = self.manager.remove_videos_model(&model_name);
+        let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
         let prefill_model_remove_err = self.manager.remove_prefill_model(&model_name);
 
         let mut chat_model_removed = false;
         let mut completions_model_removed = false;
         let mut embeddings_model_removed = false;
-        let mut tensor_model_removed = false;
         let mut images_model_removed = false;
+        let mut videos_model_removed = false;
+        let mut tensor_model_removed = false;
         let mut prefill_model_removed = false;
 
         if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
@@ -305,11 +310,14 @@ impl ModelWatcher {
         if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().is_empty() {
             embeddings_model_removed = true;
         }
-        if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
-            tensor_model_removed = true;
-        }
         if images_model_remove_err.is_ok() && self.manager.list_images_models().is_empty() {
             images_model_removed = true;
+        }
+        if videos_model_remove_err.is_ok() && self.manager.list_videos_models().is_empty() {
+            videos_model_removed = true;
+        }
+        if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
+            tensor_model_removed = true;
         }
         if prefill_model_remove_err.is_ok() && self.manager.list_prefill_models().is_empty() {
             prefill_model_removed = true;
@@ -318,18 +326,20 @@ impl ModelWatcher {
         if !chat_model_removed
             && !completions_model_removed
             && !embeddings_model_removed
-            && !tensor_model_removed
             && !images_model_removed
+            && !videos_model_removed
+            && !tensor_model_removed
             && !prefill_model_removed
         {
             tracing::debug!(
-                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, tensor_model_removed: {}, images_model_removed: {}, prefill_model_removed: {}",
+                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, images_model_removed: {}, videos_model_removed: {}, tensor_model_removed: {}, prefill_model_removed: {}",
                 model_name,
                 chat_model_removed,
                 completions_model_removed,
                 embeddings_model_removed,
-                tensor_model_removed,
                 images_model_removed,
+                videos_model_removed,
+                tensor_model_removed,
                 prefill_model_removed
             );
         } else {
@@ -337,8 +347,9 @@ impl ModelWatcher {
                 if ((chat_model_removed && *model_type == ModelType::Chat)
                     || (completions_model_removed && *model_type == ModelType::Completions)
                     || (embeddings_model_removed && *model_type == ModelType::Embedding)
-                    || (tensor_model_removed && *model_type == ModelType::TensorBased)
                     || (images_model_removed && *model_type == ModelType::Images)
+                    || (videos_model_removed && *model_type == ModelType::Videos)
+                    || (tensor_model_removed && *model_type == ModelType::TensorBased)
                     || (prefill_model_removed && *model_type == ModelType::Prefill))
                     && let Some(tx) = &self.model_update_tx
                 {
@@ -649,32 +660,60 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_images() {
-            // Case: Text + Images (e.g. vLLM-Omni, diffusion models)
-            // Takes text prompts as input, generates images. Images models also support
-            // chat completions (see model_type.rs as_endpoint_types).
-            let images_router = PushRouter::<
-                NvCreateImageRequest,
-                Annotated<NvImagesResponse>,
-            >::from_client_with_threshold(
-                client.clone(), self.router_config.router_mode, None, None
-            )
-            .await?;
-            self.manager
-                .add_images_model(card.name(), checksum, Arc::new(images_router))?;
+        }
+        // Case: Text + (Images, Audio, Videos)
+        else if card.model_input == ModelInput::Text
+            && (card.model_type.supports_images()
+                || card.model_type.supports_audios()
+                || card.model_type.supports_videos())
+        {
+            // Image Models can support chat completions (vllm omni way)
+            // So register chat_completions model as well
+            if card.model_type.supports_chat() {
+                let chat_router = PushRouter::<
+                    NvCreateChatCompletionRequest,
+                    Annotated<NvCreateChatCompletionStreamResponse>,
+                >::from_client_with_threshold(
+                    client.clone(),
+                    self.router_config.router_mode,
+                    None,
+                    None,
+                )
+                .await?;
+                self.manager.add_chat_completions_model(
+                    card.name(),
+                    checksum,
+                    Arc::new(chat_router),
+                )?;
+            }
 
-            let chat_router = PushRouter::<
-                NvCreateChatCompletionRequest,
-                Annotated<NvCreateChatCompletionStreamResponse>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
-            )
-            .await?;
-            self.manager.add_chat_completions_model(
-                card.name(),
-                checksum,
-                Arc::new(chat_router),
-            )?;
+            // This is ModelType::Images : registers /v1/images/* endpoints
+            if card.model_type.supports_images() {
+                let images_router = PushRouter::<
+                    NvCreateImageRequest,
+                    Annotated<NvImagesResponse>,
+                >::from_client_with_threshold(
+                    client.clone(), self.router_config.router_mode, None, None
+                )
+                .await?;
+                self.manager
+                    .add_images_model(card.name(), checksum, Arc::new(images_router))?;
+            }
+
+            // This is ModelType::Videos : registers /v1/videos/* endpoints
+            if card.model_type.supports_videos() {
+                let videos_router = PushRouter::<
+                    NvCreateVideoRequest,
+                    Annotated<NvVideosResponse>,
+                >::from_client_with_threshold(
+                    client.clone(), self.router_config.router_mode, None, None
+                )
+                .await?;
+                self.manager
+                    .add_videos_model(card.name(), checksum, Arc::new(videos_router))?;
+            }
+
+            // TODO: add audio models support
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens

@@ -23,10 +23,10 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
-use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
+use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::make_request_span;
-use dynamo_runtime::storage::kv;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -36,7 +36,6 @@ use tower_http::trace::TraceLayer;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    store: kv::Manager,
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
@@ -48,7 +47,9 @@ struct StateFlags {
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
+    videos_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
+    anthropic_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -58,7 +59,13 @@ impl StateFlags {
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
+            // TODO: add audios_endpoints_enabled flag
+            EndpointType::Audios => false,
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::AnthropicMessages => {
+                self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
+            }
         }
     }
 
@@ -76,8 +83,16 @@ impl StateFlags {
             EndpointType::Images => self
                 .images_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Videos => self
+                .videos_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            // TODO: add audios_endpoints_enabled flag
+            EndpointType::Audios => {}
             EndpointType::Responses => self
                 .responses_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::AnthropicMessages => self
+                .anthropic_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
         }
     }
@@ -86,28 +101,21 @@ impl StateFlags {
 impl State {
     pub fn new(
         manager: Arc<ModelManager>,
-        store: kv::Manager,
+        discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
     ) -> Self {
-        // Initialize discovery backed by KV store
-        // Create a cancellation token for the discovery's watch streams
-        let discovery_client = {
-            let discovery_cancel_token = cancel_token.child_token();
-            Arc::new(KVStoreDiscovery::new(store.clone(), discovery_cancel_token))
-                as Arc<dyn Discovery>
-        };
-
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            store,
             discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
+                videos_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
+                anthropic_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
         }
@@ -124,10 +132,6 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
-    }
-
-    pub fn store(&self) -> &kv::Manager {
-        &self.store
     }
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
@@ -196,11 +200,17 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
+    #[builder(default = "false")]
+    enable_anthropic_endpoints: bool,
+
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
-    #[builder(default)]
-    store: kv::Manager,
+    #[builder(default = "None")]
+    discovery: Option<Arc<dyn Discovery>>,
+
+    #[builder(default = "None")]
+    cancel_token: Option<CancellationToken>,
 }
 
 impl HttpService {
@@ -354,15 +364,25 @@ static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
+/// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
+static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        // Create a temporary cancel token for building - will be replaced in spawn/run
-        let temp_cancel_token = CancellationToken::new();
-        let state = Arc::new(State::new(model_manager, config.store, temp_cancel_token));
+        let cancel_token = config.cancel_token.unwrap_or_default();
+        // Use the provided discovery client, or fall back to a no-op memory-backed one
+        // (for in-process modes that don't need discovery)
+        let discovery_client = config.discovery.unwrap_or_else(|| {
+            use dynamo_runtime::discovery::KVStoreDiscovery;
+            Arc::new(KVStoreDiscovery::new(
+                dynamo_runtime::storage::kv::Manager::memory(),
+                cancel_token.child_token(),
+            )) as Arc<dyn Discovery>
+        });
+        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -375,6 +395,10 @@ impl HttpServiceConfigBuilder {
         state
             .flags
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
+        state.flags.set(
+            &EndpointType::AnthropicMessages,
+            config.enable_anthropic_endpoints,
+        );
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -491,18 +515,32 @@ impl HttpServiceConfigBuilder {
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
+        let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
-
         let mut endpoint_routes = HashMap::new();
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
+        endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
+
+        if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+            tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");
+            let (anthropic_docs, anthropic_route) = super::anthropic::anthropic_messages_router(
+                state.clone(),
+                request_template.clone(),
+                var(HTTP_SVC_ANTHROPIC_PATH_ENV).ok(),
+            );
+            endpoint_routes.insert(
+                EndpointType::AnthropicMessages,
+                (anthropic_docs, anthropic_route),
+            );
+        }
 
         for endpoint_type in EndpointType::all() {
             let state_route = state.clone();
