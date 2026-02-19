@@ -96,7 +96,7 @@ kubectl get dgdsa -n default
 
 ## Replica Ownership Model
 
-When DGDSA is enabled (the default), it becomes the **source of truth** for replica counts. This follows the same pattern as Kubernetes Deployments owning ReplicaSets.
+When DGDSA is enabled, it becomes the **source of truth** for replica counts. This follows the same pattern as Kubernetes Deployments owning ReplicaSets.
 
 ### How It Works
 
@@ -593,9 +593,9 @@ spec:
 
 ## Manual Scaling
 
-### With DGDSA Enabled (Default)
+### With DGDSA Enabled
 
-When DGDSA is enabled (the default), scale via the adapter:
+When DGDSA is enabled, scale via the adapter:
 
 ```bash
 kubectl scale dgdsa sglang-agg-decode -n default --replicas=3
@@ -615,7 +615,7 @@ kubectl get dgdsa sglang-agg-decode -n default
 If an autoscaler (KEDA, HPA, Planner) is managing the adapter, your change will be overwritten on the next evaluation cycle.
 </Note>
 
-### With DGDSA Disabled
+### With DGDSA Disabled (default)
 
 If you've disabled the scaling adapter for a service, edit the DGD directly:
 
