@@ -893,7 +893,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 	// Use the validator for simple validation (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		isClusterWide := r.Config.RestrictedNamespace == ""
-		validator := webhookvalidation.NewDynamoGraphDeploymentRequestValidator(dgdr, isClusterWide)
+		validator := webhookvalidation.NewDynamoGraphDeploymentRequestValidator(dgdr, isClusterWide, r.Config.GPUDiscoveryEnabled)
 		warnings, err := validator.Validate()
 		if err != nil {
 			return err
@@ -1036,18 +1036,31 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 
 	isNamespaceScoped := r.Config.RestrictedNamespace != ""
 	if isNamespaceScoped {
-		return fmt.Errorf(`GPU hardware info required but cannot be auto-discovered (namespace-scoped operator lacks node read permissions).
-
-Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s.
-
-See: https://github.com/ai-dynamo/dynamo/issues/6257`,
-			ConfigKeyHardware, ConfigKeyNumGpusPerNode, ConfigKeyGPUModel, ConfigKeyGPUVramMib,
-			ConfigKeyEngine, ConfigKeyMinNumGpusPerEng, ConfigKeyEngine, ConfigKeyMaxNumGpusPerEng)
+		tmpl := template.Must(template.New("nsGPUErr").Parse(
+			`GPU hardware info required but cannot be auto-discovered.` +
+				"\n\nOptions to resolve:" +
+				"\n\n1. Re-enable GPU discovery (if it was disabled during Helm install):" +
+				"\n   helm upgrade ... --set dynamo-operator.gpuDiscovery.enabled=true" +
+				"\n\n2. Add hardware config to profilingConfig.config.{{.Hardware}}:" +
+				"\n   {{.NumGPUs}}: 8" +
+				"\n   {{.GPUModel}}: \"H100-SXM5-80GB\"" +
+				"\n   {{.GPUVram}}: 81920" +
+				"\n\n3. Or specify {{.Engine}}.{{.MinGPUs}} and {{.Engine}}.{{.MaxGPUs}} for explicit GPU search ranges.",
+		))
+		var buf bytes.Buffer
+		_ = tmpl.Execute(&buf, map[string]string{
+			"Hardware": ConfigKeyHardware,
+			"NumGPUs":  ConfigKeyNumGpusPerNode,
+			"GPUModel": ConfigKeyGPUModel,
+			"GPUVram":  ConfigKeyGPUVramMib,
+			"Engine":   ConfigKeyEngine,
+			"MinGPUs":  ConfigKeyMinNumGpusPerEng,
+			"MaxGPUs":  ConfigKeyMaxNumGpusPerEng,
+		})
+		return fmt.Errorf("%s", buf.String())
 	}
 
-	return fmt.Errorf(`GPU hardware info required but auto-discovery failed. Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s.
-
-See profiling documentation for configuration details.`,
+	return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s",
 		ConfigKeyHardware, ConfigKeyNumGpusPerNode, ConfigKeyGPUModel, ConfigKeyGPUVramMib,
 		ConfigKeyEngine, ConfigKeyMinNumGpusPerEng, ConfigKeyEngine, ConfigKeyMaxNumGpusPerEng)
 }
