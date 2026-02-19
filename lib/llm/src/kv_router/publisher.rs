@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -77,6 +78,7 @@ impl KvEventSource {
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
         tx: mpsc::UnboundedSender<KvCacheEvent>,
+        next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
             KvEventSourceConfig::Zmq { endpoint, topic } => {
@@ -90,6 +92,7 @@ impl KvEventSource {
                         tx,
                         cancellation_token.clone(),
                         kv_block_size,
+                        next_event_id,
                     ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
@@ -117,6 +120,9 @@ pub struct KvEventPublisher {
     cancellation_token: CancellationToken,
     /// The channel to send events to.
     tx: mpsc::UnboundedSender<KvCacheEvent>,
+    /// Internal monotonic event ID counter - ensures each event gets a unique, incrementing ID.
+    /// Shared with the ZMQ listener (if any) to maintain consistency.
+    next_event_id: Arc<AtomicU64>,
 }
 
 impl KvEventPublisher {
@@ -125,7 +131,7 @@ impl KvEventPublisher {
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
-        Self::new_with_local_indexer(component, kv_block_size, source_config, false)
+        Self::new_with_local_indexer(component, kv_block_size, source_config, false, 0)
     }
 
     pub fn new_with_local_indexer(
@@ -133,6 +139,7 @@ impl KvEventPublisher {
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
         enable_local_indexer: bool,
+        dp_rank: DpRank,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
@@ -152,6 +159,9 @@ impl KvEventPublisher {
             );
         }
 
+        // Internal monotonic event ID counter - shared with ZMQ listener if any
+        let next_event_id = Arc::new(AtomicU64::new(0));
+
         // Create our event source (if any)
         let mut source = None;
         if let Some(config) = source_config {
@@ -161,6 +171,7 @@ impl KvEventPublisher {
                 config,
                 cancellation_token.clone(),
                 tx.clone(),
+                next_event_id.clone(),
             )?);
         }
 
@@ -189,6 +200,7 @@ impl KvEventPublisher {
                 .spawn(start_worker_kv_query_endpoint(
                     component,
                     worker_id,
+                    dp_rank,
                     local_indexer,
                 ))
         });
@@ -253,11 +265,18 @@ impl KvEventPublisher {
             source,
             cancellation_token,
             tx,
+            next_event_id,
         })
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
         self.tx.send(event)
+    }
+
+    /// Get and increment the next event ID atomically.
+    /// Use this to assign monotonically increasing event IDs to events before publishing.
+    pub fn next_event_id(&self) -> u64 {
+        self.next_event_id.fetch_add(1, Ordering::SeqCst)
     }
 
     pub fn kv_block_size(&self) -> u32 {
@@ -406,6 +425,7 @@ pub async fn start_zmq_listener(
     tx: mpsc::UnboundedSender<KvCacheEvent>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
+    next_event_id: Arc<AtomicU64>,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -423,8 +443,11 @@ pub async fn start_zmq_listener(
         return;
     }
 
+    // Connect to the ZMQ endpoint. SGLang binds locally, Dynamo connects.
+    // In multi-node setups, each node runs dynamo.sglang alongside local SGLang ranks,
+    // so ZMQ connections are always local. NATS handles cross-node event distribution.
     if let Err(e) = socket.connect(&zmq_endpoint).await {
-        tracing::error!("Failed to connect ZMQ SUB socket: {}", e);
+        tracing::error!("Failed to connect ZMQ SUB socket to {zmq_endpoint}: {e}");
         return;
     }
 
@@ -493,7 +516,9 @@ pub async fn start_zmq_listener(
                     continue;
                 }
 
-                let seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
+                // Note: We extract the engine's sequence number for logging but use our own
+                // internal monotonic counter for event_id to ensure per-dp_rank monotonicity
+                let engine_seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
 
                 // Decode our batch of events.
                 let batch_result = rmps::from_slice::<KvEventBatch>(&payload);
@@ -504,16 +529,19 @@ pub async fn start_zmq_listener(
                 };
 
                 tracing::trace!(
-                    "ZMQ listener on {} received batch with {} events (seq={}, dp_rank={})",
+                    "ZMQ listener on {} received batch with {} events (engine_seq={}, dp_rank={})",
                     zmq_endpoint,
                     batch.events.len(),
-                    seq,
+                    engine_seq,
                     batch.data_parallel_rank.unwrap_or(0)
                 );
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0) as u32;
                 for raw_event in batch.events.into_iter() {
-                    let event = convert_event(raw_event, seq, kv_block_size, dp_rank, &warning_count);
+                    // Use shared monotonic event_id counter instead of engine's sequence number
+                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+
+                    let event = convert_event(raw_event, event_id, kv_block_size, dp_rank, &warning_count);
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         exit_reason = "channel receiver dropped";
@@ -550,6 +578,26 @@ fn convert_event(
             block_mm_infos,
             ..
         } => {
+            // Reject self-referencing blocks: all block hashes (including parent) must be unique.
+            {
+                let mut seen = HashSet::with_capacity(block_hashes.len() + 1);
+                if let Some(parent) = parent_block_hash {
+                    seen.insert(parent.into_u64());
+                }
+                let has_duplicate = block_hashes.iter().any(|h| !seen.insert(h.into_u64()));
+                if has_duplicate {
+                    tracing::warn!(
+                        event_id,
+                        "Self-referencing block detected: duplicate hash in store event; dropping"
+                    );
+                    return KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank,
+                    };
+                }
+            }
+
             let num_block_tokens = vec![block_size as u64; block_hashes.len()];
             let block_hashes_u64: Vec<u64> = block_hashes
                 .into_iter()
@@ -739,6 +787,58 @@ enum RawKvEvent {
     AllBlocksCleared,
 }
 
+/// Parse MM hash from extra_keys string:
+/// - Only accept canonical vLLM MM identifiers (64-char hex digest)
+/// - Convert by taking the first 16 hex chars as u64
+fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
+    // extra_keys mixes MM identifiers with LoRA/cache_salt/prompt-embed metadata.
+    // Only MM identifiers should be mapped into BlockExtraInfo.
+    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return u64::from_str_radix(&s[..16], 16).ok();
+    }
+    None
+}
+
+/// Convert vLLM BlockStored extra_keys to block-level MM infos.
+/// extra_keys is a list aligned with blocks:
+/// - None => no MM content in that block
+/// - ["hash1", "hash2", ...] => one or more MM objects in that block
+fn extra_keys_to_block_mm_infos(
+    extra_keys: Option<Vec<Option<Vec<String>>>>,
+) -> Option<Vec<Option<BlockExtraInfo>>> {
+    let extra_keys = extra_keys?;
+    if extra_keys.is_empty() {
+        return None;
+    }
+
+    let infos: Vec<Option<BlockExtraInfo>> = extra_keys
+        .into_iter()
+        .map(|block_keys| {
+            let mm_objects: Vec<BlockMmObjectInfo> = block_keys
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|key| parse_mm_hash_from_extra_key(key))
+                .map(|mm_hash| BlockMmObjectInfo {
+                    mm_hash,
+                    offsets: vec![], // extra_keys does not carry offsets today
+                })
+                .collect();
+
+            if mm_objects.is_empty() {
+                None
+            } else {
+                Some(BlockExtraInfo { mm_objects })
+            }
+        })
+        .collect();
+
+    if infos.iter().all(|i| i.is_none()) {
+        return None;
+    }
+
+    Some(infos)
+}
+
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
 /// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
 /// additional fields that may be appended in the future, we implement a custom
@@ -776,6 +876,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut lora_id: Option<Option<u64>> = None;
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
+        let mut extra_keys: Option<Option<Vec<Option<Vec<String>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
@@ -804,6 +905,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "lora_name" => {
                     lora_name = Some(map.next_value()?);
                 }
+                "extra_keys" => {
+                    extra_keys = Some(map.next_value()?);
+                }
                 "block_mm_infos" => {
                     block_mm_infos = Some(map.next_value()?);
                 }
@@ -820,6 +924,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
+                let block_mm_infos = block_mm_infos
+                    .unwrap_or(None)
+                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys.unwrap_or(None)));
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
@@ -828,7 +935,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     lora_id: lora_id.unwrap_or(None),
                     medium: medium.unwrap_or(None),
                     lora_name: lora_name.unwrap_or(None),
-                    block_mm_infos: block_mm_infos.unwrap_or(None),
+                    block_mm_infos,
                 })
             }
             Some("BlockRemoved") => {
@@ -875,10 +982,15 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
                 let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
+                let extra_keys: Option<Vec<Option<Vec<String>>>> =
+                    seq.next_element()?.unwrap_or(None);
                 let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
                     seq.next_element()?.unwrap_or(None);
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+                let block_mm_infos =
+                    block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
 
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
@@ -1157,6 +1269,114 @@ mod test_event_processing {
         let raw_evt = RawKvEvent::AllBlocksCleared;
         let out = convert_event(raw_evt, 1, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Cleared));
+    }
+
+    #[test]
+    fn test_parse_mm_hash_from_extra_key() {
+        assert_eq!(
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            ),
+            Some(0x0123_4567_89ab_cdef)
+        );
+        assert_eq!(parse_mm_hash_from_extra_key("123"), None);
+        assert_eq!(parse_mm_hash_from_extra_key("not_a_hash"), None);
+    }
+
+    #[test]
+    fn test_extra_keys_to_block_mm_infos() {
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+        let infos = extra_keys_to_block_mm_infos(Some(vec![
+            Some(vec![mm_hash.clone()]),
+            None,
+            Some(vec!["invalid".to_string(), mm_hash]),
+        ]))
+        .expect("expected parsed MM infos");
+
+        assert_eq!(infos.len(), 3);
+        assert_eq!(
+            infos[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+        assert!(infos[1].is_none());
+        assert_eq!(
+            infos[2].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+    }
+
+    #[test]
+    fn test_seq_block_stored_field8_supports_extra_keys() {
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+        let extra_keys_payload = rmps::to_vec(&(
+            "BlockStored",
+            vec![10_u64],
+            None::<u64>,
+            vec![1_u32, 2, 3, 4],
+            4_usize,
+            None::<u64>,
+            None::<String>,
+            None::<String>,
+            vec![Some(vec![mm_hash])],
+        ))
+        .unwrap();
+        let extra_keys_event: RawKvEvent = rmps::from_slice(&extra_keys_payload).unwrap();
+        let RawKvEvent::BlockStored {
+            lora_name,
+            block_mm_infos,
+            ..
+        } = extra_keys_event
+        else {
+            panic!("expected BlockStored");
+        };
+        assert!(lora_name.is_none());
+        assert_eq!(
+            block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+    }
+
+    #[test]
+    fn test_map_block_stored_supports_extra_keys() {
+        #[derive(serde::Serialize)]
+        struct MapBlockStoredEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            block_hashes: Vec<u64>,
+            parent_block_hash: Option<u64>,
+            token_ids: Vec<u32>,
+            block_size: usize,
+            lora_id: Option<u64>,
+            medium: Option<String>,
+            lora_name: Option<String>,
+            extra_keys: Option<Vec<Option<Vec<String>>>>,
+        }
+
+        let payload = rmps::to_vec(&MapBlockStoredEvent {
+            event_type: "BlockStored",
+            block_hashes: vec![10],
+            parent_block_hash: None,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: None,
+            medium: Some("GPU".to_string()),
+            lora_name: None,
+            extra_keys: Some(vec![Some(vec![
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string(),
+            ])]),
+        })
+        .unwrap();
+
+        let event: RawKvEvent = rmps::from_slice(&payload).unwrap();
+        let RawKvEvent::BlockStored { block_mm_infos, .. } = event else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
     }
 }
 
@@ -1555,11 +1775,13 @@ mod tests_startup_helpers {
 
         // Cancellation token so we can stop the listener
         let token = dynamo_runtime::CancellationToken::new();
+        // Event ID counter for the test listener
+        let next_event_id = Arc::new(AtomicU64::new(0));
 
-        // Spawn async listener
+        // Spawn async listener (connects to publisher bound above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4)
+            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4, next_event_id)
         });
 
         // Give time for the connection to establish

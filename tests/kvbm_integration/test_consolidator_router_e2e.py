@@ -25,6 +25,7 @@ import yaml
 
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.test_output import resolve_test_output_path
 
 # Check if engines are available and build list of available engines
 from .common import check_module_available
@@ -58,7 +59,7 @@ FRONTEND_PORT = 8000
 @pytest.fixture
 def test_directory(request):
     """Create a test directory for logs and temporary files."""
-    test_dir = Path(request.node.name)
+    test_dir = Path(resolve_test_output_path(request.node.name))
     test_dir.mkdir(parents=True, exist_ok=True)
     yield test_dir
     # Cleanup handled by pytest (logs are kept for debugging)
@@ -312,7 +313,7 @@ def frontend_server(test_directory, runtime_services):
         working_dir=str(test_directory),
         display_output=False,
         log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
-        terminate_existing=False,  # Don't kill nats-server/etcd started by runtime_services
+        terminate_all_matching_process_names=False,  # Don't kill nats-server/etcd started by runtime_services
     ) as frontend_process:
         # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
         log_file = Path(frontend_process._log_path)
@@ -405,7 +406,7 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         working_dir=str(test_directory),
         display_output=False,
         log_dir=str(worker_log_dir),  # Absolute path keeps logs in test directory
-        terminate_existing=False,
+        terminate_all_matching_process_names=False,
     ) as worker_process:
         # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
         log_file = Path(worker_process._log_path)
@@ -508,6 +509,7 @@ class TestConsolidatorRouterE2E:
         logger.info(f"Concurrent requests: {successes}/{num_requests} succeeded")
         return successes, results
 
+    @pytest.mark.timeout(150)  # 4x measured (~37s), rounded up
     def test_basic_consolidator_flow(self, tester, llm_worker, frontend_server):
         """
         Test basic consolidator flow:
@@ -551,6 +553,7 @@ class TestConsolidatorRouterE2E:
 
         logger.info(f"Basic consolidator flow test passed ({engine.upper()})")
 
+    @pytest.mark.timeout(170)  # 4x measured (~41s), rounded up
     def test_consolidator_handles_concurrent_requests(
         self, tester, llm_worker, frontend_server
     ):
@@ -591,6 +594,7 @@ class TestConsolidatorRouterE2E:
 
         logger.info(f"Concurrent request handling test passed ({engine.upper()})")
 
+    @pytest.mark.timeout(180)  # 4x measured (~44s), rounded up
     def test_store_deduplication_across_sources(
         self, tester, llm_worker, frontend_server
     ):
@@ -686,6 +690,7 @@ class TestConsolidatorRouterE2E:
 
         logger.info(f"STORE deduplication test passed ({engine.upper()})")
 
+    @pytest.mark.timeout(340)  # 4x measured (~85s), rounded up
     @pytest.mark.parametrize("engine_type", AVAILABLE_ENGINES)
     def test_remove_deduplication_across_sources(
         self, test_directory, runtime_services, engine_type
@@ -743,7 +748,7 @@ class TestConsolidatorRouterE2E:
             working_dir=str(test_directory),
             display_output=False,
             log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
-            terminate_existing=False,  # Don't kill nats-server/etcd started by runtime_services
+            terminate_all_matching_process_names=False,  # Don't kill nats-server/etcd started by runtime_services
         ) as _frontend_process:
             # Get actual log file path from ManagedProcess
             frontend_log = Path(_frontend_process._log_path)
@@ -829,7 +834,7 @@ class TestConsolidatorRouterE2E:
                 log_dir=str(
                     worker_log_dir
                 ),  # Absolute path keeps logs in test directory
-                terminate_existing=False,
+                terminate_all_matching_process_names=False,
             ) as _worker_process:
                 # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
                 worker_log = Path(_worker_process._log_path)

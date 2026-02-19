@@ -31,6 +31,9 @@ outputs:
   rust:
     description: 'Whether rust files changed'
     value: ${{ steps.filter.outputs.rust_any_modified }}
+  docs:
+    description: 'Whether docs files changed'
+    value: ${{ steps.filter.outputs.docs_any_modified }}
 
 runs:
   using: "composite"

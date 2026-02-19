@@ -46,7 +46,6 @@ Platform-specific deployment guides for production environments:
 - **[Amazon EKS](/examples/deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
 - **[Azure AKS](/examples/deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
 - **[Amazon ECS](/examples/deployments/ECS/)** - Deploy Dynamo on Amazon Elastic Container Service
-- **[Router Standalone](/examples/deployments/router_standalone/)** - Standalone router deployment patterns
 - **Google GKE** - _Coming soon_
 
 ## Runtime Examples
@@ -83,4 +82,4 @@ If you're running Kubernetes/cloud deployment examples (EKS, AKS, GKE), you'll a
 | **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
 | **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
 
-See the [Kubernetes Installation Guide](/docs/kubernetes/installation_guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.
+See the [Kubernetes Installation Guide](/docs/pages/kubernetes/installation-guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.

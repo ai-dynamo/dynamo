@@ -18,6 +18,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -54,7 +56,7 @@ type VolumeMount struct {
 }
 
 // Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+// with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md
 // for migration guidance. This field will be removed in a future API version.
 type Autoscaling struct {
 	// Deprecated: This field is ignored.
@@ -124,6 +126,34 @@ type ExtraPodSpec struct {
 	MainContainer   *corev1.Container `json:"mainContainer,omitempty"`
 }
 
+// MarshalJSON implements json.Marshaler for ExtraPodSpec.
+//
+// corev1.PodSpec.Containers is declared without omitempty, so a nil slice
+// serializes as "containers": null.  The CRD structural schema defines
+// containers as type: array and rejects null.  This custom marshaller shadows
+// the Containers field with an omitempty-tagged copy so that nil/empty
+// Containers are omitted from the JSON output entirely.
+func (e ExtraPodSpec) MarshalJSON() ([]byte, error) {
+	// Type alias strips methods from corev1.PodSpec, preventing infinite
+	// recursion through any MarshalJSON defined on PodSpec.
+	type PodSpecAlias corev1.PodSpec
+
+	aux := struct {
+		*PodSpecAlias `json:",inline"`
+		Containers    []corev1.Container `json:"containers,omitempty"`
+		MainContainer *corev1.Container  `json:"mainContainer,omitempty"`
+	}{}
+
+	if e.PodSpec != nil {
+		a := PodSpecAlias(*e.PodSpec)
+		aux.PodSpecAlias = &a
+		aux.Containers = e.PodSpec.Containers
+	}
+	aux.MainContainer = e.MainContainer
+
+	return json.Marshal(aux)
+}
+
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
 // for replica management. When enabled, the DGDSA owns the replicas field and
 // external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
@@ -134,4 +164,42 @@ type ScalingAdapter struct {
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
+}
+
+// CheckpointMode defines how checkpoint creation is handled
+// +kubebuilder:validation:Enum=Auto;Manual
+type CheckpointMode string
+
+const (
+	// CheckpointModeAuto means the DGD controller will automatically create a Checkpoint CR
+	CheckpointModeAuto CheckpointMode = "Auto"
+	// CheckpointModeManual means the user must create the Checkpoint CR themselves
+	CheckpointModeManual CheckpointMode = "Manual"
+)
+
+// ServiceCheckpointConfig configures checkpointing for a DGD service
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))",message="When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified"
+type ServiceCheckpointConfig struct {
+	// Enabled indicates whether checkpointing is enabled for this service
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Mode defines how checkpoint creation is handled
+	// - Auto: DGD controller creates Checkpoint CR automatically
+	// - Manual: User must create Checkpoint CR
+	// +optional
+	// +kubebuilder:default=Auto
+	Mode CheckpointMode `json:"mode,omitempty"`
+
+	// CheckpointRef references an existing Checkpoint CR to use
+	// If specified, Identity is ignored and this checkpoint is used directly
+	// +optional
+	CheckpointRef *string `json:"checkpointRef,omitempty"`
+
+	// Identity defines the checkpoint identity for hash computation
+	// Used when Mode is Auto or when looking up existing checkpoints
+	// Required when checkpointRef is not specified
+	// +optional
+	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 }

@@ -37,7 +37,8 @@ allow = [
     "LGPL-3.0",
     "LGPL-3.0-only",
     "CC0-1.0",
-    "Unicode-DFS-2016"
+    "Unicode-DFS-2016",
+    "WTFPL"
 ]
 
 # TODO exceptions

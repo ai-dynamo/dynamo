@@ -26,6 +26,7 @@ from .utils import DynamoFrontendProcess, run_migration_test
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
@@ -72,7 +73,6 @@ class DynamoWorkerProcess(ManagedProcess):
         request: pytest request fixture
         worker_id: Unique identifier for the worker (e.g., "worker1", "prefill1")
         frontend_port: Port where the frontend is running
-        migration_limit: Maximum number of migration attempts (default: 3)
         is_prefill: None for aggregated mode, True for prefill worker, False for decode worker
     """
 
@@ -81,7 +81,6 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
-        migration_limit: int = 3,
         is_prefill: bool | None = None,
     ):
         self.worker_id = worker_id
@@ -102,8 +101,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "512",  # 8192 tokens x 1 context / 16 tokens per block = 512 blocks
             "--gpu-memory-utilization",
             "0.15",  # avoid assertion error on vLLM available memory checks
-            "--migration-limit",
-            str(migration_limit),
         ]
         if is_prefill is True:
             command.append("--is-prefill-worker")
@@ -167,10 +164,11 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
+            display_name=worker_id,
         )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -220,20 +218,17 @@ def test_request_migration_vllm_aggregated(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers
-        with DynamoWorkerProcess(
-            request, "worker1", frontend.frontend_port, migration_limit=migration_limit
-        ) as worker1:
+        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
             with DynamoWorkerProcess(
                 request,
                 "worker2",
                 frontend.frontend_port,
-                migration_limit=migration_limit,
             ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
@@ -275,7 +270,9 @@ def test_request_migration_vllm_prefill(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
+    with DynamoFrontendProcess(
+        request, migration_limit=migration_limit, enforce_disagg=True
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start decode worker first (required for prefill workers to connect)
@@ -283,7 +280,6 @@ def test_request_migration_vllm_prefill(
             request,
             "worker0",
             frontend.frontend_port,
-            migration_limit=migration_limit,
             is_prefill=False,
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
@@ -293,7 +289,6 @@ def test_request_migration_vllm_prefill(
                 request,
                 "worker1",
                 frontend.frontend_port,
-                migration_limit=migration_limit,
                 is_prefill=True,
             ) as prefill1:
                 logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
@@ -302,7 +297,6 @@ def test_request_migration_vllm_prefill(
                     request,
                     "worker2",
                     frontend.frontend_port,
-                    migration_limit=migration_limit,
                     is_prefill=True,
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
@@ -355,7 +349,9 @@ def test_request_migration_vllm_kv_transfer(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
+    with DynamoFrontendProcess(
+        request, migration_limit=migration_limit, enforce_disagg=True
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
@@ -363,7 +359,6 @@ def test_request_migration_vllm_kv_transfer(
             request,
             "worker0",
             frontend.frontend_port,
-            migration_limit=migration_limit,
             is_prefill=True,
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -373,7 +368,6 @@ def test_request_migration_vllm_kv_transfer(
                 request,
                 "worker1",
                 frontend.frontend_port,
-                migration_limit=migration_limit,
                 is_prefill=False,
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -382,7 +376,6 @@ def test_request_migration_vllm_kv_transfer(
                     request,
                     "worker2",
                     frontend.frontend_port,
-                    migration_limit=migration_limit,
                     is_prefill=False,
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
@@ -439,7 +432,9 @@ def test_request_migration_vllm_decode(
         )
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
+    with DynamoFrontendProcess(
+        request, migration_limit=migration_limit, enforce_disagg=True
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
@@ -447,7 +442,6 @@ def test_request_migration_vllm_decode(
             request,
             "worker0",
             frontend.frontend_port,
-            migration_limit=migration_limit,
             is_prefill=True,
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -457,7 +451,6 @@ def test_request_migration_vllm_decode(
                 request,
                 "worker1",
                 frontend.frontend_port,
-                migration_limit=migration_limit,
                 is_prefill=False,
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -466,7 +459,6 @@ def test_request_migration_vllm_decode(
                     request,
                     "worker2",
                     frontend.frontend_port,
-                    migration_limit=migration_limit,
                     is_prefill=False,
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")

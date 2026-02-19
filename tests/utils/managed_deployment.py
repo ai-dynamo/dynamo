@@ -18,6 +18,8 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.utils.test_output import resolve_test_output_path
+
 
 def _get_workspace_dir() -> str:
     """Get workspace directory without depending on dynamo.common package.
@@ -501,22 +503,48 @@ class ManagedDeployment:
     _in_cluster: bool = False
     _logger: logging.Logger = logging.getLogger()
     _port_forward: Optional[Any] = None
-    _deployment_name: Optional[str] = None
+    # Initialized from deployment_spec.name in __post_init__; placeholder needed for dataclass ordering
+    _deployment_name: str = field(default="")
     _apps_v1: Optional[Any] = None
     _active_port_forwards: List[Any] = field(default_factory=list)
 
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
+        self.log_dir = resolve_test_output_path(self.log_dir)
 
     async def _init_kubernetes(self):
-        """Initialize kubernetes client"""
-        try:
-            # Try in-cluster config first (for pods with service accounts)
-            config.load_incluster_config()
-            self._in_cluster = True
-        except Exception:
-            # Fallback to kube config file (for local development)
-            await config.load_kube_config()
+        """Initialize kubernetes client.
+
+        Priority order:
+        1. KUBECONFIG environment variable (CI scenario with proper RBAC)
+        2. In-cluster config (for pods without explicit kubeconfig)
+        3. Default kubeconfig (~/.kube/config)
+        """
+        kubeconfig_path = os.environ.get("KUBECONFIG")
+
+        if kubeconfig_path and os.path.exists(kubeconfig_path):
+            # Explicit kubeconfig provided (CI scenario) - use it first
+            self._logger.info(f"Loading kubeconfig from KUBECONFIG: {kubeconfig_path}")
+            await config.load_kube_config(config_file=kubeconfig_path)
+            self._in_cluster = False
+            self._logger.info("Successfully loaded kubeconfig from KUBECONFIG")
+        else:
+            try:
+                # Try in-cluster config (for pods without explicit kubeconfig)
+                self._logger.info("Attempting in-cluster kubernetes config")
+                config.load_incluster_config()
+                self._in_cluster = True
+                self._logger.info("Successfully loaded in-cluster kubernetes config")
+            except Exception as e:
+                # Fallback to default kube config file (for local development)
+                self._logger.warning(
+                    f"In-cluster config failed ({type(e).__name__}: {e}), "
+                    f"falling back to default kubeconfig (~/.kube/config)"
+                )
+                await config.load_kube_config()
+                self._in_cluster = False
+                self._logger.info("Successfully loaded default kubeconfig")
+
         k8s_client = client.ApiClient()
         self._custom_api = client.CustomObjectsApi(k8s_client)
         self._core_api = client.CoreV1Api(k8s_client)

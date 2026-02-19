@@ -26,10 +26,10 @@ import (
 	"testing"
 	"time"
 
-	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -520,7 +520,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						BackendFramework: string(BackendFrameworkSGLang),
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 							"service1": {
-								DynamoNamespace: &[]string{"default-test-dynamographdeployment"}[0],
+								DynamoNamespace: &[]string{"default-test-dynamographdeployment-44136fa3"}[0],
 								ComponentType:   "frontend",
 								Replicas:        &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
@@ -539,7 +539,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								},
 							},
 							"service2": {
-								DynamoNamespace: &[]string{"default-test-dynamographdeployment"}[0],
+								DynamoNamespace: &[]string{"default-test-dynamographdeployment-44136fa3"}[0],
 								Replicas:        &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
 									Requests: &v1alpha1.ResourceItem{
@@ -663,7 +663,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						BackendFramework: string(BackendFrameworkSGLang),
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 							"service1": {
-								DynamoNamespace: &[]string{"default-test-dynamographdeployment"}[0],
+								DynamoNamespace: &[]string{"default-test-dynamographdeployment-44136fa3"}[0],
 								ComponentType:   "frontend",
 								Replicas:        &[]int32{3}[0],
 								Resources: &v1alpha1.Resources{
@@ -722,7 +722,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.ingressSpec, nil, nil)
+			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.ingressSpec, nil, nil, RollingUpdateContext{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -756,7 +756,7 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, nil)
+	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, nil, RollingUpdateContext{})
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -823,7 +823,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			namespace:                  "djangoz",
 			numberOfNodes:              1,
 			discoveryBackend:           "kubernetes",
-			expectedDynamoNamespace:    "djangoz-vllm-disagg", // Should be k8s-namespace + DGD name
+			expectedDynamoNamespace:    "djangoz-vllm-disagg",
 			expectedComponentType:      commonconsts.ComponentTypeFrontend,
 			expectedParentDGDName:      "vllm-disagg",
 			expectedParentDGDNamespace: "djangoz",
@@ -840,7 +840,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			namespace:                  "production",
 			numberOfNodes:              2,
 			discoveryBackend:           "etcd",
-			expectedDynamoNamespace:    commonconsts.GlobalDynamoNamespace, // "dynamo"
+			expectedDynamoNamespace:    commonconsts.GlobalDynamoNamespace,
 			expectedComponentType:      commonconsts.ComponentTypeWorker,
 			expectedParentDGDName:      "shared-frontend",
 			expectedParentDGDNamespace: "production",
@@ -849,7 +849,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			name: "nil dynamoNamespace field still computes correctly",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType:   commonconsts.ComponentTypePlanner,
-				DynamoNamespace: nil, // Not set at all
+				DynamoNamespace: nil,
 			},
 			parentGraphDeploymentName:  "test-dgd",
 			namespace:                  "default",
@@ -1216,15 +1216,6 @@ func Test_mergeEnvs(t *testing.T) {
 	}
 }
 
-func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
-	sorted := make([]corev1.EnvVar, len(envs))
-	copy(sorted, envs)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Name < sorted[j].Name
-	})
-	return sorted
-}
-
 func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	type args struct {
 		ctx              context.Context
@@ -1542,6 +1533,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  commonconsts.DynamoNamespaceEnvVar,
+														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
 													},
 													{
@@ -2066,6 +2061,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -2111,6 +2111,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2259,6 +2271,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -2304,6 +2321,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2462,6 +2491,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  commonconsts.DynamoNamespaceEnvVar,
+														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
 													},
 													{
@@ -3023,6 +3056,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -3068,6 +3106,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3203,6 +3253,11 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoNixlPortName,
+														ContainerPort: int32(commonconsts.DynamoNixlPort),
+													},
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -3248,6 +3303,18 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
 														Value: "false",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_ENABLE",
+														Value: "n",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_EXPORTER",
+														Value: "prometheus",
+													},
+													{
+														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+														Value: "19090",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3406,6 +3473,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  commonconsts.DynamoNamespaceEnvVar,
+														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
 													},
 													{
@@ -3665,7 +3736,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -3696,6 +3767,15 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 }
 
+func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
+	sorted := make([]corev1.EnvVar, len(envs))
+	copy(sorted, envs)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Name < sorted[j].Name
+	})
+	return sorted
+}
+
 func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3717,7 +3797,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -3880,6 +3960,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -4037,6 +4118,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -4123,6 +4205,7 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -4800,7 +4883,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				NatsAddress: "nats-address",
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever, nil, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -4909,6 +4992,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if (err != nil) != tt.wantErr {
@@ -4984,6 +5068,7 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -5106,6 +5191,7 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -5201,6 +5287,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				tt.controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 			if !assert.NoError(t, err) {
 				return
@@ -5228,12 +5315,13 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 		expectedPodSpec *corev1.PodSpec
 	}{
 		{
-			name: "Planner component should have planner service account",
+			name: "Worker component with DynamoNamespace set",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Envs: []corev1.EnvVar{
 					{Name: "ANOTHER_COMPONENTENV", Value: "true"},
 				},
-				ComponentType: commonconsts.ComponentTypeWorker,
+				ComponentType:   commonconsts.ComponentTypeWorker,
+				DynamoNamespace: ptr.To("default-test-deployment"), // Namespace set by caller
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{
 						Command: []string{"python3"},
@@ -5262,6 +5350,9 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 							{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+							{Name: "NIXL_TELEMETRY_ENABLE", Value: "n"},
+							{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+							{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "19090"},
 							{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{
 									FieldPath: "metadata.name",
@@ -5323,6 +5414,11 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 								ContainerPort: int32(commonconsts.DynamoSystemPort),
 								Protocol:      corev1.ProtocolTCP,
 							},
+							{
+								Name:          commonconsts.DynamoNixlPortName,
+								ContainerPort: int32(commonconsts.DynamoNixlPort),
+								Protocol:      corev1.ProtocolTCP,
+							},
 						},
 					},
 				},
@@ -5360,6 +5456,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -5456,6 +5553,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -5691,6 +5789,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -5902,6 +6001,7 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -6087,6 +6187,7 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -6299,6 +6400,25 @@ func TestDetermineGroveRestartState(t *testing.T) {
 			},
 			wantSvcs:      []string{"Frontend", "Worker"},
 			wantTimestamp: ptr.To(restartID),
+		},
+		{
+			name: "superseded restart returns nil - preserves existing annotations via fallback",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+					Restart: &v1alpha1.Restart{
+						ID: restartID,
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: restartID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+			wantNil: true,
 		},
 	}
 
@@ -6581,7 +6701,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 				NatsAddress: "nats-address",
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, nil, tt.restartState, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, nil, tt.restartState, nil, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}
@@ -6649,4 +6769,173 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIsWorkerComponent(t *testing.T) {
+	workers := []string{commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode}
+	nonWorkers := []string{commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner, commonconsts.ComponentTypeEPP, "custom", ""}
+
+	for _, ct := range workers {
+		assert.True(t, IsWorkerComponent(ct), "%s should be a worker", ct)
+	}
+	for _, ct := range nonWorkers {
+		assert.False(t, IsWorkerComponent(ct), "%s should not be a worker", ct)
+	}
+}
+
+func TestRollingUpdateContext_InProgress(t *testing.T) {
+	assert.False(t, RollingUpdateContext{}.InProgress())
+	assert.False(t, RollingUpdateContext{NewWorkerHash: "abc"}.InProgress())
+	assert.True(t, RollingUpdateContext{OldWorkerReplicas: map[string]int32{"w": 1}}.InProgress())
+}
+
+func TestGetDCDResourceName(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill":  {ComponentType: commonconsts.ComponentTypePrefill},
+				"decode":   {ComponentType: commonconsts.ComponentTypeDecode},
+				"worker":   {ComponentType: commonconsts.ComponentTypeWorker},
+				"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+			},
+		},
+	}
+
+	// Workers get hash suffix
+	assert.Equal(t, "my-dgd-prefill-abc12345", GetDCDResourceName(dgd, "prefill", "abc12345"))
+	assert.Equal(t, "my-dgd-decode-abc12345", GetDCDResourceName(dgd, "decode", "abc12345"))
+	assert.Equal(t, "my-dgd-worker-abc12345", GetDCDResourceName(dgd, "worker", "abc12345"))
+
+	// Non-workers never get hash suffix
+	assert.Equal(t, "my-dgd-frontend", GetDCDResourceName(dgd, "frontend", "abc12345"))
+
+	// Empty hash — workers don't get suffix
+	assert.Equal(t, "my-dgd-prefill", GetDCDResourceName(dgd, "prefill", ""))
+}
+
+func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill":  {ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(4))},
+				"frontend": {ComponentType: commonconsts.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	ruCtx := RollingUpdateContext{
+		NewWorkerHash:     "aabb1122",
+		OldWorkerReplicas: map[string]int32{"prefill": 2},
+		NewWorkerReplicas: map[string]int32{"prefill": 2},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(ctx, dgd, nil, &RestartState{}, nil, ruCtx)
+	assert.NoError(t, err)
+
+	// Worker DCD: hash suffix in name, hash label, replica override
+	prefillDCD := dcds["prefill"]
+	assert.Equal(t, "my-dgd-prefill-aabb1122", prefillDCD.Name)
+	assert.Equal(t, "aabb1122", prefillDCD.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+	assert.Equal(t, int32(2), *prefillDCD.Spec.Replicas)
+
+	// Non-worker DCD: no hash suffix, no hash label, original replicas
+	frontendDCD := dcds["frontend"]
+	assert.Equal(t, "my-dgd-frontend", frontendDCD.Name)
+	assert.Empty(t, frontendDCD.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+	assert.Equal(t, int32(1), *frontendDCD.Spec.Replicas)
+}
+
+func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: commonconsts.ComponentTypeWorker, Replicas: ptr.To(int32(3))},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, RollingUpdateContext{})
+	assert.NoError(t, err)
+
+	dcd := dcds["worker"]
+	assert.Equal(t, "my-dgd-worker", dcd.Name)
+	assert.Empty(t, dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+	assert.Equal(t, int32(3), *dcd.Spec.Replicas)
+}
+
+func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
+	// Worker with hash label gets WorkerHashSuffix
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
+	}
+	compCtx := generateComponentContext(component, "dgd", "ns", 1, "kubernetes")
+	assert.Equal(t, "abc123", compCtx.WorkerHashSuffix)
+
+	// Worker without hash label
+	component2 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+	}
+	compCtx2 := generateComponentContext(component2, "dgd", "ns", 1, "kubernetes")
+	assert.Empty(t, compCtx2.WorkerHashSuffix)
+
+	// Frontend never gets WorkerHashSuffix, even with the label
+	component3 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
+	}
+	compCtx3 := generateComponentContext(component3, "dgd", "ns", 1, "kubernetes")
+	assert.Empty(t, compCtx3.WorkerHashSuffix)
+}
+
+func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
+	w := NewWorkerDefaults()
+
+	// With suffix
+	container, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace:  "ns-dgd",
+		ComponentType:    commonconsts.ComponentTypeWorker,
+		WorkerHashSuffix: "abc123",
+	})
+	assert.NoError(t, err)
+	found := false
+	for _, env := range container.Env {
+		if env.Name == commonconsts.DynamoNamespaceWorkerSuffixEnvVar {
+			assert.Equal(t, "abc123", env.Value)
+			found = true
+		}
+	}
+	assert.True(t, found, "DYN_NAMESPACE_WORKER_SUFFIX should be set")
+
+	// Without suffix — env var should NOT be present
+	container2, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "ns-dgd",
+		ComponentType:   commonconsts.ComponentTypeWorker,
+	})
+	assert.NoError(t, err)
+	for _, env := range container2.Env {
+		assert.NotEqual(t, commonconsts.DynamoNamespaceWorkerSuffixEnvVar, env.Name,
+			"DYN_NAMESPACE_WORKER_SUFFIX should not be set when suffix is empty")
+	}
+}
+
+func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
+	f := NewFrontendDefaults()
+	container, err := f.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "myns-mydgd",
+		ComponentType:   commonconsts.ComponentTypeFrontend,
+	})
+	assert.NoError(t, err)
+	found := false
+	for _, env := range container.Env {
+		if env.Name == commonconsts.DynamoNamespacePrefixEnvVar {
+			assert.Equal(t, "myns-mydgd", env.Value)
+			found = true
+		}
+	}
+	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
 }

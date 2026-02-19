@@ -115,9 +115,14 @@ def create_temp_engine_args_file(args) -> Path:
         ),
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
-        "enable_local_indexer": getattr(args, "enable_local_indexer", None),
+        "enable_local_indexer": not getattr(args, "durable_kv_events", False),
         # Note: bootstrap_port is NOT included here - it's set per-worker in launch_workers()
     }
+
+    # Parse --reasoning JSON string into a nested object
+    reasoning_str = getattr(args, "reasoning", None)
+    if reasoning_str:
+        engine_args["reasoning"] = json.loads(reasoning_str)
 
     # Remove None values to only include explicitly set arguments
     engine_args = {k: v for k, v in engine_args.items() if v is not None}
@@ -249,7 +254,7 @@ def parse_args():
         "--speedup-ratio",
         type=float,
         default=None,
-        help="Speedup ratio for mock execution (default: 1.0)",
+        help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
     )
     parser.add_argument(
         "--data-parallel-size",
@@ -279,6 +284,16 @@ def parse_args():
         "All workers share the same tokio runtime and thread pool.",
     )
 
+    # Reasoning token output
+    parser.add_argument(
+        "--reasoning",
+        type=str,
+        default=None,
+        help="Enable reasoning token output. JSON object with fields: "
+        "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
+        'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
+    )
+
     # Legacy support - allow direct JSON file specification
     parser.add_argument(
         "--extra-engine-args",
@@ -301,10 +316,10 @@ def parse_args():
         help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
     )
     parser.add_argument(
-        "--enable-local-indexer",
+        "--durable-kv-events",
         action="store_true",
-        default=False,
-        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (default: False)",
+        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
     )
     parser.add_argument(
         "--bootstrap-ports",
@@ -316,11 +331,22 @@ def parse_args():
         "If not specified, bootstrap rendezvous is disabled.",
     )
     parser.add_argument(
-        "--store-kv",
+        "--stagger-delay",
+        type=float,
+        default=-1.0,
+        help=(
+            "Delay in seconds between launching each worker to avoid overwhelming "
+            "etcd/NATS/frontend with many workers. Set to 0 to disable staggering. "
+            "Use -1 for auto mode (0.1s for 32-128 workers, 0.2s for >128 workers, 0 otherwise). "
+            "Default: -1 (auto)"
+        ),
+    )
+    parser.add_argument(
+        "--discovery-backend",
         type=str,
-        choices=["etcd", "file", "mem"],
-        default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        choices=["kubernetes", "etcd", "file", "mem"],
+        default=os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        help="Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",

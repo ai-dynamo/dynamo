@@ -46,6 +46,13 @@ dynamo-operator:
       # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
       renewInterval: 10s
 
+  # -- GPU discovery configuration (only applies when namespaceRestriction.enabled=true)
+  gpuDiscovery:
+    # -- Whether to provision a ClusterRole for the namespace-scoped operator to read GPU node labels.
+    # When true (default), Helm creates a ClusterRole/ClusterRoleBinding granting node read access.
+    # Set to false if your installer lacks ClusterRole creation permissions.
+    enabled: true
+
   # -- The Dynamo discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery. --
   discoveryBackend: "kubernetes"
 
@@ -209,6 +216,52 @@ dynamo-operator:
           # -- Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued.
           renewBefore: "720h"
 
+  # Checkpoint configuration for fast pod restore using CRIU/cuda-checkpoint
+  # NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
+  # using the chrek Helm chart in each namespace where checkpointing is needed.
+  checkpoint:
+    # -- Whether to enable checkpoint/restore functionality
+    enabled: false
+
+    # -- Image used for init containers in checkpoint jobs (e.g., signal file cleanup)
+    initContainerImage: "busybox:latest"
+
+    # -- Path written by worker when model is loaded and ready for checkpointing
+    readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
+
+    # -- Path written by restore-entrypoint after successful CRIU restore
+    restoreMarkerFilePath: "/tmp/dynamo-restored"
+
+    # Storage configuration
+    # These settings tell the operator where to find checkpoint storage
+    # Must match the configuration in the chrek chart
+    storage:
+      # -- Storage backend type: pvc, s3, or oci
+      type: pvc
+
+      # -- Host path for signal files (communication between checkpoint pod and DaemonSet)
+      signalHostPath: "/var/lib/chrek/signals"
+
+      # PVC storage configuration (used when type=pvc)
+      pvc:
+        # -- Name of the PVC created by the chrek chart
+        pvcName: "chrek-pvc"
+        # -- Base path within the PVC for storing checkpoints
+        basePath: "/checkpoints"
+
+      # S3 storage configuration (used when type=s3)
+      s3:
+        # -- S3 URI in format: s3://[endpoint/]bucket/prefix
+        uri: ""
+        # -- Reference to a secret containing AWS credentials
+        credentialsSecretRef: ""
+
+      # OCI registry storage configuration (used when type=oci)
+      oci:
+        # -- OCI URI in format: oci://registry/repository
+        uri: ""
+        # -- Reference to a docker config secret for registry authentication
+        credentialsSecretRef: ""
 
 # Grove component - distributed inference orchestration
 grove:

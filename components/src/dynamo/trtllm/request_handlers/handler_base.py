@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import asyncio
-import copy
+import dataclasses
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -26,6 +26,8 @@ from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.sampling_params import GuidedDecodingParams
+from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -38,6 +40,7 @@ from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
+from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -68,11 +71,19 @@ class RequestHandlerConfig:
     metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
+    encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
 
 
-class HandlerBase:
+class HandlerBase(BaseGenerativeHandler):
     """
-    Base class for request handlers.
+    Base class for LLM request handlers (text generation, multimodal LLM).
+
+    This class is dedicated to LLM-based generation using TensorRT-LLM engine.
+    For diffusion-based handlers (video, image), see VideoGenerationHandler
+    and ImageGenerationHandler which inherit directly from BaseGenerativeHandler.
+
+    Inherits from BaseGenerativeHandler to ensure a consistent interface
+    across all generative handlers (LLM, video, image).
     """
 
     def __init__(self, config: RequestHandlerConfig):
@@ -198,11 +209,12 @@ class HandlerBase:
             )
 
             # Abort the generation
-            # Temporary: Disabled on DECODE workers to prevent engine hangs in
-            # disaggregated setups where abort() may cause the engine to get stuck
-            if self.disaggregation_mode != DisaggregationMode.DECODE:
-                generation_result.abort()
-                logging.debug(f"Aborted Request ID: {context.id()}")
+            # Temporary:
+            #   Disable calling abort() on the engine, which may get stuck if a
+            #   sufficiently large number of concurrent requests is cancelled.
+            # Note to restore:
+            #   call `generation_result.abort()`; and then
+            #   log `logging.debug(f"Aborted Request ID: {context.id()}")`
 
             # Clean up any remaining background task
             for task in pending:
@@ -615,13 +627,9 @@ class HandlerBase:
 
         num_output_tokens_so_far = 0
 
-        sampling_params = copy.deepcopy(self.default_sampling_params)
-
-        for key, value in request["sampling_options"].items():
-            if not value:
-                continue
-            if hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+        sampling_params = self._override_sampling_params(
+            self.default_sampling_params, request
+        )
 
         # Additional sampling params in output options
         output_options = request.get("output_options", {})
@@ -682,6 +690,19 @@ class HandlerBase:
         # Build trace headers for distributed tracing
         trace_headers = build_trace_headers(context)
 
+        # Extract dp_rank from request's routing hints for attention DP routing
+        routing = request.get("routing", {})
+        dp_rank = routing.get("dp_rank") if routing else None
+        scheduling_params = None
+        if dp_rank is not None:
+            scheduling_params = SchedulingParams(
+                attention_dp_rank=dp_rank,
+                attention_dp_relax=False,  # Strict routing - use the rank dynamo router selected
+            )
+            logging.debug(
+                f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
+            )
+
         try:
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
@@ -690,6 +711,7 @@ class HandlerBase:
                 disaggregated_params=disaggregated_params,
                 streaming=streaming,
                 trace_headers=trace_headers,
+                scheduling_params=scheduling_params,
             )
 
             # Monitor for cancellation triggers and cancel by calling generation_result.abort()
@@ -818,3 +840,29 @@ class HandlerBase:
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
+
+    @staticmethod
+    def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
+        overrides = {
+            key: value
+            for key, value in request["sampling_options"].items()
+            if value is not None
+        }
+
+        # Convert guided_decoding dict (from Rust serialization) to GuidedDecodingParams.
+        # Explicit field mapping avoids breakage if either side adds fields the other
+        # doesn't know about (e.g. Rust's "backend"/"choice" vs TRT-LLM's fields).
+        guided_decoding = overrides.pop("guided_decoding", None)
+        if guided_decoding is not None and isinstance(guided_decoding, dict):
+            overrides["guided_decoding"] = GuidedDecodingParams(
+                json=guided_decoding.get("json"),
+                regex=guided_decoding.get("regex"),
+                grammar=guided_decoding.get("grammar"),
+                json_object=guided_decoding.get("json_object", False),
+                structural_tag=guided_decoding.get("structural_tag"),
+            )
+
+        # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:
+        # 1. it catches unsupported fields / attributes.
+        # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
+        return dataclasses.replace(sampling_params, **overrides)

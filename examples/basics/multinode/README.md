@@ -4,8 +4,8 @@ This example demonstrates running Dynamo across multiple nodes with **KV-aware r
 
 For more information about the core concepts, see:
 
-- [Dynamo Disaggregated Serving](../../../docs/design_docs/disagg_serving.md)
-- [KV Cache Routing Architecture](../../../docs/router/kv_cache_routing.md)
+- [Dynamo Disaggregated Serving](../../../docs/pages/design-docs/disagg-serving.md)
+- [KV Cache Routing](../../../docs/pages/components/router/README.md)
 
 ## Architecture Overview
 
@@ -65,7 +65,7 @@ This is particularly beneficial for:
 - **Similar queries**: Common prefixes are computed once and reused
 - **Batch processing**: Related requests can be routed to workers with shared context
 
-For detailed technical information about how KV routing works, see the [KV Cache Routing Architecture documentation](../../../docs/router/kv_cache_routing.md).
+For detailed technical information about how KV routing works, see the [Router Guide](../../../docs/pages/components/router/router-guide.md).
 
 ## Prerequisites
 
@@ -82,13 +82,13 @@ Note the IP address of this node - you'll need it for worker configuration.
 
 ### 2. Software Requirements
 
-Install Dynamo with [SGLang](https://docs.sglang.ai/) support:
+Install Dynamo with [SGLang](https://docs.sglang.io/) support:
 
 ```bash
 pip install ai-dynamo[sglang]
 ```
 
-For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../../docs/backends/sglang/README.md).
+For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../../docs/pages/backends/sglang/README.md).
 
 ### 3. Network Requirements
 
@@ -475,7 +475,7 @@ python -m dynamo.frontend \
     --router-temperature 0.0     # Temperature for probabilistic routing (0 = deterministic)
 ```
 
-For more advanced configuration options including custom worker selection, block size tuning, and alternative indexing strategies, see the [KV Cache Routing documentation](../../../docs/router/kv_cache_routing.md).
+For more advanced configuration options including custom worker selection, block size tuning, and alternative indexing strategies, see the [Router Guide](../../../docs/pages/components/router/router-guide.md).
 
 ## Cleanup
 

@@ -276,13 +276,49 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "multimodal_agg_qwen2vl_2b_epd": VLLMConfig(
-        name="multimodal_agg_qwen2vl_2b_epd",
+    # The original script is misleading  agg_multimodal_epd.sh is actually a disagg
+    # case which uses disgg encoder. We are bringing this test back shortly
+    # TODO(qiwa): enable this in https://github.com/ai-dynamo/dynamo/pull/6061/
+    # "multimodal_agg_qwen2vl_2b_epd": VLLMConfig(
+    #     name="multimodal_agg_qwen2vl_2b_epd",
+    #     directory=vllm_dir,
+    #     script_name="agg_multimodal_epd.sh",
+    #     marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+    #     model="Qwen/Qwen2-VL-2B-Instruct",
+    #     script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
+    #     request_payloads=[
+    #         chat_payload(
+    #             [
+    #                 {
+    #                     "type": "text",
+    #                     "text": "What colors are in the following image? Respond only with the colors.",
+    #                 },
+    #                 {
+    #                     "type": "image_url",
+    #                     "image_url": {"url": MULTIMODAL_IMG_URL},
+    #                 },
+    #             ],
+    #             repeat_count=1,
+    #             # With proper prompt templating, the model actually only returns "green",
+    #             # verified behavior with native vLLM.
+    #             expected_response=["green"],
+    #             temperature=0.0,
+    #             max_tokens=100,
+    #         )
+    #     ],
+    # ),
+    "multimodal_agg_frontend_decoding": VLLMConfig(
+        name="multimodal_agg_frontend_decoding",
         directory=vllm_dir,
-        script_name="agg_multimodal_epd.sh",
+        script_name="agg_multimodal.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen2-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
+        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
+        script_args=[
+            "--model",
+            "Qwen/Qwen2-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
         request_payloads=[
             chat_payload(
                 [
@@ -296,8 +332,6 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                # With proper prompt templating, the model actually only returns "green",
-                # verified behavior with native vLLM.
                 expected_response=["green"],
                 temperature=0.0,
                 max_tokens=100,
@@ -421,16 +455,18 @@ vllm_configs = {
             ),
         ],
     ),
-    # TODO: Update this test case when we have video multimodal support in vllm official components
+    # Video multimodal tests for nightly CI pipeline
+    # These tests validate video inference capabilities with LLaVA-NeXT-Video model
+    # Reference: Linear OPS-3015
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_agg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
-        delayed_start=0,
+        delayed_start=60,  # Video models require longer loading time
         script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
-        timeout=360,
+        timeout=600,  # 10 minutes for video processing overhead
         request_payloads=[
             chat_payload(
                 [
@@ -444,7 +480,35 @@ vllm_configs = {
                 ],
                 repeat_count=1,
                 expected_response=["rabbit"],
-                temperature=0.7,
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "multimodal_video_disagg": VLLMConfig(
+        name="multimodal_video_disagg",
+        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
+        script_name="video_disagg.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
+        model="llava-hf/LLaVA-NeXT-Video-7B-hf",
+        delayed_start=60,  # Video models require longer loading time
+        script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
+        timeout=600,  # 10 minutes for video processing overhead
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {
+                            "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["rabbit"],
+                temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),

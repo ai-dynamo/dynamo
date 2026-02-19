@@ -22,12 +22,24 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+)
+
+const (
+	// maxCombinedResourceNameLength is the maximum allowed combined length for Grove resource names.
+	// This constraint comes from Grove's PodCliqueSet webhook validation which enforces a 45-character
+	// limit on the combined length of PodCliqueSet name + PodCliqueScalingGroup name + PodClique name.
+	// Pod names follow formats like: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
+	// The random string and hyphens consume additional characters, leaving 45 for the resource names.
+	maxCombinedResourceNameLength = 45
 )
 
 // DynamoGraphDeploymentValidator validates DynamoGraphDeployment resources.
@@ -60,6 +72,11 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 	// Validate that at least one service is specified
 	if len(v.deployment.Spec.Services) == 0 {
 		return nil, fmt.Errorf("spec.services must have at least one service")
+	}
+
+	// Validate annotations
+	if err := v.validateAnnotations(); err != nil {
+		return nil, err
 	}
 
 	// Validate PVCs
@@ -106,6 +123,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 	// Validate replicas changes for services with scaling adapter enabled
 	// Pass userInfo (may be nil - will fail closed for DGDSA-enabled services)
 	if err := v.validateReplicasChanges(old, userInfo); err != nil {
+		return warnings, err
+	}
+
+	// Validate no restart.id change during active rolling update
+	if err := v.validateNoRestartDuringRollingUpdate(old); err != nil {
 		return warnings, err
 	}
 
@@ -237,6 +259,14 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 // validateService validates a single service configuration using SharedSpecValidator.
 // Returns warnings and error.
 func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
+	// Validate service name length constraints for Grove PodCliqueSet naming
+	// Only validate when Grove pathway may be in use
+	if v.isGrovePathway() {
+		if err := v.validateServiceNameLength(serviceName, service); err != nil {
+			return nil, err
+		}
+	}
+
 	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
 	fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
 	calculatedNamespace := v.deployment.GetDynamoNamespaceForService(service)
@@ -249,6 +279,65 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 	}
 
 	return sharedValidator.Validate(ctx)
+}
+
+// validateServiceNameLength validates that the service name combined with the DGD name
+// won't exceed Grove's 45-character limit for resource naming.
+//
+// Grove generates PodCliqueSet resources with the following naming patterns:
+// - PodCliqueSet name: DGD name (e.g., "vllm-agg")
+// - For multinode services:
+//   - PodCliqueScalingGroup name: lowercase(serviceName) (e.g., "vllmprefillworker")
+//   - PodClique names: lowercase(serviceName + "-ldr") and lowercase(serviceName + "-wkr")
+//
+// - For single-node services:
+//   - PodClique name: lowercase(serviceName)
+//
+// The combined length of these names must not exceed 45 characters.
+func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
+	dgdName := v.deployment.Name
+	lowerServiceName := strings.ToLower(serviceName)
+
+	// Check if this is a multinode service
+	isMultinode := service.GetNumberOfNodes() > 1
+
+	if isMultinode {
+		// For multinode: PodCliqueSet name + PodCliqueScalingGroup name + PodClique name (with leader suffix)
+		// The PodClique name is serviceName + "-ldr" (using GroveRoleSuffixLeader)
+		leaderPodCliqueName := lowerServiceName + "-" + consts.GroveRoleSuffixLeader
+		combinedLength := len(dgdName) + len(lowerServiceName) + len(leaderPodCliqueName)
+
+		if combinedLength > maxCombinedResourceNameLength {
+			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
+				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
+				"For multinode services, the combined length of DGD name + service name + service name with role suffix (e.g., '%s-ldr') must not exceed %d characters",
+				serviceName, combinedLength, maxCombinedResourceNameLength,
+				dgdName, len(dgdName), serviceName, len(serviceName),
+				lowerServiceName, maxCombinedResourceNameLength)
+		}
+	} else {
+		// For single-node: PodCliqueSet name + PodClique name
+		combinedLength := len(dgdName) + len(lowerServiceName)
+
+		if combinedLength > maxCombinedResourceNameLength {
+			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
+				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
+				"The combined length of DGD name + service name must not exceed %d characters",
+				serviceName, combinedLength, maxCombinedResourceNameLength,
+				dgdName, len(dgdName), serviceName, len(serviceName),
+				maxCombinedResourceNameLength)
+		}
+	}
+
+	return nil
+}
+
+// isGrovePathway determines if Grove pathway may be used for this deployment.
+// Grove is used when the nvidia.com/enable-grove annotation is NOT explicitly set to "false".
+// This is a conservative check - if Grove might be used, we validate the name length constraints.
+func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
+	return v.deployment.Annotations == nil ||
+		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
 }
 
 // validatePVCs validates the PVC configurations.
@@ -335,6 +424,26 @@ func (v *DynamoGraphDeploymentValidator) validateRestartStrategyOrder() error {
 	return err
 }
 
+// validateAnnotations validates known DGD annotations have valid values.
+func (v *DynamoGraphDeploymentValidator) validateAnnotations() error {
+	annotations := v.deployment.GetAnnotations()
+	if annotations == nil {
+		return nil
+	}
+
+	var errs []error
+
+	// Validate operator origin version is valid semver (if present)
+	if value, exists := annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+		if _, err := semver.NewVersion(value); err != nil {
+			errs = append(errs, fmt.Errorf("annotation %s has invalid value %q: must be valid semver",
+				consts.KubeAnnotationDynamoOperatorOriginVersion, value))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 func getUnique[T comparable](slice []T) []T {
 	seen := make(map[T]struct{}, len(slice))
 	uniqueSlice := make([]T, 0, len(slice))
@@ -367,4 +476,32 @@ func difference(a, b map[string]struct{}) []string {
 		}
 	}
 	return result
+}
+
+// validateNoRestartDuringRollingUpdate rejects restart.id changes while a rolling update is active.
+func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	// Check if a rolling update is active (Pending or InProgress)
+	if old.Status.RollingUpdate == nil {
+		return nil
+	}
+	phase := old.Status.RollingUpdate.Phase
+	if phase != nvidiacomv1alpha1.RollingUpdatePhasePending && phase != nvidiacomv1alpha1.RollingUpdatePhaseInProgress {
+		return nil
+	}
+
+	// Compare restart IDs
+	oldID := ""
+	if old.Spec.Restart != nil {
+		oldID = old.Spec.Restart.ID
+	}
+	newID := ""
+	if v.deployment.Spec.Restart != nil {
+		newID = v.deployment.Spec.Restart.ID
+	}
+
+	if oldID != newID {
+		return fmt.Errorf("spec.restart.id cannot be changed while a rolling update is %s", phase)
+	}
+
+	return nil
 }
