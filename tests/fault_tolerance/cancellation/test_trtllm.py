@@ -31,6 +31,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,

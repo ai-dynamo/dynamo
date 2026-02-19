@@ -7,15 +7,11 @@ use std::time::Duration;
 use anyhow::Result;
 
 use dynamo_async_openai::types::ChatCompletionRequestUserMessageContentPart;
+use dynamo_memory::nixl::NixlAgent;
 
-use super::decoders::MediaDecoder;
-use super::rdma::RdmaMediaDataDescriptor;
-
-#[cfg(feature = "media-nixl")]
-use {
-    super::common::EncodedMediaData, super::decoders::Decoder, super::rdma::get_nixl_agent,
-    dynamo_memory::nixl::NixlAgent,
-};
+use super::common::EncodedMediaData;
+use super::decoders::{Decoder, MediaDecoder};
+use super::rdma::{RdmaMediaDataDescriptor, get_nixl_agent};
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -75,7 +71,6 @@ pub struct MediaLoader {
     http_client: reqwest::Client,
     #[allow(dead_code)]
     media_fetcher: MediaFetcher,
-    #[cfg(feature = "media-nixl")]
     nixl_agent: NixlAgent,
 }
 
@@ -91,14 +86,12 @@ impl MediaLoader {
 
         let http_client = http_client_builder.build()?;
 
-        #[cfg(feature = "media-nixl")]
         let nixl_agent = get_nixl_agent()?;
 
         Ok(Self {
             media_decoder,
             http_client,
             media_fetcher,
-            #[cfg(feature = "media-nixl")]
             nixl_agent,
         })
     }
@@ -108,66 +101,58 @@ impl MediaLoader {
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         media_io_kwargs: Option<&MediaDecoder>,
     ) -> Result<RdmaMediaDataDescriptor> {
-        #[cfg(not(feature = "media-nixl"))]
-        anyhow::bail!(
-            "NIXL is not supported, cannot decode and register media data {oai_content_part:?} with media_io_kwargs {media_io_kwargs:?}"
-        );
+        // fetch the media, decode and NIXL-register
+        let decoded = match oai_content_part {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+                let mdc_decoder = self
+                    .media_decoder
+                    .image
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
-        #[cfg(feature = "media-nixl")]
-        {
-            // fetch the media, decode and NIXL-register
-            let decoded = match oai_content_part {
-                ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+                let url = &image_part.image_url.url;
+                self.media_fetcher.check_if_url_allowed(url)?;
+                let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+
+                // Use runtime decoder if provided, with MDC limits enforced
+                let decoder =
+                    mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
+                decoder.decode_async(data).await?
+            }
+            #[allow(unused_variables)]
+            ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
+                #[cfg(not(feature = "media-ffmpeg"))]
+                anyhow::bail!("Video decoding requires the 'media-ffmpeg' feature to be enabled");
+
+                #[cfg(feature = "media-ffmpeg")]
+                {
                     let mdc_decoder =
-                        self.media_decoder.image.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("Model does not support image inputs")
+                        self.media_decoder.video.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("Model does not support video inputs")
                         })?;
 
-                    let url = &image_part.image_url.url;
+                    let url = &video_part.video_url.url;
                     self.media_fetcher.check_if_url_allowed(url)?;
                     let data = EncodedMediaData::from_url(url, &self.http_client).await?;
 
                     // Use runtime decoder if provided, with MDC limits enforced
                     let decoder =
-                        mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
+                        mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
                     decoder.decode_async(data).await?
                 }
-                #[allow(unused_variables)]
-                ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
-                    #[cfg(not(feature = "media-ffmpeg"))]
-                    anyhow::bail!(
-                        "Video decoding requires the 'media-ffmpeg' feature to be enabled"
-                    );
+            }
+            ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
+                anyhow::bail!("Audio decoding is not supported yet");
+            }
+            _ => anyhow::bail!("Unsupported media type"),
+        };
 
-                    #[cfg(feature = "media-ffmpeg")]
-                    {
-                        let mdc_decoder = self.media_decoder.video.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("Model does not support video inputs")
-                        })?;
-
-                        let url = &video_part.video_url.url;
-                        self.media_fetcher.check_if_url_allowed(url)?;
-                        let data = EncodedMediaData::from_url(url, &self.http_client).await?;
-
-                        // Use runtime decoder if provided, with MDC limits enforced
-                        let decoder = mdc_decoder
-                            .with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
-                        decoder.decode_async(data).await?
-                    }
-                }
-                ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
-                    anyhow::bail!("Audio decoding is not supported yet");
-                }
-                _ => anyhow::bail!("Unsupported media type"),
-            };
-
-            let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
-            Ok(rdma_descriptor)
-        }
+        let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+        Ok(rdma_descriptor)
     }
 }
 
-#[cfg(all(test, feature = "media-nixl", feature = "testing-nixl"))]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::super::decoders::ImageDecoder;
     use super::super::rdma::DataType;

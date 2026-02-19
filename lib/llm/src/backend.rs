@@ -15,11 +15,10 @@
 //! Further post-processing can happen in the response stream. One example is the jailing mechanism for partial
 //! hidden stop condition matches, which can be handled in the response stream rather than the backend.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
-use tracing as log;
 
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::{
@@ -39,6 +38,7 @@ use crate::protocols::{
             PreprocessedRequest,
         },
         preprocessor::PreprocessedEmbeddingRequest,
+        timing::RequestTracker,
     },
 };
 use crate::tokenizers::{DecodeStream, HuggingFaceTokenizer, Tokenizer};
@@ -99,6 +99,7 @@ impl Backend {
         stop_conditions: StopConditions,
         skip_special_tokens: bool,
         include_stop_str_in_output: bool,
+        tracker: Option<Arc<RequestTracker>>,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
@@ -107,6 +108,7 @@ impl Backend {
             tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
             stop_conditions,
             include_stop_str_in_output,
+            tracker,
         );
 
         Ok(DecoderUnfoldState {
@@ -144,6 +146,7 @@ impl
             .sampling_options
             .include_stop_str_in_output
             .unwrap_or(false);
+        let tracker = request.tracker.clone();
 
         let next_stream = next.generate(request).await?;
 
@@ -154,6 +157,7 @@ impl
             stop_conditions,
             skip_special_tokens,
             include_stop_str_in_output,
+            tracker,
         )?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
@@ -226,7 +230,7 @@ impl
 
                     if state.validate_engine_decode {
                         if data.finish_reason != finish_reason {
-                            log::warn!(
+                            tracing::warn!(
                                 "finish reason mismatch: expected {:?}, got {:?}",
                                 data.finish_reason,
                                 finish_reason
@@ -234,7 +238,11 @@ impl
                         }
 
                         if data.text.is_some() && data.text != text {
-                            log::warn!("text mismatch: expected {:?}, got {:?}", data.text, text);
+                            tracing::warn!(
+                                "text mismatch: expected {:?}, got {:?}",
+                                data.text,
+                                text
+                            );
                         }
                     }
 
@@ -326,6 +334,7 @@ impl
 #[allow(dead_code)]
 pub struct Decoder {
     decode_stream: DecodeStream,
+    tracker: Option<Arc<RequestTracker>>,
 
     // do not trigger stop conditions until at least this many tokens have been generated
     min_tokens: u32,
@@ -398,6 +407,7 @@ impl Decoder {
         decode_stream: DecodeStream,
         stop_condition: StopConditions,
         include_stop_str_in_output: bool,
+        tracker: Option<Arc<RequestTracker>>,
     ) -> Self {
         let hidden_stop_ids: HashSet<TokenIdType> = stop_condition
             .stop_token_ids_hidden
@@ -425,6 +435,7 @@ impl Decoder {
 
         Self {
             decode_stream,
+            tracker,
             hidden_stop_ids,
             hidden_stop_sequences,
             visible_stop_sequences,
@@ -447,7 +458,11 @@ impl Decoder {
         self.generated_tokens += 1;
 
         // decode the token
+        let detokenize_start = Instant::now();
         let token = self.decode_stream.step(token_id)?;
+        if let Some(tracker) = &self.tracker {
+            tracker.record_detokenize_latency(detokenize_start.elapsed());
+        }
 
         // stop conditions to not apply until the minimum number of tokens have been generated
         if self.generated_tokens < self.min_tokens {
@@ -468,18 +483,12 @@ impl Decoder {
             && let Some(token) = &token
         {
             let pre_append = self.jail.len();
-            log::debug!("pre_append: {}", pre_append);
-            log::debug!("jail: {}", self.jail);
             self.jail.push_str(token);
-            log::debug!("post_append: {}", self.jail.len());
-            log::debug!("jail: {}", self.jail);
 
             // Check hidden stop sequences first (excluded from output)
             for seq in &self.hidden_stop_sequences {
-                log::debug!("stop seq: {}", seq);
                 if let Some(offset) = galil_seiferas::gs_find(self.jail.as_bytes(), seq.as_bytes())
                 {
-                    log::debug!("offset: {}", offset);
                     // return only new bytes after pre_append .. offset (excluding stop sequence)
                     // example: seq = "ox", token = "boxes", return "b"
                     // note: this changes when we start jailing tokens for partial matches

@@ -14,7 +14,9 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import torch
 from tensorrt_llm.llmapi import DisaggregatedParams
 
-from dynamo.common.multimodal.async_encoder_cache import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles
 from dynamo.trtllm.multimodal.hasher import MultimodalHasher
 
@@ -25,7 +27,7 @@ async def fetch_embeddings_from_encoder(
     image_urls: List[str],
     request: Dict[str, Any],
     encode_client: Any,
-    encoder_cache: Optional[EncoderCacheManager] = None,
+    encoder_cache: Optional[MultimodalEmbeddingCacheManager] = None,
 ) -> Union[List[torch.Tensor], DisaggregatedParams]:
     """
     Fetch embeddings from remote encode worker.
@@ -112,7 +114,7 @@ async def _remote_encode_full_epd(
 async def _fetch_embeddings_with_cache(
     image_urls: List[str],
     request: Dict[str, Any],
-    cache: EncoderCacheManager,
+    cache: MultimodalEmbeddingCacheManager,
     encode_fn: Callable[[Dict[str, Any]], DisaggregatedParams],
 ) -> List[torch.Tensor]:
     """

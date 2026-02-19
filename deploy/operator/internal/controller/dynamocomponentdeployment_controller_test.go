@@ -814,6 +814,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+											{Name: "NIXL_TELEMETRY_ENABLE", Value: "n"},
+											{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+											{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "19090"},
 											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
 												FieldRef: &corev1.ObjectFieldSelector{
 													FieldPath: "metadata.name",
@@ -835,6 +838,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,
+											},
+											{
+												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: commonconsts.DynamoNixlPort,
 											},
 										},
 										VolumeMounts: []corev1.VolumeMount{
@@ -949,6 +955,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+											{Name: "NIXL_TELEMETRY_ENABLE", Value: "n"},
+											{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+											{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: "19090"},
 											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
 												FieldRef: &corev1.ObjectFieldSelector{
 													FieldPath: "metadata.name",
@@ -970,6 +979,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,
+											},
+											{
+												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: commonconsts.DynamoNixlPort,
 											},
 										},
 										VolumeMounts: []corev1.VolumeMount{
@@ -1291,9 +1303,9 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	// Set up reconciler
 	recorder := record.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:      fakeKubeClient,
-		Recorder:    recorder,
-		Config:      controller_common.Config{},
+		Client:   fakeKubeClient,
+		Recorder: recorder,
+		Config:   controller_common.Config{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -1398,9 +1410,9 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 
 	recorder := record.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:      fakeKubeClient,
-		Recorder:    recorder,
-		Config:      controller_common.Config{},
+		Client:   fakeKubeClient,
+		Recorder: recorder,
+		Config:   controller_common.Config{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -1706,9 +1718,9 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			// Set up reconciler
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:      fakeKubeClient,
-				Recorder:    recorder,
-				Config:      controller_common.Config{},
+				Client:   fakeKubeClient,
+				Recorder: recorder,
+				Config:   controller_common.Config{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1795,6 +1807,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
+					ComponentNames:    []string{"test-component"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					ReadyReplicas:     ptr.To(int32(2)),
@@ -1836,6 +1849,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:     v1alpha1.ComponentKindDeployment,
 					ComponentName:     "test-component",
+					ComponentNames:    []string{"test-component"},
 					Replicas:          1,
 					UpdatedReplicas:   1,
 					ReadyReplicas:     ptr.To(int32(1)),
@@ -1900,9 +1914,9 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			// Set up reconciler
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
-				Client:      fakeKubeClient,
-				Recorder:    recorder,
-				Config:      controller_common.Config{},
+				Client:   fakeKubeClient,
+				Recorder: recorder,
+				Config:   controller_common.Config{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil

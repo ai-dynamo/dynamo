@@ -1311,7 +1311,14 @@ def fetch_kvbm_metrics(port: int, timeout: int = 10) -> dict:
     Raises:
         RuntimeError: If metrics endpoint is unreachable or returns error
     """
-    response = requests.get(f"http://localhost:{port}/metrics", timeout=timeout)
+    url = f"http://localhost:{port}/metrics"
+    try:
+        response = requests.get(url, timeout=timeout)
+    except requests.exceptions.ConnectionError as err:
+        raise RuntimeError(
+            f"Metrics endpoint {url} refused connection. "
+            f"Check that DYN_KVBM_METRICS_PORT={port} matches the running server."
+        ) from err
     if response.status_code != 200:
         raise RuntimeError(
             f"Metrics endpoint returned status {response.status_code}. "

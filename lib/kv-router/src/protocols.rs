@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_tokens::{SequenceHash, Token};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
@@ -114,6 +115,8 @@ pub enum RouterRequest {
     #[serde(rename = "new")]
     New {
         tokens: Vec<Token>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     },
     MarkPrefill,
     MarkFree,
@@ -121,7 +124,10 @@ pub enum RouterRequest {
 
 impl Default for RouterRequest {
     fn default() -> Self {
-        RouterRequest::New { tokens: vec![] }
+        RouterRequest::New {
+            tokens: vec![],
+            block_mm_infos: None,
+        }
     }
 }
 
@@ -501,11 +507,11 @@ impl RouterEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlapScores {
     /// Map of worker (with dp_rank) to score.
-    pub scores: std::collections::HashMap<WorkerWithDpRank, u32>,
+    pub scores: FxHashMap<WorkerWithDpRank, u32>,
     /// List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
     /// Map of worker to their tree size (number of blocks in the tree for that worker).
-    pub tree_sizes: std::collections::HashMap<WorkerWithDpRank, usize>,
+    pub tree_sizes: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 impl Default for OverlapScores {
@@ -522,9 +528,9 @@ impl OverlapScores {
     /// A new `OverlapScores`.
     pub fn new() -> Self {
         Self {
-            scores: std::collections::HashMap::new(),
+            scores: FxHashMap::default(),
             frequencies: Vec::with_capacity(32),
-            tree_sizes: std::collections::HashMap::new(),
+            tree_sizes: FxHashMap::default(),
         }
     }
 

@@ -83,6 +83,19 @@ pub mod openai {
         pub type OpenAIImagesStreamingEngine =
             ServerStreamingEngine<NvCreateImageRequest, Annotated<NvImagesResponse>>;
     }
+
+    pub mod videos {
+        use super::*;
+
+        pub use protocols::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
+
+        /// A [`UnaryEngine`] implementation for the OpenAI Videos API
+        pub type OpenAIVideosUnaryEngine = UnaryEngine<NvCreateVideoRequest, NvVideosResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the OpenAI Videos API
+        pub type OpenAIVideosStreamingEngine =
+            ServerStreamingEngine<NvCreateVideoRequest, Annotated<NvVideosResponse>>;
+    }
 }
 
 pub mod generic {

@@ -142,14 +142,6 @@ COPY --from=builder /restore-entrypoint /restore-entrypoint
 # Create checkpoint directory
 RUN mkdir -p /checkpoints
 
-# Set environment variables
-ENV HOST_PROC=/host/proc \
-    CONTAINERD_SOCKET=/run/containerd/containerd.sock \
-    CHECKPOINT_DIR=/checkpoints \
-    LISTEN_ADDR=:8080
-
-EXPOSE 8080
-
 USER root
 
 ENTRYPOINT ["/usr/local/bin/chrek-agent"]
@@ -172,7 +164,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnl-3-200 \
     libnl-route-3-200 \
     libprotobuf-c1 \
-    libgnutls30 \
+    libgnutls30t64 \
     libnftables1 \
     iproute2 \
     iptables \
@@ -191,23 +183,11 @@ COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /
 RUN chmod +x /usr/local/sbin/cuda-checkpoint
 
 # Create directories
-RUN mkdir -p /checkpoints /var/run/criu /tmp /var/criu-work
+RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
 
 # Copy restore binaries
 COPY --from=builder /restore-entrypoint /restore-entrypoint
 RUN chmod +x /restore-entrypoint
 
-COPY scripts/smart-entrypoint.sh /smart-entrypoint.sh
-RUN chmod +x /smart-entrypoint.sh
-
-# Set environment variables
-ENV DYN_CHECKPOINT_PATH=/checkpoints \
-    RESTORE_TRIGGER=/tmp/restore-trigger \
-    RESTORE_WAIT_TIMEOUT=300 \
-    CRIU_LOG_LEVEL=4 \
-    WAIT_FOR_CHECKPOINT=0 \
-    CUDA_PLUGIN_DIR=/usr/local/lib/criu \
-    DEBUG=0
-
-ENTRYPOINT ["/smart-entrypoint.sh"]
+ENTRYPOINT ["/restore-entrypoint"]
 CMD []

@@ -1,11 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionStreamResponseDelta, Role};
+use dynamo_async_openai::types::{
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, Role,
+};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{StreamExt, stream};
+
+/// Helper to extract text from ChatCompletionMessageContent
+fn get_text(content: &ChatCompletionMessageContent) -> &str {
+    match content {
+        ChatCompletionMessageContent::Text(text) => text.as_str(),
+        ChatCompletionMessageContent::Parts(_) => "",
+    }
+}
 
 /// Helper function to create a mock chat response chunk
 fn create_mock_response_chunk(
@@ -17,7 +27,7 @@ fn create_mock_response_chunk(
         index: 0,
         delta: ChatCompletionStreamResponseDelta {
             role: Some(Role::Assistant),
-            content: Some(content),
+            content: Some(ChatCompletionMessageContent::Text(content)),
             tool_calls: None,
             function_call: None,
             refusal: None,
@@ -61,7 +71,7 @@ mod tests {
         match expected_content {
             Some(expected) => {
                 assert_eq!(
-                    choice.delta.content.as_deref(),
+                    choice.delta.content.as_ref().map(get_text),
                     Some(expected),
                     "Content mismatch"
                 );
@@ -69,7 +79,7 @@ mod tests {
             None => {
                 assert!(
                     choice.delta.content.is_none()
-                        || choice.delta.content.as_ref().unwrap().is_empty(),
+                        || get_text(choice.delta.content.as_ref().unwrap()).is_empty(),
                     "Expected content to be None or empty, got: {:?}",
                     choice.delta.content
                 );
@@ -260,7 +270,7 @@ mod tests {
             let output_choice = &output.data.as_ref().unwrap().choices[0];
             assert_choice(
                 output_choice,
-                input_choice.delta.content.as_deref(),
+                input_choice.delta.content.as_ref().map(get_text),
                 input_choice.delta.reasoning_content.as_deref(),
             );
         }
@@ -316,7 +326,8 @@ mod tests {
             "Should contain Mistral reasoning content"
         );
         assert!(
-            normal_content.contains("Let me think") || normal_content.contains("Here's my answer"),
+            get_text(normal_content).contains("Let me think")
+                || get_text(normal_content).contains("Here's my answer"),
             "Should contain normal content"
         );
     }
@@ -379,7 +390,7 @@ mod tests {
 
                     // Collect normal content
                     if let Some(ref content) = choice.delta.content {
-                        all_normal_content.push_str(content);
+                        all_normal_content.push_str(get_text(content));
                     }
                 }
             }
@@ -450,8 +461,8 @@ mod tests {
             "Should contain Kimi reasoning content"
         );
         assert!(
-            normal_content.contains("Let me analyze")
-                || normal_content.contains("Here's my conclusion"),
+            get_text(normal_content).contains("Let me analyze")
+                || get_text(normal_content).contains("Here's my conclusion"),
             "Should contain normal content"
         );
     }
@@ -518,7 +529,7 @@ mod tests {
 
                     // Collect normal content
                     if let Some(ref content) = choice.delta.content {
-                        all_normal_content.push_str(content);
+                        all_normal_content.push_str(get_text(content));
                     }
 
                     // Check for tool calls
@@ -624,7 +635,7 @@ mod tests {
                         all_reasoning.push_str(reasoning);
                     }
                     if let Some(ref content) = choice.delta.content {
-                        all_normal_content.push_str(content);
+                        all_normal_content.push_str(get_text(content));
                     }
                     if let Some(ref tool_calls) = choice.delta.tool_calls
                         && !tool_calls.is_empty()

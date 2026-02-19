@@ -42,6 +42,9 @@ impl MemoryRegion for MockMemory {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn nixl_descriptor(&self) -> Option<NixlDescriptor> {
+        None
+    }
 }
 
 /// Mock memory region for testing serialization

@@ -7,20 +7,24 @@
 # 1. Deploys the disaggregated planner if not already running
 # 2. Sets up port forwarding to localhost:8000
 # 3. Waits for the deployment to be ready
-# 4. Runs the hardcoded scaling test (12 req/s -> 24 req/s)
+# 4. Runs the scaling test (8 req/s -> 18 req/s)
 # 5. Cleans up
+#
+# Supports two modes:
+#   --mode throughput  (default) Uses throughput-based planner
+#   --mode load        Uses load-based planner with regression scaling
 
 set -e
 
 # Configuration
 NAMESPACE=${NAMESPACE:-default}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YAML_FILE="$SCRIPT_DIR/disagg_planner.yaml"
 TEST_FILE="$SCRIPT_DIR/../test_scaling_e2e.py"
 FRONTEND_PORT=8000
 LOCAL_PORT=8000
 DEPLOYMENT_NAME="vllm-disagg-planner"
 SAVE_RESULTS=false
+MODE="throughput"
 
 # Colors for output
 RED='\033[0;31m'
@@ -198,14 +202,14 @@ cleanup_deployment() {
 }
 
 run_test() {
-    log_info "Running scaling test (graduated 8->18 req/s)..."
+    log_info "Running scaling test (graduated 8->18 req/s, mode=$MODE)..."
 
     local python_cmd="python3"
     if ! command -v python3 &> /dev/null; then
         python_cmd="python"
     fi
 
-    local test_args="--namespace $NAMESPACE"
+    local test_args="--namespace $NAMESPACE --mode $MODE"
     if [ "$SAVE_RESULTS" = true ]; then
         test_args="$test_args --save-results"
         log_info "Results will be saved to tests/planner/e2e_scaling_results"
@@ -227,17 +231,26 @@ main() {
                 NAMESPACE="$2"
                 shift 2
                 ;;
+            --mode)
+                MODE="$2"
+                if [[ "$MODE" != "throughput" && "$MODE" != "load" ]]; then
+                    log_error "Invalid mode: $MODE (must be 'throughput' or 'load')"
+                    exit 1
+                fi
+                shift 2
+                ;;
             --save-results)
                 SAVE_RESULTS=true
                 shift
                 ;;
             --help)
-                echo "Usage: $0 [--namespace NS] [--save-results]"
+                echo "Usage: $0 [--namespace NS] [--mode MODE] [--save-results]"
                 echo ""
-                echo "Run SLA planner scaling test (graduated 8->15->25 req/s prefill scaling)"
+                echo "Run SLA planner scaling test (graduated 8->18 req/s prefill scaling)"
                 echo ""
                 echo "Options:"
                 echo "  --namespace NS    Kubernetes namespace (default: default)"
+                echo "  --mode MODE       Scaling mode: 'throughput' (default) or 'load'"
                 echo "  --save-results    Save results to tests/planner/e2e_scaling_results instead of /tmp"
                 echo "  --help            Show this help"
                 exit 0
@@ -250,8 +263,17 @@ main() {
         esac
     done
 
+    # Select YAML based on mode
+    if [ "$MODE" = "load" ]; then
+        YAML_FILE="$SCRIPT_DIR/disagg_planner_load.yaml"
+    else
+        YAML_FILE="$SCRIPT_DIR/disagg_planner_throughput.yaml"
+    fi
+
     log_info "SLA Planner Scaling Test"
     log_info "Namespace: $NAMESPACE"
+    log_info "Mode: $MODE"
+    log_info "YAML: $YAML_FILE"
     log_info "Scenario: Graduated 8->18 req/s (1P1D -> 2P1D prefill scaling, ISL=4000/OSL=150)"
 
     check_prerequisites

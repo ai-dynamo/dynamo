@@ -14,31 +14,33 @@
 //! Run with: cargo bench --package dynamo-kv-router --bench radix_tree_microbench --features bench -- --help
 
 use clap::{Parser, ValueEnum};
+use dynamo_bench::common::LatencyStats;
 use dynamo_kv_router::{
-    RadixTree, RouterEvent,
-    bench_utils::{LatencyStats, SequenceData, generate_sequences},
+    ConcurrentRadixTree, OverlapScores, PositionalIndexer, RadixTree, RouterEvent, SyncIndexer,
+    bench_utils::{SequenceData, generate_sequences},
     compute_block_hash_for_seq,
-    flat_hashmap::FlatHashMap,
     protocols::LocalBlockHash,
 };
 use std::time::{Duration, Instant};
 
-/// Unified interface for RadixTree and FlatHashMap benchmarking.
+/// Unified interface for RadixTree, ConcurrentRadixTree, and PositionalIndexer benchmarking.
 ///
-/// Both structures have feature parity for store, remove, find_matches, and current_size.
+/// All structures have feature parity for store, remove, find_matches, and current_size.
 /// The key difference is find_matches input:
-/// - RadixTree: uses LocalBlockHash (tokens_hash)
-/// - FlatHashMap: uses ExternalSequenceBlockHash (cumulative sequence hash)
+/// - RadixTree/ConcurrentRadixTree: uses LocalBlockHash (tokens_hash)
+/// - PositionalIndexer: uses LocalBlockHash (same as tree; internal mapping uses sequence hashes)
 enum KvIndex {
     Tree(RadixTree),
-    Flat(FlatHashMap),
+    Concurrent(ConcurrentRadixTree),
+    Nested(PositionalIndexer),
 }
 
 impl KvIndex {
     fn name(&self) -> &'static str {
         match self {
             KvIndex::Tree(_) => "RadixTree",
-            KvIndex::Flat(_) => "FlatHashMap",
+            KvIndex::Concurrent(_) => "ConcurrentRadixTree",
+            KvIndex::Nested(_) => "PositionalIndexer",
         }
     }
 
@@ -47,8 +49,11 @@ impl KvIndex {
             KvIndex::Tree(tree) => {
                 let _ = tree.apply_event(event);
             }
-            KvIndex::Flat(map) => {
-                map.apply_event(event);
+            KvIndex::Concurrent(tree) => {
+                let _ = tree.apply_event(event);
+            }
+            KvIndex::Nested(map) => {
+                let _ = map.apply_event(event).ok();
             }
         }
     }
@@ -58,7 +63,8 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(local_hashes, early_exit),
-            KvIndex::Flat(map) => map.find_matches(local_hashes, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches_impl(&local_hashes, early_exit),
+            KvIndex::Nested(map) => map.find_matches(&local_hashes, early_exit),
         };
         start.elapsed()
     }
@@ -70,7 +76,8 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(miss_hashes, early_exit),
-            KvIndex::Flat(map) => map.find_matches(miss_hashes, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches_impl(&miss_hashes, early_exit),
+            KvIndex::Nested(map) => map.find_matches(&miss_hashes, early_exit),
         };
         start.elapsed()
     }
@@ -89,7 +96,8 @@ impl KvIndex {
         let start = Instant::now();
         let _ = match self {
             KvIndex::Tree(tree) => tree.find_matches(partial, early_exit),
-            KvIndex::Flat(map) => map.find_matches(partial, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches_impl(&partial, early_exit),
+            KvIndex::Nested(map) => map.find_matches(&partial, early_exit),
         };
         start.elapsed()
     }
@@ -97,7 +105,27 @@ impl KvIndex {
     fn current_size(&self) -> usize {
         match self {
             KvIndex::Tree(tree) => tree.current_size(),
-            KvIndex::Flat(map) => map.current_size(),
+            KvIndex::Concurrent(tree) => tree.current_size(),
+            KvIndex::Nested(map) => map.current_size(),
+        }
+    }
+
+    fn find_matches(&self, local_hashes: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
+        match self {
+            KvIndex::Tree(tree) => tree.find_matches(local_hashes, early_exit),
+            KvIndex::Concurrent(tree) => tree.find_matches_impl(&local_hashes, early_exit),
+            KvIndex::Nested(map) => map.find_matches(&local_hashes, early_exit),
+        }
+    }
+
+    fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        match self {
+            KvIndex::Tree(tree) => tree.dump_tree_as_events(),
+            KvIndex::Concurrent(tree) => tree.dump_tree_as_events(),
+            KvIndex::Nested(_) => {
+                // NestedMap does not support dump_tree_as_events
+                vec![]
+            }
         }
     }
 }
@@ -197,44 +225,22 @@ struct Args {
     #[arg(long, default_value = "42")]
     seed: u64,
 
-    /// Use flat HashMap baseline instead of radix tree (for comparison)
+    /// Use nested map instead of radix tree (for comparison)
     #[arg(long)]
-    flat_hashmap: bool,
-}
+    nested_map: bool,
 
-/// Build a pre-populated RadixTree (for sweep/dump benchmarks that specifically need RadixTree)
-fn build_tree(sequences: &[SequenceData]) -> RadixTree {
-    let num_blocks: usize = sequences.iter().map(|s| s.local_hashes.len()).sum();
-    print!(
-        "  Building tree with {} sequences ({} blocks)... ",
-        sequences.len(),
-        num_blocks
-    );
-    std::io::Write::flush(&mut std::io::stdout()).unwrap();
-
-    let start = Instant::now();
-    let mut tree = RadixTree::new();
-    for (event_id, seq) in sequences.iter().enumerate() {
-        let event = seq.to_store_event(event_id as u64);
-        let _ = tree.apply_event(event);
-    }
-    let elapsed = start.elapsed();
-
-    println!(
-        "done in {:.2?} ({:.2} sequences/sec, {:.2} blocks/sec)",
-        elapsed,
-        sequences.len() as f64 / elapsed.as_secs_f64(),
-        num_blocks as f64 / elapsed.as_secs_f64()
-    );
-
-    tree
+    /// Use concurrent radix tree instead of single-threaded radix tree
+    #[arg(long)]
+    concurrent: bool,
 }
 
 /// Build a pre-populated KvIndex (prints timing info)
-fn build_index(sequences: &[SequenceData], use_flat_hashmap: bool) -> KvIndex {
+fn build_index(sequences: &[SequenceData], use_nested_map: bool, use_concurrent: bool) -> KvIndex {
     let num_blocks: usize = sequences.iter().map(|s| s.local_hashes.len()).sum();
-    let name = if use_flat_hashmap {
-        "FlatHashMap"
+    let name = if use_nested_map {
+        "NestedMap"
+    } else if use_concurrent {
+        "ConcurrentRadixTree"
     } else {
         "RadixTree"
     };
@@ -247,8 +253,10 @@ fn build_index(sequences: &[SequenceData], use_flat_hashmap: bool) -> KvIndex {
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
     let start = Instant::now();
-    let mut index = if use_flat_hashmap {
-        KvIndex::Flat(FlatHashMap::new())
+    let mut index = if use_nested_map {
+        KvIndex::Nested(PositionalIndexer::new(32))
+    } else if use_concurrent {
+        KvIndex::Concurrent(ConcurrentRadixTree::new())
     } else {
         KvIndex::Tree(RadixTree::new())
     };
@@ -306,7 +314,7 @@ fn bench_hash(args: &Args) {
         }
     }
 
-    let stats = LatencyStats::from_durations(durations).unwrap();
+    let stats = LatencyStats::from_durations(&durations).unwrap();
     stats.print("COMPUTE_BLOCK_HASH", args.depth);
 }
 
@@ -329,10 +337,10 @@ fn bench_store_remove_cycle(args: &Args, time_store: bool) {
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
-        true, // use_cumulative_hash
+        true,
     );
 
-    let mut index = build_index(&sequences, args.flat_hashmap);
+    let mut index = build_index(&sequences, args.nested_map, args.concurrent);
     println!("\n=== Benchmarking {} ({}) ===", op_name, index.name());
     println!("  Size: {} blocks", index.current_size());
 
@@ -367,7 +375,7 @@ fn bench_store_remove_cycle(args: &Args, time_store: bool) {
         }
     }
 
-    let stats = LatencyStats::from_durations(durations).unwrap();
+    let stats = LatencyStats::from_durations(&durations).unwrap();
     stats.print(op_name, args.depth);
 }
 
@@ -391,10 +399,10 @@ fn bench_find_matches(args: &Args) {
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
-        true, // use_cumulative_hash
+        true,
     );
 
-    let index = build_index(&sequences, args.flat_hashmap);
+    let index = build_index(&sequences, args.nested_map, args.concurrent);
     println!("\n=== Benchmarking FIND_MATCHES ({}) ===", index.name());
     println!(
         "  Built with {} sequences, {} total blocks",
@@ -419,7 +427,7 @@ fn bench_find_matches(args: &Args) {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
-    LatencyStats::from_durations(hit_durations)
+    LatencyStats::from_durations(&hit_durations)
         .unwrap()
         .print("FIND_MATCHES (HIT)", args.depth);
 
@@ -435,7 +443,7 @@ fn bench_find_matches(args: &Args) {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
-    LatencyStats::from_durations(miss_durations)
+    LatencyStats::from_durations(&miss_durations)
         .unwrap()
         .print("FIND_MATCHES (MISS)", args.depth);
 
@@ -452,7 +460,7 @@ fn bench_find_matches(args: &Args) {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
-    LatencyStats::from_durations(partial_durations)
+    LatencyStats::from_durations(&partial_durations)
         .unwrap()
         .print("FIND_MATCHES (PARTIAL)", args.depth);
 
@@ -466,7 +474,7 @@ fn bench_find_matches(args: &Args) {
             early_exit_durations.push(elapsed);
         }
     }
-    LatencyStats::from_durations(early_exit_durations)
+    LatencyStats::from_durations(&early_exit_durations)
         .unwrap()
         .print("FIND_MATCHES (EARLY_EXIT)", args.depth);
 }
@@ -696,12 +704,12 @@ fn bench_sweep(args: &Args) {
             args.prefix_prompt_ratio,
             num_prefix_prompts,
             args.seed,
-            true, // use_cumulative_hash
+            true,
         );
         let tree_sequences = &all_sequences[..num_sequences];
         let extra_sequences = &all_sequences[num_sequences..];
 
-        let mut tree = build_tree(tree_sequences);
+        let mut index = build_index(tree_sequences, args.nested_map, args.concurrent);
 
         // --- STORE benchmark ---
         let mut store_durations = Vec::with_capacity(args.sweep_iterations);
@@ -718,12 +726,12 @@ fn bench_sweep(args: &Args) {
             let store_event = truncated.to_store_event(i as u64);
 
             let start = Instant::now();
-            let _ = tree.apply_event(store_event);
+            index.apply_event(store_event);
             store_durations.push(start.elapsed());
 
-            // Remove to restore tree state (untimed)
+            // Remove to restore index state (untimed)
             let remove_event = truncated.to_remove_event(i as u64);
-            let _ = tree.apply_event(remove_event);
+            index.apply_event(remove_event);
         }
 
         // --- REMOVE benchmark ---
@@ -738,12 +746,12 @@ fn bench_sweep(args: &Args) {
             let remove_event = truncated.to_remove_event(i as u64);
 
             let start = Instant::now();
-            let _ = tree.apply_event(remove_event);
+            index.apply_event(remove_event);
             remove_durations.push(start.elapsed());
 
             // Re-add to restore state (untimed)
             let store_event = truncated.to_store_event(i as u64 + 1000000);
-            let _ = tree.apply_event(store_event);
+            index.apply_event(store_event);
         }
 
         // --- FIND_MATCHES benchmark ---
@@ -768,7 +776,7 @@ fn bench_sweep(args: &Args) {
             };
 
             let start = Instant::now();
-            let _ = tree.find_matches(query, false);
+            let _ = index.find_matches(query, false);
             find_matches_durations.push(start.elapsed());
         }
 
@@ -808,19 +816,20 @@ fn bench_dump(args: &Args) {
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
-        true, // use_cumulative_hash
+        true,
     );
 
-    let tree = build_tree(&sequences);
+    let index = build_index(&sequences, args.nested_map, args.concurrent);
     println!(
-        "  Tree built with {} sequences, {} total blocks",
+        "  {} built with {} sequences, {} total blocks",
+        index.name(),
         sequences.len(),
-        tree.current_size()
+        index.current_size()
     );
 
     // Single iteration timing
     let start = Instant::now();
-    let events = tree.dump_tree_as_events();
+    let events = index.dump_tree_as_events();
     let elapsed = start.elapsed();
 
     println!("\nDUMP_TREE_AS_EVENTS Results:");
