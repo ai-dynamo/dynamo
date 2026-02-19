@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -10,25 +9,24 @@ from typing import Any, Callable, Dict, List, Optional
 from components.replay_buffer import ReplayBuffer
 from utils import Config, Trajectory, Turn
 
-from dynamo.runtime import DistributedRuntime
-
 logger = logging.getLogger(__name__)
 
 
-class DynamoTrajectoryCollector:
+class HttpTrajectoryCollector:
     """
-    Collects trajectories asynchronously via Dynamo runtime API.
+    Collects trajectories asynchronously via HTTP (OpenAI-compatible API).
     """
 
     def __init__(
         self,
-        runtime: DistributedRuntime,
+        client,
         cfg: Config,
         replay_buffer: ReplayBuffer,
         reward_fn: Optional[Callable[[Trajectory], float]] = None,
         start_step: int = 0,
+        num_steps: int = 1,
     ):
-        self.runtime = runtime
+        self.client = client
         self.cfg = cfg
         self.replay_buffer = replay_buffer
         self.reward_fn = reward_fn or (lambda t: 0.0)
@@ -36,10 +34,7 @@ class DynamoTrajectoryCollector:
         self.running = False
         self.current_weight_version = start_step
         self.initial_weight_version = start_step
-
-        # Dynamo client
-        self.client = None
-        self.tokenizer = None
+        self.max_target_weight = start_step + num_steps - 1
 
         # Pause/resume events
         self._manual_pause = asyncio.Event()
@@ -51,58 +46,25 @@ class DynamoTrajectoryCollector:
         self._generating_targets: set = set()
         self._gen_lock = asyncio.Lock()
 
-        # Generation stats
+        # Stats
         self.total_generated = 0
         self.generation_errors = 0
-
-    async def _init_client(self):
-        """Initialize the Dynamo runtime client."""
-        logger.debug(
-            f"[Collector] Connecting to {self.cfg.namespace}.{self.cfg.component}.{self.cfg.endpoint}"
-        )
-
-        # Get the worker endpoint
-        endpoint = (
-            self.runtime.namespace(self.cfg.namespace)
-            .component(self.cfg.component)
-            .endpoint(self.cfg.endpoint)
-        )
-        self.client = await endpoint.client()
-
-        logger.debug("[Collector] Waiting for worker instances...")
-        await self.client.wait_for_instances()
-
-        instance_ids = self.client.instance_ids()
-        logger.info(
-            f"[Collector] Connected to {len(instance_ids)} worker instances: {instance_ids}"
-        )
-
-        # Load tokenizer
-        try:
-            from transformers import AutoTokenizer
-
-            self.tokenizer = AutoTokenizer.from_pretrained(self.cfg.model_name)
-            logger.debug("[Collector] Loaded tokenizer")
-        except Exception as e:
-            logger.warning(f"[Collector] Could not load tokenizer: {e}")
-            logger.warning(
-                "[Collector] Will send text prompts (workers must handle tokenization)"
-            )
-            self.tokenizer = None
 
     def _calculate_target_weights(self, generation_weight_version: int) -> List[int]:
         """Calculate target weight versions for the generation weight version."""
         max_age = self.cfg.max_trajectory_age_steps
 
         if generation_weight_version == self.initial_weight_version:
-            return list(
+            candidates = list(
                 range(
                     self.initial_weight_version,
                     self.initial_weight_version + max_age + 1,
                 )
             )
+        else:
+            candidates = [generation_weight_version + i for i in range(1, max_age + 1)]
 
-        return [generation_weight_version + i for i in range(1, max_age + 1)]
+        return [t for t in candidates if t <= self.max_target_weight]
 
     async def _get_next_target_for_generation(
         self, generation_weight_version: int
@@ -123,29 +85,6 @@ class DynamoTrajectoryCollector:
 
         return None
 
-    def _build_request(self, prompt: str) -> Dict[str, Any]:
-        request = {
-            "model": self.cfg.model_name,
-            "sampling_options": {
-                "temperature": self.cfg.temperature,
-                "top_p": 1.0,
-            },
-            "stop_conditions": {
-                "max_tokens": self.cfg.max_new_tokens,
-            },
-            "output_options": {
-                "logprobs": 1,
-            },
-        }
-
-        if self.tokenizer is not None:
-            token_ids = self.tokenizer.encode(prompt)
-            request["token_ids"] = token_ids
-        else:
-            request["prompt"] = prompt
-
-        return request
-
     async def _generate_single(
         self,
         prompt_data: Dict,
@@ -153,77 +92,46 @@ class DynamoTrajectoryCollector:
         target_weight_version: int,
     ) -> Optional[Trajectory]:
         """Generate a single trajectory."""
-        if self.client is None:
-            raise RuntimeError("Client not initialized. Call _init_client() first.")
-
         try:
+            messages = []
             turns = []
 
             for turn_data in prompt_data["turns"]:
-                generated_tokens = []
-                token_logprobs = []
+                messages.append({"role": "user", "content": turn_data.user})
 
                 req_start = time.perf_counter()
-                request = self._build_request(turn_data.user)
-
-                try:
-                    stream = await self.client.generate(request)
-
-                    async for response in stream:
-                        if hasattr(response, "data"):
-                            output = response.data()
-                        else:
-                            output = response
-
-                        if isinstance(output, str):
-                            try:
-                                output = json.loads(output)
-                            except json.JSONDecodeError:
-                                continue
-                        if not isinstance(output, dict):
-                            continue
-
-                        # Extract tokens
-                        if "token_ids" in output:
-                            new_tokens = output["token_ids"]
-                            if isinstance(new_tokens, list):
-                                generated_tokens.extend(new_tokens)
-
-                        # Extract logprobs
-                        if "log_probs" in output and output["log_probs"]:
-                            log_probs = output["log_probs"]
-                            if isinstance(log_probs, list):
-                                token_logprobs.extend(log_probs)
-
-                        # Check for finish
-                        if output.get("finish_reason"):
-                            break
-
-                except Exception as e:
-                    logger.error(f"[Collector] Stream error: {e}")
-                    raise
-
+                response = await self.client.chat.completions.create(
+                    model=self.cfg.model_name,
+                    messages=messages,
+                    temperature=self.cfg.temperature,
+                    max_tokens=self.cfg.max_new_tokens,
+                    logprobs=True,
+                    top_logprobs=1,
+                )
                 req_elapsed = time.perf_counter() - req_start
 
-                if self.tokenizer is not None and generated_tokens:
-                    generated_text = self.tokenizer.decode(
-                        generated_tokens, skip_special_tokens=True
-                    )
-                else:
-                    generated_text = "".join(str(t) for t in generated_tokens)
+                choice = response.choices[0]
+                generated_text = choice.message.content or ""
 
+                token_logprobs = []
+                if choice.logprobs and choice.logprobs.content:
+                    for token_info in choice.logprobs.content:
+                        if token_info.logprob is not None:
+                            token_logprobs.append(token_info.logprob)
+
+                usage = response.usage
                 turn = Turn(
                     user=turn_data.user,
                     ground_truth=turn_data.ground_truth,
                     generated=generated_text,
+                    logprobs=choice.logprobs.content if choice.logprobs else [],
                     token_logprobs=token_logprobs,
-                    input_tokens=len(self.tokenizer.encode(turn_data.user))
-                    if self.tokenizer
-                    else 0,
-                    output_tokens=len(generated_tokens),
+                    input_tokens=usage.prompt_tokens if usage else 0,
+                    output_tokens=usage.completion_tokens if usage else 0,
                     latency_s=req_elapsed,
                 )
                 turns.append(turn)
+                messages.append({"role": "assistant", "content": generated_text})
 
             trajectory = Trajectory(
                 id=prompt_data["id"],
@@ -255,39 +163,19 @@ class DynamoTrajectoryCollector:
 
         async def bounded_generate(prompt: Dict, gen_idx: int) -> Optional[Trajectory]:
             """Generate with concurrency limiting."""
+            if not self.running:
+                return None
             async with semaphore:
+                if not self.running:
+                    return None
                 return await self._generate_single(
                     prompt, gen_idx, target_weight_version
                 )
 
-        # Create all generation tasks
-        tasks = []
-        for prompt in prompts:
-            for gen_idx in range(self.cfg.num_generations_per_prompt):
-                # Check for pause before each generation during weight refit
-                await self._manual_pause.wait()
-                await self._refit_pause.wait()
-
-                if not self.running:
-                    for t in tasks:
-                        t.cancel()
-                    return
-
-                task = asyncio.create_task(bounded_generate(prompt, gen_idx))
-                tasks.append(task)
-
-        # Process and push results immediately to buffer
-        for coro in asyncio.as_completed(tasks):
-            try:
-                result = await coro
-            except asyncio.CancelledError:
-                continue
-            except Exception as e:
-                logger.error(f"[Collector] Task failed: {e}")
-                continue
-
+        async def push_to_buffer(result: Optional[Trajectory]) -> None:
+            """Push result to buffer with backoff."""
             if result is None:
-                continue
+                return
 
             backoff = 0.01
             max_retries = 100
@@ -301,20 +189,87 @@ class DynamoTrajectoryCollector:
                     break
                 elif status == "full":
                     if not self.running:
-                        # Drop the trajectory if stopping and buffer is full
                         logger.warning("[Collector] Dropping trajectory")
                         break
                     await asyncio.sleep(min(backoff, 0.5))
                     backoff *= 1.5
 
-        # Release target reservation
-        async with self._gen_lock:
-            self._generating_targets.discard(target_weight_version)
+        max_concurrent_tasks = self.cfg.max_concurrency
+        active_tasks = set()
+
+        logger.debug(
+            f"[Collector] Processing batch with max {max_concurrent_tasks} concurrent tasks"
+        )
+
+        # Create work queue
+        work_items = []
+        for prompt in prompts:
+            for gen_idx in range(self.cfg.num_generations_per_prompt):
+                work_items.append((prompt, gen_idx))
+
+        work_iter = iter(work_items)
+
+        try:
+            # Initial fill of task pool
+            for _ in range(min(max_concurrent_tasks, len(work_items))):
+                await self._manual_pause.wait()
+                await self._refit_pause.wait()
+
+                if not self.running:
+                    break
+
+                try:
+                    prompt, gen_idx = next(work_iter)
+                    task = asyncio.create_task(bounded_generate(prompt, gen_idx))
+                    active_tasks.add(task)
+                except StopIteration:
+                    break
+
+            # Process completions and spawn new tasks
+            while active_tasks:
+                # Wait for at least one task to complete
+                done, active_tasks = await asyncio.wait(
+                    active_tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # Process completed tasks
+                for task in done:
+                    try:
+                        result = await task
+                        if result is not None:
+                            await push_to_buffer(result)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception as e:
+                        logger.error(f"[Collector] Task failed: {e}")
+                        continue
+
+                # Don't spawn new tasks if stopping
+                if not self.running:
+                    continue
+
+                # Spawn new tasks to maintain pool size
+                while len(active_tasks) < max_concurrent_tasks:
+                    await self._manual_pause.wait()
+                    await self._refit_pause.wait()
+
+                    if not self.running:
+                        break
+
+                    try:
+                        prompt, gen_idx = next(work_iter)
+                        task = asyncio.create_task(bounded_generate(prompt, gen_idx))
+                        active_tasks.add(task)
+                    except StopIteration:
+                        break
+
+        finally:
+            # Release target reservation
+            async with self._gen_lock:
+                self._generating_targets.discard(target_weight_version)
 
     async def start_collection(self, data: List[Dict]):
         """Collect trajectories from the data."""
-        await self._init_client()
-
         self.running = True
         data_iter = iter(data)
         batch_size = self.cfg.num_prompts_per_step

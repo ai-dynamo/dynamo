@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Mock async GRPO implementation with Dynamo Runtime API.
+Async GRPO with HTTP-based generation (OpenAI-compatible API).
 """
 
 import argparse
@@ -14,14 +14,21 @@ from typing import Dict, List
 import uvloop
 from components.data_loader import load_data
 from components.replay_buffer import ReplayBuffer
-from components.trajectory import DynamoTrajectoryCollector
+from components.trajectory import HttpTrajectoryCollector
+from openai import AsyncOpenAI
 from utils import Config, Trajectory
 
-from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.runtime.logging import configure_dynamo_logging
-
 logger = logging.getLogger(__name__)
-configure_dynamo_logging(service_name="grpo_trainer")
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
+# Silence noisy httpx request logs (one per HTTP call)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
 
 
 def _blocking_training_step(
@@ -66,8 +73,9 @@ def _blocking_training_step(
         "avg_trajectory_age": avg_age,
         "mean_generation_length": mean_generation_length,
         "total_tokens": sum(
-            sum(turn.input_tokens + turn.output_tokens for turn in t.turns)
+            t.turns[-1].input_tokens + t.turns[-1].output_tokens
             for t in trajectories
+            if t.turns
         ),
     }
 
@@ -86,16 +94,23 @@ async def run_training_step(
     )
 
 
-async def async_grpo_train(runtime: DistributedRuntime, cfg: Config, data: List[Dict]):
+async def async_grpo_train(cfg: Config, data: List[Dict]):
     """
-    Main async GRPO training loop using Dynamo runtime.
+    Main async GRPO training loop using HTTP API.
 
     This demonstrates the full async GRPO workflow:
-    1. Start background trajectory collection via Dynamo runtime
+    1. Start background trajectory collection via HTTP
     2. Wait for buffer to fill
     3. Sample and train in a loop
     4. Coordinate weight updates with collector
     """
+    # Initialize OpenAI client
+    client = AsyncOpenAI(
+        base_url=cfg.api_base,
+        api_key="not-needed",
+        timeout=600.0,
+    )
+
     buffer_size = (
         cfg.num_prompts_per_step
         * cfg.num_generations_per_prompt
@@ -109,13 +124,14 @@ async def async_grpo_train(runtime: DistributedRuntime, cfg: Config, data: List[
         total_output = sum(turn.output_tokens for turn in trajectory.turns)
         return min(1.0, total_output / cfg.max_new_tokens)
 
-    # Initialize collector with Dynamo runtime
-    collector = DynamoTrajectoryCollector(
-        runtime=runtime,
+    # Initialize collector with HTTP client
+    collector = HttpTrajectoryCollector(
+        client=client,
         cfg=cfg,
         replay_buffer=replay_buffer,
         reward_fn=reward_fn,
         start_step=0,
+        num_steps=cfg.num_steps,
     )
     collection_task = asyncio.create_task(collector.start_collection(data))
 
@@ -123,15 +139,17 @@ async def async_grpo_train(runtime: DistributedRuntime, cfg: Config, data: List[
     min_trajectories = cfg.num_prompts_per_step * cfg.num_generations_per_prompt
     weight_version = 0
 
-    logger.info("Async GRPO Training (Dynamo Runtime)")
-    logger.info(f"  Namespace: {cfg.namespace}")
-    logger.info(f"  Component: {cfg.component}")
-    logger.info(f"  Endpoint: {cfg.endpoint}")
+    logger.info("Async GRPO Training (HTTP API)")
+    logger.info(f"  API Base: {cfg.api_base}")
+    logger.info(f"  Model: {cfg.model_name}")
     logger.info(f"  Prompts per step: {cfg.num_prompts_per_step}")
     logger.info(f"  Generations per prompt: {cfg.num_generations_per_prompt}")
     logger.info(f"  Trajectories per step: {min_trajectories}")
     logger.info(f"  Max trajectory age: {cfg.max_trajectory_age_steps} steps")
     logger.info(f"  Max steps: {cfg.num_steps}")
+
+    # Track per-step generation metrics
+    step_metrics = []
 
     try:
         for step in range(cfg.num_steps):
@@ -160,6 +178,14 @@ async def async_grpo_train(runtime: DistributedRuntime, cfg: Config, data: List[
             logger.info(
                 f"{len(trajectories)} trajectories sampled in {rollout_elapsed:.1f}s (avg_age={avg_age:.2f})"
             )
+
+            # On the last step the collector has no more target weights to
+            # generate for (capped by num_steps), so we just signal it to
+            # exit its idle loop promptly.
+            is_last_step = step == cfg.num_steps - 1
+            if is_last_step:
+                logger.info("[Train] Last step - signalling collector to stop")
+                collector.stop()
 
             logger.info("Run training step")
             train_start = time.perf_counter()
@@ -197,23 +223,44 @@ async def async_grpo_train(runtime: DistributedRuntime, cfg: Config, data: List[
                 f"(pushed={buf_stats['total_pushed']}, sampled={buf_stats['total_sampled']}, expired={buf_stats['total_expired']})"
             )
 
+            # Track per-step metrics
+            step_metrics.append(
+                {
+                    "step": step,
+                    "generation_time": rollout_elapsed,
+                    "total_tokens": metrics["total_tokens"],
+                    "throughput": metrics["total_tokens"] / rollout_elapsed,
+                }
+            )
+
     except KeyboardInterrupt:
         logger.info("[Train] Training interrupted by user")
     except Exception as e:
         logger.exception(f"[Train] Training error: {e}")
     finally:
-        # Cleanup - give in-flight requests time to complete
+        # Cleanup - signal collector to stop
         logger.info("[Train] Stopping trajectory collection...")
         collector.stop()
 
-        # Wait briefly for in-flight requests to complete gracefully
-        await asyncio.sleep(0.5)
-
-        collection_task.cancel()
+        # Wait for collector to stop gracefully (with timeout)
+        shutdown_timeout = 5.0
+        logger.info(
+            f"[Train] Waiting up to {shutdown_timeout}s for in-flight requests..."
+        )
         try:
-            await collection_task
+            await asyncio.wait_for(collection_task, timeout=shutdown_timeout)
+        except asyncio.TimeoutError:
+            logger.warning("[Train] Collector did not stop gracefully, cancelling...")
+            collection_task.cancel()
+            try:
+                await collection_task
+            except asyncio.CancelledError:
+                pass
         except asyncio.CancelledError:
             pass
+
+        logger.info("[Train] Closing HTTP client...")
+        await client.close()
 
         # Final stats
         logger.info(f"{'='*60}")
@@ -222,10 +269,33 @@ async def async_grpo_train(runtime: DistributedRuntime, cfg: Config, data: List[
         logger.info(f"Collector: {collector.get_stats()}")
         logger.info(f"Buffer: {replay_buffer.get_stats()}")
 
+        # Log per-step generation time and throughput
+        if step_metrics:
+            logger.info(f"{'='*60}")
+            logger.info("Per-Step Generation Metrics")
+            logger.info(f"{'='*60}")
+            for m in step_metrics:
+                logger.info(
+                    f"  Step {m['step']}: "
+                    f"gen_time={m['generation_time']:.2f}s, "
+                    f"tokens={m['total_tokens']:,}, "
+                    f"throughput={m['throughput']:.2f} tokens/s"
+                )
+            # Summary statistics
+            total_gen_time = sum(m["generation_time"] for m in step_metrics)
+            total_tokens = sum(m["total_tokens"] for m in step_metrics)
+            avg_throughput = total_tokens / total_gen_time if total_gen_time > 0 else 0
+            logger.info(f"{'='*60}")
+            logger.info(
+                f"Summary: total_gen_time={total_gen_time:.2f}s, "
+                f"total_tokens={total_tokens:,}, "
+                f"avg_throughput={avg_throughput:.2f} tokens/s"
+            )
+
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(
-        description="Async GRPO with Dynamo Runtime API",
+        description="Async GRPO with HTTP-based generation (OpenAI-compatible API)",
     )
 
     # Dataset
@@ -242,18 +312,12 @@ def parse_args() -> Config:
         "--dataset-subset", type=str, default="chat_if", help="HuggingFace subset"
     )
 
-    # Dynamo settings
+    # API settings
     parser.add_argument(
-        "--namespace", type=str, default="dynamo", help="Dynamo namespace"
-    )
-    parser.add_argument(
-        "--component",
+        "--api-base",
         type=str,
-        default="backend",
-        help="Dynamo component (backend/prefill)",
-    )
-    parser.add_argument(
-        "--endpoint", type=str, default="generate", help="Dynamo endpoint"
+        default="http://localhost:8000/v1",
+        help="OpenAI-compatible API base URL",
     )
     parser.add_argument(
         "--model-name", type=str, default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
@@ -270,20 +334,10 @@ def parse_args() -> Config:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max-concurrency", type=int, default=1024)
 
-    # Runtime settings
-    parser.add_argument(
-        "--store-kv", type=str, default="etcd", choices=["etcd", "file", "mem"]
-    )
-    parser.add_argument(
-        "--request-plane", type=str, default="tcp", choices=["tcp", "nats", "http"]
-    )
-
     args = parser.parse_args()
 
     return Config(
-        namespace=args.namespace,
-        component=args.component,
-        endpoint=args.endpoint,
+        api_base=args.api_base,
         model_name=args.model_name,
         dataset_name=args.dataset_name,
         dataset_subset=args.dataset_subset,
@@ -295,16 +349,13 @@ def parse_args() -> Config:
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         max_concurrency=args.max_concurrency,
-        store_kv=args.store_kv,
-        request_plane=args.request_plane,
     )
 
 
-@dynamo_worker()
-async def main(runtime: DistributedRuntime):
+async def main():
     cfg = parse_args()
     data = load_data(cfg)
-    await async_grpo_train(runtime, cfg, data)
+    await async_grpo_train(cfg, data)
 
 
 if __name__ == "__main__":
