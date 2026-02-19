@@ -794,8 +794,8 @@ mod tests {
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, false);
 
         // Forced reasoning without open tag, flushed on </think>
-        let r1 = parser
-            .parse_reasoning_streaming_incremental("initial reasoning</think> normal1 ", &[]);
+        let r1 =
+            parser.parse_reasoning_streaming_incremental("initial reasoning</think> normal1 ", &[]);
         assert_eq!(r1.reasoning_text, "initial reasoning");
         assert_eq!(r1.normal_text, " normal1 ");
 
@@ -844,8 +844,7 @@ mod tests {
         assert_eq!(r1.reasoning_text, "T1");
         assert_eq!(r1.normal_text, "");
 
-        let r2 =
-            parser.parse_reasoning_streaming_incremental("<tool_call>A</tool_call>", &[]);
+        let r2 = parser.parse_reasoning_streaming_incremental("<tool_call>A</tool_call>", &[]);
         assert_eq!(r2.normal_text, "<tool_call>A</tool_call>");
         assert_eq!(r2.reasoning_text, "");
 
@@ -853,8 +852,7 @@ mod tests {
         assert_eq!(r3.reasoning_text, "T2");
         assert_eq!(r3.normal_text, "");
 
-        let r4 =
-            parser.parse_reasoning_streaming_incremental("<tool_call>B</tool_call>", &[]);
+        let r4 = parser.parse_reasoning_streaming_incremental("<tool_call>B</tool_call>", &[]);
         assert_eq!(r4.normal_text, "<tool_call>B</tool_call>");
         assert_eq!(r4.reasoning_text, "");
     }
