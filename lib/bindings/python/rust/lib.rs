@@ -149,7 +149,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
-    m.add_class::<Namespace>()?;
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;

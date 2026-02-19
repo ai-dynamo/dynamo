@@ -111,19 +111,6 @@ class DistributedRuntime:
         """
         ...
 
-class Namespace:
-    """
-    A namespace is a collection of components
-    """
-
-    ...
-
-    def component(self, name: str) -> Component:
-        """
-        Create a `Component` object
-        """
-        ...
-
 class Component:
     """
     A component is a collection of endpoints
