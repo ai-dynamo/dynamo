@@ -20,8 +20,8 @@ import asyncio
 import logging
 
 from dynamo.runtime import DistributedRuntime
+from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import Modality
-from dynamo.trtllm.utils.trtllm_utils import Config
 from dynamo.trtllm.workers.llm_worker import init_llm_worker
 
 
@@ -40,7 +40,7 @@ async def init_worker(
     """
     logging.info(f"Initializing worker with modality={config.modality}")
 
-    modality = Modality(config.modality)
+    modality = config.modality
 
     if Modality.is_diffusion(modality):
         if modality == Modality.VIDEO_DIFFUSION:
