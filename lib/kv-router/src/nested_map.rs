@@ -21,13 +21,13 @@
 //! `KvIndexerInterface` with sticky event routing and worker threads, wrap it
 //! in a `ThreadPoolIndexer`.
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::indexer::{SyncIndexer, WorkerTask};
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank, KvCacheEvent, KvCacheStoredBlockData
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
 };
 
 /// Entry for the innermost level of the index.
@@ -198,12 +198,7 @@ impl PositionalIndexer {
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                self.remove_blocks_impl(
-                    worker_blocks,
-                    worker,
-                    &remove_data.block_hashes,
-                    id,
-                )?;
+                self.remove_blocks_impl(worker_blocks, worker, &remove_data.block_hashes, id)?;
                 Ok(())
             }
             KvCacheEventData::Cleared => {
@@ -220,7 +215,7 @@ impl PositionalIndexer {
         store_data: KvCacheStoreData,
         event_id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let worker_map = worker_blocks.entry(worker).or_insert_with(FxHashMap::default);
+        let worker_map = worker_blocks.entry(worker).or_default();
         // Determine starting position based on parent_hash
         let start_pos = match store_data.parent_hash {
             Some(parent_hash) => {
@@ -239,7 +234,7 @@ impl PositionalIndexer {
             None => 0, // Start from position 0
         };
 
-        let worker_blocks_entry = worker_blocks.entry(worker).or_insert_with(FxHashMap::default);
+        let worker_blocks_entry = worker_blocks.entry(worker).or_default();
 
         let num_stored_blocks = store_data.blocks.len();
 
@@ -262,7 +257,8 @@ impl PositionalIndexer {
                 size.fetch_add(num_stored_blocks, Ordering::Relaxed);
             }
             None => {
-                self.tree_sizes.insert(worker, AtomicUsize::new(num_stored_blocks));
+                self.tree_sizes
+                    .insert(worker, AtomicUsize::new(num_stored_blocks));
             }
         }
 
@@ -323,17 +319,11 @@ impl PositionalIndexer {
     /// Clear all blocks for a specific worker_id (all dp_ranks), but keep worker tracked.
     /// Static version for use in worker threads.
     fn clear_worker_blocks_impl(
-
         &self,
         worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
         worker_id: WorkerId,
     ) {
         self.remove_or_clear_worker_blocks_impl(worker_blocks, worker_id, true);
-    }
-
-    /// Get total number of blocks across all workers.
-    pub fn current_size(&self) -> usize {
-        unimplemented!()
     }
 
     /// Helper function to remove or clear blocks for a worker.
@@ -367,7 +357,10 @@ impl PositionalIndexer {
         }
     }
 
-    fn dump_events(&self, worker_blocks: &FxHashMap<WorkerWithDpRank, LevelIndex>) -> Vec<RouterEvent> {
+    fn dump_events(
+        &self,
+        worker_blocks: &FxHashMap<WorkerWithDpRank, LevelIndex>,
+    ) -> Vec<RouterEvent> {
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
@@ -619,7 +612,9 @@ impl PositionalIndexer {
 
             for worker in scores.scores.keys() {
                 if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                    scores.tree_sizes.insert(*worker, worker_tree_size.load(Ordering::Relaxed) as usize);
+                    scores
+                        .tree_sizes
+                        .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
                 }
             }
             return scores;
@@ -669,7 +664,9 @@ impl PositionalIndexer {
 
         for worker in scores.scores.keys() {
             if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                scores.tree_sizes.insert(*worker, worker_tree_size.load(Ordering::Relaxed) as usize);
+                scores
+                    .tree_sizes
+                    .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
             }
         }
 

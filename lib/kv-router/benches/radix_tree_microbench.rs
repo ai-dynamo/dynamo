@@ -19,8 +19,8 @@ use dynamo_kv_router::{
     ConcurrentRadixTree, OverlapScores, PositionalIndexer, RadixTree, RouterEvent, SyncIndexer,
     bench_utils::{SequenceData, generate_sequences},
     compute_block_hash_for_seq,
-    protocols::{ExternalSequenceBlockHash, LocalBlockHash},
     nested_map::LevelIndex,
+    protocols::{ExternalSequenceBlockHash, LocalBlockHash},
 };
 use std::time::{Duration, Instant};
 
@@ -33,7 +33,10 @@ use std::time::{Duration, Instant};
 enum KvIndex {
     Tree(RadixTree),
     Concurrent(ConcurrentRadixTree),
-    Nested(PositionalIndexer, FxHashMap<ExternalSequenceBlockHash, LevelIndex>),
+    Nested(
+        PositionalIndexer,
+        FxHashMap<ExternalSequenceBlockHash, LevelIndex>,
+    ),
 }
 
 impl KvIndex {
