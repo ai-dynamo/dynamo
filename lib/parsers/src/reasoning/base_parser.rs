@@ -1,6 +1,38 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! # Reasoning and Tool Call Interplay
+//!
+//! Models like GLM-4.5/4.7 and Qwen3 interleave reasoning blocks with tool calls:
+//!
+//! ```text
+//! <think>reasoning about what tool to call</think>
+//! <tool_call>get_weather<arg_key>city</arg_key><arg_value>Beijing</arg_value></tool_call>
+//! <think>reasoning about the result</think>
+//! <tool_call>summarize<arg_key>text</arg_key><arg_value>...</arg_value></tool_call>
+//! ```
+//!
+//! The reasoning parser and the tool call parser are **independent, sequential** stages:
+//!
+//! 1. **Reasoning parser** (`BasicReasoningParser`) splits the stream into:
+//!    - `reasoning_content`: everything inside `<think>...</think>` blocks
+//!    - `normal_text`: everything outside (including tool call tags)
+//! 2. **Tool call parser** (`glm47` / others) then processes `normal_text` to extract
+//!    `<tool_call>...</tool_call>` blocks.
+//!
+//! This means tool calls **must** appear outside `<think>` blocks to be detected.
+//! If a model erroneously emits a tool call inside a `<think>` block (observed in
+//! GLM-4.7 under very long contexts), the tool call parser will not see it.
+//!
+//! ## `force_reasoning` and tokenizer behavior
+//!
+//! Some models (e.g. GLM-5-FP8 served via ZAI) consume `<think>` as a special
+//! tokenizer token and never emit it as literal text. In that case use
+//! `force_reasoning=true` (`deepseek_r1` parser), which treats all output as
+//! reasoning until `</think>` is seen. Models that do emit `<think>` as text
+//! (standard serving, Qwen3, GLM-4.5) should use `force_reasoning=false`
+//! (`glm45`, `nemotron_deci`, `qwen3` parsers).
+
 use crate::{ParserResult, ReasoningParser};
 
 #[derive(Default, Debug, Clone)]
