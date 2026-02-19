@@ -3,7 +3,7 @@
 
 use dynamo_llm::block_manager::connector::protocol::TransferType;
 use dynamo_llm::block_manager::connector::scheduler::{
-    Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
+    Scheduler, SchedulerMessage, TransferSchedulerClient, WorkerSchedulerClient,
 };
 
 use std::collections::HashSet;
@@ -113,6 +113,40 @@ impl KvConnectorWorker {
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
         })
+    }
+
+    /// Move the event sync + offload enqueue off the forward-pass thread.
+    ///
+    /// Bookkeeping (`record_operation`) is done synchronously while we have
+    /// `&mut self`, then a background thread waits on the CUDA event and
+    /// sends the operations to the scheduler via the cloned channel.
+    fn submit_offload_on_event(&mut self, event: u64) -> anyhow::Result<()> {
+        let operations = std::mem::take(&mut self.offloading_operations);
+
+        tracing::trace!(
+            iteration = self.iteration,
+            num_operations = operations.len(),
+            "All layers complete, submitting {} offload operations on event",
+            operations.len()
+        );
+
+        for op in &operations {
+            self.connector.record_operation(&op.request_id, op.uuid);
+        }
+
+        let tx = self.connector.get_scheduler_tx();
+
+        std::thread::spawn(move || {
+            event_sync_blocking(event);
+
+            for op in operations {
+                if let Err(e) = tx.send(SchedulerMessage::EnqueueRequest(op)) {
+                    tracing::error!("Failed to send offload operation: {}", e);
+                }
+            }
+        });
+
+        Ok(())
     }
 }
 
@@ -316,27 +350,9 @@ impl Worker for KvConnectorWorker {
             "save_kv_layer called"
         );
         if self.layers_complete == self.kv_cache_layers.len() {
-            let offloading_operations = std::mem::take(&mut self.offloading_operations);
-
-            tracing::trace!(
-                iteration = self.iteration,
-                num_operations = offloading_operations.len(),
-                "All layers complete, enqueuing {} offload operations",
-                offloading_operations.len()
-            );
-
-            // block on the the completion of the last layer
-            // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
-            // or put the event on a stream and use stream waits to keep it all on device.
-            event_sync_blocking(self.layer_events[self.layers_complete - 1]);
-            for operation in &offloading_operations {
-                tracing::debug!(
-                    request_id = %operation.request_id,
-                    operation_id = %operation.uuid,
-                    "Enqueuing offload operation to scheduler"
-                );
-                self.connector.enqueue_request(operation.clone());
-            }
+            self.submit_offload_on_event(
+                self.layer_events[self.layers_complete - 1],
+            )?;
         }
         Ok(())
     }

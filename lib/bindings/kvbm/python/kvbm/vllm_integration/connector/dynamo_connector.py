@@ -147,6 +147,7 @@ class DynamoConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         pass
 
+    @nvtx_annotate(category="worker")
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
