@@ -6,6 +6,7 @@ name: Build Frontend Image
 on:
   push:
     branches:
+    - ops-3128/frontend-image
     - main
     - "pull-request/[0-9]+"
     # Note: release/* branches are handled by release.yml which calls this workflow
@@ -34,11 +35,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+env:
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+
 jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
       frontend: ${{ steps.changes.outputs.frontend }}
+      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -49,62 +54,91 @@ jobs:
         uses: ./.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
+      - name: Export builder name
+        id: export-builder-name
+        run: |
+          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
   build-frontend-image:
-    name: Build Frontend Image (${{ matrix.platform.arch }})
+    name: Build Frontend Image
     needs: changed-files
     if: needs.changed-files.outputs.frontend == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: prod-builder-amd-v1  }
-          - { arch: arm64, runner: prod-builder-arm-v1 }
-    runs-on: ${{ matrix.platform.runner }}
+    runs-on: prod-builder-v3
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      TARGET: frontend
+      PLATFORMS: amd64,arm64
+      CUDA_VERSION: 12.9
+      FRAMEWORK: dynamo
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
         with:
-          go-version: '1.24'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Build Frontend Container
-        id: build-image
-        uses: ./.github/actions/docker-build
-        env:
-          PLATFORMS: ${{ matrix.platform.arch }}
-          TARGETARCH: ${{ matrix.platform.arch }}
-        with:
-          framework: dynamo
-          target: frontend
-          platform: ${{ env.PLATFORMS }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          cuda_version: "12.9"
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Docker Tag and Push Frontend Image
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-frontend-${{ matrix.platform.arch }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          flavor: general
+          all_arch: 'true'
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "Generating Dockerfile for target: ${{ env.TARGET }} and framework: ${{ env.FRAMEWORK }} "
+          python ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --platform=arm64 \
+              --cuda-version=${{ env.CUDA_VERSION }} \
+              --show-result \
+              --output-short-filename
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "Generating Dockerfile for target: ${{ env.TARGET }} and framework: ${{ env.FRAMEWORK }} "
+          python ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --platform=amd64 \
+              --cuda-version=${{ env.CUDA_VERSION }} \
+              --show-result \
+              --output-short-filename
+      # - name: Docker Login
+      #   uses: ./.github/actions/docker-login
+      #   with:
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      # - name: Build Frontend Container
+      #   id: build-image
+      #   timeout-minutes: ${{ inputs.build_timeout_minutes }}
+      #   uses: ./.github/actions/docker-remote-build
+      #   with:
+      #     image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
+      #     framework: ${{ inputs.framework }}
+      #     target: ${{ inputs.target }}
+      #     platform: ${{ inputs.platform }}
+      #     cuda_version: ${{ inputs.cuda_version }}
+      #     ci_token: ${{ secrets.CI_TOKEN }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     no_cache: ${{ inputs.no_cache }}
+      #     extra_tags: ${{ steps.extra-tags.outputs.tags }}
+      #     push_image: ${{ inputs.push_image }}
+      #     no_load: ${{ inputs.no_load }}
+      # - name: Show summary
+      #   shell: bash
+      #   if: ${{ inputs.push_image && inputs.show_summary }}
+      #   run: |
+      #     echo "### 🐳 ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }} Default Image" >> $GITHUB_STEP_SUMMARY
+      #     echo "" >> $GITHUB_STEP_SUMMARY
+      #     echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+      #     echo "|-----|" >> $GITHUB_STEP_SUMMARY
+      #     echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+
+
 
   frontend-status-check:
     runs-on: ubuntu-latest
