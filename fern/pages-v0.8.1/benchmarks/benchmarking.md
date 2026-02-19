@@ -63,7 +63,7 @@ The framework is a Python-based wrapper around `aiperf` that:
 
 ---
 
-# Client-Side Benchmarking (Local)
+## Client-Side Benchmarking (Local)
 
 Client-side benchmarking runs on your local machine and connects to Kubernetes deployments via port-forwarding.
 
