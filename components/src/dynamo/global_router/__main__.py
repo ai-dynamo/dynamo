@@ -20,7 +20,6 @@ Key features:
 import argparse
 import asyncio
 import logging
-import os
 
 import uvloop
 
@@ -28,91 +27,50 @@ from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .backend_args import DynamoGlobalRouterArgGroup, DynamoGlobalRouterConfig
 from .handler import GlobalRouterHandler
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
-DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 
-
-def parse_args():
+def parse_args() -> DynamoGlobalRouterConfig:
     """Parse command-line arguments for the Global Router service."""
     parser = argparse.ArgumentParser(
         description="Dynamo Global Router Service: Hierarchical routing to prefill/decode pools",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the JSON configuration file defining pool namespaces and selection strategy",
-    )
-
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        required=True,
-        help="Model name for registration (must match workers)",
-    )
-
-    parser.add_argument(
-        "--namespace",
-        type=str,
-        default=DYN_NAMESPACE,
-        help=f"Dynamo namespace for the global router (default: {DYN_NAMESPACE})",
-    )
-
-    parser.add_argument(
-        "--component-name",
-        type=str,
-        default="global_router",
-        help="Component name for the global router (default: global_router)",
-    )
-
-    parser.add_argument(
-        "--default-ttft-target",
-        type=float,
-        default=None,
-        help="Default TTFT target (ms) for prefill pool selection when SLA not present in request",
-    )
-
-    parser.add_argument(
-        "--default-itl-target",
-        type=float,
-        default=None,
-        help="Default ITL target (ms) for decode pool selection when SLA not present in request",
-    )
-
-    return parser.parse_args()
+    DynamoGlobalRouterArgGroup().add_arguments(parser)
+    args = parser.parse_args()
+    config = DynamoGlobalRouterConfig.from_cli_args(args)
+    config.validate()
+    return config
 
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     """Main worker function for the Global Router service."""
 
-    args = parse_args()
-
+    config = parse_args()
     logger.info("Starting Global Router Service")
-    logger.info(f"Config: {args.config}")
-    logger.info(f"Model name: {args.model_name}")
-    logger.info(f"Namespace: {args.namespace}")
+    logger.info(f"Config: {config.config_path}")
+    logger.info(f"Model name: {config.model_name}")
+    logger.info(f"Namespace: {config.namespace}")
 
     # Create handler
     handler = GlobalRouterHandler(
         runtime=runtime,
-        config_path=args.config,
-        model_name=args.model_name,
-        default_ttft_target=args.default_ttft_target,
-        default_itl_target=args.default_itl_target,
+        config_path=config.config_path,
+        model_name=config.model_name,
+        default_ttft_target=config.default_ttft_target,
+        default_itl_target=config.default_itl_target,
     )
 
     # Initialize connections to local routers
     await handler.initialize()
 
     # Create component in the global router namespace
-    component = runtime.namespace(args.namespace).component(args.component_name)
+    component = runtime.namespace(config.namespace).component(config.component_name)
 
     # Create endpoints for prefill and decode
     # Note: We use separate endpoints so we can register them with different ModelTypes
@@ -126,11 +84,11 @@ async def worker(runtime: DistributedRuntime):
         model_input=ModelInput.Tokens,
         model_type=ModelType.Prefill,
         endpoint=prefill_endpoint,
-        model_path=args.model_name,
-        model_name=args.model_name,
+        model_path=config.model_name,
+        model_name=config.model_name,
     )
     logger.info(
-        f"Registered prefill endpoint: {args.namespace}.{args.component_name}.prefill_generate"
+        f"Registered prefill endpoint: {config.namespace}.{config.component_name}.prefill_generate"
     )
 
     logger.info("Registering as decode worker...")
@@ -139,11 +97,11 @@ async def worker(runtime: DistributedRuntime):
         model_input=ModelInput.Tokens,
         model_type=ModelType.Chat | ModelType.Completions,
         endpoint=decode_endpoint,
-        model_path=args.model_name,
-        model_name=args.model_name,
+        model_path=config.model_name,
+        model_name=config.model_name,
     )
     logger.info(
-        f"Registered decode endpoint: {args.namespace}.{args.component_name}.decode_generate"
+        f"Registered decode endpoint: {config.namespace}.{config.component_name}.decode_generate"
     )
 
     logger.info("Global Router ready - serving endpoints...")

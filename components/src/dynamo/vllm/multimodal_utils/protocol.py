@@ -182,28 +182,6 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     embeddings_shape: Optional[List[int]] = None
 
 
-class VLLMNativeEncoderRequest(BaseModel):
-    """Request for vLLM-native encoder worker using ECConnector"""
-
-    request_id: str
-    token_ids: List[
-        int
-    ]  # Pre-tokenized prompt with placeholder tokens (for TokensPrompt)
-    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
-    modality: Optional[
-        Literal["image", "video", "audio"]
-    ] = None  # Can be inferred from inputs
-
-
-class VLLMNativeEncoderResponse(BaseModel):
-    """Response from vLLM-native encoder worker (ECConnector mode)"""
-
-    request_id: str
-    mm_hash: str  # vLLM's multimodal hash identifier
-    modality: str  # "image", "video", "audio"
-    connector_metadata: dict[str, Any]  # ECConnector config info for PD workers
-
-
 class MyRequestOutput(BaseModel):
     """
     RequestOutput from vLLM is not serializable by default

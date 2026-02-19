@@ -112,6 +112,50 @@ _Appears in:_
 | `key` _string_ | Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml". | disagg.yaml |  |
 
 
+#### DGDRState
+
+_Underlying type:_ _string_
+
+
+
+_Validation:_
+- Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)
+
+| Field | Description |
+| --- | --- |
+| `Initializing` |  |
+| `Pending` |  |
+| `Profiling` |  |
+| `Deploying` |  |
+| `Ready` |  |
+| `DeploymentDeleted` |  |
+| `Failed` |  |
+
+
+#### DGDState
+
+_Underlying type:_ _string_
+
+
+
+_Validation:_
+- Enum: [initializing pending successful failed]
+
+_Appears in:_
+- [DeploymentStatus](#deploymentstatus)
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description |
+| --- | --- |
+| `initializing` |  |
+| `pending` |  |
+| `successful` |  |
+| `failed` |  |
+
+
 #### DeploymentOverridesSpec
 
 
@@ -149,7 +193,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the name of the created DynamoGraphDeployment. |  |  |
 | `namespace` _string_ | Namespace is the namespace of the created DynamoGraphDeployment. |  |  |
-| `state` _string_ | State is the current state of the DynamoGraphDeployment.<br />This value is mirrored from the DGD's status.state field. |  |  |
+| `state` _[DGDState](#dgdstate)_ | State is the current state of the DynamoGraphDeployment.<br />This value is mirrored from the DGD's status.state field. | initializing | Enum: [initializing pending successful failed] <br /> |
 | `created` _boolean_ | Created indicates whether the DGD has been successfully created.<br />Used to prevent recreation if the DGD is manually deleted by users. |  |  |
 
 
@@ -421,7 +465,7 @@ It serves as the primary interface for users to request model deployments with
 specific performance and resource constraints, enabling SLA-driven deployments.
 
 Lifecycle:
- 1. Initial → Pending: Validates spec and prepares for profiling
+ 1. Initializing → Pending: Validates spec and prepares for profiling
  2. Pending → Profiling: Creates and runs profiling job (online or AIC)
  3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
  4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
@@ -482,7 +526,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `state` _string_ | State is a high-level textual status of the deployment request lifecycle.<br />Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"<br />Empty string ("") represents the initial state before initialization. |  |  |
+| `state` _[DGDRState](#dgdrstate)_ | State is a high-level textual status of the deployment request lifecycle. | Initializing | Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed] <br /> |
 | `backend` _string_ | Backend is extracted from profilingConfig.config.engine.backend for display purposes.<br />This field is populated by the controller and shown in kubectl output. |  | Optional: \{\} <br /> |
 | `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
@@ -601,11 +645,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
+| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
+| `state` _[DGDState](#dgdstate)_ | State is a high-level textual status of the graph deployment lifecycle. | initializing | Enum: [initializing pending successful failed] <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
+| `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -950,6 +996,7 @@ _Appears in:_
 | `Restarting` |  |
 | `Completed` |  |
 | `Failed` |  |
+| `Superseded` |  |
 
 
 #### RestartStatus
@@ -1002,6 +1049,45 @@ _Appears in:_
 | --- | --- |
 | `Sequential` |  |
 | `Parallel` |  |
+
+
+#### RollingUpdatePhase
+
+_Underlying type:_ _string_
+
+RollingUpdatePhase represents the current phase of a rolling update.
+
+_Validation:_
+- Enum: [Pending InProgress Completed Failed ]
+
+_Appears in:_
+- [RollingUpdateStatus](#rollingupdatestatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` |  |
+| `InProgress` |  |
+| `Completed` |  |
+| `` |  |
+
+
+#### RollingUpdateStatus
+
+
+
+RollingUpdateStatus tracks the progress of a rolling update.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[RollingUpdatePhase](#rollingupdatephase)_ | Phase indicates the current phase of the rolling update. |  | Enum: [Pending InProgress Completed Failed ] <br />Optional: \{\} <br /> |
+| `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when the rolling update began. |  | Optional: \{\} <br /> |
+| `endTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | EndTime is when the rolling update completed (successfully or failed). |  | Optional: \{\} <br /> |
+| `updatedServices` _string array_ | UpdatedServices is the list of services that have completed the rolling update.<br />A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.<br />Only services of componentType Worker (or Prefill/Decode) are considered. |  | Optional: \{\} <br /> |
 
 
 #### ScalingAdapter
@@ -1075,7 +1161,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
-| `componentName` _string_ | ComponentName is the name of the underlying resource. |  |  |
+| `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  |  |
+| `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
