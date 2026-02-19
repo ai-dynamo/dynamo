@@ -20,7 +20,7 @@ on:
         description: 'S3 bucket to upload the wheel'
         required: false
         type: string
-        default: 'dynamo-infra-utils'
+        default: 'dynamo-ops-test-utils'
       s3_prefix:
         description: 'S3 key prefix for the wheel'
         required: false
