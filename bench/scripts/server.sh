@@ -16,14 +16,13 @@ set -euo pipefail
 SCENARIO=""
 MODEL=""
 LOG_DIR=""
-DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --scenario)  SCENARIO="$2"; shift 2 ;;
         --model)     MODEL="$2"; shift 2 ;;
         --log-dir)   LOG_DIR="$2"; shift 2 ;;
-        --dry-run)   DRY_RUN=true; shift ;;
+        --dry-run)   shift ;;  # accepted but ignored
         *)           echo "ERROR: server.sh: Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -91,11 +90,7 @@ wait_for_port() {
 # ---------------------------------------------------------------------------
 launch_scenario_1() {
     echo "[server.sh] Scenario 1: vllm serve $MODEL --port 8000"
-    local extra_args=()
-    if [[ "$DRY_RUN" == "true" ]]; then
-        extra_args+=(--enforce-eager --gpu-memory-utilization 0.40)
-    fi
-    vllm serve "$MODEL" --port 8000 "${extra_args[@]}" &
+    vllm serve "$MODEL" --port 8000 &
     CHILD_PIDS+=($!)
     echo "[server.sh] vllm serve PID: ${CHILD_PIDS[-1]}"
 }
@@ -125,13 +120,9 @@ launch_scenario_2() {
     CHILD_PIDS+=($!)
     echo "[server.sh] dynamo.frontend PID: ${CHILD_PIDS[-1]}"
 
-    # Start dynamo vllm worker (foreground-ish, but we track it)
-    local extra_args=(--connector none)
-    if [[ "$DRY_RUN" == "true" ]]; then
-        extra_args+=(--enforce-eager --gpu-memory-utilization 0.40)
-    fi
+    # Start dynamo vllm worker
     DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
-        --model "$MODEL" "${extra_args[@]}" &
+        --model "$MODEL" --connector none &
     CHILD_PIDS+=($!)
     echo "[server.sh] dynamo.vllm PID: ${CHILD_PIDS[-1]}"
 }
@@ -166,12 +157,8 @@ launch_scenario_3() {
     echo "[server.sh] dynamo.frontend (vllm processor) PID: ${CHILD_PIDS[-1]}"
 
     # Start dynamo vllm worker
-    local extra_args=(--connector none)
-    if [[ "$DRY_RUN" == "true" ]]; then
-        extra_args+=(--enforce-eager --gpu-memory-utilization 0.40)
-    fi
     DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
-        --model "$MODEL" "${extra_args[@]}" &
+        --model "$MODEL" --connector none &
     CHILD_PIDS+=($!)
     echo "[server.sh] dynamo.vllm PID: ${CHILD_PIDS[-1]}"
 }
@@ -181,7 +168,6 @@ launch_scenario_3() {
 # ---------------------------------------------------------------------------
 echo "[server.sh] Starting scenario $SCENARIO"
 echo "[server.sh] Model: $MODEL"
-echo "[server.sh] Dry-run: $DRY_RUN"
 echo "[server.sh] Log dir: $LOG_DIR"
 
 # ---------------------------------------------------------------------------
