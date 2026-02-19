@@ -429,9 +429,9 @@ func (r *DynamoComponentDeploymentReconciler) cleanupLegacyLWSResources(ctx cont
 		}
 		
 		// Check if it matches legacy naming pattern: baseName-<number>
-		if len(lws.Name) > len(baseKubeName)+1 && 
-		   lws.Name[:len(baseKubeName)] == baseKubeName && 
-		   lws.Name[len(baseKubeName)] == '-' {
+		if len(lws.Name) > len(baseKubeName)+1 &&
+			lws.Name[:len(baseKubeName)] == baseKubeName &&
+			lws.Name[len(baseKubeName)] == '-' {
 			// Verify the suffix is numeric
 			suffix := lws.Name[len(baseKubeName)+1:]
 			isNumeric := true
