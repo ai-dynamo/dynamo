@@ -1133,10 +1133,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 } else {
                     let saturated =
-                        result.offered_block_throughput > result.block_throughput * 10.0;
+                        result.offered_block_throughput > result.block_throughput * 3.0;
                     results.push((dur_ms, result));
                     if saturated {
-                        println!("Early stop: offered throughput >10x achieved throughput");
+                        println!("Early stop: offered throughput >3x achieved throughput");
                         break;
                     }
                 }
