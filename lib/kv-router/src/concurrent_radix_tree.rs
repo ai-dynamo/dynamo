@@ -28,7 +28,9 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use parking_lot::RwLock;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet, FxBuildHasher};
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::indexer::SyncIndexer;
 use crate::protocols::*;
@@ -98,10 +100,7 @@ pub struct ConcurrentRadixTree {
     /// This will only contain root blocks.
     root: SharedBlock,
 
-    /// Per-worker lookup table for O(1) block access.
-    /// Outer RwLock protects the worker map structure (rarely mutated);
-    /// inner RwLock per worker protects that worker's block-hash map.
-    lookup: RwLock<FxHashMap<WorkerWithDpRank, RwLock<WorkerLookup>>>,
+    tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
 }
 
 impl Default for ConcurrentRadixTree {
@@ -121,21 +120,6 @@ impl Drop for ConcurrentRadixTree {
             let mut root = self.root.write();
             stack.extend(root.children.drain().map(|(_, v)| v));
         }
-
-        // Remove all lookup references (they may include blocks not reachable from root).
-        // We have &mut self so no concurrent access; drain the map.
-        let lookup = self.lookup.get_mut();
-        for (_, inner_lock) in lookup.drain() {
-            stack.extend(inner_lock.into_inner().into_values());
-        }
-
-        // Iteratively free any uniquely-owned blocks without recursion
-        while let Some(block) = stack.pop() {
-            if let Ok(rwlock) = Arc::try_unwrap(block) {
-                let mut inner = rwlock.into_inner();
-                stack.extend(inner.children.drain().map(|(_, v)| v));
-            }
-        }
     }
 }
 
@@ -144,7 +128,7 @@ impl ConcurrentRadixTree {
     pub fn new() -> Self {
         Self {
             root: Arc::new(RwLock::new(Block::new())),
-            lookup: RwLock::new(FxHashMap::default()),
+            tree_sizes: DashMap::with_hasher(FxBuildHasher),
         }
     }
 
@@ -197,10 +181,9 @@ impl ConcurrentRadixTree {
             for worker in &active {
                 scores.scores.insert(*worker, 1);
             }
-            let lk = self.lookup.read();
             for worker in scores.scores.keys() {
-                if let Some(inner_lock) = lk.get(worker) {
-                    scores.tree_sizes.insert(*worker, inner_lock.read().len());
+                if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
+                    scores.tree_sizes.insert(*worker, worker_tree_size.load(Ordering::Relaxed));
                 }
             }
             return scores;
@@ -272,10 +255,9 @@ impl ConcurrentRadixTree {
         }
 
         // Get tree sizes from lookup.
-        let lk = self.lookup.read();
         for worker in scores.scores.keys() {
-            if let Some(inner_lock) = lk.get(worker) {
-                scores.tree_sizes.insert(*worker, inner_lock.read().len());
+            if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
+                scores.tree_sizes.insert(*worker, worker_tree_size.load(Ordering::Relaxed));
             }
         }
 
@@ -290,7 +272,7 @@ impl ConcurrentRadixTree {
     /// ### Arguments
     ///
     /// * `event` - The `RouterEvent` to apply.
-    pub fn apply_event(&self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+    pub fn apply_event(&self, lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>, event: RouterEvent) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
 
@@ -298,10 +280,10 @@ impl ConcurrentRadixTree {
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
         match op {
-            KvCacheEventData::Stored(op) => self.apply_stored(worker, op, id),
-            KvCacheEventData::Removed(op) => self.apply_removed(worker, op, id),
+            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id),
+            KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
-                self.clear_all_blocks(worker.worker_id);
+                self.clear_all_blocks(lookup, worker.worker_id);
                 Ok(())
             }
         }
@@ -310,20 +292,13 @@ impl ConcurrentRadixTree {
     /// Apply a store operation.
     fn apply_stored(
         &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         op: KvCacheStoreData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
         // Ensure this worker has an entry in the outer map.
-        if !self.lookup.read().contains_key(&worker) {
-            self.lookup
-                .write()
-                .entry(worker)
-                .or_insert_with(|| RwLock::new(FxHashMap::default()));
-        }
-
-        let lk = self.lookup.read();
-        let mut worker_lookup = lk.get(&worker).unwrap().write();
+        let worker_lookup = lookup.entry(worker).or_insert_with(|| FxHashMap::default());
 
         // Find parent block
         let mut current = match op.parent_hash {
@@ -345,6 +320,8 @@ impl ConcurrentRadixTree {
         };
 
         let mut needs_worker_insert = false;
+
+        let num_blocks_added = op.blocks.len();
 
         // In each iteration, we lock the parent block and insert the worker into it from
         // the previous iteration. This avoids locking a block twice.
@@ -399,6 +376,15 @@ impl ConcurrentRadixTree {
             current = child;
         }
 
+        match self.tree_sizes.get(&worker) {
+            Some(size) => {
+                size.fetch_add(num_blocks_added, Ordering::Relaxed);
+            }
+            None => {
+                self.tree_sizes.insert(worker, AtomicUsize::new(num_blocks_added));
+            }
+        }
+
         // Insert worker into the last child (not yet handled since there is
         // no subsequent iteration to pick it up).
         if needs_worker_insert {
@@ -417,15 +403,17 @@ impl ConcurrentRadixTree {
     /// `child_count > active_count`.
     fn apply_removed(
         &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         op: KvCacheRemoveData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let lk = self.lookup.read();
-        let Some(inner_ref) = lk.get(&worker) else {
+
+        let Some(worker_lookup) = lookup.get_mut(&worker) else {
             return Err(KvCacheEventError::BlockNotFound);
         };
-        let mut worker_lookup = inner_ref.write();
+
+        let mut num_removed = 0;
 
         for block_hash in op.block_hashes {
             let Some(block) = worker_lookup.remove(&block_hash) else {
@@ -445,6 +433,17 @@ impl ConcurrentRadixTree {
             if guard.workers.is_empty() {
                 guard.children.clear();
             }
+
+            num_removed += 1;
+        }
+
+        match self.tree_sizes.get(&worker) {
+            Some(size) => {
+                size.fetch_sub(num_removed, Ordering::Relaxed);
+            }
+            None => {
+                self.tree_sizes.insert(worker, AtomicUsize::new(num_removed));
+            }
         }
 
         Ok(())
@@ -453,20 +452,16 @@ impl ConcurrentRadixTree {
     /// Helper function to remove or clear blocks for a worker.
     /// If `keep_worker` is true, the worker remains in lookup with empty blocks.
     /// If `keep_worker` is false, the worker is completely removed from lookup.
-    fn remove_or_clear_worker_blocks(&self, worker_id: WorkerId, keep_worker: bool) {
-        let workers: Vec<WorkerWithDpRank> = self
-            .lookup
-            .read()
+    fn remove_or_clear_worker_blocks(&self, lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>, worker_id: WorkerId, keep_worker: bool) {
+        let workers: Vec<WorkerWithDpRank> = lookup
             .keys()
             .filter(|w| w.worker_id == worker_id)
             .copied()
             .collect();
 
-        let mut lk = self.lookup.write();
         for worker in workers {
-            if let Some(inner_lock) = lk.remove(&worker) {
-                let blocks = inner_lock.into_inner();
-                for (_, block) in blocks {
+            if let Some(worker_lookup) = lookup.remove(&worker) {
+                for (_, block) in worker_lookup.into_iter() {
                     let mut guard = block.write();
                     guard.workers.remove(&worker);
                     if guard.workers.is_empty() {
@@ -475,106 +470,33 @@ impl ConcurrentRadixTree {
                 }
 
                 if keep_worker {
-                    lk.insert(worker, RwLock::new(FxHashMap::default()));
+                    lookup.insert(worker, FxHashMap::default());
                 }
             }
         }
     }
 
-    /// Remove a worker and all their blocks from the tree.
-    pub fn remove_worker(&self, worker_id: WorkerId) {
-        self.remove_or_clear_worker_blocks(worker_id, false);
-    }
-
     /// Clear all blocks for a worker but keep the worker tracked.
-    pub fn clear_all_blocks(&self, worker_id: WorkerId) {
-        self.remove_or_clear_worker_blocks(worker_id, true);
+    pub fn clear_all_blocks(&self, lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>, worker_id: WorkerId) {
+        self.remove_or_clear_worker_blocks(lookup, worker_id, true);
     }
 
     /// Get all worker IDs currently tracked in the radix tree.
     /// Returns unique worker_ids (ignoring dp_rank differences).
     pub fn get_workers(&self) -> Vec<WorkerId> {
-        let mut worker_ids: Vec<WorkerId> = self
-            .lookup
-            .read()
-            .keys()
-            .map(|w| w.worker_id)
-            .collect::<FxHashSet<_>>()
-            .into_iter()
-            .collect();
-        worker_ids.sort_unstable();
-        worker_ids
+        unimplemented!();
     }
 
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
     /// Uses BFS traversal to ensure that the tree reconstruction is unique,
     /// though the exact event ordering will be lost.
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
-        tracing::debug!(
-            "Dumping concurrent radix tree as events (contains information about {:?} workers)",
-            self.lookup.read().len()
-        );
-
-        let mut events = Vec::new();
-        let mut event_id = 0u64;
-
-        // Queue entries: (current_block, parent_hash, tokens_hash)
-        let mut queue = VecDeque::new();
-
-        // Process root's children first
-        {
-            let root_guard = self.root.read();
-            for (tokens_hash, child_block) in &root_guard.children {
-                queue.push_back((child_block.clone(), None, *tokens_hash));
-            }
-        }
-
-        while let Some((current_block, parent_hash, tokens_hash)) = queue.pop_front() {
-            let current_guard = current_block.read();
-
-            // Get this block's hash (same for all workers)
-            let block_hash = current_guard
-                .block_hash
-                .expect("non-root block must have block_hash");
-
-            // For each worker that has this block
-            for worker in &current_guard.workers {
-                // Create a store event for this worker
-                let event = RouterEvent {
-                    worker_id: worker.worker_id,
-                    event: KvCacheEvent {
-                        event_id,
-                        data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash,
-                            blocks: vec![KvCacheStoredBlockData {
-                                block_hash,
-                                mm_extra_info: None,
-                                tokens_hash,
-                            }],
-                        }),
-                        dp_rank: worker.dp_rank,
-                    },
-                };
-                events.push(event);
-                event_id += 1;
-            }
-
-            // Enqueue children with this block's hash as their parent
-            for (child_tokens_hash, child_block) in &current_guard.children {
-                queue.push_back((child_block.clone(), Some(block_hash), *child_tokens_hash));
-            }
-        }
-
-        events
+        unimplemented!();
     }
 
     /// Get total number of blocks across all workers.
     pub fn current_size(&self) -> usize {
-        self.lookup
-            .read()
-            .values()
-            .map(|inner| inner.read().len())
-            .sum()
+        unimplemented!();
     }
 }
 
@@ -585,8 +507,9 @@ impl ConcurrentRadixTree {
 impl SyncIndexer for ConcurrentRadixTree {
 
     fn worker(&self, event_receiver: flume::Receiver<Option<RouterEvent>>) -> anyhow::Result<()> {
+        let mut lookup = FxHashMap::default();
         while let Ok(Some(event)) = event_receiver.recv() {
-            if let Err(e) = self.apply_event(event) {
+            if let Err(e) = self.apply_event(&mut lookup, event) {
                 tracing::warn!("Failed to apply event: {:?}", e);
             }
         }
@@ -742,6 +665,13 @@ mod tests {
         let result = trie.find_matches_impl(&[LocalBlockHash(0)], false).scores;
         assert_eq!(result.len(), 2);
 
+        trie.apply_event(RouterEvent {
+            worker_id: worker_0,
+            event: KvCacheEvent { 
+                event_id: 0, data: KvCacheEventData::Cleared, dp_rank: 0 
+            },
+        }).unwrap();
+
         trie.clear_all_blocks(worker_0);
 
         assert!(
@@ -763,41 +693,6 @@ mod tests {
             .scores;
         assert_eq!(result.len(), 1);
         assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 2);
-    }
-
-    #[test]
-    fn test_remove_worker() {
-        let trie = ConcurrentRadixTree::new();
-
-        let worker_0 = 0;
-        let worker_1 = 1;
-
-        trie.apply_event(create_store_event(worker_0, 0, vec![1, 2, 3], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_1, 0, vec![1, 2, 3], None))
-            .unwrap();
-
-        assert_eq!(trie.lookup.read().len(), 2);
-
-        trie.remove_worker(worker_0);
-
-        assert!(
-            !trie
-                .lookup
-                .read()
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-        assert_eq!(trie.lookup.read().len(), 1);
-
-        let result = trie
-            .find_matches_impl(
-                &[LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-                false,
-            )
-            .scores;
-        assert_eq!(result.len(), 1);
-        assert!(!result.contains_key(&WorkerWithDpRank::from_worker_id(worker_0)));
-        assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_1)));
     }
 
     #[test]
