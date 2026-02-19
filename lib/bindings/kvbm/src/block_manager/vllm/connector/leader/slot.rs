@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{any::Any, cmp::max, sync::Arc};
+use std::{any::Any, cmp::max, collections::HashMap, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
@@ -384,6 +384,10 @@ pub struct VllmConnectorSlot {
     /// Block index where offload was terminated due to priority filtering.
     /// When Some, no further blocks will be offloaded to ensure global contiguity.
     offload_terminated_at_block: Option<usize>,
+
+    /// Stored block priorities from previous apply_scheduler_output calls.
+    /// Used as fallback when priorities=None in subsequent chunked prefill iterations.
+    stored_block_priorities: HashMap<BlockId, u32>,
 }
 
 impl VllmConnectorSlot {
@@ -424,6 +428,7 @@ impl VllmConnectorSlot {
             cache_stats,
             offload_min_priority,
             offload_terminated_at_block: None,
+            stored_block_priorities: HashMap::new(),
         }
     }
 
@@ -604,6 +609,16 @@ impl Slot for VllmConnectorSlot {
             }
         }
 
+        // Store block→priority mapping for use in subsequent chunked prefill iterations.
+        // In chunked prefill, new_request (chunk 1) carries priorities for ALL blocks,
+        // but cached_request (chunk 2+) has priorities=None. Storing here lets us look up
+        // priorities for blocks evaluated in later chunks.
+        if let Some(prios) = priorities {
+            for (block_id, priority) in block_ids.iter().zip(prios.iter()) {
+                self.stored_block_priorities.insert(*block_id, *priority);
+            }
+        }
+
         // Early exit if offload has been permanently terminated.
         // This ensures global contiguity: once a gap is created by priority filtering,
         // no subsequent blocks will be offloaded for this request.
@@ -702,9 +717,38 @@ impl Slot for VllmConnectorSlot {
                         .take(num_candidate_blocks)
                         .copied()
                         .collect()
+                } else if !self.stored_block_priorities.is_empty() {
+                    // Candidate blocks predate current block_ids (candidate_start < new_blocks_start).
+                    // In chunked prefill, chunk 2+ carries priorities only for its NEW blocks,
+                    // but candidates may include blocks from earlier chunks. Use stored priorities.
+                    let stored: Vec<u32> = candidate_block_ids
+                        .iter()
+                        .map(|id| self.stored_block_priorities.get(id).copied().unwrap_or(0))
+                        .collect();
+                    tracing::debug!(
+                        "PRIORITY_STORED: candidate_start={} < new_blocks_start={}, \
+                         using stored priorities for {} candidates: {:?}",
+                        candidate_start, new_blocks_start,
+                        stored.len(),
+                        &stored[..std::cmp::min(10, stored.len())]
+                    );
+                    stored
                 } else {
                     vec![0; num_candidate_blocks]
                 }
+            } else if !self.stored_block_priorities.is_empty() {
+                // priorities=None entirely (shouldn't happen in practice with TRT-LLM,
+                // but handle defensively).
+                let stored: Vec<u32> = candidate_block_ids
+                    .iter()
+                    .map(|id| self.stored_block_priorities.get(id).copied().unwrap_or(0))
+                    .collect();
+                tracing::debug!(
+                    "PRIORITY_STORED: priorities=None, using stored priorities for {} candidates: {:?}",
+                    stored.len(),
+                    &stored[..std::cmp::min(10, stored.len())]
+                );
+                stored
             } else {
                 vec![0; num_candidate_blocks]
             };
