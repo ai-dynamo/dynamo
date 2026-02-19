@@ -143,6 +143,7 @@ class Processor(ProcessMixIn):
             engine_prompt=engine_prompt,
             sampling_params=sampling_params,
             request_id=request_id,
+            model=raw_request.model,
             multimodal_input=multimodal_input,
         )
 
@@ -298,19 +299,16 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     Instantiate and serve
     """
 
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
 
     parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
         args.downstream_endpoint
     )
-    encode_worker_client = (
-        await runtime.namespace(parsed_namespace)
-        .component(parsed_component_name)
-        .endpoint(parsed_endpoint_name)
-        .client()
-    )
+    encode_worker_client = await runtime.endpoint(
+        f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+    ).client()
 
     handler = Processor(args, config.engine_args, encode_worker_client)
 
