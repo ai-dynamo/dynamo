@@ -379,10 +379,8 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	}
 
 	// Clean up any excess LeaderWorkerSets (if replicas were decreased)
-	baseKubeName := dynamoComponentDeployment.Name
 	for i := int(desiredReplicas); ; i++ {
-		// Try to find a LeaderWorkerSet with the next index
-		nextLWSName := fmt.Sprintf("%s-%d", baseKubeName, i)
+		nextLWSName := lwsInstanceName(dynamoComponentDeployment, i)
 		lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
 		err := r.Get(ctx, types.NamespacedName{
 			Name:      nextLWSName,
@@ -568,7 +566,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 		return nil, false, fmt.Errorf("generateVolcanoPodGroup: instanceID cannot be negative, got %d", instanceID)
 	}
 
-	podGroupName := fmt.Sprintf("%s-%d", opt.dynamoComponentDeployment.Name, instanceID)
+	podGroupName := lwsInstanceName(opt.dynamoComponentDeployment, instanceID)
 
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 
@@ -694,7 +692,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 		return nil, false, fmt.Errorf("generateLeaderWorkerSet: instanceID cannot be negative, got %d", instanceID)
 	}
 
-	kubeName := fmt.Sprintf("%s-%d", opt.dynamoComponentDeployment.Name, instanceID)
+	kubeName := lwsInstanceName(opt.dynamoComponentDeployment, instanceID)
 
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
@@ -745,6 +743,10 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	return leaderWorkerSet, false, nil
+}
+
+func lwsInstanceName(dcd *v1alpha1.DynamoComponentDeployment, instanceID int) string {
+	return fmt.Sprintf("%s-%d", dcd.Name, instanceID)
 }
 
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) error {
