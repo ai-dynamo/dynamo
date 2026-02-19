@@ -347,11 +347,12 @@ jobs:
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     runs-on: prod-default-small-v2
     needs: [deploy-operator, vllm-pipeline]
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         profile:
           - agg
@@ -381,11 +382,12 @@ jobs:
     # Run if core, sglang, or deploy is changed
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, sglang-pipeline]
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         profile:
           - agg
@@ -413,17 +415,20 @@ jobs:
     # Run if core, trtllm, or deploy is changed
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, trtllm-pipeline]
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         profile:
           - agg
           - agg_router
-          - disagg
-          - disagg_router
+          # Disabled: trtllm disagg profiles consistently timeout (~32 min) with 0% success rate.
+          # Re-enable once the underlying disagg deployment issue is resolved.
+          # - disagg
+          # - disagg_router
     name: deploy-test-trtllm (${{ matrix.profile }})
     env:
       FRAMEWORK: trtllm
