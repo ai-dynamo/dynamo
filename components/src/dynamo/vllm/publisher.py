@@ -3,7 +3,7 @@
 
 import asyncio
 import logging
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from prometheus_client import CollectorRegistry
 from vllm.config import VllmConfig
@@ -45,7 +45,6 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         endpoint: Endpoint,
         dp_rank: int = 0,
         component_gauges: Optional[LLMBackendMetrics] = None,
-        metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
         self._endpoint = endpoint
@@ -108,13 +107,11 @@ class StatLoggerFactory:
         endpoint: Endpoint,
         component_gauges: Optional[LLMBackendMetrics] = None,
         dp_rank: int = 0,
-        metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.endpoint = endpoint
         self.component_gauges = component_gauges
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
         self.dp_rank = dp_rank
-        self.metrics_labels = metrics_labels or []
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         if self.dp_rank != dp_rank:
@@ -129,7 +126,6 @@ class StatLoggerFactory:
             endpoint=self.endpoint,
             dp_rank=dp_rank,
             component_gauges=self.component_gauges,
-            metrics_labels=self.metrics_labels,
         )
         self.created_logger = logger
 

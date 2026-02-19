@@ -105,6 +105,7 @@ class TestCreate:
             Mock(),
             Mock(),
             "/tmp/prometheus",
+            Mock(),
         )
 
         await factory.create(
