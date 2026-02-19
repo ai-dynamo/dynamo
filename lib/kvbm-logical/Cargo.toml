@@ -19,6 +19,7 @@ bincode = { version = "2.0.1", features = ["serde", "derive"] }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
+indexmap = { workspace = true }
 lru = "0.16"
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
