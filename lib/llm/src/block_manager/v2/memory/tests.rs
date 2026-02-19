@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Tests for the storage-next module.
+//! Tests for the storage module (re-exported from dynamo-memory).
 
 use super::*;
 
@@ -107,17 +107,10 @@ mod cuda_tests {
     }
 }
 
-// Tests for NIXL registration would require a real NIXL agent,
-// so we'll skip those for now. In practice, you'd mock the agent
-// or use integration tests.
 #[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 mod nixl_tests {
-    use super::super::registered::register_with_nixl;
     use super::*;
     use nixl_sys::Agent as NixlAgent;
-
-    // These tests would require a mock NIXL agent or real NIXL setup
-    // Placeholder for now
 
     #[test]
     fn test_nixl_registration() {

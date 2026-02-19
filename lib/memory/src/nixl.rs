@@ -195,7 +195,7 @@ impl<S: MemoryDescriptor + NixlCompatible> NixlRegistered<S> {
 /// A `NixlRegistered` wrapper containing the storage and registration handle.
 pub fn register_with_nixl<S>(
     storage: S,
-    agent: &NixlAgent,
+    agent: &Agent,
     opt: Option<&OptArgs>,
 ) -> std::result::Result<NixlRegistered<S>, S>
 where

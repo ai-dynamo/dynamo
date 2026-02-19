@@ -89,7 +89,7 @@ repos:
   hooks:
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
-      entry: python3 scripts/report_pytest_markers.py
+      entry: python3 tests/report_pytest_markers.py
       language: python
       pass_filenames: false
       additional_dependencies:

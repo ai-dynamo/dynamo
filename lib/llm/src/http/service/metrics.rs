@@ -297,6 +297,9 @@ pub enum Endpoint {
     /// OAI Responses
     Responses,
 
+    /// Anthropic Messages
+    AnthropicMessages,
+
     /// Tensor
     Tensor,
 }
@@ -948,6 +951,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
             Endpoint::Responses => write!(f, "responses"),
+            Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
         }
     }
@@ -962,6 +966,7 @@ impl Endpoint {
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
             Endpoint::Responses => "responses",
+            Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
         }
     }

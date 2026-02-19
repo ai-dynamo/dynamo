@@ -356,6 +356,11 @@ def parse_args():
     parser.add_argument(
         "--tests", default="tests", help="Path to test directory (default: tests)"
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print all tests with their markers (default: only failures and summary)",
+    )
     return parser.parse_args()
 
 
@@ -395,14 +400,18 @@ def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
     return exitcode, plugin.build_report()
 
 
-def print_human_report(report: Report) -> None:
-    """Print human-readable report to stdout."""
-    print("\n" + "=" * 80)
-    print(f"{'TEST ID':<60} | MARKERS")
-    print("=" * 80)
+def print_human_report(report: Report, *, verbose: bool = False) -> None:
+    """Print human-readable report to stdout.
 
-    for rec in report.tests:
-        print(f"{rec.nodeid:<60} | {', '.join(rec.markers)}")
+    By default only prints tests with missing markers and the summary.
+    Pass verbose=True to print all tests with their markers.
+    """
+    if verbose:
+        print("\n" + "=" * 80)
+        print(f"{'TEST ID':<60} | MARKERS")
+        print("=" * 80)
+        for rec in report.tests:
+            print(f"{rec.nodeid:<60} | {', '.join(rec.markers)}")
 
     # Print tests with missing markers before summary
     missing_tests = [rec for rec in report.tests if rec.missing]
@@ -432,7 +441,7 @@ def main() -> int:
     declared = load_declared_markers(Path("."))
     validate_marker_definitions(report, declared)
 
-    print_human_report(report)
+    print_human_report(report, verbose=args.verbose)
 
     # Strict mode validation
     if args.strict:

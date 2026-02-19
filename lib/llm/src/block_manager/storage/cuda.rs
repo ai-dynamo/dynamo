@@ -74,7 +74,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use cudarc::driver::{CudaContext, sys};
+use cudarc::driver::CudaContext;
 
 use crate::block_manager::numa_allocator;
 
@@ -91,7 +91,12 @@ use crate::block_manager::numa_allocator;
 unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, StorageError> {
     // First, try write-combined allocation (optimal for PCIe systems)
     // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
-    match unsafe { cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED) } {
+    match unsafe {
+        cudarc::driver::result::malloc_host(
+            size,
+            cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+        )
+    } {
         Ok(ptr) => Ok(ptr as *mut u8),
         Err(_) => {
             // Write-combined not supported (e.g., Grace Hopper/Blackwell),
@@ -205,7 +210,7 @@ impl PinnedStorage {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-            // Try NUMA-aware allocation if enabled, otherwise use direct allocation
+            // Try NUMA-aware allocation if enabled, otherwise use direct allocation.
             let ptr = if numa_allocator::is_numa_enabled() {
                 let device_id = ctx.cu_device() as u32;
                 match numa_allocator::worker_pool::NumaWorkerPool::global()
@@ -627,14 +632,8 @@ mod tests {
         }
     }
 
-    /// Test PinnedStorage::new with NUMA disabled (the direct allocation path)
-    ///
-    /// This test confirms that when `DYN_KVBM_ENABLE_NUMA` is not set,
-    /// PinnedStorage::new uses the direct malloc_host_prefer_writecombined path
-    /// (lines 222-224 in the source).
+    /// Test PinnedStorage::new with NUMA disabled (the direct allocation path).
     #[test]
-    // `remove_var` is not thread-safe, so we need to run this test in a serial context
-    // #[serial]
     fn test_pinned_storage_new_without_numa() {
         // Verify NUMA is actually disabled for this test
         assert!(

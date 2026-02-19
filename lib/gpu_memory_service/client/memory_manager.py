@@ -403,11 +403,6 @@ class GMSClientMemoryManager:
         self._unmap_preserving_va()
         self._va_preserved = True
 
-        # Ensure all CUDA VMM unmap operations complete before releasing the lock.
-        # This prevents race conditions where remap() may be called before
-        # physical memory is fully released.
-        synchronize()
-
         self._client_rpc.close()
         self._client = None
         self._unmapped = True

@@ -612,6 +612,131 @@ class ResponsesStreamPayload(BasePayload):
 
 
 @dataclass
+class AnthropicMessagesPayload(BasePayload):
+    """Payload for the Anthropic Messages API endpoint (/v1/messages)."""
+
+    endpoint: str = "/v1/messages"
+
+    @staticmethod
+    def extract_content(response):
+        """Extract text content from an Anthropic Messages API response."""
+        response.raise_for_status()
+        result = response.json()
+
+        assert (
+            result.get("type") == "message"
+        ), f"Expected type='message', got {result.get('type')}"
+        assert result.get("id", "").startswith(
+            "msg_"
+        ), f"Expected id to start with 'msg_', got {result.get('id')}"
+        assert (
+            result.get("role") == "assistant"
+        ), f"Expected role='assistant', got {result.get('role')}"
+        assert result.get("stop_reason") in (
+            "end_turn",
+            "max_tokens",
+            "stop_sequence",
+            "tool_use",
+        ), f"Unexpected stop_reason: {result.get('stop_reason')}"
+
+        content = result.get("content", [])
+        assert len(content) > 0, "Response content is empty"
+        assert (
+            content[0].get("type") == "text"
+        ), f"Expected content[0].type='text', got {content[0].get('type')}"
+
+        usage = result.get("usage", {})
+        assert "input_tokens" in usage, "Missing input_tokens in usage"
+        assert "output_tokens" in usage, "Missing output_tokens in usage"
+
+        return content[0].get("text", "")
+
+    def response_handler(self, response: Any) -> str:
+        return AnthropicMessagesPayload.extract_content(response)
+
+
+@dataclass
+class AnthropicMessagesStreamPayload(BasePayload):
+    """Streaming payload for the Anthropic Messages API endpoint (/v1/messages).
+
+    Validates SSE event structure and lifecycle ordering per the Anthropic streaming spec.
+    """
+
+    endpoint: str = "/v1/messages"
+    http_stream: bool = True
+
+    @staticmethod
+    def extract_content(response):
+        """Parse SSE stream and validate Anthropic event structure."""
+        import json
+
+        response.raise_for_status()
+
+        events = []
+        event_type = ""
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                event_type = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data_str = line[len("data: ") :]
+                events.append((event_type, json.loads(data_str)))
+
+        event_types = [e[0] for e in events]
+
+        # Validate lifecycle event ordering
+        assert len(event_types) >= 3, f"Too few events: {event_types}"
+        assert (
+            event_types[0] == "message_start"
+        ), f"First event should be message_start, got {event_types[0]}"
+        assert (
+            event_types[-1] == "message_stop"
+        ), f"Last event should be message_stop, got {event_types[-1]}"
+
+        # Validate message_start structure
+        msg_start = events[0][1]
+        assert msg_start.get("type") == "message_start", "message_start missing type"
+        message = msg_start.get("message", {})
+        assert message.get("id", "").startswith(
+            "msg_"
+        ), "message id should start with msg_"
+        assert message.get("role") == "assistant", "message role should be assistant"
+
+        # Validate required event types
+        assert "content_block_start" in event_types, "Missing content_block_start"
+        assert "content_block_delta" in event_types, "Missing content_block_delta"
+        assert "content_block_stop" in event_types, "Missing content_block_stop"
+        assert "message_delta" in event_types, "Missing message_delta"
+
+        # Validate message_delta has stop_reason
+        delta_events = [e for e in events if e[0] == "message_delta"]
+        assert (
+            len(delta_events) == 1
+        ), f"Expected 1 message_delta, got {len(delta_events)}"
+        delta_body = delta_events[0][1].get("delta", {})
+        assert delta_body.get("stop_reason") in (
+            "end_turn",
+            "max_tokens",
+            "stop_sequence",
+            "tool_use",
+        ), f"Unexpected stop_reason in message_delta: {delta_body.get('stop_reason')}"
+
+        # Collect text deltas
+        deltas = []
+        for e_type, e_data in events:
+            if e_type == "content_block_delta":
+                delta = e_data.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    deltas.append(delta.get("text", ""))
+
+        return "".join(deltas)
+
+    def response_handler(self, response: Any) -> str:
+        return AnthropicMessagesStreamPayload.extract_content(response)
+
+
+@dataclass
 class EmbeddingPayload(BasePayload):
     """Payload for embeddings endpoint."""
 

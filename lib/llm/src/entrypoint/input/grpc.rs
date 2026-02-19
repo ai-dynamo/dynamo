@@ -24,6 +24,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
+        .http_cancel_token(Some(distributed_runtime.primary_token()))
         .with_request_template(engine_config.local_model().request_template());
 
     // Set HTTP metrics port if provided (for parallel test execution)

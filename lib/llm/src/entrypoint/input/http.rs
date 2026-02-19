@@ -49,6 +49,8 @@ pub async fn run(
         http_service_builder = http_service_builder.host(http_host);
     }
     http_service_builder =
+        http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
+    http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
 
     let http_service = match engine_config {

@@ -22,10 +22,7 @@ from pydantic import BaseModel
 from dynamo.planner.utils.agg_planner import AggPlanner
 from dynamo.planner.utils.decode_planner import DecodePlanner
 from dynamo.planner.utils.disagg_planner import DisaggPlanner
-from dynamo.planner.utils.planner_argparse import (
-    create_sla_planner_parser,
-    validate_sla_planner_args,
-)
+from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -40,42 +37,57 @@ class RequestType(BaseModel):
     text: str
 
 
-async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
-    validate_sla_planner_args(args)
-
-    mode = getattr(args, "mode", "disagg")
+async def start_planner(runtime: DistributedRuntime, config: PlannerConfig):
+    mode = config.mode
     if mode == "disagg":
-        planner = DisaggPlanner(runtime, args)
+        planner = DisaggPlanner(runtime, config)
     elif mode == "prefill":
-        planner = PrefillPlanner(runtime, args)
+        planner = PrefillPlanner(runtime, config)
     elif mode == "decode":
-        planner = DecodePlanner(runtime, args)
+        planner = DecodePlanner(runtime, config)
     elif mode == "agg":
-        planner = AggPlanner(runtime, args)
+        planner = AggPlanner(runtime, config)
     else:
         raise ValueError(f"Invalid planner mode: {mode}")
     await planner._async_init()
     await planner.run()
 
 
-@dynamo_worker()
-async def init_planner(runtime: DistributedRuntime, args):
+async def init_planner(runtime: DistributedRuntime, config: PlannerConfig):
     await asyncio.sleep(INIT_PLANNER_START_DELAY)
 
-    await start_sla_planner(runtime, args)
+    await start_planner(runtime, config)
 
-    component = runtime.namespace(args.namespace).component("Planner")
+    component = runtime.namespace(config.namespace).component("Planner")
 
     async def generate(request: RequestType):
         """Dummy endpoint to satisfy that each component has an endpoint"""
         yield "mock endpoint"
 
     generate_endpoint = component.endpoint("generate")
-    await generate_endpoint.serve_endpoint(generate)
+    await generate_endpoint.serve_endpoint(generate)  # type: ignore[arg-type]
+
+
+def _parse_config() -> PlannerConfig:
+    parser = argparse.ArgumentParser(description="Dynamo Planner")
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="JSON string or path to a JSON/YAML config file",
+    )
+    args = parser.parse_args()
+    return PlannerConfig.from_config_arg(args.config)
+
+
+@dynamo_worker()
+async def worker(runtime: DistributedRuntime):
+    config = _parse_config()
+    await init_planner(runtime, config)
+
+
+def main():
+    asyncio.run(worker())  # type: ignore[call-arg]
 
 
 if __name__ == "__main__":
-    parser = create_sla_planner_parser()
-    args = parser.parse_args()
-    validate_sla_planner_args(args)
-    asyncio.run(init_planner(args))
+    main()

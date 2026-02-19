@@ -17,7 +17,6 @@ import logging
 import math
 import warnings
 from abc import ABC, abstractmethod
-from argparse import Namespace
 from datetime import datetime, timedelta
 from enum import Enum
 
@@ -27,6 +26,7 @@ import pmdarima
 from filterpy.kalman import KalmanFilter
 from prophet import Prophet
 
+from dynamo.planner.utils.planner_config import PlannerConfig
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -99,7 +99,7 @@ class ConstantPredictor(BasePredictor):
     Assume load is constant and predict the next load to be the same as most recent load
     """
 
-    def __init__(self, _args: Namespace):
+    def __init__(self, _config: PlannerConfig):
         super().__init__(minimum_data_points=1)
 
     def predict_next(self):
@@ -112,15 +112,14 @@ class ARIMAPredictor(BasePredictor):
         RAW = "raw"
         LOG1P = "log1p"
 
-    def __init__(self, args: Namespace):
+    def __init__(self, config: PlannerConfig):
         super().__init__(minimum_data_points=5)
         self.model = None
         # Keep raw values so we can fit in raw space first, then fallback to log1p space.
         self._raw_buffer: list[float] = []
         # Pending raw points to incrementally update the fitted model with.
         self._pending_raw_updates: list[float] = []
-        # Shared log1p knob across predictors. Back-compat: `--arima-mode=log1p`.
-        use_log1p = bool(getattr(args, "load_predictor_log1p", False))
+        use_log1p = config.load_predictor_log1p
         self._requested_mode = (
             ARIMAPredictor.Mode.LOG1P if use_log1p else ARIMAPredictor.Mode.RAW
         )
@@ -248,18 +247,12 @@ class ARIMAPredictor(BasePredictor):
 
 # Time-series forecasting model from Meta
 class ProphetPredictor(BasePredictor):
-    def __init__(self, args: Namespace):
+    def __init__(self, config: PlannerConfig):
         super().__init__(minimum_data_points=5)
-        self._use_log1p = bool(getattr(args, "load_predictor_log1p", False))
-        # Window size is only used by Prophet (to bound refit cost).
-        self.window_size = getattr(
-            args,
-            "prophet_window_size",
-            getattr(args, "load_prediction_window_size", 50),
-        )
+        self._use_log1p = config.load_predictor_log1p
+        self.window_size = config.prophet_window_size
         self.curr_step = 0
-        # Use adjustment_interval as step size (seconds per observation)
-        self.step_size = getattr(args, "adjustment_interval", 3600)
+        self.step_size = config.throughput_adjustment_interval
         self.start_date = datetime(2024, 1, 1)  # Base date for generating timestamps
         self.data_buffer = []  # Override to store dicts instead of values
         self._seen_nonzero_since_idle_reset = False
@@ -329,15 +322,12 @@ class KalmanPredictor(BasePredictor):
     forecasting in bursty systems.
     """
 
-    def __init__(self, args: Namespace):
-        super().__init__(minimum_data_points=getattr(args, "kalman_min_points", 5))
-        # Shared log1p knob across predictors. Back-compat: `--kalman-log1p`.
-        self._use_log1p = bool(getattr(args, "load_predictor_log1p", False)) or bool(
-            getattr(args, "kalman_log1p", False)
-        )
-        q_level = getattr(args, "kalman_q_level", 1.0)
-        q_trend = getattr(args, "kalman_q_trend", 0.1)
-        r = getattr(args, "kalman_r", 10.0)
+    def __init__(self, config: PlannerConfig):
+        super().__init__(minimum_data_points=config.kalman_min_points)
+        self._use_log1p = config.load_predictor_log1p
+        q_level = config.kalman_q_level
+        q_trend = config.kalman_q_trend
+        r = config.kalman_r
         self._kf = KalmanFilter(dim_x=2, dim_z=1)
         # State: [level, trend]
         self._kf.x = np.array([[0.0], [0.0]], dtype=float)
