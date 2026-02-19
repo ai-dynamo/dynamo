@@ -52,7 +52,7 @@ navbar-links:
     text: Blog
     links:
       - text: All Posts
-        href: /dynamo/blog
+        href: /dynamo/dev/blog
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 footer: ./components/CustomFooter.tsx
