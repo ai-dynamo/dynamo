@@ -277,13 +277,13 @@ def generate_dgd_config_with_planner(
     planner_config_dict = json.loads(planner_args[config_idx + 1])
 
     if best_prefill_mapping is not None:
-        planner_config_dict["prefill_engine_num_gpu"] = (
-            best_prefill_mapping.get_num_gpus()
-        )
+        planner_config_dict[
+            "prefill_engine_num_gpu"
+        ] = best_prefill_mapping.get_num_gpus()
     if best_decode_mapping is not None:
-        planner_config_dict["decode_engine_num_gpu"] = (
-            best_decode_mapping.get_num_gpus()
-        )
+        planner_config_dict[
+            "decode_engine_num_gpu"
+        ] = best_decode_mapping.get_num_gpus()
 
     planner_args[config_idx + 1] = json.dumps(planner_config_dict)
 

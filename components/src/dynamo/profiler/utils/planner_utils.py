@@ -15,9 +15,8 @@
 
 import argparse
 import json
-from typing import Any, get_args, get_origin
-
 import typing
+from typing import Any, get_args, get_origin
 
 from dynamo.planner.utils.planner_config import PlannerConfig
 
