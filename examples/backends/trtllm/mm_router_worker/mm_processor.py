@@ -70,8 +70,7 @@ def process_multimodal(
     model: str,
     model_type: str,
 ) -> ProcessedInput:
-    """Process multimodal request: load images, get expanded tokens and mm_hashes.
-    """
+    """Process multimodal request: load images, get expanded tokens and mm_hashes."""
     try:
         prompt = build_prompt_from_messages(messages)
 

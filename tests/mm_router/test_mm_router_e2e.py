@@ -210,7 +210,9 @@ def start_trtllm_mm_services(
 
     with TRTLLMWorkerProcess(request, system_port=trtllm_port):
         time.sleep(15)
-        with TRTLLMMMRouterWorkerProcess(request, system_port=router_port) as router_proc:
+        with TRTLLMMMRouterWorkerProcess(
+            request, system_port=router_port
+        ) as router_proc:
             time.sleep(5)
             with FrontendProcess(request, frontend_port=frontend_port):
                 yield frontend_port, router_proc

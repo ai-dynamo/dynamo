@@ -28,13 +28,7 @@ import uvloop
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from transformers import AutoProcessor
 
-from dynamo.llm import (
-    KvRouter,
-    KvRouterConfig,
-    ModelInput,
-    ModelType,
-    register_llm,
-)
+from dynamo.llm import KvRouter, KvRouterConfig, ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 from .handler import MMRouterHandler
