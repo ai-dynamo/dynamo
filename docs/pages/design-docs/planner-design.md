@@ -4,8 +4,6 @@
 title: Planner Design
 ---
 
-# Planner Design
-
 > **Tier 3 design documentation** for contributors and architects. For user-facing docs, see [docs/components/planner/](../components/planner/README.md).
 
 ## Overview

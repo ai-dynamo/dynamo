@@ -4,8 +4,6 @@
 title: Integration with Dynamo
 ---
 
-# Checkpoint/Restore for Fast Pod Startup
-
 > ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. It requires privileged mode for restore operations. See [Limitations](#limitations) for details.
 
 Reduce cold start times for LLM inference workers from ~3 minutes to ~30 seconds using container checkpointing.

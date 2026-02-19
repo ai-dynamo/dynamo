@@ -4,8 +4,6 @@
 title: Request Plane
 ---
 
-# Dynamo Request Planes User Guide
-
 ## Overview
 
 Dynamo supports multiple transport mechanisms for its request plane (the communication layer between services). You can choose from three different request plane modes based on your deployment requirements:

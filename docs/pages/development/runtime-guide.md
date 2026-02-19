@@ -4,8 +4,6 @@
 title: Runtime Guide
 ---
 
-# Dynamo Runtime
-
 <h4>A Datacenter Scale Distributed Inference Serving Framework</h4>
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)

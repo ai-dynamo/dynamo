@@ -4,8 +4,6 @@
 title: vLLM-Omni
 ---
 
-# [Experimental] Running Omni Models with vLLM
-
 Dynamo supports omni (multimodal generation) models via the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This enables multi-stage pipelines for tasks like text-to-text and text-to-image generation through an OpenAI-compatible API.
 
 ## Prerequisites

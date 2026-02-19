@@ -4,8 +4,6 @@
 title: Profiler Examples
 ---
 
-# Profiler Examples
-
 Complete examples for profiling with DGDRs, the interactive WebUI, and direct script usage.
 
 ## DGDR Examples

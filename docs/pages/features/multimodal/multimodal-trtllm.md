@@ -4,8 +4,6 @@
 title: TensorRT-LLM Multimodal
 ---
 
-# TensorRT-LLM Multimodal
-
 This document provides a comprehensive guide for multimodal inference using TensorRT-LLM backend in Dynamo.
 
 You can provide multimodal inputs in the following ways:

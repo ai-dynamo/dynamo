@@ -4,8 +4,6 @@
 title: KV Events for Custom Engines
 ---
 
-# KV Event Publishing for Custom Engines
-
 This document explains how to implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing.
 
 ## Overview

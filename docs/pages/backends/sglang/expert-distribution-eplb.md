@@ -4,8 +4,6 @@
 title: Expert Distribution (EPLB)
 ---
 
-# Expert Parallelism Load Balancer (EPLB) in SGLang
-
 Mixture-of-Experts (MoE) models utilize a technique called Expert Parallelism (EP), where experts are distributed across multiple GPUs. While this allows for much larger and more powerful models, it can lead to an uneven workload distribution. Because the load on different experts may vary depending on the workload, some GPUs can become bottlenecks, forcing the entire system to wait. This imbalance leads to wasted compute cycles and increased memory usage.
 
 To address this, SGLang implements an Expert Parallelism Load Balancer (EPLB) inspired by the work in the DeepSeek-V3 paper. EPLB analyzes expert usage patterns and dynamically re-arranges the experts across the available GPUs to ensure a more balanced workload.

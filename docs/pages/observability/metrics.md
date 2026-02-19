@@ -4,8 +4,6 @@
 title: Metrics
 ---
 
-# Dynamo Metrics
-
 ## Overview
 
 Dynamo provides built-in metrics capabilities through the Dynamo metrics API, which is automatically available whenever you use the `DistributedRuntime` framework. This document serves as a reference for all available metrics in Dynamo.

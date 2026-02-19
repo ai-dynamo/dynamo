@@ -4,8 +4,6 @@
 title: Diffusion LM
 ---
 
-# Running Diffusion LMs with SGLang
-
 Diffusion Language Models (Diffusion LMs) are a class of generative models that use diffusion processes for text generation. This guide shows how to deploy diffusion models like LLaDA2.0 using SGLang as the backend with Dynamo. Diffusion LMs work differently from autoregressive models - they iteratively refine generated text through a diffusion process.
 
 ## Launch the Deployment

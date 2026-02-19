@@ -5,8 +5,6 @@ title: LoRA Adapters
 subtitle: Serve fine-tuned LoRA adapters with dynamic loading and routing in Dynamo
 ---
 
-# LoRA Adapters
-
 LoRA (Low-Rank Adaptation) enables efficient fine-tuning and serving of specialized model variants without duplicating full model weights. Dynamo provides built-in support for dynamic LoRA adapter loading, caching, and inference routing.
 
 ## Backend Support

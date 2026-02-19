@@ -4,8 +4,6 @@
 title: Service Discovery
 ---
 
-# Service Discovery
-
 Dynamo components (frontends, workers, planner) need to be able to discover each other and their capabilities at runtime. We refer to this as service discovery. There are 2 kinds of service discovery backends supported on Kubernetes.
 
 ## Discovery Backends

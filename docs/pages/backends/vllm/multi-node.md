@@ -4,8 +4,6 @@
 title: Multi-Node
 ---
 
-# Multi-node Examples
-
 This guide covers deploying vLLM across multiple nodes using Dynamo's distributed capabilities.
 
 ## Prerequisites

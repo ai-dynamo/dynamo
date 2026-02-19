@@ -5,8 +5,6 @@ title: Fault Tolerance
 subtitle: Handle failures gracefully with request migration, cancellation, and graceful shutdown
 ---
 
-# Fault Tolerance
-
 Dynamo provides comprehensive fault tolerance mechanisms to ensure reliable LLM inference in production deployments. This section covers the various strategies and features that enable Dynamo to handle failures gracefully and maintain service availability.
 
 ## Overview

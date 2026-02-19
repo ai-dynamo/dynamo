@@ -4,8 +4,6 @@
 title: Profiling
 ---
 
-# Profiling SGLang Workers in Dynamo
-
 > [!NOTE]
 > **See also**: [Profiler Component Overview](../../components/profiler/README.md) for SLA-driven profiling and deployment optimization.
 

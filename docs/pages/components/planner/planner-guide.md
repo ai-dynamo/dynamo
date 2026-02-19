@@ -4,8 +4,6 @@
 title: Planner Guide
 ---
 
-# Planner Guide
-
 Deployment, configuration, and integration guide for the Dynamo SLA Planner. For a quick overview, see the [Planner README](README.md). For architecture internals, see [Planner Design](../../design-docs/planner-design.md).
 
 ## Scaling Modes
