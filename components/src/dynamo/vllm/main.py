@@ -687,9 +687,12 @@ async def init(
     )
     component = generate_endpoint.component()
     clear_endpoint = component.endpoint("clear_kv_blocks")
-    load_lora_endpoint = component.endpoint("load_lora")
-    unload_lora_endpoint = component.endpoint("unload_lora")
-    list_loras_endpoint = component.endpoint("list_loras")
+
+    lora_enabled = config.engine_args.enable_lora
+    if lora_enabled:
+        load_lora_endpoint = component.endpoint("load_lora")
+        unload_lora_endpoint = component.endpoint("unload_lora")
+        list_loras_endpoint = component.endpoint("list_loras")
 
     model_name = config.served_model_name or config.model
 
@@ -812,77 +815,52 @@ async def init(
 
     try:
         logger.debug("Starting serve_endpoint for decode worker")
-        await asyncio.gather(
+
+        model_metrics_labels = [
+            (
+                prometheus_names.labels.MODEL,
+                config.served_model_name or config.model,
+            ),
+            (
+                prometheus_names.labels.MODEL_NAME,
+                config.served_model_name or config.model,
+            ),
+        ]
+
+        serve_tasks = [
             # for decode, we want to transfer the in-flight requests to other decode engines,
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
-                    ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
+                metrics_labels=model_metrics_labels,
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
-                    ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
+                metrics_labels=model_metrics_labels,
             ),
-            load_lora_endpoint.serve_endpoint(
-                handler.load_lora,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
+        ]
+
+        if lora_enabled:
+            serve_tasks.extend(
+                [
+                    load_lora_endpoint.serve_endpoint(
+                        handler.load_lora,
+                        metrics_labels=model_metrics_labels,
                     ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
+                    unload_lora_endpoint.serve_endpoint(
+                        handler.unload_lora,
+                        metrics_labels=model_metrics_labels,
                     ),
-                ],
-            ),
-            unload_lora_endpoint.serve_endpoint(
-                handler.unload_lora,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
+                    list_loras_endpoint.serve_endpoint(
+                        handler.list_loras,
+                        metrics_labels=model_metrics_labels,
                     ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
-            ),
-            list_loras_endpoint.serve_endpoint(
-                handler.list_loras,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
-                    ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
-            ),
-        )
+                ]
+            )
+
+        await asyncio.gather(*serve_tasks)
         logger.debug("serve_endpoint completed for decode worker")
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")

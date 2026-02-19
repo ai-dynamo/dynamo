@@ -94,6 +94,12 @@ class WorkerFactory:
         component = generate_endpoint.component()
         clear_endpoint = component.endpoint("clear_kv_blocks")
 
+        lora_enabled = config.engine_args.enable_lora
+        if lora_enabled:
+            load_lora_endpoint = component.endpoint("load_lora")
+            unload_lora_endpoint = component.endpoint("unload_lora")
+            list_loras_endpoint = component.endpoint("list_loras")
+
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         if pre_created_engine is not None:
             (
@@ -134,7 +140,12 @@ class WorkerFactory:
         # Choose handler based on worker type
         if config.multimodal_decode_worker:
             handler = MultimodalDecodeWorkerHandler(
-                runtime, component, engine_client, config, shutdown_event
+                runtime,
+                component,
+                engine_client,
+                config,
+                shutdown_event,
+                generate_endpoint=generate_endpoint,
             )
         else:
             handler = MultimodalPDWorkerHandler(
@@ -145,6 +156,7 @@ class WorkerFactory:
                 encode_worker_client,
                 decode_worker_client,
                 shutdown_event,
+                generate_endpoint=generate_endpoint,
             )
         handler.add_temp_dir(prometheus_temp_dir)
 
@@ -173,7 +185,7 @@ class WorkerFactory:
 
         metrics_labels = [("model", config.served_model_name or config.model)]
         try:
-            await asyncio.gather(
+            serve_tasks = [
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,
@@ -182,7 +194,27 @@ class WorkerFactory:
                     handler.clear_kv_blocks,
                     metrics_labels=metrics_labels,
                 ),
-            )
+            ]
+
+            if lora_enabled:
+                serve_tasks.extend(
+                    [
+                        load_lora_endpoint.serve_endpoint(
+                            handler.load_lora,
+                            metrics_labels=metrics_labels,
+                        ),
+                        unload_lora_endpoint.serve_endpoint(
+                            handler.unload_lora,
+                            metrics_labels=metrics_labels,
+                        ),
+                        list_loras_endpoint.serve_endpoint(
+                            handler.list_loras,
+                            metrics_labels=metrics_labels,
+                        ),
+                    ]
+                )
+
+            await asyncio.gather(*serve_tasks)
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
             raise

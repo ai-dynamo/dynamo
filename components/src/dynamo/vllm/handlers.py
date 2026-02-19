@@ -12,6 +12,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, Final
 
 import torch
@@ -48,6 +49,14 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LoRAInfo:
+    """Metadata for a loaded LoRA adapter."""
+
+    id: int
+    path: str
 
 
 def _compute_mm_uuids(
@@ -287,9 +296,8 @@ class BaseWorkerHandler(ABC):
         # NIXL connector for frontend decoding - lazy initialized
         self._nixl_connector = None
         self._nixl_connector_lock = asyncio.Lock()
-        # LoRA tracking
-        self.lora_id_for_name: dict[str, int] = {}
-        self.lora_name_to_path: dict[str, str] = {}
+        # LoRA tracking: name -> LoRAInfo(id, path)
+        self.loaded_loras: dict[str, LoRAInfo] = {}
         # Per-LoRA locks to prevent concurrent load operations for the same LoRA
         self._lora_load_locks: dict[str, asyncio.Lock] = {}
         # Guard lock-map access in case handlers are invoked from multiple threads.
@@ -458,6 +466,16 @@ class BaseWorkerHandler(ABC):
         if temp_dir is not None:
             self.temp_dirs.append(temp_dir)
 
+    def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
+        """Return a LoRARequest if model_name is a loaded adapter, else None."""
+        if model_name and (lora := self.loaded_loras.get(model_name)):
+            return LoRARequest(
+                lora_name=model_name,
+                lora_int_id=lora.id,
+                lora_path=lora.path,
+            )
+        return None
+
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
         with self._lora_load_locks_guard:
@@ -534,8 +552,8 @@ class BaseWorkerHandler(ABC):
                 try:
                     # Check if already loaded (idempotency check after acquiring lock).
                     # Another concurrent request may have loaded this LoRA while we waited.
-                    if lora_name in self.lora_id_for_name:
-                        lora_id = self.lora_id_for_name[lora_name]
+                    if lora_name in self.loaded_loras:
+                        lora_id = self.loaded_loras[lora_name].id
                         logger.info(
                             f"LoRA adapter already loaded (concurrent request completed): "
                             f"{lora_name} with ID {lora_id}"
@@ -576,8 +594,7 @@ class BaseWorkerHandler(ABC):
                     )
 
                     # Track the LoRA
-                    self.lora_id_for_name[lora_name] = lora_id
-                    self.lora_name_to_path[lora_name] = lora_path
+                    self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
                     logger.info(
                         f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
                     )
@@ -625,11 +642,7 @@ class BaseWorkerHandler(ABC):
                                     f"Rolling back: removing LoRA '{lora_name}' from engine"
                                 )
                                 await self.engine_client.remove_lora(lora_id)
-                                # Remove from tracking dictionaries
-                                if lora_name in self.lora_id_for_name:
-                                    del self.lora_id_for_name[lora_name]
-                                if lora_name in self.lora_name_to_path:
-                                    del self.lora_name_to_path[lora_name]
+                                self.loaded_loras.pop(lora_name, None)
                                 logger.debug(
                                     f"Successfully rolled back LoRA '{lora_name}'"
                                 )
@@ -661,7 +674,7 @@ class BaseWorkerHandler(ABC):
                     # loaded, remove the lock entry (best-effort).
                     with self._lora_load_locks_guard:
                         if (
-                            lora_name not in self.lora_id_for_name
+                            lora_name not in self.loaded_loras
                             and self._lora_load_locks.get(lora_name) is lock
                         ):
                             self._lora_load_locks.pop(lora_name, None)
@@ -697,23 +710,22 @@ class BaseWorkerHandler(ABC):
             async with lock:
                 try:
                     # Check if the LoRA exists *after* waiting for any in-progress load.
-                    if lora_name not in self.lora_id_for_name:
+                    lora = self.loaded_loras.get(lora_name)
+                    if lora is None:
                         yield {
                             "status": "error",
-                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.lora_id_for_name.keys())}",
+                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
                         }
                         return
 
                     logger.debug(f"Unloading LoRA adapter: {lora_name}")
-                    lora_id = self.lora_id_for_name[lora_name]
-                    lora_path = self.lora_name_to_path.get(lora_name)
+                    lora_id = lora.id
+                    lora_path = lora.path
 
                     await self.engine_client.remove_lora(lora_id)
 
-                    # Remove from tracking dictionaries
-                    del self.lora_id_for_name[lora_name]
-                    if lora_name in self.lora_name_to_path:
-                        del self.lora_name_to_path[lora_name]
+                    # Remove from tracking
+                    del self.loaded_loras[lora_name]
 
                     # Unregister the LoRA model from the model registry
                     if self.generate_endpoint is not None:
@@ -734,32 +746,28 @@ class BaseWorkerHandler(ABC):
                             )
 
                             # Rollback: re-add the LoRA to the engine to maintain consistency
-                            if lora_path is None:
-                                logger.error(
-                                    f"Cannot rollback LoRA '{lora_name}': lora_path is None (data inconsistency)"
+                            try:
+                                logger.debug(
+                                    f"Rolling back: re-adding LoRA '{lora_name}' to engine"
                                 )
-                            else:
-                                try:
-                                    logger.debug(
-                                        f"Rolling back: re-adding LoRA '{lora_name}' to engine"
+                                await self.engine_client.add_lora(
+                                    LoRARequest(
+                                        lora_name=lora_name,
+                                        lora_int_id=lora_id,
+                                        lora_path=lora_path,
                                     )
-                                    await self.engine_client.add_lora(
-                                        LoRARequest(
-                                            lora_name=lora_name,
-                                            lora_int_id=lora_id,
-                                            lora_path=lora_path,
-                                        )
-                                    )
-                                    # Re-add to tracking dictionaries
-                                    self.lora_id_for_name[lora_name] = lora_id
-                                    self.lora_name_to_path[lora_name] = lora_path
-                                    logger.debug(
-                                        f"Successfully rolled back LoRA '{lora_name}'"
-                                    )
-                                except Exception as rollback_error:
-                                    logger.exception(
-                                        f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                                    )
+                                )
+                                # Re-add to tracking
+                                self.loaded_loras[lora_name] = LoRAInfo(
+                                    id=lora_id, path=lora_path
+                                )
+                                logger.debug(
+                                    f"Successfully rolled back LoRA '{lora_name}'"
+                                )
+                            except Exception as rollback_error:
+                                logger.exception(
+                                    f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                                )
 
                             # Return error status since unregistration failed
                             yield {
@@ -786,7 +794,7 @@ class BaseWorkerHandler(ABC):
                     # Remove lock entry once the LoRA is not loaded (or never was).
                     with self._lora_load_locks_guard:
                         if (
-                            lora_name not in self.lora_id_for_name
+                            lora_name not in self.loaded_loras
                             and self._lora_load_locks.get(lora_name) is lock
                         ):
                             self._lora_load_locks.pop(lora_name, None)
@@ -800,7 +808,7 @@ class BaseWorkerHandler(ABC):
         Returns a dictionary of lora_name -> lora_id mappings.
         """
         try:
-            loras = dict(self.lora_id_for_name)
+            loras = {name: lora.id for name, lora in self.loaded_loras.items()}
             yield {
                 "status": "success",
                 "loras": loras,
@@ -1354,19 +1362,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         # Extract LoRA request if present
-        # Check if model name matches a loaded LoRA adapter
-        lora_request = None
         model_name = request.get("model")
-
-        if model_name and model_name in self.lora_id_for_name:
-            lora_id = self.lora_id_for_name[model_name]
-            lora_request = LoRARequest(
-                lora_name=model_name,
-                lora_int_id=lora_id,
-                lora_path=self.lora_name_to_path[model_name],
-            )
+        lora_request = self._resolve_lora_request(model_name)
+        if lora_request:
             logger.info(
-                f"Decode request {request_id} will use LoRA adapter: {model_name} (ID: {lora_id})"
+                f"Decode request {request_id} will use LoRA adapter: {model_name} (ID: {lora_request.lora_int_id})"
             )
         else:
             logger.debug(
@@ -1570,20 +1570,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         sampling_params.min_tokens = 1
 
         # Extract LoRA request if present
-        # Check if model name matches a loaded LoRA adapter
-        lora_request = None
         model_name = request.get("model")
-
-        if model_name and model_name in self.lora_id_for_name:
-            lora_id = self.lora_id_for_name[model_name]
-            lora_request = LoRARequest(
-                lora_name=model_name,
-                lora_int_id=lora_id,
-                lora_path=self.lora_name_to_path[model_name],
-            )
+        lora_request = self._resolve_lora_request(model_name)
+        if lora_request:
             logger.info(
-                f"Prefill request {request_id} will use LoRA adapter: {model_name} (ID: {lora_id}), "
-                f"path: {self.lora_name_to_path[model_name]}"
+                f"Prefill request {request_id} will use LoRA adapter: {model_name} "
+                f"(ID: {lora_request.lora_int_id}), path: {lora_request.lora_path}"
             )
         else:
             logger.debug(
