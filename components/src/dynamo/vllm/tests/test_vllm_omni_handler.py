@@ -8,7 +8,11 @@ import pytest
 from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
 from dynamo.common.utils.output_modalities import RequestType
-from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler, prepare_image_output
+from dynamo.vllm.omni.omni_handler import (
+    EngineInputs,
+    OmniHandler,
+    prepare_image_output,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -19,7 +23,9 @@ pytestmark = [
 
 
 def _make_handler():
-    with patch("dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__", return_value=None):
+    with patch(
+        "dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__", return_value=None
+    ):
         handler = OmniHandler.__new__(OmniHandler)
 
     config = MagicMock()
@@ -95,7 +101,9 @@ class TestBuildEngineInputs:
     def test_video_generation(self):
         """Video request parses prompt, size, seconds, and sets fps."""
         handler = _make_handler()
-        req = NvCreateVideoRequest(prompt="a drone", model="test", size="832x480", seconds=2)
+        req = NvCreateVideoRequest(
+            prompt="a drone", model="test", size="832x480", seconds=2
+        )
         inputs = handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
         assert inputs.request_type == RequestType.VIDEO_GENERATION
         assert inputs.prompt["prompt"] == "a drone"
@@ -137,7 +145,10 @@ class TestFormatTextChunk:
         """Final chunk includes finish_reason and usage stats."""
         handler = _make_handler()
         handler._normalize_finish_reason = lambda r: r
-        handler._build_completion_usage = lambda ro: {"prompt_tokens": 3, "completion_tokens": 1}
+        handler._build_completion_usage = lambda ro: {
+            "prompt_tokens": 3,
+            "completion_tokens": 1,
+        }
         ro = self._make_output("done", finish_reason="stop")
         chunk = handler._format_text_chunk(ro, "req-1", "")
         assert chunk["choices"][0]["finish_reason"] == "stop"
@@ -150,7 +161,9 @@ class TestFormatImageChunk:
         handler = _make_handler()
         img = MagicMock()
         img.save = lambda b, format: b.write(b"px")
-        chunk = handler._format_image_chunk([img], "req-1", request_type=RequestType.CHAT_COMPLETION)
+        chunk = handler._format_image_chunk(
+            [img], "req-1", request_type=RequestType.CHAT_COMPLETION
+        )
         assert chunk["object"] == "chat.completion.chunk"
         assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
 
@@ -160,7 +173,23 @@ class TestFormatImageChunk:
         img = MagicMock()
         img.save = lambda b, format: b.write(b"px")
         chunk = handler._format_image_chunk(
-            [img], "req-1", response_format="b64_json", request_type=RequestType.IMAGE_GENERATION
+            [img],
+            "req-1",
+            response_format="b64_json",
+            request_type=RequestType.IMAGE_GENERATION,
+        )
+        assert chunk["data"][0]["b64_json"] is not None
+
+    def test_image_generation_default_format_returns_b64(self):
+        """Image generation with response_format=None defaults to b64_json."""
+        handler = _make_handler()
+        img = MagicMock()
+        img.save = lambda b, format: b.write(b"px")
+        chunk = handler._format_image_chunk(
+            [img],
+            "req-1",
+            response_format=None,
+            request_type=RequestType.IMAGE_GENERATION,
         )
         assert chunk["data"][0]["b64_json"] is not None
 
@@ -183,7 +212,10 @@ class TestFormatVideoChunk:
     async def test_error_returns_failed_status(self):
         """Encoding failure returns NvVideosResponse with failed status and error."""
         handler = _make_handler()
-        with patch("dynamo.vllm.omni.omni_handler.normalize_video_frames", side_effect=RuntimeError("boom")):
+        with patch(
+            "dynamo.vllm.omni.omni_handler.normalize_video_frames",
+            side_effect=RuntimeError("boom"),
+        ):
             chunk = await handler._format_video_chunk([MagicMock()], "req-1", fps=16)
         assert chunk["status"] == "failed"
         assert "boom" in chunk["error"]
