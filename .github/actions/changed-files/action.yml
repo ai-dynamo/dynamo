@@ -44,9 +44,16 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.gh_token }}
       run: |
-        # For PR branches, compare against merge-base with PR's target branch
-        # For main/release branches, use default behavior (previous commit)
-        if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
+        # For PRs (including from forks), use merge-base with the PR's target branch
+        # so changed-files compares against the correct base. For push/main use default.
+        if [[ "${{ github.event_name }}" == "pull_request" ]] || [[ "${{ github.event_name }}" == "pull_request_target" ]]; then
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          echo "PR base branch: $BASE_BRANCH"
+          git fetch origin "$BASE_BRANCH" --depth=1
+          BASE_SHA=$(git merge-base "origin/$BASE_BRANCH" HEAD)
+          echo "base_sha=$BASE_SHA" >> $GITHUB_OUTPUT
+          echo "Using merge-base with $BASE_BRANCH: $BASE_SHA"
+        elif [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
           PR_NUMBER="${BASH_REMATCH[1]}"
           BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
           echo "PR #$PR_NUMBER targets branch: $BASE_BRANCH"

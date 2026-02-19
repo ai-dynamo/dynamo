@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://schema.buildwithfern.dev/docs-yml.json
+
+instances:
+  - url: dynamo.docs.buildwithfern.com/dynamo
+    custom-domain: docs.dynamo.nvidia.com/dynamo
+
+title: NVIDIA Dynamo Documentation
+
+products:
+  - display-name: Dynamo
+    slug: /
+    path: ./versions/dev.yml
+    versions:
+      - display-name: dev
+        path: ./versions/dev.yml
+
+redirects:
+  - source: "/dynamo/index.html"
+    destination: "/dynamo/"
+  - source: "/dynamo/latest/index.html"
+    destination: "/dynamo/"
+
+# GitHub repository link in navbar
+navbar-links:
+  - type: github
+    value: https://github.com/ai-dynamo/dynamo
+
+footer: ./components/CustomFooter.tsx
+
+layout:
+  searchbar-placement: header
+  page-width: 1376px
+  sidebar-width: 248px
+  content-width: 812px
+  tabs-placement: header
+  hide-feedback: true
+
+experimental:
+  mdx-components:
+    - ./components
+
+colors:
+  accentPrimary:
+    dark: '#76B900'
+    light: '#76B900'
+  background:
+    light: '#FFFFFF'
+    dark: '#000000'
+typography:
+  bodyFont:
+    name: NVIDIA
+    paths:
+      - path: ./assets/fonts/NVIDIASans.woff2
+        style: normal
+      - path: ./assets/fonts/NVIDIASans_Italic.woff2
+        style: italic
+  codeFont:
+    name: RobotoMono
+    paths:
+      - path: ./assets/fonts/RobotoMono.woff2
+theme:
+  page-actions: toolbar
+  footer-nav: minimal
+
+logo:
+  dark: ./assets/NVIDIA_dark.svg
+  light: ./assets/NVIDIA_light.svg
+  height: 20
+  href: /
+  right-text: Documentation
+
+favicon: ./assets/NVIDIA_symbol.svg
+
+js:
+  - url: https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js
+    strategy: beforeInteractive
+css:
+  - ./main.css

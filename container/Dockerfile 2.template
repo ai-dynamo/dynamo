@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1.10.0-labs
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{% include "templates/args.Dockerfile" %}
+
+# --- Base Image Stages
+{% if framework != "dynamo" %}
+    {% include "templates/dynamo_base.Dockerfile" %}
+    {% include "templates/wheel_builder.Dockerfile" %}
+{% elif framework == "dynamo" %}
+    {% if target == "frontend" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+        {% include "templates/wheel_builder.Dockerfile" %}
+        {% include "templates/dynamo_runtime.Dockerfile" %}
+        {% include "templates/frontend.Dockerfile" %}
+    {% elif target == "runtime" or target == "dev" or target == "local-dev" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+        {% include "templates/wheel_builder.Dockerfile" %}
+        {% include "templates/dynamo_runtime.Dockerfile" %}
+    {% elif target == "wheel_builder" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+        {% include "templates/wheel_builder.Dockerfile" %}
+    {% elif target == "base" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+    {% endif %}
+{% endif %}
+
+# --- SGLang Stages
+{% if framework == "sglang" %}
+    # SGLang is the only framework without a `framework` target currently, needs special treatment
+    {% include "templates/sglang_runtime.Dockerfile" %}
+{% else %}
+# --- No SGLANG stages included
+{% endif %}
+
+# --- VLLM Stages
+{% if framework == "vllm" %}
+    {% include "templates/vllm_framework.Dockerfile" %}
+    {% if target != "framework" %}
+        {% include "templates/vllm_runtime.Dockerfile" %}
+    {% endif %}
+{% else %}
+# --- No VLLM stages included
+{% endif %}
+
+# --- TRTLLM Stages
+{% if framework == "trtllm" %}
+    {% include "templates/trtllm_framework.Dockerfile" %}
+    {% if target != "framework" %}
+        {% include "templates/trtllm_runtime.Dockerfile" %}
+    {% endif %}
+{% else %}
+# --- No TRTLLM stages included
+{% endif %}
+
+{% if make_efa == true and target == "runtime" %}
+    {% include "templates/aws.Dockerfile" %}
+{% endif %}
+
+# --- Development Stages
+{% if target == "dev" or target == "local-dev" %}
+    {% include "templates/dev.Dockerfile" %}
+    {% if make_efa == true %}
+        {% include "templates/aws.Dockerfile" %}
+    {% endif %}
+    {% if target == "local-dev" %}
+        {% include "templates/local_dev.Dockerfile" %}
+    {% endif %}
+{% else %}
+# --- No development stages included
+{% endif %}

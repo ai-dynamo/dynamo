@@ -282,9 +282,15 @@ for ARCH in "${ARCHS[@]}"; do
     # 2. Get the number of elements in the array
     TARGET_INDICES_LENGTH=${#TARGET_INDICES[@]}
 
+    # Guard: avoid division-by-zero when no target indices (e.g. buildkit unavailable/DNS issues)
+    if [ "$TARGET_INDICES_LENGTH" -eq 0 ]; then
+      echo "::error::No buildkit pod indices for ${flavor}_${ARCH}; get_target_indices returned empty (active: ${ACTIVE_INDICES[*]})."
+      exit 1
+    fi
+
     # 3. Generate a random index between 0 and length-1
     # The $RANDOM variable provides a number between 0 and 32767.
-    RANDOM_INDEX=$(($RANDOM % $TARGET_INDICES_LENGTH))
+    RANDOM_INDEX=$(($RANDOM % TARGET_INDICES_LENGTH))
     RANDOM_VALUE="${TARGET_INDICES[$RANDOM_INDEX]}"
     POD_NAME="${POD_PREFIX}-${RANDOM_VALUE}"
     ADDRS="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"

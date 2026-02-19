@@ -35,6 +35,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -489,7 +490,7 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 			wantErr: false,
 		},
 		{
-			name: "nil instanceID",
+			name: "nil instanceID - success (native scaling)",
 			args: args{
 				ctx: context.Background(),
 				opt: generateResourceOption{
@@ -511,9 +512,51 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 					instanceID: nil,
 				},
 			},
-			want:    nil,
+			want: &volcanov1beta1.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "service-nil-instanceid",
+					Namespace: "default",
+					Labels:    map[string]string{"instance-id": "0"},
+				},
+				Spec: volcanov1beta1.PodGroupSpec{MinMember: 2},
+			},
 			want1:   false,
-			wantErr: true,
+			wantErr: false,
+		},
+		{
+			name: "nil instanceID with Replicas - MinMember scales for gang scheduling",
+			args: args{
+				ctx: context.Background(),
+				opt: generateResourceOption{
+					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "service-native-replicas",
+							Namespace: "default",
+						},
+						Spec: v1alpha1.DynamoComponentDeploymentSpec{
+							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+								ServiceName:     "service-native-replicas",
+								DynamoNamespace: &[]string{"default"}[0],
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
+								Replicas: ptr.To(int32(3)),
+							},
+						},
+					},
+					instanceID: nil,
+				},
+			},
+			want: &volcanov1beta1.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "service-native-replicas",
+					Namespace: "default",
+					Labels:    map[string]string{"instance-id": "0"},
+				},
+				Spec: volcanov1beta1.PodGroupSpec{MinMember: 6}, // 2 nodes * 3 replicas
+			},
+			want1:   false,
+			wantErr: false,
 		},
 		{
 			name: "negative instanceID",
@@ -971,9 +1014,15 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			wantErr: false,
 		},
 		{
-			name: "nil instanceID", // This test should fail before r.List is called in generatePodTemplateSpec
+			name: "nil instanceID - success (native scaling)",
 			fields: fields{
 				Recorder: record.NewFakeRecorder(100),
+				Config:   controller_common.Config{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+						return []string{}, nil
+					},
+				},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -981,6 +1030,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-nil-id", Namespace: "default"},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
+							BackendFramework: string(dynamo.BackendFrameworkVLLM),
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
@@ -992,7 +1042,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								},
 								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									MainContainer: &corev1.Container{
-										Image: "test-image:latest",
+										Image:   "test-image:latest",
+										Command: []string{"some", "command"},
+										Args:    []string{"arg"},
 									},
 								},
 							},
@@ -1000,62 +1052,154 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					},
 					instanceID: nil,
 				},
-				mockServiceAccounts: []client.Object{ // Provide a default SA for consistency, though not strictly needed here
+				mockServiceAccounts: []client.Object{
 					&corev1.ServiceAccount{
 						ObjectMeta: metav1.ObjectMeta{
-							Name: "default-test-sa", Namespace: "default", // Match namespace
+							Name: "default-test-sa", Namespace: "default",
 							Labels: map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
 						},
 					},
 				},
 			},
-			want:    nil,
-			want1:   false,
-			wantErr: true,
-		},
-		{
-			name: "error from generateLeaderPodTemplateSpec", // This case involves an error from generatePodTemplateSpec
-			fields: fields{
-				Recorder: record.NewFakeRecorder(100),
-			},
-			args: args{
-				ctx: context.Background(),
-				opt: generateResourceOption{
-					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-leader-err", Namespace: "default"},
-						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								Multinode: &v1alpha1.MultinodeSpec{
-									NodeCount: 2,
+			want: &leaderworkersetv1.LeaderWorkerSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-lws-nil-id",
+					Namespace: "default",
+					Labels: map[string]string{
+						"instance-id": "0",
+					},
+				},
+				Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+					Replicas:      ptr.To(int32(1)),
+					StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
+					LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
+						Size: ptr.To(int32(2)),
+						LeaderTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"instance-id":                        "0",
+									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
+									"role":                               "leader",
+									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
 								},
-								Resources: &v1alpha1.Resources{
-									Limits: &v1alpha1.ResourceItem{
-										GPU: "1",
+								Annotations: map[string]string{
+									"scheduling.k8s.io/group-name": "test-lws-nil-id",
+								},
+							},
+							Spec: corev1.PodSpec{
+								SchedulerName:                 "volcano",
+								TerminationGracePeriodSeconds: ptr.To(int64(60)),
+								ServiceAccountName:            "default-test-sa",
+								RestartPolicy:                 corev1.RestartPolicyAlways,
+								SecurityContext: &corev1.PodSecurityContext{
+									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+								},
+								Volumes: []corev1.Volume{
+									{
+										Name: "shared-memory",
+										VolumeSource: corev1.VolumeSource{
+											EmptyDir: &corev1.EmptyDirVolumeSource{
+												Medium:    corev1.StorageMediumMemory,
+												SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
+											},
+										},
 									},
 								},
-								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-									MainContainer: &corev1.Container{
-										Image: "", // Image is missing, will cause error in generatePodTemplateSpec
+								Containers: []corev1.Container{
+									{
+										Name:    "main",
+										Image:   "test-image:latest",
+										Command: []string{"some", "command"},
+										Args:    []string{"arg"},
+										Resources: corev1.ResourceRequirements{
+											Limits:   corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+										},
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "shared-memory",
+												MountPath: commonconsts.DefaultSharedMemoryMountPath,
+											},
+										},
+										Env: []corev1.EnvVar{
+											{Name: "DYN_COMPONENT"},
+											{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"},
+											{Name: "DYN_NAMESPACE", Value: "default-"},
+											{Name: "DYN_PARENT_DGD_K8S_NAME"},
+											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
+											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
+											{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
+										},
 									},
 								},
 							},
 						},
-					},
-					instanceID: ptr.To(0),
-				},
-				// No specific SA needed if error is before SA listing, but good to be consistent
-				mockServiceAccounts: []client.Object{
-					&corev1.ServiceAccount{
-						ObjectMeta: metav1.ObjectMeta{
-							Name: "default-test-sa", Namespace: "default", // Match namespace
-							Labels: map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
+						WorkerTemplate: corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"instance-id":                        "0",
+									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
+									"role":                               "worker",
+									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
+								},
+								Annotations: map[string]string{
+									"scheduling.k8s.io/group-name": "test-lws-nil-id",
+								},
+							},
+							Spec: corev1.PodSpec{
+								SchedulerName:                 "volcano",
+								TerminationGracePeriodSeconds: ptr.To(int64(60)),
+								ServiceAccountName:            "default-test-sa",
+								RestartPolicy:                 corev1.RestartPolicyAlways,
+								SecurityContext: &corev1.PodSecurityContext{
+									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+								},
+								Volumes: []corev1.Volume{
+									{
+										Name: "shared-memory",
+										VolumeSource: corev1.VolumeSource{
+											EmptyDir: &corev1.EmptyDirVolumeSource{
+												Medium:    corev1.StorageMediumMemory,
+												SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
+											},
+										},
+									},
+								},
+								Containers: []corev1.Container{
+									{
+										Name:    "main",
+										Image:   "test-image:latest",
+										Command: []string{"some", "command"},
+										Args:    []string{"arg"},
+										Resources: corev1.ResourceRequirements{
+											Limits:   corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+										},
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "shared-memory",
+												MountPath: commonconsts.DefaultSharedMemoryMountPath,
+											},
+										},
+										Env: []corev1.EnvVar{
+											{Name: "DYN_COMPONENT"},
+											{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"},
+											{Name: "DYN_NAMESPACE", Value: "default-"},
+											{Name: "DYN_PARENT_DGD_K8S_NAME"},
+											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
+											{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+											{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
+											{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
+										},
+									},
+								},
+							},
 						},
+
 					},
 				},
 			},
-			want:    nil,
 			want1:   false,
-			wantErr: true,
+			wantErr: false,
 		},
 	}
 
@@ -1239,7 +1383,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	name := "test-component"
-	namespace := defaultNamespace
+	namespace := "default"
 
 	// Create DynamoComponentDeployment
 	replicaCount := int32(3)
@@ -1325,15 +1469,17 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 		name                         string
 		replicas                     int32
 		existingLeaderWorkerSets     []*leaderworkersetv1.LeaderWorkerSet
+		existingPodGroups            []*volcanov1beta1.PodGroup
 		wantComponentReconcileResult ComponentReconcileResult
+		wantLegacyResourcesDeleted   bool
 	}{
 		{
-			name:     "singular LWS replica ready",
+			name:     "singular LWS (1 replica) - native scaling",
 			replicas: 1,
 			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-0",
+						Name:      "test-component",
 						Namespace: "default",
 					},
 					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
@@ -1355,154 +1501,35 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			wantComponentReconcileResult: ComponentReconcileResult{
 				modified: true,
 				status:   metav1.ConditionTrue,
-				reason:   "AllLeaderWorkerSetsReady",
-				message:  "All LeaderWorkerSets are ready",
+				reason:   "LeaderWorkerSetReady",
+				message:  "LeaderWorkerSet is ready",
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
-					ComponentName:   "test-component-0",
-					ComponentNames:  []string{"test-component-0"},
+					ComponentName:   "test-component",
 					ReadyReplicas:   ptr.To(int32(1)),
 					UpdatedReplicas: 1,
 					Replicas:        1,
 				},
 			},
+			wantLegacyResourcesDeleted: false,
 		},
+
 		{
-			name:     "multiple LWS replicas - at least one is unready",
+			name:     "multiple replicas (3) - checking single LWS ready",
 			replicas: 3,
 			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-0",
+						Name:      "test-component",
 						Namespace: "default",
 					},
 					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
+						Replicas: ptr.To(int32(3)),
 					},
 					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-1",
-						Namespace: "default",
-					},
-					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
-					},
-					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   0, // Not ready
-						Replicas:        1,
-						UpdatedReplicas: 0,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
-								Status: metav1.ConditionFalse,
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-2",
-						Namespace: "default",
-					},
-					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
-					},
-					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
-			},
-			wantComponentReconcileResult: ComponentReconcileResult{
-				modified: true,
-				status:   metav1.ConditionFalse,
-				reason:   "SomeLeaderWorkerSetsNotReady",
-				message:  "Some LeaderWorkerSets are not ready",
-				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
-					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
-					ComponentName:   "test-component-0",
-					ComponentNames:  []string{"test-component-0", "test-component-1", "test-component-2"},
-					ReadyReplicas:   ptr.To(int32(2)),
-					UpdatedReplicas: 2,
-					Replicas:        3,
-				},
-			},
-		},
-		{
-			name:     "multiple LWS replicas - all ready",
-			replicas: 3,
-			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-0",
-						Namespace: "default",
-					},
-					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
-					},
-					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-1",
-						Namespace: "default",
-					},
-					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
-					},
-					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
-								Status: metav1.ConditionTrue,
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component-2",
-						Namespace: "default",
-					},
-					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-						Replicas: ptr.To(int32(1)),
-					},
-					Status: leaderworkersetv1.LeaderWorkerSetStatus{
-						ReadyReplicas:   1,
-						Replicas:        1,
-						UpdatedReplicas: 1,
+						ReadyReplicas:   3,
+						Replicas:        3,
+						UpdatedReplicas: 3,
 						Conditions: []metav1.Condition{
 							{
 								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
@@ -1515,18 +1542,104 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			wantComponentReconcileResult: ComponentReconcileResult{
 				modified: true,
 				status:   metav1.ConditionTrue,
-				reason:   "AllLeaderWorkerSetsReady",
-				message:  "All LeaderWorkerSets are ready",
+				reason:   "LeaderWorkerSetReady",
+				message:  "LeaderWorkerSet is ready",
 				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
 					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
-					ComponentName:   "test-component-0",
-					ComponentNames:  []string{"test-component-0", "test-component-1", "test-component-2"},
+					ComponentName:   "test-component",
 					ReadyReplicas:   ptr.To(int32(3)),
 					UpdatedReplicas: 3,
 					Replicas:        3,
 				},
 			},
+			wantLegacyResourcesDeleted: false,
 		},
+
+		{
+			name:     "legacy cleanup - removes indexed LWS resources",
+			replicas: 2,
+			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
+				// New native scaling LWS
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component",
+						Namespace: "default",
+						Labels: map[string]string{
+							"instance-id": "0",
+						},
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(2)),
+					},
+					Status: leaderworkersetv1.LeaderWorkerSetStatus{
+						ReadyReplicas:   2,
+						Replicas:        2,
+						UpdatedReplicas: 2,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+				// Legacy indexed LWS resources to be deleted
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-0",
+						Namespace: "default",
+						Labels: map[string]string{
+							"instance-id": "0",
+						},
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							"instance-id": "1",
+						},
+					},
+					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			existingPodGroups: []*volcanov1beta1.PodGroup{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-0",
+						Namespace: "default",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-component-1",
+						Namespace: "default",
+					},
+				},
+			},
+			wantComponentReconcileResult: ComponentReconcileResult{
+				modified: true,
+				status:   metav1.ConditionTrue,
+				reason:   "LeaderWorkerSetReady",
+				message:  "LeaderWorkerSet is ready",
+				serviceReplicaStatus: &v1alpha1.ServiceReplicaStatus{
+					ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
+					ComponentName:   "test-component",
+					ReadyReplicas:   ptr.To(int32(2)),
+					UpdatedReplicas: 2,
+					Replicas:        2,
+				},
+			},
+			wantLegacyResourcesDeleted: true,
+		},
+
+
 	}
 
 	for _, tt := range tests {
@@ -1581,6 +1694,9 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			for _, lws := range tt.existingLeaderWorkerSets {
 				objects = append(objects, lws)
 			}
+			for _, pg := range tt.existingPodGroups {
+				objects = append(objects, pg)
+			}
 			// Add a mock ServiceAccount that the generateLeaderWorkerSet function needs
 			objects = append(objects, &corev1.ServiceAccount{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1618,6 +1734,32 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 
 			// Assert the ComponentReconcileResult
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
+
+			// Verify legacy resources were deleted if expected
+			if tt.wantLegacyResourcesDeleted {
+				// Check that legacy LWS resources are deleted
+				legacyLWS0 := &leaderworkersetv1.LeaderWorkerSet{}
+				err := fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-0", Namespace: "default"}, legacyLWS0)
+				g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy LWS test-component-0 should be deleted")
+
+				legacyLWS1 := &leaderworkersetv1.LeaderWorkerSet{}
+				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-1", Namespace: "default"}, legacyLWS1)
+				g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy LWS test-component-1 should be deleted")
+
+				// Check that new native-scaling LWS still exists
+				newLWS := &leaderworkersetv1.LeaderWorkerSet{}
+				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component", Namespace: "default"}, newLWS)
+				g.Expect(err).NotTo(gomega.HaveOccurred(), "New native-scaling LWS should still exist")
+
+				// Check that legacy PodGroups are deleted
+				legacyPG0 := &volcanov1beta1.PodGroup{}
+				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-0", Namespace: "default"}, legacyPG0)
+				g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy PodGroup test-component-0 should be deleted")
+
+				legacyPG1 := &volcanov1beta1.PodGroup{}
+				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-1", Namespace: "default"}, legacyPG1)
+				g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy PodGroup test-component-1 should be deleted")
+			}
 		})
 	}
 }
