@@ -363,7 +363,6 @@ type HardwareSpec struct {
 	// NumGPUsPerNode is the number of GPUs per node.
 	// +optional
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
-
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.

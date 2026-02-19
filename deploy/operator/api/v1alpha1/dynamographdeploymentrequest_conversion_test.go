@@ -38,9 +38,9 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 		},
 		"deployment": map[string]interface{}{
 			"modelCache": map[string]interface{}{
-				"pvcName":       "model-pvc",
+				"pvcName":        "model-pvc",
 				"modelPathInPvc": "llama-3",
-				"pvcMountPath":  "/data/model",
+				"pvcMountPath":   "/data/model",
 			},
 		},
 		"extra_key": "preserved",
