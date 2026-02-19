@@ -117,6 +117,70 @@ async def preprocess_chat_request(
     )
 
 
+def preprocess_chat_request_sync(
+    request: dict[str, Any],
+    *,
+    tokenizer: TokenizerLike,
+    renderer,
+    tool_parser_class: type[ToolParser] | None,
+) -> PreprocessResult:
+    """Sync version of preprocess_chat_request for worker processes."""
+    request_for_sampling = ChatCompletionRequest.model_validate(request)
+
+    tool_parser: ToolParser | None = None
+    if tool_parser_class and request_for_sampling.tools:
+        if request_for_sampling.tool_choice != "none":
+            tool_parser = tool_parser_class(tokenizer)
+            request_for_sampling = tool_parser.adjust_request(request_for_sampling)
+
+    tool_dicts = (
+        [tool.model_dump() for tool in request_for_sampling.tools]
+        if request_for_sampling.tools
+        else None
+    )
+    chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
+    chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+
+    is_mistral_tokenizer = (
+        tokenizer.__class__.__name__ == "MistralTokenizer"
+        or "tokenizers.mistral" in tokenizer.__class__.__module__
+    )
+    tokenize_in_template = is_mistral_tokenizer
+    messages_for_render = (
+        _materialize_assistant_tool_calls(request_for_sampling.messages)
+        if is_mistral_tokenizer
+        else request_for_sampling.messages
+    )
+
+    _, engine_prompt = renderer.render_messages(
+        messages_for_render,
+        chat_template=request_for_sampling.chat_template,
+        chat_template_content_format="auto",
+        add_generation_prompt=request_for_sampling.add_generation_prompt,
+        continue_final_message=request_for_sampling.continue_final_message,
+        tools=tool_dicts,
+        documents=request_for_sampling.documents,
+        tokenize=tokenize_in_template,
+        **chat_template_kwargs,
+    )
+
+    if "prompt_token_ids" in engine_prompt:
+        tokens = list(engine_prompt["prompt_token_ids"])
+    else:
+        tokens = tokenizer.encode(
+            engine_prompt["prompt"],
+            add_special_tokens=request_for_sampling.add_special_tokens,
+        )
+
+    return PreprocessResult(
+        request_for_sampling=request_for_sampling,
+        tool_parser=tool_parser,
+        chat_template_kwargs=chat_template_kwargs,
+        engine_prompt=engine_prompt,
+        prompt_token_ids=tokens,
+    )
+
+
 class StreamingPostProcessor:
     def __init__(
         self,

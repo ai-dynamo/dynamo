@@ -7,11 +7,15 @@
 
 import asyncio
 import logging
+import multiprocessing
 import os
+import queue
 import time
 import uuid
 from argparse import Namespace
 from collections.abc import AsyncGenerator
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import wait as _futures_wait
 from typing import Any
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
@@ -36,7 +40,11 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 
-from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .prepost import (
+    StreamingPostProcessor,
+    preprocess_chat_request,
+    preprocess_chat_request_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +80,311 @@ def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
     return mapped
 
 
+# --- Worker process globals (initialized once per process by _init_worker) ---
+_w_input_processor: InputProcessor | None = None
+_w_tokenizer: Any = None
+_w_tool_parser_class: type[ToolParser] | None = None
+_w_reasoning_parser_class: type[ReasoningParser] | None = None
+_WORKER_STOP_SENTINEL = "__dynamo_worker_stop__"
+
+
+def _init_worker(
+    model_path: str,
+    tokenizer_mode: str,
+    config_format: str,
+    load_format: str,
+    tool_parser_name: str | None,
+    reasoning_parser_name: str | None,
+) -> None:
+    """Initialize a worker process with its own VllmConfig and InputProcessor."""
+    global _w_input_processor, _w_tokenizer, _w_tool_parser_class, _w_reasoning_parser_class
+
+    model_config = ModelConfig(
+        model=model_path,
+        tokenizer_mode=tokenizer_mode,
+        config_format=config_format,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        load_config=LoadConfig(load_format=load_format),
+        cache_config=CacheConfig(),
+    )
+
+    _w_input_processor = InputProcessor(vllm_config)
+    _w_tokenizer = _w_input_processor.get_tokenizer()
+
+    if tool_parser_name:
+        _w_tool_parser_class = ToolParserManager.get_tool_parser(tool_parser_name)
+    else:
+        _w_tool_parser_class = None
+
+    if reasoning_parser_name:
+        _w_reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
+            reasoning_parser_name
+        )
+    else:
+        _w_reasoning_parser_class = None
+
+
+def _worker_warmup() -> bool:
+    """Dummy task to ensure worker process is fully initialized."""
+    return True
+
+
+def _request_handler(
+    input_q: multiprocessing.Queue,
+    output_q: multiprocessing.Queue,
+    request: dict[str, Any],
+    request_id: str,
+    model_name: str,
+) -> None:
+    """Full request lifecycle in a worker process.
+
+    Phase A: Preprocessing (pydantic validation, template rendering, tokenization)
+    Phase B: Setup output processing
+    Phase C: Token processing loop (detokenization, reasoning/tool parsing)
+    Phase D: Cleanup
+    """
+
+    output_processor = None
+    vllm_request_id = None
+
+    try:
+        # Phase A: Preprocessing
+        pre = preprocess_chat_request_sync(
+            request,
+            tokenizer=_w_tokenizer,
+            renderer=_w_input_processor.renderer,
+            tool_parser_class=_w_tool_parser_class,
+        )
+
+        request_for_sampling = pre.request_for_sampling
+        tool_parser = pre.tool_parser
+        chat_template_kwargs = pre.chat_template_kwargs
+        engine_prompt = pre.engine_prompt
+        tokens = pre.prompt_token_ids
+
+        if request_for_sampling.max_completion_tokens is not None:
+            max_tokens = request_for_sampling.max_completion_tokens
+        elif request_for_sampling.max_tokens is not None:
+            max_tokens = request_for_sampling.max_tokens
+        else:
+            max_tokens = None
+
+        sampling_params = SamplingParams(
+            output_kind=RequestOutputKind.DELTA,
+            max_tokens=max_tokens,
+        )
+        for k, v in _w_input_processor.generation_config_fields.items():
+            if hasattr(sampling_params, k):
+                setattr(sampling_params, k, v)
+
+        sampling_fields = (
+            set(getattr(SamplingParams, "__annotations__", ()))
+            & set(type(request_for_sampling).model_fields)
+        ) - {"max_tokens", "logprobs", "output_kind"}
+        for k in sorted(sampling_fields):
+            v = getattr(request_for_sampling, k, None)
+            if v is not None:
+                setattr(sampling_params, k, v)
+
+        logprobs = request_for_sampling.logprobs
+        top_logprobs = request_for_sampling.top_logprobs
+        if logprobs is True:
+            sampling_params.logprobs = top_logprobs or 1
+        elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
+            sampling_params.logprobs = logprobs
+        elif top_logprobs not in (None, 0):
+            sampling_params.logprobs = top_logprobs
+
+        prompt_inputs = TokensPrompt(prompt_token_ids=tokens)
+        if "multi_modal_data" in engine_prompt:
+            prompt_inputs["multi_modal_data"] = engine_prompt["multi_modal_data"]
+        if "multi_modal_uuids" in engine_prompt:
+            prompt_inputs["multi_modal_uuids"] = engine_prompt["multi_modal_uuids"]
+        if request_for_sampling.cache_salt is not None:
+            prompt_inputs["cache_salt"] = request_for_sampling.cache_salt
+        if request_for_sampling.mm_processor_kwargs is not None:
+            prompt_inputs[
+                "mm_processor_kwargs"
+            ] = request_for_sampling.mm_processor_kwargs
+
+        vllm_preproc: EngineCoreRequest = _w_input_processor.process_inputs(
+            request_id,
+            prompt_inputs,
+            sampling_params,
+        )
+        InputProcessor.assign_request_id(vllm_preproc)
+
+        sp = vllm_preproc.sampling_params
+        if sp.n != 1:
+            output_q.put(
+                (
+                    "error",
+                    {
+                        "error": {
+                            "message": (
+                                f"Unsupported value: 'n={sp.n}'. "
+                                "This endpoint currently supports only n=1."
+                            ),
+                            "type": "invalid_request_error",
+                            "param": "n",
+                            "code": "unsupported_value",
+                        }
+                    },
+                )
+            )
+            return
+
+        dynamo_preproc = {
+            "model": model_name,
+            "token_ids": tokens,
+            "stop_conditions": {
+                "max_tokens": sp.max_tokens,
+                "stop": sp.stop,
+                "stop_token_ids": sp.stop_token_ids,
+                "min_tokens": sp.min_tokens,
+                "ignore_eos": sp.ignore_eos,
+            },
+            "sampling_options": {
+                "n": sp.n,
+                "presence_penalty": sp.presence_penalty,
+                "frequency_penalty": sp.frequency_penalty,
+                "repetition_penalty": sp.repetition_penalty,
+                "temperature": sp.temperature,
+                "top_p": sp.top_p,
+                "top_k": sp.top_k,
+                "min_p": sp.min_p,
+                "seed": sp.seed,
+            },
+            "output_options": {
+                "logprobs": sp.logprobs,
+                "prompt_logprobs": sp.prompt_logprobs,
+                "skip_special_tokens": sp.skip_special_tokens,
+            },
+            "eos_token_ids": [vllm_preproc.eos_token_id]
+            if vllm_preproc.eos_token_id is not None
+            else [],
+            "annotations": [],
+        }
+
+        output_q.put(("preprocess", dynamo_preproc, tokens))
+
+        # Phase B: Setup output processing
+        output_processor = OutputProcessor(
+            _w_tokenizer,
+            log_stats=False,
+            stream_interval=1,
+        )
+        vllm_request_id = vllm_preproc.request_id
+        output_processor.add_request(vllm_preproc, None)
+
+        post = StreamingPostProcessor(
+            tokenizer=_w_tokenizer,
+            request_for_sampling=request_for_sampling,
+            sampling_params=sampling_params,
+            prompt_token_ids=tokens,
+            tool_parser=tool_parser,
+            reasoning_parser_class=_w_reasoning_parser_class,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+
+        # Phase C: Token processing loop
+        while True:
+            engine_response = input_q.get()
+
+            if engine_response == _WORKER_STOP_SENTINEL:
+                break
+
+            if (
+                engine_response is None
+                or not isinstance(engine_response, dict)
+                or "token_ids" not in engine_response
+            ):
+                output_q.put(
+                    (
+                        "error",
+                        {
+                            "id": request_id,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "error",
+                                }
+                            ],
+                            "created": int(time.time()),
+                            "model": model_name,
+                            "object": "chat.completion.chunk",
+                        },
+                    )
+                )
+                break
+
+            raw_finish_reason = engine_response.get("finish_reason")
+            finish_reason = map_finish_reason(raw_finish_reason)
+            stop_reason = engine_response.get("stop_reason")
+
+            vllm_response = EngineCoreOutput(
+                request_id=vllm_request_id,
+                new_token_ids=engine_response["token_ids"],
+                finish_reason=finish_reason,
+                stop_reason=stop_reason,
+            )
+
+            vllm_out = output_processor.process_outputs([vllm_response])
+
+            if vllm_out.reqs_to_abort:
+                pass
+
+            choices = []
+            if not vllm_out.request_outputs:
+                output_q.put(("skip",))
+                continue
+
+            for output in vllm_out.request_outputs[0].outputs:
+                choice = post.process_output(output)
+                if choice:
+                    choices.append(choice)
+
+            if choices:
+                dynamo_out = {
+                    "id": request_id,
+                    "choices": choices,
+                    "created": int(time.time()),
+                    "model": model_name,
+                    "object": "chat.completion.chunk",
+                }
+                if usage := engine_response.get("completion_usage"):
+                    dynamo_out["usage"] = usage
+
+                output_q.put(("chunk", dynamo_out))
+            else:
+                output_q.put(("skip",))
+
+    except Exception as e:
+        try:
+            output_q.put(
+                (
+                    "error",
+                    {
+                        "error": {
+                            "message": f"Worker error: {e}",
+                            "type": "internal_error",
+                        }
+                    },
+                )
+            )
+        except Exception:
+            pass
+
+    finally:
+        # Phase D: Cleanup
+        if output_processor is not None and vllm_request_id is not None:
+            if vllm_request_id in output_processor.request_states:
+                output_processor.abort_requests([vllm_request_id], internal=True)
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -82,6 +395,8 @@ class VllmProcessor:
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         debug_perf: bool = False,
+        preprocess_pool: ProcessPoolExecutor | None = None,
+        preprocess_workers: int = 0,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -91,6 +406,36 @@ class VllmProcessor:
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
         self.debug_perf = debug_perf
+        self.preprocess_pool = preprocess_pool
+        # Manager provides proxy Queue objects that are picklable and work
+        # across processes (unlike raw multiprocessing.Queue which relies on
+        # shared pipe FDs that don't transfer to already-forked pool workers).
+        self._mp_manager = multiprocessing.Manager() if preprocess_pool else None
+        # Two dedicated thread pools for blocking queue reads, sized from
+        # preprocess_workers.  Preprocessing waits and streaming waits MUST
+        # use separate pools: under high concurrency every waiting request
+        # parks a thread on output_q.get for its preprocessing result.  If
+        # those threads come from the same pool as streaming reads, active
+        # requests that finished preprocessing can never acquire a thread to
+        # read token results → circular deadlock.
+        if preprocess_pool is not None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            # Preprocessing pool: only needs as many threads as workers, since
+            # only that many requests can be actively preprocessing.  Excess
+            # requests queue cheaply inside the ThreadPoolExecutor (no thread
+            # consumed until scheduled).
+            self._preproc_wait_executor = ThreadPoolExecutor(
+                max_workers=max(4, preprocess_workers)
+            )
+            # Streaming pool: also bounded by workers — each worker handles
+            # one request's token loop at a time.
+            self._stream_wait_executor = ThreadPoolExecutor(
+                max_workers=max(4, preprocess_workers)
+            )
+        else:
+            self._preproc_wait_executor = None
+            self._stream_wait_executor = None
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -113,8 +458,14 @@ class VllmProcessor:
             logger.info("[perf] generator enter: active_requests=%d", active)
 
         try:
-            async for item in self._generator_inner(request):
-                yield item
+            if self.preprocess_pool is None:
+                # Single process
+                async for item in self._generator_inner(request):
+                    yield item
+            else:
+                # Multi process
+                async for item in self._generator_inner_pool(request):
+                    yield item
         finally:
             if self.debug_perf:
                 active = exit_generator()
@@ -440,6 +791,104 @@ class VllmProcessor:
                     post_proc_total_ms / token_count,
                 )
 
+    async def _generator_inner_pool(
+        self, request: dict[str, Any]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Process a request using the worker pool.
+
+        Preprocessing and per-token output processing run in a worker process
+        (own GIL). The main process only does router I/O and queue transfer.
+        """
+        request_id = random_uuid()
+        loop = asyncio.get_running_loop()
+        input_q = self._mp_manager.Queue()
+        output_q = self._mp_manager.Queue()
+
+        future = self.preprocess_pool.submit(
+            _request_handler,
+            input_q,
+            output_q,
+            request,
+            request_id,
+            request["model"],
+        )
+
+        try:
+            # Wait for preprocessing result from worker in background thread (output_q is sync)
+            try:
+                msg = await loop.run_in_executor(
+                    self._preproc_wait_executor, output_q.get, True, 120
+                )
+            except queue.Empty:
+                logger.error(
+                    "Worker preprocessing timed out for request %s", request_id
+                )
+                yield {
+                    "error": {
+                        "message": "Worker preprocessing timed out",
+                        "type": "internal_error",
+                    }
+                }
+                return
+
+            if msg[0] == "error":
+                yield msg[1]
+                return
+
+            _, dynamo_preproc, tokens = msg
+
+            # Route via Rust router (stays in main process)
+            if self.is_kv_router:
+                dynamo_stream = await self.router.generate(
+                    token_ids=tokens,
+                    model=dynamo_preproc["model"],
+                    stop_conditions=dynamo_preproc["stop_conditions"],
+                    sampling_options=dynamo_preproc["sampling_options"],
+                    output_options=dynamo_preproc["output_options"],
+                )
+            else:
+                dynamo_stream = await self.router.generate(dynamo_preproc)
+
+            # Stream tokens to worker, yield processed results back
+            async for dynamo_response in dynamo_stream:
+                if self.is_kv_router:
+                    engine_response = dynamo_response
+                else:
+                    engine_response = dynamo_response.data()
+
+                input_q.put(engine_response)
+
+                try:
+                    msg = await loop.run_in_executor(
+                        self._stream_wait_executor, output_q.get, True, 60
+                    )
+                except queue.Empty:
+                    logger.error(
+                        "Worker token processing timed out for request %s",
+                        request_id,
+                    )
+                    yield {
+                        "error": {
+                            "message": "Worker token processing timed out",
+                            "type": "internal_error",
+                        }
+                    }
+                    break
+
+                if msg[0] == "chunk":
+                    yield msg[1]
+                elif msg[0] == "error":
+                    yield msg[1]
+                    break
+                # "skip" → continue
+
+        finally:
+            input_q.put(_WORKER_STOP_SENTINEL)  # Signal worker to clean up
+            try:
+                future.result(timeout=5)
+            except Exception:
+                pass
+
 
 class EngineFactory:
     def __init__(
@@ -535,6 +984,47 @@ class EngineFactory:
                 router_mode=self.router_config.router_mode
             )
 
+        preprocess_pool = None
+        preprocess_workers = getattr(self.config, "preprocess_workers", 0)
+        if preprocess_workers > 0:
+            logger.info(
+                "Creating preprocess worker pool with %d workers for model %s",
+                preprocess_workers,
+                source_path,
+            )
+            preprocess_pool = ProcessPoolExecutor(
+                max_workers=preprocess_workers,
+                initializer=_init_worker,
+                initargs=(
+                    source_path,
+                    tokenizer_mode,
+                    config_format,
+                    load_format,
+                    tool_parser_name,
+                    reasoning_parser_name,
+                ),
+            )
+            # Warm up all workers to ensure initialization completes
+            futures = [
+                preprocess_pool.submit(_worker_warmup)
+                for _ in range(preprocess_workers)
+            ]
+            done, not_done = _futures_wait(futures, timeout=120)
+            if not_done:
+                for f in not_done:
+                    f.cancel()
+                preprocess_pool.shutdown(wait=False, cancel_futures=True)
+                raise RuntimeError(
+                    "Timed out waiting for preprocess worker pool warmup"
+                )
+            try:
+                for f in done:
+                    f.result()  # Raises if initializer failed
+            except Exception:
+                preprocess_pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            logger.info("Preprocess worker pool ready (%d workers)", preprocess_workers)
+
         gen = VllmProcessor(
             tokenizer,
             input_processor,
@@ -543,6 +1033,8 @@ class EngineFactory:
             tool_parser_class,
             reasoning_parser_class,
             debug_perf=self.debug_perf,
+            preprocess_pool=preprocess_pool,
+            preprocess_workers=preprocess_workers,
         )
 
         return PythonAsyncEngine(gen.generator, loop)

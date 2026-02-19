@@ -84,6 +84,7 @@ class FrontendConfig(ConfigBase):
     enable_anthropic_api: bool
     exp_python_factory: bool
     debug_perf: bool
+    preprocess_workers: int
 
     def validate(self) -> None:
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
@@ -528,23 +529,26 @@ class FrontendArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--exp-python-factory",
-            env_var="DYN_EXP_PYTHON_FACTORY",
-            default=False,
-            help=(
-                "[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be "
-                "created via a Python callback instead of the default Rust pipeline."
-            ),
-        )
-
-        add_negatable_bool_argument(
-            g,
             flag_name="--debug-perf",
             env_var="DYN_DEBUG_PERF",
             default=False,
             help=(
                 "Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
                 "Logs GIL contention, per-function timing via sys.monitoring, request concurrency, "
-                "and hot-path section durations."
+                "and hot-path section durations. '--chat-processor vllm' only."
             ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--preprocess-workers",
+            env_var="DYN_PREPROCESS_WORKERS",
+            default=0,
+            help=(
+                "Number of worker processes for preprocessing and output processing. "
+                "When > 0, offloads CPU-bound work (tokenization, template rendering, "
+                "detokenization) to a ProcessPoolExecutor with N workers, each with its "
+                "own GIL. 0 (default) keeps all processing on the main event loop. '--chat-processor vllm' only."
+            ),
+            arg_type=int,
         )
