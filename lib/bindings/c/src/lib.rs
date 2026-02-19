@@ -475,6 +475,7 @@ impl RouterHandles {
             .find_best_match(
                 None,
                 tokens,
+                None,
                 config_override.as_ref(),
                 false,
                 None,
@@ -1124,7 +1125,7 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let result = handles.runtime.secondary().block_on(async {
         let prefill_worker_id = handles
-            .query_prefill_worker(&tokens, false, None, 0.0, allowed_worker_ids)
+            .query_prefill_worker(&tokens, None, false, None, 0.0, allowed_worker_ids)
             .await?;
 
         tracing::info!(

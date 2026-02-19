@@ -287,7 +287,7 @@ impl PrefillRouter {
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
-            let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
+            let (_routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
             match self
                 .query_prefill_worker(
                     &req.token_ids,
