@@ -313,9 +313,10 @@ impl PositionalIndexer {
             None => 0, // Start from position 0
         };
 
-        let worker_ref = worker_blocks
+        worker_blocks
             .entry(worker)
             .or_insert_with(|| RwLock::new(FxHashMap::default()));
+        let worker_ref = worker_blocks.get(&worker).unwrap();
         let mut worker_map = worker_ref.write();
 
         for (i, block_data) in store_data.blocks.into_iter().enumerate() {

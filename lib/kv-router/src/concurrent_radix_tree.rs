@@ -310,10 +310,10 @@ impl ConcurrentRadixTree {
         op: KvCacheStoreData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let lk_ref = self
-            .lookup
+        self.lookup
             .entry(worker)
             .or_insert_with(|| RwLock::new(FxHashMap::default()));
+        let lk_ref = self.lookup.get(&worker).unwrap();
         let mut worker_lookup = lk_ref.write();
 
         // Find parent block
