@@ -408,18 +408,18 @@ func (r *DynamoComponentDeploymentReconciler) cleanupLegacyLWSResources(ctx cont
 	baseKubeName := r.getKubeName(dynamoComponentDeployment, false)
 	newLWSName := baseKubeName // The new LWS uses the base name without suffix
 	anyModified := false
-	
+
 	// List all LeaderWorkerSets in the namespace with our labels
 	lwsList := &leaderworkersetv1.LeaderWorkerSetList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(dynamoComponentDeployment.Namespace),
 		client.MatchingLabels(r.getKubeLabels(dynamoComponentDeployment)),
 	}
-	
+
 	if err := r.List(ctx, lwsList, listOpts...); err != nil {
 		return false, fmt.Errorf("failed to list LeaderWorkerSets: %w", err)
 	}
-	
+
 	// Delete legacy indexed LeaderWorkerSets (e.g., name-0, name-1, ...)
 	// Only delete if the name matches the legacy pattern: baseName-<number>
 	for _, lws := range lwsList.Items {
@@ -427,7 +427,7 @@ func (r *DynamoComponentDeploymentReconciler) cleanupLegacyLWSResources(ctx cont
 		if lws.Name == newLWSName {
 			continue
 		}
-		
+
 		// Check if it matches legacy naming pattern: baseName-<number>
 		if len(lws.Name) > len(baseKubeName)+1 &&
 			lws.Name[:len(baseKubeName)] == baseKubeName &&
@@ -441,7 +441,7 @@ func (r *DynamoComponentDeploymentReconciler) cleanupLegacyLWSResources(ctx cont
 					break
 				}
 			}
-			
+
 			if isNumeric {
 				logger.Info("Deleting legacy LeaderWorkerSet", "name", lws.Name)
 				if err := r.Delete(ctx, &lws); err != nil && !k8serrors.IsNotFound(err) {
@@ -449,7 +449,7 @@ func (r *DynamoComponentDeploymentReconciler) cleanupLegacyLWSResources(ctx cont
 				} else {
 					anyModified = true
 				}
-				
+
 				// Also delete corresponding PodGroup
 				pgName := lws.Name
 				pg := &volcanov1beta1.PodGroup{}
@@ -462,7 +462,7 @@ func (r *DynamoComponentDeploymentReconciler) cleanupLegacyLWSResources(ctx cont
 			}
 		}
 	}
-	
+
 	return anyModified, nil
 }
 
