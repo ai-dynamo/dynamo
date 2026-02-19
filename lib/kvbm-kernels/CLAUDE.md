@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-kvbm-kernels is a high-performance CUDA transfer library for batched H2D, D2H, and D2D block copies used by the Dynamo KV cache system. The core API (`vectorized_copy`, `memcpy_batch`) is always available and handles the common case of moving KV cache blocks between host and device without layout changes. Fused permute-and-copy kernels for layout conversion between **Block Stack** (vLLM), **Operational** (TensorRT-LLM), and **Universal** (Dynamo storage) formats are feature-gated behind `permute_kernels`.
+kvbm-kernels is a high-performance CUDA transfer library for batched H2D, D2H, and D2D block copies used by the Dynamo KV cache system. The core API (`vectorized_copy`, `memcpy_batch`) is always available and handles the common case of moving KV cache blocks between host and device without layout changes. Fused permute-and-copy kernels for layout conversion between **Block Stack** (vLLM) and **Universal** (Dynamo storage) formats are feature-gated behind `permute_kernels`.
 
 ## Build Commands
 
@@ -55,13 +55,12 @@ These live in `src/tensor_kernels.rs` and work on any device-visible memory (dev
 These fuse layout permutation with copy for non-standard transfer paths:
 
 - **`universal_from_block`** / **`block_from_universal`** — Permute between block stack layout (`nl*no` separate allocations, each `[nt, nh, hd]` NHD or `[nh, nt, hd]` HND) and universal layout (contiguous `[nh, nl, no, nt, hd]`).
-- **`operational_copy`** — Bidirectional block stack to/from operational layout (`[nl, no, inner]`). Multiple backends with auto-selection: VectorizedKernel (int64 with power-of-2 fast paths) > MemcpyBatch > MemcpyAsync > KernelOnly.
 
 ### Source organization
 
 - `cuda/tensor_kernels.cu` — All CUDA kernels. C++ templates on dtype (F16/BF16/F32/F64) and layout (NHD/HND), exposed via `extern "C"` functions prefixed `kvbm_kernels_launch_*` / `kvbm_kernels_memcpy_batch`.
 - `cuda/stubs.c` — Abort-on-call fallbacks for all `extern "C"` symbols.
-- `src/tensor_kernels.rs` — Rust FFI wrappers, enums (`TensorDataType`, `BlockLayout`, `OperationalCopyDirection`, `OperationalCopyBackend`, `MemcpyBatchMode`), and integration tests.
+- `src/tensor_kernels.rs` — Rust FFI wrappers, enums (`TensorDataType`, `BlockLayout`, `MemcpyBatchMode`), and integration tests.
 - `examples/kvbench.rs` — Benchmark harness (Llama 3.1 70B profile, CSV output).
 - `scripts/plot_roofline.py` — Roofline bandwidth plots from kvbench output.
 
@@ -73,7 +72,7 @@ These fuse layout permutation with copy for non-standard transfer paths:
 
 | Feature | Purpose |
 |---------|---------|
-| `permute_kernels` | Enable fused permute-and-copy kernels (block<->universal<->operational) |
+| `permute_kernels` | Enable fused permute-and-copy kernels (block<->universal) |
 | `testing-cuda` | Enable CUDA integration tests |
 | `static-kernels` | Link as `.a` instead of `.so` |
 | `kvbench` | Enable benchmark example (pulls in `clap`) |
@@ -82,5 +81,5 @@ These fuse layout permutation with copy for non-standard transfer paths:
 
 - `tests/stub_build.rs` — Verifies stub behavior (gated on `stub_kernels`).
 - `tests/memcpy_batch.rs` — Core transfer API roundtrip tests (H2D + D2H via pinned host memory). Gated on `testing-cuda`.
-- `tests/kernel_roundtrip.rs` — Permute kernel roundtrip tests across all dtypes, layouts, and backends. Gated on `testing-cuda` + `permute_kernels`.
-- Inline tests in `src/tensor_kernels.rs` — Integration tests including `fused_copy_roundtrip`. Gated on `testing-cuda` + `permute_kernels`.
+- `tests/kernel_roundtrip.rs` — Permute kernel roundtrip tests across all dtypes and layouts. Gated on `testing-cuda` + `permute_kernels`.
+- Inline tests in `src/tensor_kernels.rs` — Integration tests including `universal_roundtrip`. Gated on `testing-cuda` + `permute_kernels`.

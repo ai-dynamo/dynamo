@@ -70,29 +70,6 @@ kvbm_kernels_launch_block_from_universal(
 }
 
 cudaError_t
-kvbm_kernels_launch_operational_copy(
-    const void* const* block_ptrs_host, const void* const* block_ptrs_device, void* const* operational_ptrs_host,
-    void* const* operational_ptrs_device, size_t num_blocks, size_t nl, size_t no, size_t inner, size_t elem_size,
-    int dtype_value, int direction_value, int backend_value, cudaStream_t stream)
-{
-  (void)block_ptrs_host;
-  (void)block_ptrs_device;
-  (void)operational_ptrs_host;
-  (void)operational_ptrs_device;
-  (void)num_blocks;
-  (void)nl;
-  (void)no;
-  (void)inner;
-  (void)elem_size;
-  (void)dtype_value;
-  (void)direction_value;
-  (void)backend_value;
-  (void)stream;
-  STUB_ABORT("kvbm_kernels_launch_operational_copy");
-  return 1;  // Unreachable
-}
-
-cudaError_t
 kvbm_kernels_launch_vectorized_copy(
     void** src_ptrs_device, void** dst_ptrs_device, size_t copy_size_bytes, int num_pairs, cudaStream_t stream)
 {

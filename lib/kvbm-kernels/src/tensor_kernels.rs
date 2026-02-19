@@ -38,33 +38,6 @@ pub enum BlockLayout {
     HND = 1,
 }
 
-/// Direction flag for copying between block stacks and operational buffers.
-#[cfg(feature = "permute_kernels")]
-#[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OperationalCopyDirection {
-    BlockToOperational = 0,
-    OperationalToBlock = 1,
-}
-
-/// Selects how the operational copy should move data.
-#[cfg(feature = "permute_kernels")]
-#[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OperationalCopyBackend {
-    /// Auto-select the best backend based on data alignment and CUDA version.
-    /// Priority: vectorized kernel (if 8-byte aligned) -> batch copy (CUDA 12.9+) -> memcpy async.
-    Auto = 0,
-    /// Force the vectorized 64-bit kernel (requires 8-byte aligned data).
-    VectorizedKernel = 1,
-    /// Force the dtype-specific kernel path.
-    KernelOnly = 2,
-    /// Issue one cudaMemcpyAsync per chunk.
-    MemcpyAsync = 3,
-    /// Invoke cudaMemcpyBatchAsync directly.
-    MemcpyBatch = 4,
-}
-
 #[cfg(feature = "permute_kernels")]
 unsafe extern "C" {
     fn kvbm_kernels_launch_universal_from_block(
@@ -92,22 +65,6 @@ unsafe extern "C" {
         hd: usize,
         dtype: i32,
         layout: i32,
-        stream: cudaStream_t,
-    ) -> cudaError_t;
-
-    fn kvbm_kernels_launch_operational_copy(
-        block_ptrs_host: *const *const c_void,
-        block_ptrs_device: *const *const c_void,
-        operational_ptrs_host: *const *mut c_void,
-        operational_ptrs_device: *const *const c_void,
-        num_blocks: usize,
-        nl: usize,
-        no: usize,
-        inner: usize,
-        elem_size: usize,
-        dtype: i32,
-        direction: i32,
-        backend: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
 }
@@ -323,78 +280,9 @@ pub unsafe fn vectorized_copy(
     }
 }
 
-/// Check that every pointer in `ptrs` is aligned to `alignment` bytes.
-///
-/// The vectorized operational copy kernel requires 8-byte aligned pointers.
-/// CUDA allocators (`cudaMalloc`, `cudaMallocHost`) guarantee this, but callers
-/// passing sub-buffer offsets should validate alignment before calling
-/// [`operational_copy`] with `VectorizedKernel` or `Auto` backend.
-///
-/// Intended for use as a debug assertion:
-/// ```ignore
-/// debug_assert!(check_pointer_alignment(ptrs, 8), "pointers must be 8-byte aligned");
-/// ```
-pub fn check_pointer_alignment(ptrs: &[*const c_void], alignment: usize) -> bool {
-    debug_assert!(
-        alignment.is_power_of_two(),
-        "alignment must be a power of 2"
-    );
-    let mask = alignment - 1;
-    ptrs.iter().all(|&ptr| (ptr as usize) & mask == 0)
-}
-
-/// Copy between block stacks and operational buffers for `num_blocks`.
-///
-/// In `Auto` mode, the priority order is:
-/// 1. Vectorized 64-bit kernel (if data is 8-byte aligned)
-/// 2. `cudaMemcpyBatchAsync` (CUDA 12.9+)
-/// 3. `cudaMemcpyAsync` (fallback)
-///
-/// The `backend` parameter lets callers force a specific path:
-/// - `Auto` - automatic selection based on alignment and CUDA version
-/// - `VectorizedKernel` - force 64-bit vectorized kernel (requires 8-byte alignment)
-/// - `KernelOnly` - force dtype-specific kernel
-/// - `MemcpyAsync` - force per-chunk cudaMemcpyAsync
-/// - `MemcpyBatch` - force cudaMemcpyBatchAsync
-#[cfg(feature = "permute_kernels")]
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn operational_copy(
-    block_ptrs_host: *const *const c_void,
-    block_ptrs_device: *const *const c_void,
-    operational_ptrs_host: *const *mut c_void,
-    operational_ptrs_device: *const *const c_void,
-    num_blocks: usize,
-    nl: usize,
-    no: usize,
-    inner: usize,
-    elem_size: usize,
-    dtype: TensorDataType,
-    direction: OperationalCopyDirection,
-    backend: OperationalCopyBackend,
-    stream: cudaStream_t,
-) -> cudaError_t {
-    unsafe {
-        kvbm_kernels_launch_operational_copy(
-            block_ptrs_host,
-            block_ptrs_device,
-            operational_ptrs_host,
-            operational_ptrs_device,
-            num_blocks,
-            nl,
-            no,
-            inner,
-            elem_size,
-            dtype as i32,
-            direction as i32,
-            backend as i32,
-            stream,
-        )
-    }
-}
-
 // Tests are gated to only run when:
 // 1. testing-cuda feature is enabled
-// 2. permute_kernels feature is enabled (tests use operational_copy/universal kernels)
+// 2. permute_kernels feature is enabled (tests use universal kernels)
 // 3. NOT using stub kernels (stub_kernels cfg is set by build.rs when no nvcc)
 #[cfg(all(
     test,
@@ -409,7 +297,7 @@ mod tests {
     use cudarc::runtime::sys as cuda_runtime;
 
     #[test]
-    fn fused_copy_roundtrip() -> Result<(), DriverError> {
+    fn universal_roundtrip() -> Result<(), DriverError> {
         let device_count = match CudaContext::device_count() {
             Ok(count) => count,
             Err(_) => return Ok(()),
@@ -430,7 +318,6 @@ mod tests {
         let inner = nt * nh * hd;
         let chunk_count = nl * no;
         let block_volume = nh * nl * no * nt * hd;
-        let operational_volume = chunk_count * inner;
         let num_blocks = 2usize;
 
         let dtype = TensorDataType::F32;
@@ -438,7 +325,6 @@ mod tests {
 
         let mut host_block_chunks: Vec<Vec<Vec<f32>>> = Vec::with_capacity(num_blocks);
         let mut block_slices: Vec<Vec<CudaSlice<f32>>> = Vec::with_capacity(num_blocks);
-        let mut block_ptrs_host: Vec<*const c_void> = Vec::with_capacity(num_blocks * chunk_count);
         let mut block_ptr_values: Vec<usize> = Vec::with_capacity(num_blocks * chunk_count);
 
         for block_idx in 0..num_blocks {
@@ -453,7 +339,6 @@ mod tests {
                 let slice = stream.clone_htod(&host_chunk)?;
                 {
                     let (ptr_raw, _guard) = slice.device_ptr(&stream);
-                    block_ptrs_host.push(ptr_raw as usize as *const c_void);
                     block_ptr_values.push(ptr_raw as usize);
                 }
                 slices_for_block.push(slice);
@@ -484,28 +369,6 @@ mod tests {
             universal_slices.push(slice);
         }
         let universal_ptrs_device = stream.clone_htod(universal_ptr_values.as_slice())?;
-
-        let mut operational_slices = Vec::with_capacity(num_blocks);
-        let mut operational_ptrs_host = Vec::with_capacity(num_blocks);
-        let mut operational_ptr_values = Vec::with_capacity(num_blocks);
-        for _ in 0..num_blocks {
-            let mut slice = unsafe { stream.alloc::<f32>(operational_volume)? };
-            {
-                let (ptr_raw, _guard) = slice.device_ptr_mut(&stream);
-                operational_ptrs_host.push(ptr_raw as usize as *mut c_void);
-                operational_ptr_values.push(ptr_raw as usize);
-                unsafe {
-                    memset_d8_async(
-                        ptr_raw,
-                        0xDE,
-                        operational_volume * std::mem::size_of::<f32>(),
-                        stream.cu_stream(),
-                    )?;
-                }
-            }
-            operational_slices.push(slice);
-        }
-        let operational_ptrs_device = stream.clone_htod(operational_ptr_values.as_slice())?;
 
         // Block -> Universal
         {
@@ -635,115 +498,6 @@ mod tests {
             }
         }
 
-        // Block -> Operational
-        {
-            let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-            let block_ptrs_device_ptr = block_ptrs_device_raw as usize as *const *const c_void;
-            let (operational_ptrs_device_raw, _op_guard) =
-                operational_ptrs_device.device_ptr(&stream);
-            let operational_ptrs_device_ptr =
-                operational_ptrs_device_raw as usize as *const *const c_void;
-            let status = unsafe {
-                super::operational_copy(
-                    block_ptrs_host.as_ptr(),
-                    block_ptrs_device_ptr,
-                    operational_ptrs_host.as_ptr(),
-                    operational_ptrs_device_ptr,
-                    num_blocks,
-                    nl,
-                    no,
-                    inner,
-                    std::mem::size_of::<f32>(),
-                    dtype,
-                    OperationalCopyDirection::BlockToOperational,
-                    OperationalCopyBackend::Auto,
-                    stream_raw,
-                )
-            };
-            assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
-        }
-        stream.synchronize()?;
-
-        for block_idx in 0..num_blocks {
-            let host_operational = stream.clone_dtoh(&operational_slices[block_idx])?;
-            for chunk_idx in 0..chunk_count {
-                for inner_idx in 0..inner {
-                    let expected = host_block_chunks[block_idx][chunk_idx][inner_idx];
-                    let value = host_operational[chunk_idx * inner + inner_idx];
-                    assert!(
-                        (value - expected).abs() < 1e-5,
-                        "operational pack mismatch block {} chunk {} offset {}: {} vs {}",
-                        block_idx,
-                        chunk_idx,
-                        inner_idx,
-                        value,
-                        expected
-                    );
-                }
-            }
-        }
-
-        // Operational -> Block (poison-fill destination before reverse pass)
-        for block in &mut block_slices {
-            for slice in block {
-                let (dptr, _guard) = slice.device_ptr_mut(&stream);
-                unsafe {
-                    memset_d8_async(
-                        dptr,
-                        0xDE,
-                        inner * std::mem::size_of::<f32>(),
-                        stream.cu_stream(),
-                    )?;
-                }
-            }
-        }
-        stream.synchronize()?;
-
-        {
-            let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-            let (operational_ptrs_device_raw, _op_guard) =
-                operational_ptrs_device.device_ptr(&stream);
-            let operational_ptrs_device_const =
-                operational_ptrs_device_raw as usize as *const *const c_void;
-            let status = unsafe {
-                super::operational_copy(
-                    block_ptrs_host.as_ptr(),
-                    block_ptrs_device_raw as usize as *const *const c_void,
-                    operational_ptrs_host.as_ptr(),
-                    operational_ptrs_device_const,
-                    num_blocks,
-                    nl,
-                    no,
-                    inner,
-                    std::mem::size_of::<f32>(),
-                    dtype,
-                    OperationalCopyDirection::OperationalToBlock,
-                    OperationalCopyBackend::Auto,
-                    stream_raw,
-                )
-            };
-            assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
-        }
-        stream.synchronize()?;
-
-        for block_idx in 0..num_blocks {
-            for chunk_idx in 0..chunk_count {
-                let host_chunk = stream.clone_dtoh(&block_slices[block_idx][chunk_idx])?;
-                for (inner_idx, value) in host_chunk.iter().enumerate() {
-                    let expected = host_block_chunks[block_idx][chunk_idx][inner_idx];
-                    assert!(
-                        (value - expected).abs() < 1e-5,
-                        "operational unpack mismatch block {} chunk {} offset {}: {} vs {}",
-                        block_idx,
-                        chunk_idx,
-                        inner_idx,
-                        value,
-                        expected
-                    );
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -823,197 +577,6 @@ mod tests {
         for i in 0..num_pairs {
             let result = stream.clone_dtoh(&dst_slices[i])?;
             assert_eq!(result, expected_data[i], "Mismatch at pair {}", i);
-        }
-
-        Ok(())
-    }
-
-    /// Test operational copy with explicit VectorizedKernel backend.
-    #[test]
-    fn test_operational_copy_vectorized_backend() -> Result<(), DriverError> {
-        let device_count = match CudaContext::device_count() {
-            Ok(count) => count,
-            Err(_) => return Ok(()),
-        };
-        if device_count <= 0 {
-            return Ok(());
-        }
-
-        let ctx = CudaContext::new(0)?;
-        let stream = ctx.default_stream();
-        let stream_raw = stream.cu_stream() as cuda_runtime::cudaStream_t;
-
-        // Use dimensions that result in 8-byte aligned data for vectorized path
-        let nl = 2usize;
-        let no = 2usize;
-        let inner = 32usize; // 32 elements * 4 bytes = 128 bytes (8-byte aligned)
-        let chunk_count = nl * no;
-        let operational_volume = chunk_count * inner;
-        let num_blocks = 2usize;
-
-        let dtype = TensorDataType::F32;
-
-        // Create block chunks
-        let mut host_block_chunks: Vec<Vec<Vec<f32>>> = Vec::with_capacity(num_blocks);
-        let mut block_slices: Vec<Vec<CudaSlice<f32>>> = Vec::with_capacity(num_blocks);
-        let mut block_ptrs_host: Vec<*const c_void> = Vec::with_capacity(num_blocks * chunk_count);
-        let mut block_ptr_values: Vec<usize> = Vec::with_capacity(num_blocks * chunk_count);
-
-        for block_idx in 0..num_blocks {
-            let mut host_chunks_for_block = Vec::with_capacity(chunk_count);
-            let mut slices_for_block = Vec::with_capacity(chunk_count);
-            for chunk_idx in 0..chunk_count {
-                let global_idx = block_idx * chunk_count + chunk_idx;
-                let mut host_chunk = Vec::with_capacity(inner);
-                for offset in 0..inner {
-                    host_chunk.push((global_idx * inner + offset) as f32 + 0.5f32);
-                }
-                let slice = stream.clone_htod(&host_chunk)?;
-                {
-                    let (ptr_raw, _guard) = slice.device_ptr(&stream);
-                    block_ptrs_host.push(ptr_raw as usize as *const c_void);
-                    block_ptr_values.push(ptr_raw as usize);
-                }
-                slices_for_block.push(slice);
-                host_chunks_for_block.push(host_chunk);
-            }
-            block_slices.push(slices_for_block);
-            host_block_chunks.push(host_chunks_for_block);
-        }
-
-        let block_ptrs_device = stream.clone_htod(block_ptr_values.as_slice())?;
-
-        // Create operational buffers (poison-filled)
-        let mut operational_slices = Vec::with_capacity(num_blocks);
-        let mut operational_ptrs_host = Vec::with_capacity(num_blocks);
-        let mut operational_ptr_values = Vec::with_capacity(num_blocks);
-        for _ in 0..num_blocks {
-            let mut slice = unsafe { stream.alloc::<f32>(operational_volume)? };
-            {
-                let (ptr_raw, _guard) = slice.device_ptr_mut(&stream);
-                operational_ptrs_host.push(ptr_raw as usize as *mut c_void);
-                operational_ptr_values.push(ptr_raw as usize);
-                unsafe {
-                    memset_d8_async(
-                        ptr_raw,
-                        0xDE,
-                        operational_volume * std::mem::size_of::<f32>(),
-                        stream.cu_stream(),
-                    )?;
-                }
-            }
-            operational_slices.push(slice);
-        }
-        let operational_ptrs_device = stream.clone_htod(operational_ptr_values.as_slice())?;
-
-        // Block -> Operational using VectorizedKernel backend
-        {
-            let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-            let block_ptrs_device_ptr = block_ptrs_device_raw as usize as *const *const c_void;
-            let (operational_ptrs_device_raw, _op_guard) =
-                operational_ptrs_device.device_ptr(&stream);
-            let operational_ptrs_device_ptr =
-                operational_ptrs_device_raw as usize as *const *const c_void;
-            let status = unsafe {
-                super::operational_copy(
-                    block_ptrs_host.as_ptr(),
-                    block_ptrs_device_ptr,
-                    operational_ptrs_host.as_ptr(),
-                    operational_ptrs_device_ptr,
-                    num_blocks,
-                    nl,
-                    no,
-                    inner,
-                    std::mem::size_of::<f32>(),
-                    dtype,
-                    OperationalCopyDirection::BlockToOperational,
-                    OperationalCopyBackend::VectorizedKernel,
-                    stream_raw,
-                )
-            };
-            assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
-        }
-        stream.synchronize()?;
-
-        // Verify pack results
-        for block_idx in 0..num_blocks {
-            let host_operational = stream.clone_dtoh(&operational_slices[block_idx])?;
-            for chunk_idx in 0..chunk_count {
-                for inner_idx in 0..inner {
-                    let expected = host_block_chunks[block_idx][chunk_idx][inner_idx];
-                    let value = host_operational[chunk_idx * inner + inner_idx];
-                    assert!(
-                        (value - expected).abs() < 1e-5,
-                        "vectorized pack mismatch block {} chunk {} offset {}: {} vs {}",
-                        block_idx,
-                        chunk_idx,
-                        inner_idx,
-                        value,
-                        expected
-                    );
-                }
-            }
-        }
-
-        // Poison-fill block data before unpack
-        for block in &mut block_slices {
-            for slice in block {
-                let (dptr, _guard) = slice.device_ptr_mut(&stream);
-                unsafe {
-                    memset_d8_async(
-                        dptr,
-                        0xDE,
-                        inner * std::mem::size_of::<f32>(),
-                        stream.cu_stream(),
-                    )?;
-                }
-            }
-        }
-        stream.synchronize()?;
-
-        // Operational -> Block using VectorizedKernel backend
-        {
-            let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-            let (operational_ptrs_device_raw, _op_guard) =
-                operational_ptrs_device.device_ptr(&stream);
-            let status = unsafe {
-                super::operational_copy(
-                    block_ptrs_host.as_ptr(),
-                    block_ptrs_device_raw as usize as *const *const c_void,
-                    operational_ptrs_host.as_ptr(),
-                    operational_ptrs_device_raw as usize as *const *const c_void,
-                    num_blocks,
-                    nl,
-                    no,
-                    inner,
-                    std::mem::size_of::<f32>(),
-                    dtype,
-                    OperationalCopyDirection::OperationalToBlock,
-                    OperationalCopyBackend::VectorizedKernel,
-                    stream_raw,
-                )
-            };
-            assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
-        }
-        stream.synchronize()?;
-
-        // Verify unpack results
-        for block_idx in 0..num_blocks {
-            for chunk_idx in 0..chunk_count {
-                let host_chunk = stream.clone_dtoh(&block_slices[block_idx][chunk_idx])?;
-                for (inner_idx, value) in host_chunk.iter().enumerate() {
-                    let expected = host_block_chunks[block_idx][chunk_idx][inner_idx];
-                    assert!(
-                        (value - expected).abs() < 1e-5,
-                        "vectorized unpack mismatch block {} chunk {} offset {}: {} vs {}",
-                        block_idx,
-                        chunk_idx,
-                        inner_idx,
-                        value,
-                        expected
-                    );
-                }
-            }
         }
 
         Ok(())
