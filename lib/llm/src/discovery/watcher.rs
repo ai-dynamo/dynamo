@@ -715,15 +715,6 @@ impl ModelWatcher {
 
             // TODO: add audio models support
         } else if card.model_type.supports_prefill() {
-            // Case 6: Prefill
-            // Guardrail: Verify model_input is Tokens
-            if card.model_input != ModelInput::Tokens {
-                anyhow::bail!(
-                    "Prefill models must use ModelInput::Tokens, got {}",
-                    card.model_input.as_str()
-                );
-            }
-
             tracing::info!(
                 model_name = card.name(),
                 "Prefill model detected, registering and activating prefill router"

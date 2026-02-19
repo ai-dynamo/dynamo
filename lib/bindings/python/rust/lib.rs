@@ -245,15 +245,6 @@ fn register_model<'p>(
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    // Validate Prefill model type requirements
-    if model_type.inner == llm_rs::model_type::ModelType::Prefill
-        && !matches!(model_input, ModelInput::Tokens)
-    {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "ModelType::Prefill requires model_input to be ModelInput::Tokens",
-        ));
-    }
-
     let model_input = match model_input {
         ModelInput::Text => llm_rs::model_type::ModelInput::Text,
         ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,

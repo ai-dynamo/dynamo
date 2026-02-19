@@ -128,6 +128,11 @@ class PrefillHandler(HandlerBase):
         """
         logging.debug(f"Prefill Request ID: {context.id()}")
         logging.debug(f"PrefillHandler.generate received request: {request}")
+
+        # Text mode: tokenize and restructure request, then use existing flow
+        if self.use_trtllm_tokenizer:
+            self._normalize_text_request_to_internal(request)
+
         embeddings_tensor = None
         ep_disaggregated_params = None
 
@@ -202,6 +207,11 @@ class DecodeHandler(HandlerBase):
         If disaggregated_params is present, prefill was done. Otherwise generate normally.
         """
         logging.debug(f"Decode Request ID: {context.id()}")
+
+        if self.use_trtllm_tokenizer:
+            async for chunk in self._generate_text_mode(request, context):
+                yield chunk
+            return
 
         disaggregated_params = request.get("disaggregated_params")
         if disaggregated_params:

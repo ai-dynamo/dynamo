@@ -37,6 +37,11 @@ class AggregatedHandler(HandlerBase):
         """Generate response, optionally using remote encoder for multimodal."""
         logging.debug(f"AggregatedHandler Request ID: {context.id()}")
 
+        if self.use_trtllm_tokenizer:
+            async for chunk in self._generate_text_mode(request, context):
+                yield chunk
+            return
+
         embeddings = None
         ep_disaggregated_params = None
         if self.multimodal_processor and self.encode_client:

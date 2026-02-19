@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional, Union
@@ -30,6 +31,7 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Context
+from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
@@ -72,6 +74,8 @@ class RequestHandlerConfig:
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
+    use_trtllm_tokenizer: bool = False
+    tokenizer: Optional[Any] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -101,6 +105,8 @@ class HandlerBase(BaseGenerativeHandler):
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
+        self.use_trtllm_tokenizer = config.use_trtllm_tokenizer
+        self.input_param_manager = InputParamManager(config.tokenizer)
 
     def check_error(self, result: dict):
         """
@@ -552,6 +558,300 @@ class HandlerBase(BaseGenerativeHandler):
             and "temperature" not in request["sampling_options"]
         ):
             request["sampling_options"]["temperature"] = request.pop("temperature")
+
+    def _normalize_text_request_to_internal(self, request: dict) -> None:
+        """
+        Convert an OpenAI-format text request to the internal format expected by
+        generate_locally(). This tokenizes the input and restructures the request
+        fields so that the existing prefill flow can be reused unchanged.
+
+        Args:
+            request: Request dictionary to normalize (modified in place)
+        """
+        input_data = self.input_param_manager.get_input_param(
+            request, use_tokenizer=True
+        )
+
+        # If apply_chat_template returned a string, encode it to token_ids
+        if isinstance(input_data, str):
+            token_ids = self.input_param_manager.tokenizer.encode(input_data)
+        else:
+            token_ids = input_data
+
+        request["token_ids"] = token_ids
+
+        # Move flat OpenAI params into internal nested structure
+        if "stop_conditions" not in request:
+            request["stop_conditions"] = {}
+        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
+            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
+        if "stop" in request and "stop" not in request["stop_conditions"]:
+            request["stop_conditions"]["stop"] = request.pop("stop")
+        if (
+            "ignore_eos" in request
+            and "ignore_eos" not in request["stop_conditions"]
+        ):
+            request["stop_conditions"]["ignore_eos"] = request.pop("ignore_eos")
+        if (
+            "min_tokens" in request
+            and "min_tokens" not in request["stop_conditions"]
+        ):
+            request["stop_conditions"]["min_tokens"] = request.pop("min_tokens")
+
+        if "sampling_options" not in request:
+            request["sampling_options"] = {}
+        for key in [
+            "temperature",
+            "top_p",
+            "top_k",
+            "presence_penalty",
+            "frequency_penalty",
+            "repetition_penalty",
+            "seed",
+        ]:
+            if key in request and key not in request["sampling_options"]:
+                request["sampling_options"][key] = request.pop(key)
+
+    def _build_text_mode_sampling_params(self, request: dict) -> SamplingParams:
+        """
+        Build TRT-LLM SamplingParams from OpenAI-style flat request fields
+        with detokenize=True for text-mode output.
+
+        Args:
+            request: OpenAI-format request dictionary
+
+        Returns:
+            SamplingParams configured for text-mode generation
+        """
+        params = SamplingParams(detokenize=True)
+
+        # Enable perf metrics so prompt_tokens_details can be returned
+        if hasattr(params, "return_perf_metrics"):
+            params.return_perf_metrics = True
+
+        # Map flat OpenAI fields to SamplingParams
+        if "temperature" in request:
+            params.temperature = request["temperature"]
+        if "top_p" in request:
+            params.top_p = request["top_p"]
+        if "max_tokens" in request:
+            params.max_tokens = request["max_tokens"]
+        if "presence_penalty" in request:
+            params.presence_penalty = request["presence_penalty"]
+        if "frequency_penalty" in request:
+            params.frequency_penalty = request["frequency_penalty"]
+        if "repetition_penalty" in request:
+            params.repetition_penalty = request["repetition_penalty"]
+        if "seed" in request:
+            params.seed = request["seed"]
+        if "stop" in request and request["stop"]:
+            params.stop = request["stop"]
+        if "ignore_eos" in request:
+            params.ignore_eos = request["ignore_eos"]
+        if "min_tokens" in request:
+            params.min_tokens = request["min_tokens"]
+
+        return params
+
+    async def _generate_text_mode(self, request: dict, context: Context):
+        """
+        Main text-mode generation for decode/aggregated handlers.
+
+        Uses InputParamManager to get text/tokens from the raw request, builds
+        SamplingParams with detokenize=True, and yields OpenAI-compatible
+        streaming chunks.
+
+        For decode mode, extracts disaggregated_params from prefill_result.
+
+        Args:
+            request: OpenAI-format request dictionary
+            context: Dynamo context for cancellation handling
+
+        Yields:
+            OpenAI-compatible streaming chat completion chunks
+        """
+        request_id = request.get("id") or request.get("request_id", "unknown-id")
+        logging.debug(f"Text-mode generation for request {request_id}")
+
+        disaggregated_params = None
+        prompt_input = None
+
+        # Handle decode mode: extract disaggregated_params from prefill_result
+        prefill_result = request.get("prefill_result")
+        if prefill_result and "disaggregated_params" in prefill_result:
+            (
+                disaggregated_params,
+                epd_metadata,
+            ) = self._decode_disaggregated_params_from_prefill(prefill_result)
+
+            # Use prefill metadata for prompt/token_ids (skip re-tokenization)
+            prefill_prompt = epd_metadata.get("_prefill_prompt")
+            prefill_token_ids = epd_metadata.get("_prefill_prompt_token_ids")
+            if prefill_prompt:
+                prompt_input = prefill_prompt
+            elif prefill_token_ids:
+                prompt_input = prefill_token_ids
+
+        # If no prefill metadata, get input from the raw request
+        if prompt_input is None:
+            input_data = self.input_param_manager.get_input_param(
+                request, use_tokenizer=True
+            )
+            # If apply_chat_template returned a string, use it directly (TRT-LLM accepts text)
+            prompt_input = input_data
+
+        # Build sampling params from OpenAI-style flat request fields
+        sampling_params = self._build_text_mode_sampling_params(request)
+
+        # Build trace headers for distributed tracing
+        trace_headers = build_trace_headers(context)
+
+        # Extract dp_rank from request's routing hints for attention DP routing
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank") if routing else None
+        scheduling_params = None
+        if dp_rank is not None:
+            scheduling_params = SchedulingParams(
+                attention_dp_rank=dp_rank,
+                attention_dp_relax=False,
+            )
+
+        previous_text = ""
+
+        try:
+            generation_result = self.engine.llm.generate_async(
+                inputs=prompt_input,
+                sampling_params=sampling_params,
+                disaggregated_params=disaggregated_params,
+                streaming=True,
+                trace_headers=trace_headers,
+                scheduling_params=scheduling_params,
+            )
+
+            async with self._cancellation_monitor(generation_result, context):
+                async for res in generation_result:
+                    if self.first_generation and self.publisher:
+                        self.publisher.start()
+                        self.first_generation = False
+
+                    if not res.outputs and not res.finished:
+                        yield {
+                            "id": request_id,
+                            "created": int(time.time()),
+                            "object": "chat.completion.chunk",
+                            "model": "unknown",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": ""},
+                                    "finish_reason": "error",
+                                }
+                            ],
+                        }
+                        break
+
+                    output = res.outputs[0]
+                    delta_text = output.text[len(previous_text) :]
+                    previous_text = output.text
+
+                    finish_reason = None
+                    if output.finish_reason:
+                        finish_reason = output.finish_reason
+
+                    chunk = {
+                        "id": request_id,
+                        "created": int(time.time()),
+                        "object": "chat.completion.chunk",
+                        "model": "unknown",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "role": "assistant",
+                                    "content": delta_text,
+                                },
+                                "finish_reason": finish_reason,
+                            }
+                        ],
+                    }
+
+                    if output.finish_reason:
+                        num_output_tokens = len(output.token_ids)
+                        num_input_tokens = (
+                            len(res.prompt_token_ids)
+                            if res.prompt_token_ids
+                            else 0
+                        )
+                        chunk["usage"] = {
+                            "prompt_tokens": num_input_tokens,
+                            "completion_tokens": num_output_tokens,
+                            "total_tokens": num_input_tokens + num_output_tokens,
+                        }
+
+                    # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    if (
+                        res.finished
+                        and self.metrics_collector
+                        and hasattr(res, "metrics_dict")
+                    ):
+                        try:
+                            self.metrics_collector.log_metrics_dict(
+                                res.metrics_dict
+                            )
+                        except Exception as e:
+                            logging.warning(
+                                f"Failed to log TensorRT-LLM metrics: {e}"
+                            )
+
+                    yield chunk
+
+        except asyncio.CancelledError:
+            logging.debug(f"Request {request_id}: Client cancelled")
+            return
+
+        except RequestError as e:
+            error_msg = str(e)
+            logging.warning(f"Request {request_id} error: {error_msg}")
+            yield {
+                "id": request_id,
+                "created": int(time.time()),
+                "object": "chat.completion.chunk",
+                "model": "unknown",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": "error",
+                    }
+                ],
+            }
+
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+            logging.error(
+                f"Fatal {error_type} in request {request_id}: {error_msg}",
+                exc_info=True,
+            )
+
+            try:
+                yield {
+                    "id": request_id,
+                    "created": int(time.time()),
+                    "object": "chat.completion.chunk",
+                    "model": "unknown",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": ""},
+                            "finish_reason": "error",
+                        }
+                    ],
+                }
+            except Exception:
+                pass
+
+            await self._initiate_shutdown(e)
 
     async def _initiate_shutdown(self, error: Exception):
         """Initiate graceful shutdown after fatal error"""

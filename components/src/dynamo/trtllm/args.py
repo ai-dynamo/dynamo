@@ -36,6 +36,12 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
         # Derive use_kv_events from publish_events_and_metrics
         self.use_kv_events = self.publish_events_and_metrics
 
+        if self.use_trtllm_tokenizer and self.modality == Modality.MULTIMODAL:
+            raise ValueError(
+                "--use-trtllm-tokenizer is not supported with multimodal modality. "
+                "Multimodal has its own processing pipeline."
+            )
+
         # fix the connector as trtllm accepts only one connector and it should be in VALID_TRTLLM_CONNECTORS
         # while the runtime args accepts a list of connectors
         if self.connector:

@@ -270,7 +270,7 @@ async def init_llm_worker(
     # Enable perf metrics so prompt_tokens_details can be returned
     if hasattr(default_sampling_params, "return_perf_metrics"):
         default_sampling_params.return_perf_metrics = True
-    model_input = ModelInput.Tokens
+    model_input = ModelInput.Text if config.use_trtllm_tokenizer else ModelInput.Tokens
 
     # Set model type based on disaggregation mode for unified frontend support
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -305,6 +305,11 @@ async def init_llm_worker(
             tokenizer=tokenizer,
             allowed_local_media_path=config.allowed_local_media_path,
         )
+
+    elif config.use_trtllm_tokenizer:
+        # Text mode: engine needs tokenizer for detokenization, keep detokenize=True (default)
+        engine_args["skip_tokenizer_init"] = False
+        default_sampling_params.detokenize = True
 
     else:
         # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
@@ -428,6 +433,8 @@ async def init_llm_worker(
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+            use_trtllm_tokenizer=config.use_trtllm_tokenizer,
+            tokenizer=tokenizer,
         )
 
         # Register the model with runtime config
@@ -446,7 +453,10 @@ async def init_llm_worker(
             )
 
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+        health_check_payload = TrtllmHealthCheckPayload(
+            tokenizer=tokenizer,
+            use_text_input=config.use_trtllm_tokenizer,
+        ).to_dict()
 
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to

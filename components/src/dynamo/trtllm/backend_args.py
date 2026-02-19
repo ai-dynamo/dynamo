@@ -152,6 +152,13 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="If set, publish events and metrics to Dynamo components.",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--use-trtllm-tokenizer",
+            env_var="DYN_TRTLLM_USE_TOKENIZER",
+            default=False,
+            help="Use TRT-LLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
+        )
         add_argument(
             g,
             flag_name="--disaggregation-mode",
@@ -370,6 +377,7 @@ class DynamoTrtllmConfig(ConfigBase):
     extra_engine_args: str
     override_engine_args: str
     publish_events_and_metrics: bool
+    use_trtllm_tokenizer: bool
 
     disaggregation_mode: DisaggregationMode
     modality: Modality

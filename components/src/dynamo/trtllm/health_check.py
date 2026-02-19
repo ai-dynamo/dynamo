@@ -55,37 +55,47 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
     Provides TRT-LLM defaults and inherits environment override support from base class.
     """
 
-    def __init__(self, tokenizer=None):
+    def __init__(self, tokenizer=None, use_text_input: bool = False):
         """
         Initialize TRT-LLM health check payload with TRT-LLM-specific defaults.
 
         Args:
             tokenizer: Optional TRT-LLM tokenizer to extract BOS token from.
                        If provided, will attempt to use the model's actual BOS token.
+            use_text_input: If True, use a text-based payload instead of token-based.
+                           Used when --use-trtllm-tokenizer is enabled.
         """
-        bos_token_id = _get_bos_token_id_from_tokenizer(tokenizer)
-
-        # Set TensorRT-LLM default payload - minimal request that completes quickly
-        # The handler expects token_ids, stop_conditions, and sampling_options
-        self.default_payload = {
-            "token_ids": [bos_token_id],
-            "stop_conditions": {
-                "max_tokens": 1,  # Generate only 1 token
-                "stop": None,
-                "stop_token_ids": None,
-                "include_stop_str_in_output": False,
-                "ignore_eos": False,
-                "min_tokens": 0,
-            },
-            "sampling_options": {
+        if use_text_input:
+            # Text mode: send a minimal text request
+            self.default_payload = {
+                "prompt": "Test",
                 "temperature": 0.0,
-                "top_p": 1.0,
-                "top_k": 1,
-                "beam_width": 1,
-                "repetition_penalty": 1.0,
-                "presence_penalty": 0.0,
-                "frequency_penalty": 0.0,
-                "seed": None,
-            },
-        }
+                "max_tokens": 1,
+            }
+        else:
+            bos_token_id = _get_bos_token_id_from_tokenizer(tokenizer)
+
+            # Set TensorRT-LLM default payload - minimal request that completes quickly
+            # The handler expects token_ids, stop_conditions, and sampling_options
+            self.default_payload = {
+                "token_ids": [bos_token_id],
+                "stop_conditions": {
+                    "max_tokens": 1,  # Generate only 1 token
+                    "stop": None,
+                    "stop_token_ids": None,
+                    "include_stop_str_in_output": False,
+                    "ignore_eos": False,
+                    "min_tokens": 0,
+                },
+                "sampling_options": {
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "top_k": 1,
+                    "beam_width": 1,
+                    "repetition_penalty": 1.0,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "seed": None,
+                },
+            }
         super().__init__()
