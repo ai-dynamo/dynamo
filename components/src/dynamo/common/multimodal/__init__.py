@@ -14,7 +14,8 @@ from dynamo.common.multimodal.embedding_transfer import (
 from dynamo.common.multimodal.image_loader import ImageLoader
 
 __all__ = [
-    "AsyncEncoderCache", "ImageLoader",
+    "AsyncEncoderCache",
+    "ImageLoader",
     "NixlPersistentEmbeddingReceiver",
     "NixlPersistentEmbeddingSender",
     "TransferRequest",
