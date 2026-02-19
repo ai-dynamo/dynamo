@@ -4,11 +4,11 @@ set -euo pipefail
 cargo bench -p dynamo-kv-router --bench mooncake_bench --features bench -- \
     /home/ubuntu/dynamo/mooncake_trace.jsonl \
     --sweep \
-    --sweep-max-ms 10000 \
+    --sweep-max-ms 100000 \
     --sweep-min-ms 1000 \
-    --sweep-steps 5 \
+    --sweep-steps 10 \
     --trace-duplication-factor 4 \
     --num-gpu-blocks 16384 \
     --trace-length-factor 16 \
     --num-event-workers 24 \
-    --compare nested-map,concurrent-radix-tree
+    --compare naive-nested-map,inverted-index,radix-tree,concurrent-radix-tree,nested-map
