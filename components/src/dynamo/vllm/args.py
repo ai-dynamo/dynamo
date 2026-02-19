@@ -21,6 +21,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 
 from . import envs
@@ -33,11 +34,10 @@ VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     component: str
-    endpoint: str
     is_prefill_worker: bool
     is_decode_worker: bool
     custom_jinja_template: Optional[str] = None
-    store_kv: str
+    discovery_backend: str
     request_plane: str
     event_plane: str
     enable_local_indexer: bool = True
@@ -85,6 +85,7 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser(
         description="Dynamo vLLM worker configuration",
         formatter_class=argparse.RawTextHelpFormatter,
+        allow_abbrev=False,
     )
 
     # Build argument parser
@@ -152,15 +153,14 @@ def update_dynamo_config_with_engine(
     else:
         dynamo_config.served_model_name = None
 
+    # Capture user-provided --endpoint before defaults overwrite it
+    user_endpoint = dynamo_config.endpoint
+
     # TODO: move to "disaggregation_mode" as the other engines.
-    if dynamo_config.multimodal_processor or dynamo_config.ec_processor:
+    if dynamo_config.route_to_encoder:
         dynamo_config.component = "processor"
         dynamo_config.endpoint = "generate"
-    elif (
-        dynamo_config.vllm_native_encoder_worker
-        or dynamo_config.multimodal_encode_worker
-        or dynamo_config.multimodal_encode_prefill_worker
-    ):
+    elif dynamo_config.multimodal_encode_worker:
         dynamo_config.component = "encoder"
         dynamo_config.endpoint = "generate"
     elif dynamo_config.multimodal_decode_worker:
@@ -178,6 +178,13 @@ def update_dynamo_config_with_engine(
     else:
         dynamo_config.component = "backend"
         dynamo_config.endpoint = "generate"
+
+    # If user provided --endpoint, override namespace/component/endpoint
+    if user_endpoint is not None:
+        parsed_ns, parsed_comp, parsed_ep = parse_endpoint(user_endpoint)
+        dynamo_config.namespace = parsed_ns
+        dynamo_config.component = parsed_comp
+        dynamo_config.endpoint = parsed_ep
 
     if dynamo_config.custom_jinja_template is not None:
         expanded_template_path = os.path.expanduser(
@@ -214,6 +221,14 @@ def update_dynamo_config_with_engine(
                 "Cannot specify both --kv-transfer-config and --connector flags"
             )
         dynamo_config.connector = normalized  # type: ignore[assignment]
+
+    # Validate ModelExpress P2P server URL
+    if getattr(engine_config, "load_format", None) in ("mx-source", "mx-target"):
+        if not dynamo_config.model_express_url:
+            raise ValueError(
+                f"--model-express-url or MODEL_EXPRESS_URL env var is required "
+                f"when using --load-format={engine_config.load_format}"
+            )
 
 
 def update_engine_config_with_dynamo(

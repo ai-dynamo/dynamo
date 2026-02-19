@@ -17,9 +17,7 @@ spec:
     # NOTE: any image built before January 10 and any release prior to 0.8.1
     # will need to use snake_case within profilingConfig.config
     config:
-      sweep:
-        useAiConfigurator: true
-        aicSystem: h200_sxm
+      searchStrategy: rapid
       sla:
         isl: 3000
         osl: 150

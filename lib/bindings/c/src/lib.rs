@@ -420,6 +420,7 @@ impl RouterHandles {
     async fn query_prefill_worker(
         &self,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<dynamo_llm::kv_router::protocols::BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
@@ -428,6 +429,7 @@ impl RouterHandles {
         self.prefill_router
             .query_prefill_worker(
                 tokens,
+                block_mm_infos,
                 update_states,
                 lora_name,
                 priority_jump,

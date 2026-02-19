@@ -23,7 +23,7 @@ use dynamo_runtime::{
 use crate::{
     discovery::ModelManager,
     kv_router::protocols::WorkerId,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
+    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, protocols::BlockExtraInfo},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
     protocols::common::timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},
@@ -287,8 +287,16 @@ impl PrefillRouter {
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
+            let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
             match self
-                .query_prefill_worker(&req.token_ids, false, lora_name, priority_jump, None)
+                .query_prefill_worker(
+                    &req.token_ids,
+                    block_mm_infos,
+                    false,
+                    lora_name,
+                    priority_jump,
+                    None,
+                )
                 .await
             {
                 Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
@@ -477,6 +485,7 @@ impl PrefillRouter {
     pub async fn query_prefill_worker(
         &self,
         token_ids: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
@@ -494,6 +503,7 @@ impl PrefillRouter {
                     .find_best_match(
                         None,
                         token_ids,
+                        block_mm_infos,
                         None,
                         update_states,
                         lora_name,

@@ -41,13 +41,16 @@ const (
 // It is a thin wrapper around DynamoGraphDeploymentRequestValidator.
 type DynamoGraphDeploymentRequestHandler struct {
 	isClusterWideOperator bool
+	gpuDiscoveryEnabled   bool
 }
 
 // NewDynamoGraphDeploymentRequestHandler creates a new handler for DynamoGraphDeploymentRequest Webhook.
-// The isClusterWide parameter indicates whether the operator is running in cluster-wide or namespace-restricted mode.
-func NewDynamoGraphDeploymentRequestHandler(isClusterWide bool) *DynamoGraphDeploymentRequestHandler {
+// isClusterWide indicates whether the operator has cluster-wide permissions.
+// gpuDiscoveryEnabled indicates whether a ClusterRole for node read access was provisioned by Helm.
+func NewDynamoGraphDeploymentRequestHandler(isClusterWide bool, gpuDiscoveryEnabled bool) *DynamoGraphDeploymentRequestHandler {
 	return &DynamoGraphDeploymentRequestHandler{
 		isClusterWideOperator: isClusterWide,
+		gpuDiscoveryEnabled:   gpuDiscoveryEnabled,
 	}
 }
 
@@ -63,7 +66,7 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateCreate(ctx context.Context
 	logger.Info("validate create", "name", request.Name, "namespace", request.Namespace)
 
 	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentRequestValidator(request, h.isClusterWideOperator)
+	validator := NewDynamoGraphDeploymentRequestValidator(request, h.isClusterWideOperator, h.gpuDiscoveryEnabled)
 	return validator.Validate()
 }
 
@@ -90,7 +93,7 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context
 	}
 
 	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentRequestValidator(newRequest, h.isClusterWideOperator)
+	validator := NewDynamoGraphDeploymentRequestValidator(newRequest, h.isClusterWideOperator, h.gpuDiscoveryEnabled)
 
 	// Validate stateless rules
 	warnings, err := validator.Validate()

@@ -29,8 +29,19 @@ products:
       - display-name: dev
         path: ./versions/dev.yml
 
+redirects:
+  - source: "/dynamo/index.html"
+    destination: "/dynamo/"
+  - source: "/dynamo/latest/index.html"
+    destination: "/dynamo/"
+
 # GitHub repository link in navbar
 navbar-links:
+  - type: dropdown
+    text: Blog
+    links:
+      - text: All Posts
+        href: /dynamo/blog
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 

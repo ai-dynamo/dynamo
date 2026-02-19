@@ -62,7 +62,7 @@ class KVRouterProcess(ManagedProcess):
             "kv",
             "--http-port",
             str(frontend_port),
-            "--store-kv",
+            "--discovery-backend",
             store_backend,
             "--namespace",
             namespace,
@@ -83,7 +83,7 @@ class KVRouterProcess(ManagedProcess):
             )
 
         if durable_kv_events:
-            command.append("--durable-kv-events")
+            command.append("--router-durable-kv-events")
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane

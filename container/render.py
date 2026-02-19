@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 import yaml
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 
 def parse_args():
@@ -18,7 +18,8 @@ def parse_args():
         "--framework",
         type=str,
         default="vllm",
-        help="Dockerfile framework to use [dynamo, vllm, sglang, trtllm]",
+        choices=["dynamo", "vllm", "sglang", "trtllm"],
+        help="Dockerfile framework to use",
     )
     parser.add_argument(
         "--target",
@@ -30,13 +31,14 @@ def parse_args():
         "--platform",
         type=str,
         default="amd64",
-        help="Dockerfile platform to use. [amdg64, arm64]",
+        help="Dockerfile platform to use. [amd64, arm64]",
     )
     parser.add_argument(
         "--cuda-version",
         type=str,
         default="12.9",
-        help="CUDA version to use. [12.9, 13.0]",
+        choices=["12.9", "13.0", "13.1"],
+        help="CUDA version to use. [12.9 or 13.0 for vllm and sglang, 13.1 for trtllm]",
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
@@ -55,28 +57,72 @@ def parse_args():
 
 def validate_args(args):
     valid_inputs = {
-        "vllm": {"runtime", "dev", "local-dev", "framework", "wheel_builder", "base"},
-        "trtllm": {"runtime", "dev", "local-dev", "framework", "wheel_builder", "base"},
-        "sglang": {"runtime", "dev", "local-dev", "wheel_builder", "base"},
-        "dynamo": {"runtime", "dev", "local-dev", "frontend", "wheel_builder", "base"},
+        "vllm": {
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "framework",
+                "wheel_builder",
+                "base",
+            ],
+            "cuda_version": ["12.9", "13.0"],
+        },
+        "trtllm": {
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "framework",
+                "wheel_builder",
+                "base",
+            ],
+            "cuda_version": ["13.1"],
+        },
+        "sglang": {
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "wheel_builder",
+                "base",
+            ],
+            "cuda_version": ["12.9", "13.0"],
+        },
+        "dynamo": {
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "frontend",
+                "wheel_builder",
+                "base",
+            ],
+            "cuda_version": ["12.9", "13.0"],
+        },
     }
 
     if args.framework in valid_inputs:
-        if args.target in valid_inputs[args.framework]:
+        if (
+            args.target in valid_inputs[args.framework]["target"]
+            and args.cuda_version in valid_inputs[args.framework]["cuda_version"]
+        ):
             return
         raise ValueError(
-            f"Invalid input combination: [framework={args.framework},target={args.target}]"
+            f"Invalid input combination: [framework={args.framework},target={args.target},cuda_version={args.cuda_version}]"
         )
 
     raise ValueError(
-        f"Invalid input combination: [framework={args.framework},target={args.target}]"
+        f"Invalid input combination: [framework={args.framework},target={args.target},cuda_version={args.cuda_version}]"
     )
-    return
 
 
 def render(args, context, script_dir):
     env = Environment(
-        loader=FileSystemLoader(script_dir), trim_blocks=False, lstrip_blocks=True
+        loader=FileSystemLoader(script_dir),
+        trim_blocks=False,
+        lstrip_blocks=True,
+        undefined=StrictUndefined,  # Raise an error if a variable in the template is not provided in the context
     )
     template = env.get_template("Dockerfile.template")
     rendered = template.render(
