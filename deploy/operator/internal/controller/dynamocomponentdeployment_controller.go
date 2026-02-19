@@ -1173,23 +1173,6 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	return svc, false, nil
 }
 
-type TLSModeOpt string
-
-const (
-	TLSModeNone   TLSModeOpt = "none"
-	TLSModeAuto   TLSModeOpt = "auto"
-	TLSModeStatic TLSModeOpt = "static"
-)
-
-type IngressConfig struct {
-	ClassName           *string
-	Annotations         map[string]string
-	Path                string
-	PathType            networkingv1.PathType
-	TLSMode             TLSModeOpt
-	StaticTLSSecretName string
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	m := ctrl.NewControllerManagedBy(mgr).
