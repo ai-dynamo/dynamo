@@ -173,7 +173,9 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 	dst.ObjectMeta = src.ObjectMeta
 
 	// Spec
-	convertDGDRSpecTo(&src.Spec, &dst.Spec, dst)
+	if err := convertDGDRSpecTo(&src.Spec, &dst.Spec, dst); err != nil {
+		return err
+	}
 
 	// Status
 	convertDGDRStatusTo(&src.Status, &dst.Status, dst)
@@ -217,7 +219,7 @@ func setAnnotation(obj *v1beta1.DynamoGraphDeploymentRequest, key, value string)
 }
 
 // convertDGDRSpecTo converts the v1alpha1 Spec into the v1beta1 Spec.
-func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, dstObj *v1beta1.DynamoGraphDeploymentRequest) {
+func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, dstObj *v1beta1.DynamoGraphDeploymentRequest) error {
 	// --- Simple fields ---
 	dst.Model = src.Model
 	dst.AutoApply = src.AutoApply
@@ -248,59 +250,61 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 	// --- Parse the JSON blob to extract structured fields ---
 	if src.ProfilingConfig.Config != nil && src.ProfilingConfig.Config.Raw != nil {
 		var blob map[string]interface{}
-		if err := json.Unmarshal(src.ProfilingConfig.Config.Raw, &blob); err == nil {
-			// SLA fields from blob.sla
-			if slaRaw, ok := blob["sla"]; ok {
-				if slaMap, ok := slaRaw.(map[string]interface{}); ok {
-					if dst.SLA == nil {
-						dst.SLA = &v1beta1.SLASpec{}
-					}
-					if v, ok := slaMap["ttft"].(float64); ok {
-						dst.SLA.TTFT = &v
-					}
-					if v, ok := slaMap["itl"].(float64); ok {
-						dst.SLA.ITL = &v
-					}
+		if err := json.Unmarshal(src.ProfilingConfig.Config.Raw, &blob); err != nil {
+			return fmt.Errorf("failed to parse ProfilingConfig.Config: %w", err)
+		}
+
+		// SLA fields from blob.sla
+		if slaRaw, ok := blob["sla"]; ok {
+			if slaMap, ok := slaRaw.(map[string]interface{}); ok {
+				if dst.SLA == nil {
+					dst.SLA = &v1beta1.SLASpec{}
+				}
+				if v, ok := slaMap["ttft"].(float64); ok {
+					dst.SLA.TTFT = &v
+				}
+				if v, ok := slaMap["itl"].(float64); ok {
+					dst.SLA.ITL = &v
 				}
 			}
+		}
 
-			// Workload fields from blob.sla (ISL, OSL are under sla in the blob)
-			if slaRaw, ok := blob["sla"]; ok {
-				if slaMap, ok := slaRaw.(map[string]interface{}); ok {
-					if v, ok := slaMap["isl"].(float64); ok {
-						if dst.Workload == nil {
-							dst.Workload = &v1beta1.WorkloadSpec{}
-						}
-						isl := int32(v)
-						dst.Workload.ISL = &isl
+		// Workload fields from blob.sla (ISL, OSL are under sla in the blob)
+		if slaRaw, ok := blob["sla"]; ok {
+			if slaMap, ok := slaRaw.(map[string]interface{}); ok {
+				if v, ok := slaMap["isl"].(float64); ok {
+					if dst.Workload == nil {
+						dst.Workload = &v1beta1.WorkloadSpec{}
 					}
-					if v, ok := slaMap["osl"].(float64); ok {
-						if dst.Workload == nil {
-							dst.Workload = &v1beta1.WorkloadSpec{}
-						}
-						osl := int32(v)
-						dst.Workload.OSL = &osl
+					isl := int32(v)
+					dst.Workload.ISL = &isl
+				}
+				if v, ok := slaMap["osl"].(float64); ok {
+					if dst.Workload == nil {
+						dst.Workload = &v1beta1.WorkloadSpec{}
 					}
+					osl := int32(v)
+					dst.Workload.OSL = &osl
 				}
 			}
+		}
 
-			// ModelCache from blob.deployment.modelCache
-			if deployRaw, ok := blob["deployment"]; ok {
-				if deployMap, ok := deployRaw.(map[string]interface{}); ok {
-					if mcRaw, ok := deployMap["modelCache"]; ok {
-						if mcMap, ok := mcRaw.(map[string]interface{}); ok {
-							mc := &v1beta1.ModelCacheSpec{}
-							if v, ok := mcMap["pvcName"].(string); ok {
-								mc.PVCName = v
-							}
-							if v, ok := mcMap["modelPathInPvc"].(string); ok {
-								mc.PVCModelPath = v
-							}
-							if v, ok := mcMap["pvcMountPath"].(string); ok {
-								mc.PVCMountPath = v
-							}
-							dst.ModelCache = mc
+		// ModelCache from blob.deployment.modelCache
+		if deployRaw, ok := blob["deployment"]; ok {
+			if deployMap, ok := deployRaw.(map[string]interface{}); ok {
+				if mcRaw, ok := deployMap["modelCache"]; ok {
+					if mcMap, ok := mcRaw.(map[string]interface{}); ok {
+						mc := &v1beta1.ModelCacheSpec{}
+						if v, ok := mcMap["pvcName"].(string); ok {
+							mc.PVCName = v
 						}
+						if v, ok := mcMap["modelPathInPvc"].(string); ok {
+							mc.PVCModelPath = v
+						}
+						if v, ok := mcMap["pvcMountPath"].(string); ok {
+							mc.PVCMountPath = v
+						}
+						dst.ModelCache = mc
 					}
 				}
 			}
@@ -375,6 +379,8 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 			}
 		}
 	}
+
+	return nil
 }
 
 // convertDGDRSpecFrom converts the v1beta1 Spec back into the v1alpha1 Spec.
@@ -535,7 +541,7 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 // convertDGDRStatusTo converts the v1alpha1 Status into the v1beta1 Status.
 func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, dstObj *v1beta1.DynamoGraphDeploymentRequest) {
 	// State → Phase
-	dst.Phase = dgdrStateToPhase(src.State, src.Deployment)
+	dst.Phase = dgdrStateToPhase(string(src.State), src.Deployment)
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.Conditions = src.Conditions
 
@@ -575,7 +581,7 @@ func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.D
 // convertDGDRStatusFrom converts the v1beta1 Status back into the v1alpha1 Status.
 func convertDGDRStatusFrom(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus, srcObj *v1beta1.DynamoGraphDeploymentRequest) {
 	// Phase → State
-	dst.State = dgdrPhaseToState(src.Phase)
+	dst.State = DGDRState(dgdrPhaseToState(src.Phase))
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.Conditions = src.Conditions
 
