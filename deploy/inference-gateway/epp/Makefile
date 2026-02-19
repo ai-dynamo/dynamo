@@ -108,7 +108,7 @@ image-kind: image-load ## Build and load the image into kind cluster
 ##@ Multi-Architecture Builds
 
 .PHONY: image-multiarch
-image-multiarch: ## Build multi-arch image (requires --push or OCI export; --load not supported)
+image-multiarch: ## Build multi-arch image (requires --push ; --load not supported)
 	$(IMAGE_BUILD_CMD) -t $(IMAGE_TAG) \
 		--platform=$(MULTIARCH_PLATFORMS) \
 		--build-context dynamo=$(DYNAMO_DIR) \
@@ -124,18 +124,6 @@ image-multiarch: ## Build multi-arch image (requires --push or OCI export; --loa
 image-multiarch-push: PUSH=--push ## Build and push multi-arch image to registry
 image-multiarch-push: image-multiarch
 
-.PHONY: image-multiarch-oci
-image-multiarch-oci: ## Build multi-arch image and export as OCI tarball
-	$(IMAGE_BUILD_CMD) -t $(IMAGE_TAG) \
-		--platform=$(MULTIARCH_PLATFORMS) \
-		--build-context dynamo=$(DYNAMO_DIR) \
-		--build-arg RUST_IMAGE=$(RUST_IMAGE) \
-		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
-		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
-		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
-		--build-arg BUILD_REF=$(GIT_TAG) \
-		--output type=oci,dest=$(IMAGE_NAME)-$(GIT_TAG).tar \
-		.
 
 ##@ Local Development with Buildx
 
