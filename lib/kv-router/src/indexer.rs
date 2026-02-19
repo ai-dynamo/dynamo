@@ -362,7 +362,7 @@ pub trait KvIndexerInterface {
 pub enum WorkerTask {
     Event(RouterEvent),
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
-    Terminate
+    Terminate,
 }
 
 // ============================================================================
@@ -569,7 +569,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             let (resp_tx, resp_rx) = oneshot::channel::<anyhow::Result<Vec<RouterEvent>>>();
             let dump_req = WorkerTask::DumpEvents(resp_tx);
 
-            channel.send(dump_req).map_err(|_| KvRouterError::IndexerOffline)?;
+            channel
+                .send(dump_req)
+                .map_err(|_| KvRouterError::IndexerOffline)?;
             receivers.push(resp_rx);
         }
 
@@ -578,7 +580,10 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         let mut all_events = Vec::new();
 
         for resp_rx in receivers {
-            let mut events = resp_rx.await.map_err(|_| KvRouterError::IndexerDroppedRequest)?.map_err(|_| KvRouterError::IndexerOffline)?;
+            let mut events = resp_rx
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?
+                .map_err(|_| KvRouterError::IndexerOffline)?;
             for event in &mut events {
                 event.event.event_id = event_id_counter;
                 event_id_counter += 1;
@@ -2272,9 +2277,6 @@ mod tests {
     #[tokio::test]
     #[apply(indexer_template)]
     async fn test_dump_and_restore(variant: &str) {
-        if variant == "flat" {
-            return;
-        }
         let index = make_indexer(variant);
 
         // Store some data
@@ -2371,6 +2373,16 @@ mod tests {
     #[apply(indexer_template)]
     async fn test_shutdown(variant: &str) {
         let index = make_indexer(variant);
+        index.shutdown();
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_shutdown_idempotent(variant: &str) {
+        let index = make_indexer(variant);
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        index.shutdown();
         index.shutdown();
     }
 
