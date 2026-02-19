@@ -8,7 +8,10 @@ import torch
 import uvloop
 from pydantic import BaseModel
 
-from dynamo.common.multimodal.embedding_transfer import LocalEmbeddingSender
+from dynamo.common.multimodal.embedding_transfer import (
+    LocalEmbeddingSender,
+    TransferRequest,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -19,6 +22,10 @@ configure_dynamo_logging()
 class SenderConfig(BaseModel):
     num_requests: int
     tensor_count_per_request: int
+
+
+class TransferRequest(BaseModel):
+    requests: list[TransferRequest]
 
 
 class Sender:
@@ -46,7 +53,7 @@ class Sender:
             )
             request.append(transfer_request)
             futures.append(send_future)
-        stream = await self.client.generate(request)
+        stream = await self.client.round_robin(request.model_dump_json())
         async for response in stream:
             continue
         await asyncio.gather(*futures)

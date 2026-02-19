@@ -34,7 +34,7 @@ async def worker(runtime: DistributedRuntime):
 
     try:
         start_time = time.perf_counter()
-        stream = await client.generate("world,sun,moon,star")
+        stream = await client.round_robin("world,sun,moon,star")
         async for response in stream:
             print(response.data())
         end_time = time.perf_counter()
