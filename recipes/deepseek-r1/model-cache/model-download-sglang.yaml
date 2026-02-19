@@ -29,6 +29,7 @@ spec:
               set -eux
               pip install --no-cache-dir huggingface_hub hf_transfer
               hf download deepseek-ai/DeepSeek-R1
+              chown -R 1000:0 /opt/model-cache
           volumeMounts:
             - name: model-cache
               mountPath: /opt/model-cache
