@@ -230,15 +230,35 @@ See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#
 
 ### Automatic GPU Discovery
 
-The operator automatically discovers GPU resources from your Kubernetes cluster nodes when available. GPU discovery provides:
+The operator automatically discovers GPU resources from cluster nodes, providing hardware info (GPU model, VRAM, GPUs per node) and automatic profiling search space calculation.
 
-- Hardware information (GPU model, VRAM, GPUs per node)
-- Automatic calculation of profiling search space based on model size
-- Hardware system identifier for AI Configurator integration
+**Requirements:**
+- **Cluster-scoped operators**: Have node read permissions by default
+- **Namespace-scoped operators**: GPU discovery is enabled by default when installing via Helm — the chart provisions the required ClusterRole/ClusterRoleBinding automatically
 
-**Permissions**: GPU discovery requires cluster-wide node read permissions. Cluster-scoped operators automatically have these permissions. Namespace-restricted operators can also use GPU discovery if granted node read permissions via RBAC.
+**For namespace-scoped operators**, GPU discovery is controlled by a Helm value:
 
-If GPU discovery is unavailable (no permissions or no GPU labels), the profiler will use manually specified hardware configuration or defaults.
+```bash
+# GPU discovery enabled (default) — Helm provisions read-only node access automatically
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=true
+
+# GPU discovery disabled — you must provide hardware config manually in each DGDR
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=false
+```
+
+If GPU discovery is disabled, provide hardware config manually in the DGDR:
+
+```yaml
+spec:
+  profilingConfig:
+    config:
+      hardware:
+        numGpusPerNode: 8
+        gpuModel: "H100-SXM5-80GB"
+        gpuVramMib: 81920
+```
+
+If GPU discovery is disabled and no manual hardware config is provided, the DGDR will be rejected at admission time.
 
 ## Configuration
 

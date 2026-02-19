@@ -195,6 +195,30 @@ You can also change the restricted namespace by setting the targetNamespace prop
 --set "dynamo-operator.namespaceRestriction.targetNamespace=dynamo-namespace" # optional
 ```
 
+### GPU Discovery for DynamoGraphDeploymentRequests with Namespace-Scoped Operators
+
+GPU discovery is **enabled by default** for namespace-scoped operators. The Helm chart automatically provisions a ClusterRole/ClusterRoleBinding granting the operator read-only access to node GPU labels.
+
+**To disable GPU discovery** (if your installer lacks ClusterRole creation permissions):
+
+```bash
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=false
+```
+
+When GPU discovery is disabled, you must provide hardware configuration manually in each DynamoGraphDeploymentRequest:
+
+```yaml
+spec:
+  profilingConfig:
+    config:
+      hardware:
+        numGpusPerNode: 8
+        gpuModel: "H100-SXM5-80GB"
+        gpuVramMib: 81920
+```
+
+> **Note**: If GPU discovery is disabled and no hardware config is provided, the DGDR will be rejected at admission time with a clear error message.
+
 → [Verify Installation](#verify-installation)
 
 ## Path B: Custom Build from Source
