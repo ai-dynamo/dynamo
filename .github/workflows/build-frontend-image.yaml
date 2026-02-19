@@ -104,7 +104,7 @@ jobs:
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
           echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/{{ env.IMAGE_REGISTRY }}/{{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
-          
+
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -116,7 +116,7 @@ jobs:
 
       - name: Build Frontend Container
         id: build-image
-        timeout-minutes: ${{ inputs.build_timeout_minutes }}
+        timeout-minutes: 30
         uses: ./.github/actions/docker-remote-build
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}
