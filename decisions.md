@@ -18,3 +18,57 @@ Primary engine, shadow engine, and GMS run as containers within a single pod. GP
   - Application-level handler: engine detects GMS connection loss (broken pipe on UDS) and self-terminates.
   - Canary liveness probe on engine containers checking GMS socket availability (less reliable if GMS restarts faster than probe interval).
 - **TODO**: Verify that engines reliably restart on GMS failure in practice.
+
+## Decision 2: Probes and Failure Detection
+
+### Current State
+
+- Workers expose `/live` and `/health` via the Rust runtime's system status server. Both are aliases for the same handler (`health_handler`), which checks `SystemHealth` endpoint status.
+- The operator sets `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS=["generate"]`, so both probes gate on the `generate` endpoint being `Ready`.
+- `generate` transitions to `Ready` only when `serve_endpoint()` registers the handler with the ingress server.
+- The canary health check system exists but is disabled by the operator (`DYN_HEALTH_CHECK_ENABLED=false`).
+
+### Shadow Mode Sequencing Bug (Existing)
+
+The current shadow mode code calls `sleep()` (which calls `unregister_endpoint_instance()`) **before** `serve_endpoint()` (which does the actual discovery registration). The unregister is a no-op since nothing is registered yet, and `serve_endpoint()` then unconditionally registers the instance in etcd. The sleeping shadow ends up discoverable and receiving traffic it cannot serve.
+
+### Shadow Mode: Skip `serve_endpoint` at Init
+
+`serve_endpoint()` performs no engine logic — it is purely infrastructure (ingress handler registration, etcd discovery registration, health status flip). For shadow mode, `serve_endpoint()` is deferred entirely to the wake path. The engine is fully initialized by the time `setup_vllm_engine()` returns.
+
+### Engine State Machine
+
+Four states. No cycling back to Standby after Active (shadow is single-use for the POC).
+
+```
+Init -> Standby -> Waking -> Active -> Dead
+```
+
+- **Init**: Model loading, CUDA graph capture.
+- **Standby**: Init complete, weights offloaded, sleeping. Not discoverable. Waiting for wake signal via `/engine/wake_up` on the system port.
+- **Waking**: Transition period. Repopulating weights, allocating KV cache, calling `serve_endpoint()`.
+- **Active**: Fully operational. Discoverable, serving inference.
+- **Dead**: Process crashed or killed by kubelet.
+
+### Role-Aware Liveness Probe
+
+The liveness probe behavior depends on engine state:
+
+- **Init**: `/live` returns 503. Startup probe covers this phase (2h budget via `FailureThreshold: 720`).
+- **Standby**: `/live` returns 200 unconditionally. Engine is alive, intentionally idle.
+- **Waking**: `/live` returns 200, but the handler checks whether the transition has exceeded a configurable timeout. If exceeded, returns 503 — container is killed. This prevents a hung wake from going undetected.
+- **Active**: `/live` checks `generate` endpoint health in `SystemHealth`. Normal operation.
+
+### Startup Probe for Shadow
+
+The startup probe waits for the engine to leave `Init` (i.e., enter `Standby`). This signals that model loading and CUDA graph capture are complete.
+
+**TODO**: Determine the signaling mechanism — options include setting `SystemHealth` directly or introducing an engine state field the probe handler reads.
+
+### State Transition Ordering
+
+The state is set to `Active` **after** `engine.wake_up()` + `serve_endpoint()` complete, not before. Setting it before risks the container being killed during a slow but healthy wake (the liveness probe would start checking endpoint health prematurely). The waking timeout handles the inverse risk (hung wake going undetected).
+
+### `serve_endpoint` Restructuring
+
+`serve_endpoint()` is a long-lived blocking await (runs the request loop). The `wake_up()` handler is an HTTP handler that must return a response. For shadow mode, `serve_endpoint()` must be spawned as a background task from within `wake_up()`. The handler needs access to all endpoint objects and the health check payload.
