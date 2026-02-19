@@ -82,6 +82,10 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-gpu-discovery-preflight
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.controllerManager.tolerations }}
       tolerations:
         {{- toYaml .Values.controllerManager.tolerations | nindent 8 }}
