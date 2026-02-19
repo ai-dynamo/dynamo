@@ -135,7 +135,7 @@ spec:
           value: kv
         - name: DYN_ROUTER_TEMPERATURE
           value: "0.5"  # Add some randomness to prevent worker saturation
-        - name: DYN_KV_OVERLAP_SCORE_WEIGHT
+        - name: DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT
           value: "1.5"  # Prioritize TTFT over ITL
         - name: DYN_KV_CACHE_BLOCK_SIZE
           value: "16"

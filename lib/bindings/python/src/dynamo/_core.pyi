@@ -922,6 +922,7 @@ class ModelType:
     TensorBased: ModelType
     Prefill: ModelType
     Images: ModelType
+    Audios: ModelType
     Videos: ModelType
     ...
 
