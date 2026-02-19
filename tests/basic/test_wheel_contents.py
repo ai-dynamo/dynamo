@@ -13,11 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Test that the ai-dynamo-runtime wheel does not bundle shared libraries."""
+
 import importlib.metadata
 
 import pytest
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.integration,
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+]
 
 
 def test_no_bundled_shared_libraries():
