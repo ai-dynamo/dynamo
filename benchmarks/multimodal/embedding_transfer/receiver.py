@@ -5,8 +5,12 @@ import asyncio
 import logging
 
 import uvloop
+from pydantic import BaseModel
 
-from dynamo.common.multimodal.embedding_transfer import LocalEmbeddingReceiver
+from dynamo.common.multimodal.embedding_transfer import (
+    LocalEmbeddingReceiver,
+    TransferRequest,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -14,13 +18,19 @@ logger = logging.getLogger(__name__)
 configure_dynamo_logging()
 
 
+class TransferRequest(BaseModel):
+    requests: list[TransferRequest]
+
+
 class Receiver:
     def __init__(self):
         self.receiver = LocalEmbeddingReceiver()
 
     async def generate(self, request):
+        request = TransferRequest.model_validate_json(request)
         tasks = [
-            asyncio.create_task(self.receiver.receive_embeddings(tr)) for tr in request
+            asyncio.create_task(self.receiver.receive_embeddings(tr))
+            for tr in request.requests
         ]
         responses = await asyncio.gather(*tasks)
         for id, _ in responses:
