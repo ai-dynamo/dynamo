@@ -657,8 +657,13 @@ impl DistributedRuntime {
         let endpoint_name = parts[2];
 
         // Get endpoint using existing chain
-        let namespace = self.inner.namespace(namespace_name.to_string()).map_err(to_pyerr)?;
-        let component = namespace.component(component_name.to_string()).map_err(to_pyerr)?;
+        let namespace = self
+            .inner
+            .namespace(namespace_name.to_string())
+            .map_err(to_pyerr)?;
+        let component = namespace
+            .component(component_name.to_string())
+            .map_err(to_pyerr)?;
         let endpoint = component.endpoint(endpoint_name.to_string());
 
         Ok(Endpoint {
