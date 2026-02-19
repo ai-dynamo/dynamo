@@ -72,3 +72,16 @@ The state is set to `Active` **after** `engine.wake_up()` + `serve_endpoint()` c
 ### `serve_endpoint` Restructuring
 
 `serve_endpoint()` is a long-lived blocking await (runs the request loop). The `wake_up()` handler is an HTTP handler that must return a response. For shadow mode, `serve_endpoint()` must be spawned as a background task from within `wake_up()`. The handler needs access to all endpoint objects and the health check payload.
+
+### Alternative Implementation: Implicit State via Existing Health APIs
+
+Instead of an explicit engine state enum, the same probe behavior can be achieved by leveraging the existing three-branch fallback in `SystemHealth.get_health_status()`:
+
+1. Shadow container omits `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` (empty) and starts with `DYN_SYSTEM_STARTING_HEALTH_STATUS=notready`.
+2. After model init + sleep, Python calls `set_health_status(Ready)` -> startup probe passes (branch 3: simple system health check).
+3. While sleeping, no health check targets exist -> branch 3 continues returning 200.
+4. On wake, `serve_endpoint()` registers health check targets -> branch 2 automatically takes over, checking `generate` endpoint status.
+
+**Trade-off vs explicit state machine**: Covers Init, Standby, and Active implicitly through existing APIs. Does not cover the Waking state — a hung wake goes undetected by the probe. Mitigation: add a timeout inside the `wake_up()` handler that self-terminates the process on expiry.
+
+**Requires**: Exposing `set_health_status` to Python (not currently available in bindings).
