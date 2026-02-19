@@ -58,12 +58,6 @@ class DistributedRuntime:
         """
         ...
 
-    def namespace(self, name: str) -> Namespace:
-        """
-        Create a `Namespace` object
-        """
-        ...
-
     def endpoint(self, path: str) -> Endpoint:
         """
         Get an endpoint directly by path.
@@ -136,19 +130,6 @@ class CancellationToken:
         """
         ...
 
-
-class Namespace:
-    """
-    A namespace is a collection of components
-    """
-
-    ...
-
-    def component(self, name: str) -> Component:
-        """
-        Create a `Component` object
-        """
-        ...
 
 class Component:
     """
