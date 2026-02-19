@@ -130,6 +130,28 @@ Each rate value is a multiplier on the base request rate from the original trace
 
 You can optionally add `--num-requests` as a cap to stop early if the schedule would produce more requests than needed.
 
+### Constant Rate Mode
+
+For scenarios that require a deterministic, evenly-spaced request stream (e.g., measuring latency at a precise QPS), use `--constant-rate` with `--step-duration` and `--step-rates`. In this mode, `--step-rates` values are interpreted as **absolute req/s** (not multipliers) and each timestamp gets exactly 1 request.
+
+```bash
+# Steady 1 req/s for 30 seconds -> 30 requests, 1000ms apart
+datagen synthesize \
+  --input-file trace.jsonl \
+  --step-duration 30 \
+  --step-rates 1 \
+  --constant-rate
+
+# Staircase with absolute rates
+datagen synthesize \
+  --input-file trace.jsonl \
+  --step-duration 60 \
+  --step-rates 1,5,10,5,1 \
+  --constant-rate
+```
+
+Request content (paths, ISL, OSL) is still sampled from the original trace's empirical distribution — only the arrival pattern changes. `--constant-rate` is mutually exclusive with `--speedup-ratio`.
+
 ### Implementation details
 
 The generation algorithm, simplified, is as follows
