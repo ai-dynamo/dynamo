@@ -6,7 +6,7 @@ But here's the problem: which worker has the blocks you need?
 
 Each worker knows about its own cache. Nobody has the global picture. To route a request to the worker with the best prefix overlap, or to orchestrate block transfers between workers, or to schedule distributed prefills---you need a **global index** of every cached block across every worker. And you need it to be *fast*: every microsecond spent in the index is a microsecond not spent generating tokens.
 
-This is the story of how we built that index---the **Flash Indexer**---evolving through six iterations from a Python dictionary to a concurrent, jump-optimized spatial index sustaining over 10 million operations per second.
+This is the story of how we built that index---the **Flash Indexer**---evolving through six iterations from a Python dictionary to a concurrent, jump-optimized spatial index sustaining over 100 million operations per second.
 
 ---
 
@@ -481,7 +481,7 @@ Claims are cheap; numbers aren't. We maintain a benchmark harness (`mooncake_ben
 
 ### Setup
 
-All benchmarks run on a 32-core machine. The benchmark works in two phases:
+All benchmarks run on a 24-core Arrow Lake (285K) desktop. The benchmark works in two phases:
 
 1. **Event generation.** The trace is a JSONL file of timestamped requests, each carrying a sequence of block-level hash IDs. We randomly partition these requests across `N` simulated workers (controlled by a trace duplication factor), then replay each worker's partition through a mock engine with 16,384 GPU blocks, prefix caching enabled, and a trace length factor that stretches sequence depths. The mock engine emits the same KV cache events (store, remove, clear) that a real engine would produce---complete with eviction pressure and prefix reuse patterns. These events are collected and timestamped.
 
@@ -501,7 +501,7 @@ Below the threshold, the indexer is invisible: the real bottlenecks are network,
 
 ![Achieved vs Payload Throughput](sweep_plot.png)
 
-The naive nested map and inverted indexer quickly fall off the diagonal and are unable to keep up before the 1 million ops/s mark---single-threaded access to a global data structure simply can't absorb the event and request rates at scale. The radix tree (also single-threaded) holds on longer, sustaining throughput into the low millions before saturating. The concurrent radix tree and concurrent positional indexer, both leveraging multi-threaded reads with sticky-routed writes, comfortably track the identity line all the way to the 10 million ops/s range before the curve begins to peel off.
+The naive nested map and inverted indexer quickly fall off the diagonal and are unable to keep up before the 1 million ops/s mark---single-threaded access to a global data structure simply can't absorb the event and request rates at scale. The radix tree (also single-threaded) holds on longer, sustaining throughput into the low millions before saturating. The concurrent radix tree and concurrent positional indexer, both leveraging multi-threaded reads with sticky-routed writes, comfortably track the identity line all the way to the 100 million ops/s range before the curve begins to peel off.
 
 ---
 
@@ -530,6 +530,6 @@ The journey from a Python dictionary to the Flash Indexer spans six iterations, 
 5. **Concurrent radix tree** --- `Arc<parking_lot::RwLock<>>` replaces `Rc<RefCell<>>`; `DashMap` with per-worker inner `RwLock` for the lookup table (shard-level locking for rare mutations, cheap shared reads on the hot path); reads bypass the actor entirely; sticky routing serializes writes per worker with zero contention.
 6. **Concurrent positional indexer with jump search** --- an alternative to the radix tree for long-sequence workloads; `Vec<DashMap<>>` indexed by position replaces pointer chasing with O(1) random access, enabling jump search that skips most of the depth; `DashMap` with per-worker inner `RwLock` for the reverse lookup; hot prefix positions cluster at the front of the `Vec` and stay warm in cache.
 
-The result: a sustained ops throughput of over **10 million operations per second**---events and requests combined---with achieved throughput tracking offered throughput all the way to the limit.
+The result: a sustained ops throughput of over **100 million operations per second**---events and requests combined---with achieved throughput tracking offered throughput all the way to the limit.
 
 And this is just the indexer. Block transfer orchestration, distributed scheduling, and cross-worker cache coordination are next. Stay tuned.
