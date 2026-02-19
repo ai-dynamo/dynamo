@@ -6,7 +6,7 @@
       "ops_throughput": 616904.9,
       "offered_block_throughput": 2031856.1,
       "block_throughput": 1988566.1,
-      "latency_p99_us": 150.144
+      "latency_p99_us": 150.549
     },
     {
       "duration_ms": 10000,
@@ -14,155 +14,131 @@
       "ops_throughput": 1329020.0,
       "offered_block_throughput": 4377430.5,
       "block_throughput": 4284038.5,
-      "latency_p99_us": 157.972
+      "latency_p99_us": 152.114
     },
     {
       "duration_ms": 4642,
       "offered_ops_throughput": 2925447.5,
-      "ops_throughput": 2862547.8,
+      "ops_throughput": 2861944.5,
       "offered_block_throughput": 9430054.0,
-      "block_throughput": 9227300.0,
-      "latency_p99_us": 170.223
+      "block_throughput": 9225354.0,
+      "latency_p99_us": 171.387
     },
     {
       "duration_ms": 2154,
       "offered_ops_throughput": 6304515.5,
-      "ops_throughput": 6164288.0,
+      "ops_throughput": 6167088.0,
       "offered_block_throughput": 20322334.0,
-      "block_throughput": 19870316.0,
-      "latency_p99_us": 204.999
+      "block_throughput": 19879340.0,
+      "latency_p99_us": 205.988
     },
     {
       "duration_ms": 1000,
       "offered_ops_throughput": 13579927.0,
-      "ops_throughput": 13274611.0,
+      "ops_throughput": 13287600.0,
       "offered_block_throughput": 43774308.0,
-      "block_throughput": 42790136.0,
-      "latency_p99_us": 314.682
+      "block_throughput": 42832004.0,
+      "latency_p99_us": 260.643
     },
     {
       "duration_ms": 464,
       "offered_ops_throughput": 29267084.0,
-      "ops_throughput": 24035270.0,
+      "ops_throughput": 25719558.0,
       "offered_block_throughput": 94341176.0,
-      "block_throughput": 77476650.0,
-      "latency_p99_us": 1395.925
+      "block_throughput": 82905880.0,
+      "latency_p99_us": 816.001
     },
     {
       "duration_ms": 215,
       "offered_ops_throughput": 63162450.0,
-      "ops_throughput": 23950488.0,
+      "ops_throughput": 22939066.0,
       "offered_block_throughput": 203601440.0,
-      "block_throughput": 77203370.0,
-      "latency_p99_us": 2851.18
+      "block_throughput": 73943090.0,
+      "latency_p99_us": 3354.294
     },
     {
       "duration_ms": 100,
       "offered_ops_throughput": 135799260.0,
-      "ops_throughput": 24380478.0,
+      "ops_throughput": 24424330.0,
       "offered_block_throughput": 437743100.0,
-      "block_throughput": 78589420.0,
-      "latency_p99_us": 2947.573
+      "block_throughput": 78730776.0,
+      "latency_p99_us": 3214.444
     }
   ],
   "inverted-index": [
     {
       "duration_ms": 100000,
       "offered_ops_throughput": 944.32,
-      "ops_throughput": 924.2635,
+      "ops_throughput": 924.2454,
       "offered_block_throughput": 261987.86,
-      "block_throughput": 256423.47,
-      "latency_p99_us": 9397.255
+      "block_throughput": 256418.42,
+      "latency_p99_us": 8805.717
     },
     {
-      "duration_ms": 59948,
-      "offered_ops_throughput": 1575.2319,
-      "ops_throughput": 1541.747,
-      "offered_block_throughput": 437025.16,
-      "block_throughput": 427735.25,
-      "latency_p99_us": 10827.88
-    },
-    {
-      "duration_ms": 35938,
-      "offered_ops_throughput": 2627.6365,
-      "ops_throughput": 2561.0762,
-      "offered_block_throughput": 728999.5,
-      "block_throughput": 710533.3,
-      "latency_p99_us": 9973.663
+      "duration_ms": 46416,
+      "offered_ops_throughput": 2034.4708,
+      "ops_throughput": 1991.2281,
+      "offered_block_throughput": 564434.3,
+      "block_throughput": 552437.25,
+      "latency_p99_us": 10686.267
     },
     {
       "duration_ms": 21544,
       "offered_ops_throughput": 4383.216,
-      "ops_throughput": 2840.4019,
+      "ops_throughput": 2695.7463,
       "offered_block_throughput": 1216059.5,
-      "block_throughput": 788028.1,
-      "latency_p99_us": 34309.266
+      "block_throughput": 747895.6,
+      "latency_p99_us": 33287.895
     },
     {
-      "duration_ms": 12915,
-      "offered_ops_throughput": 7311.808,
-      "ops_throughput": 2873.855,
-      "offered_block_throughput": 2028554.8,
-      "block_throughput": 797309.2,
-      "latency_p99_us": 62072.77
-    },
-    {
-      "duration_ms": 7743,
-      "offered_ops_throughput": 12195.789,
-      "ops_throughput": 2894.8223,
-      "offered_block_throughput": 3383544.5,
-      "block_throughput": 803126.3,
-      "latency_p99_us": 61309.992
+      "duration_ms": 10000,
+      "offered_ops_throughput": 9443.2,
+      "ops_throughput": 2919.3435,
+      "offered_block_throughput": 2619878.5,
+      "block_throughput": 809929.3,
+      "latency_p99_us": 62016.043
     },
     {
       "duration_ms": 4642,
       "offered_ops_throughput": 20342.957,
-      "ops_throughput": 2889.3308,
+      "ops_throughput": 2884.653,
       "offered_block_throughput": 5643857.0,
-      "block_throughput": 801602.8,
-      "latency_p99_us": 63076.61
+      "block_throughput": 800305.0,
+      "latency_p99_us": 61697.46
     }
   ],
   "naive-nested-map": [
     {
       "duration_ms": 100000,
       "offered_ops_throughput": 944.32,
-      "ops_throughput": 924.2725,
+      "ops_throughput": 924.2635,
       "offered_block_throughput": 261987.86,
-      "block_throughput": 256425.97,
-      "latency_p99_us": 42393.887
+      "block_throughput": 256423.47,
+      "latency_p99_us": 41510.066
     },
     {
-      "duration_ms": 59948,
-      "offered_ops_throughput": 1575.2319,
-      "ops_throughput": 1257.2494,
-      "offered_block_throughput": 437025.16,
-      "block_throughput": 348805.53,
-      "latency_p99_us": 24583.684
-    },
-    {
-      "duration_ms": 35938,
-      "offered_ops_throughput": 2627.6365,
-      "ops_throughput": 1354.7379,
-      "offered_block_throughput": 728999.5,
-      "block_throughput": 375852.28,
-      "latency_p99_us": 41676.754
+      "duration_ms": 46416,
+      "offered_ops_throughput": 2034.4708,
+      "ops_throughput": 1322.2437,
+      "offered_block_throughput": 564434.3,
+      "block_throughput": 366837.28,
+      "latency_p99_us": 27161.172
     },
     {
       "duration_ms": 21544,
       "offered_ops_throughput": 4383.216,
-      "ops_throughput": 1379.395,
+      "ops_throughput": 1387.7875,
       "offered_block_throughput": 1216059.5,
-      "block_throughput": 382693.06,
-      "latency_p99_us": 92300.336
+      "block_throughput": 385021.47,
+      "latency_p99_us": 90544.99
     },
     {
-      "duration_ms": 12915,
-      "offered_ops_throughput": 7311.808,
-      "ops_throughput": 1389.7073,
-      "offered_block_throughput": 2028554.8,
-      "block_throughput": 385554.03,
-      "latency_p99_us": 93037.62
+      "duration_ms": 10000,
+      "offered_ops_throughput": 9443.2,
+      "ops_throughput": 1382.0194,
+      "offered_block_throughput": 2619878.5,
+      "block_throughput": 383421.16,
+      "latency_p99_us": 91671.85
     }
   ],
   "nested-map": [
@@ -172,7 +148,7 @@
       "ops_throughput": 1329020.0,
       "offered_block_throughput": 4377430.5,
       "block_throughput": 4284038.5,
-      "latency_p99_us": 2.23
+      "latency_p99_us": 2.242
     },
     {
       "duration_ms": 4642,
@@ -180,7 +156,7 @@
       "ops_throughput": 2862547.8,
       "offered_block_throughput": 9430054.0,
       "block_throughput": 9227300.0,
-      "latency_p99_us": 2.683
+      "latency_p99_us": 2.668
     },
     {
       "duration_ms": 2154,
@@ -188,15 +164,15 @@
       "ops_throughput": 6167088.0,
       "offered_block_throughput": 20322334.0,
       "block_throughput": 19879340.0,
-      "latency_p99_us": 2.447
+      "latency_p99_us": 2.379
     },
     {
       "duration_ms": 1000,
       "offered_ops_throughput": 13579927.0,
-      "ops_throughput": 13261647.0,
+      "ops_throughput": 13287600.0,
       "offered_block_throughput": 43774308.0,
-      "block_throughput": 42748348.0,
-      "latency_p99_us": 2.271
+      "block_throughput": 42832004.0,
+      "latency_p99_us": 2.238
     },
     {
       "duration_ms": 464,
@@ -204,23 +180,23 @@
       "ops_throughput": 28589320.0,
       "offered_block_throughput": 94341176.0,
       "block_throughput": 92156440.0,
-      "latency_p99_us": 2.287
+      "latency_p99_us": 2.232
     },
     {
       "duration_ms": 215,
       "offered_ops_throughput": 63162450.0,
-      "ops_throughput": 54757770.0,
+      "ops_throughput": 52635376.0,
       "offered_block_throughput": 203601440.0,
-      "block_throughput": 176509310.0,
-      "latency_p99_us": 2.125
+      "block_throughput": 169667860.0,
+      "latency_p99_us": 2.063
     },
     {
       "duration_ms": 100,
       "offered_ops_throughput": 135799260.0,
-      "ops_throughput": 54979460.0,
+      "ops_throughput": 51831780.0,
       "offered_block_throughput": 437743100.0,
-      "block_throughput": 177223920.0,
-      "latency_p99_us": 2.034
+      "block_throughput": 167077520.0,
+      "latency_p99_us": 2.093
     }
   ],
   "radix-tree": [
@@ -230,71 +206,47 @@
       "ops_throughput": 132916.33,
       "offered_block_throughput": 437743.06,
       "block_throughput": 428450.0,
-      "latency_p99_us": 3031.172
+      "latency_p99_us": 3588.039
     },
     {
-      "duration_ms": 59948,
-      "offered_ops_throughput": 226528.44,
-      "ops_throughput": 221716.72,
-      "offered_block_throughput": 730204.6,
-      "block_throughput": 714694.25,
-      "latency_p99_us": 7766.779
-    },
-    {
-      "duration_ms": 35938,
-      "offered_ops_throughput": 377870.97,
-      "ops_throughput": 369843.88,
-      "offered_block_throughput": 1218050.8,
-      "block_throughput": 1192175.6,
-      "latency_p99_us": 10334.513
+      "duration_ms": 46416,
+      "offered_ops_throughput": 292569.94,
+      "ops_throughput": 286345.34,
+      "offered_block_throughput": 943086.6,
+      "block_throughput": 923021.8,
+      "latency_p99_us": 9482.066
     },
     {
       "duration_ms": 21544,
       "offered_ops_throughput": 630334.56,
-      "ops_throughput": 616876.8,
+      "ops_throughput": 616904.9,
       "offered_block_throughput": 2031856.1,
-      "block_throughput": 1988475.9,
-      "latency_p99_us": 29634.87
+      "block_throughput": 1988566.1,
+      "latency_p99_us": 30705.686
     },
     {
-      "duration_ms": 12915,
-      "offered_ops_throughput": 1051484.9,
-      "ops_throughput": 920298.6,
-      "offered_block_throughput": 3389416.0,
-      "block_throughput": 2966543.0,
-      "latency_p99_us": 53192.43
-    },
-    {
-      "duration_ms": 7743,
-      "offered_ops_throughput": 1753832.8,
-      "ops_throughput": 1027692.4,
-      "offered_block_throughput": 5653404.5,
-      "block_throughput": 3312722.0,
-      "latency_p99_us": 53246.56
+      "duration_ms": 10000,
+      "offered_ops_throughput": 1357992.6,
+      "ops_throughput": 978592.44,
+      "offered_block_throughput": 4377430.5,
+      "block_throughput": 3154450.5,
+      "latency_p99_us": 55837.547
     },
     {
       "duration_ms": 4642,
       "offered_ops_throughput": 2925447.5,
-      "ops_throughput": 1059690.0,
+      "ops_throughput": 1086568.0,
       "offered_block_throughput": 9430054.0,
-      "block_throughput": 3415864.8,
-      "latency_p99_us": 54501.24
+      "block_throughput": 3502505.2,
+      "latency_p99_us": 54552.395
     },
     {
-      "duration_ms": 2783,
-      "offered_ops_throughput": 4879600.0,
-      "ops_throughput": 1102893.4,
-      "offered_block_throughput": 15729180.0,
-      "block_throughput": 3555129.5,
-      "latency_p99_us": 52181.297
-    },
-    {
-      "duration_ms": 1668,
-      "offered_ops_throughput": 8141443.0,
-      "ops_throughput": 1105947.2,
-      "offered_block_throughput": 26243590.0,
-      "block_throughput": 3564973.5,
-      "latency_p99_us": 53386.848
+      "duration_ms": 2154,
+      "offered_ops_throughput": 6304515.5,
+      "ops_throughput": 1088745.9,
+      "offered_block_throughput": 20322334.0,
+      "block_throughput": 3509525.2,
+      "latency_p99_us": 54857.27
     }
   ]
 }
