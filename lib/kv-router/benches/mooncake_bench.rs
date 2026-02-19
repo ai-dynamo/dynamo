@@ -1127,16 +1127,15 @@ async fn main() -> anyhow::Result<()> {
                         consecutive_keeping_up = 0;
                     }
                     results.push((dur_ms, result));
-                    if consecutive_keeping_up >= 3 {
-                        println!("Early stop: achieved >= 95% offered for 3 consecutive steps");
+                    if consecutive_keeping_up >= 5 {
+                        println!("Early stop: achieved >= 95% offered for 5 consecutive steps");
                         break;
                     }
                 } else {
-                    let saturated =
-                        result.offered_block_throughput > result.block_throughput * 3.0;
+                    let saturated = result.offered_block_throughput > result.block_throughput * 5.0;
                     results.push((dur_ms, result));
                     if saturated {
-                        println!("Early stop: offered throughput >3x achieved throughput");
+                        println!("Early stop: offered throughput >5x achieved throughput");
                         break;
                     }
                 }

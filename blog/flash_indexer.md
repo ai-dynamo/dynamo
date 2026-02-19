@@ -374,7 +374,7 @@ The `RwLock` itself embodies this tension. A reader-biased lock can starve write
 
 The concurrent radix tree is already fast---it eliminated the actor bottleneck and handles millions of ops per second. But its traversal cost scales linearly with sequence depth: `find_matches` walks the tree node by node, following pointers from parent to child. Each step is a pointer dereference into a different heap allocation---cache-hostile, and fundamentally sequential. You can't skip ahead to position 128 without first visiting positions 0 through 127.
 
-For today's workloads with moderate sequence lengths, this is fine. But as context windows grow into the hundreds of thousands of tokens and sequences span thousands of blocks, the linear pointer-chasing cost starts to matter. The concurrent inverted indexer is an alternative design that trades the tree's structural elegance for random-access lookups, targeting these longer-sequence workloads.
+For today's workloads with moderate sequence lengths, this is fine. But as context windows grow into the hundreds of thousands of tokens and sequences span thousands of blocks, the linear pointer-chasing cost starts to matter. The concurrent positional indexer is an alternative design that trades the tree's structural elegance for random-access lookups, targeting these longer-sequence workloads.
 
 ### Position as a First-Class Dimension
 
@@ -463,7 +463,7 @@ while current_pos < len - 1 && !active.is_empty() {
 }
 ```
 
-In the best case (all workers share the full prefix), `find_matches` does `D / J` lookups instead of `D`. In the worst case (workers drop at every jump), it degrades to a linear scan with extra overhead from overshooting, since each failed jump wastes a probe before scanning back. The tradeoff is clear: the concurrent inverted indexer wins on long sequences with high prefix sharing where jumps skip most of the depth, while the radix tree wins on short or highly-divergent sequences where the linear walk is cheap and the jump machinery adds overhead.
+In the best case (all workers share the full prefix), `find_matches` does `D / J` lookups instead of `D`. In the worst case (workers drop at every jump), it degrades to a linear scan with extra overhead from overshooting, since each failed jump wastes a probe before scanning back. The tradeoff is clear: the concurrent positional indexer wins on long sequences with high prefix sharing where jumps skip most of the depth, while the radix tree wins on short or highly-divergent sequences where the linear walk is cheap and the jump machinery adds overhead.
 
 ### Lazy Hash Computation
 
@@ -487,7 +487,7 @@ All benchmarks run on a 32-core machine. The benchmark works in two phases:
 
 2. **Benchmark replay.** Each worker's request trace and event trace are merged into a single time-ordered sequence and rescaled to fit the benchmark duration. Workers are spawned as 24 concurrent event-processing threads, each replaying its merged trace at the original inter-entry timing. Every `find_matches` call is timed (via `minstant` for nanosecond-precision monotonic timestamps), and every KV event is applied to the indexer under test. After all workers finish, the event queue is flushed.
 
-The harness supports all five indexer backends from sections 1--6 (`NaiveNestedMap`, `InvertedIndex`, `RadixTree`, `ConcurrentRadixTree`, `ConcurrentInvertedIndexer`) and allows tuning worker count, trace duplication/length factors, jump size, and event worker threads from the CLI. The naive backends (sections 2 and 3) silently ignore Remove events and their throughput is computed from requests only, since they do no meaningful work on events.
+The harness supports all five indexer backends from sections 1--6 (`NaiveNestedMap`, `InvertedIndex`, `RadixTree`, `ConcurrentRadixTree`, `ConcurrentPositionalIndexer`) and allows tuning worker count, trace duplication/length factors, jump size, and event worker threads from the CLI. The naive backends (sections 2 and 3) silently ignore Remove events and their throughput is computed from requests only, since they do no meaningful work on events.
 
 ### What We Measure
 
@@ -501,7 +501,7 @@ Below the threshold, the indexer is invisible: the real bottlenecks are network,
 
 ![Achieved vs Payload Throughput](sweep_plot.png)
 
-The naive nested map and inverted indexer quickly fall off the diagonal and are unable to keep up before the 1 million ops/s mark---single-threaded access to a global data structure simply can't absorb the event and request rates at scale. The radix tree (also single-threaded) holds on longer, sustaining throughput into the low millions before saturating. The concurrent radix tree and concurrent inverted indexer, both leveraging multi-threaded reads with sticky-routed writes, comfortably track the identity line all the way to the 10 million ops/s range before the curve begins to peel off.
+The naive nested map and inverted indexer quickly fall off the diagonal and are unable to keep up before the 1 million ops/s mark---single-threaded access to a global data structure simply can't absorb the event and request rates at scale. The radix tree (also single-threaded) holds on longer, sustaining throughput into the low millions before saturating. The concurrent radix tree and concurrent positional indexer, both leveraging multi-threaded reads with sticky-routed writes, comfortably track the identity line all the way to the 10 million ops/s range before the curve begins to peel off.
 
 ---
 
@@ -509,7 +509,7 @@ The naive nested map and inverted indexer quickly fall off the diagonal and are 
 
 The Flash Indexer is already far from being the bottleneck---even a single instance comfortably handles the event and request rates of large deployments. But we're always looking ahead to a future where thousands of frontends serve billions of workers, and these optimizations would start to matter:
 
-1. **Binary search within jumps.** The concurrent inverted indexer's flat structure supports random access by position, which means we can replace the linear scan-back after a failed jump with a binary search over the skipped range. This would tighten the worst case from `O(J)` per failed jump to `O(log J)`.
+1. **Binary search within jumps.** The concurrent positional indexer's flat structure supports random access by position, which means we can replace the linear scan-back after a failed jump with a binary search over the skipped range. This would tighten the worst case from `O(J)` per failed jump to `O(log J)`.
 
 2. **Hierarchical routing.** A sparse indexer at the top level that tracks coarse-grained prefix coverage across groups of deployments, with full indexers at the bottom each serving a subset. Queries hit the sparse layer first to narrow down which group to probe, avoiding a broadcast to every indexer.
 
@@ -528,7 +528,7 @@ The journey from a Python dictionary to the Flash Indexer spans six iterations, 
 3. **Inverted index** --- O(D + W) per query by flipping the key structure; secondary seq_hash layer for chunk-hash collision safety.
 4. **Radix tree** --- tree structure replaces giant flat map; per-node children maps stay small; dual-key design (local hash for traversal, seq hash for event processing); `Rc<RefCell<>>` for single-threaded shared ownership.
 5. **Concurrent radix tree** --- `Arc<parking_lot::RwLock<>>` replaces `Rc<RefCell<>>`; `DashMap` with per-worker inner `RwLock` for the lookup table (shard-level locking for rare mutations, cheap shared reads on the hot path); reads bypass the actor entirely; sticky routing serializes writes per worker with zero contention.
-6. **Concurrent inverted indexer with jump search** --- an alternative to the radix tree for long-sequence workloads; `Vec<DashMap<>>` indexed by position replaces pointer chasing with O(1) random access, enabling jump search that skips most of the depth; `DashMap` with per-worker inner `RwLock` for the reverse lookup; hot prefix positions cluster at the front of the `Vec` and stay warm in cache.
+6. **Concurrent positional indexer with jump search** --- an alternative to the radix tree for long-sequence workloads; `Vec<DashMap<>>` indexed by position replaces pointer chasing with O(1) random access, enabling jump search that skips most of the depth; `DashMap` with per-worker inner `RwLock` for the reverse lookup; hot prefix positions cluster at the front of the `Vec` and stay warm in cache.
 
 The result: a sustained ops throughput of over **10 million operations per second**---events and requests combined---with achieved throughput tracking offered throughput all the way to the limit.
 

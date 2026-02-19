@@ -29,7 +29,7 @@ DISPLAY_NAMES = {
     "inverted-index": "inverted indexer",
     "radix-tree": "radix tree",
     "concurrent-radix-tree": "concurrent radix tree",
-    "nested-map": "concurrent inverted indexer",
+    "nested-map": "concurrent positional indexer",
 }
 
 
