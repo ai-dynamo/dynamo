@@ -746,14 +746,6 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Register the DGDR v1alpha1↔v1beta1 conversion webhook.
-		// This exposes the /convert endpoint served by controller-runtime's conversion
-		// handler (conversion.NewWebhookHandler). The handler uses the ConvertTo/ConvertFrom
-		// methods in api/v1alpha1/dynamographdeploymentrequest_conversion.go.
-		//
-		// NOTE: for the API server to call this endpoint, the DGDR CRD must also have a
-		// spec.conversion block (strategy: Webhook) pointing at this operator's webhook
-		// service with a valid CABundle. That CRD change is tracked as a follow-up.
 		if err = ctrl.NewWebhookManagedBy(mgr).
 			For(&nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}).
 			Complete(); err != nil {
