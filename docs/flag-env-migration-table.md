@@ -99,5 +99,5 @@ This document summarizes Dynamo 1.0 config naming changes, grouped by component.
 
 - Old flags marked obsolete in code (`obsolete_flag`) are still accepted for compatibility where configured.
 - Some rows are migrations from flag-only behavior to env-backed configuration, so one side may be `--`.
-- Some rows may have new flags the same as old flags when adding env-backed configuraiton.
+- Some rows may have new flags the same as old flags when adding env-backed configuration.
 
