@@ -242,6 +242,7 @@ jobs:
       platforms: '["amd64"]'
       cuda_versions: '["12.9"]'
       make_efa: true
+      run_tests: false
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
@@ -262,6 +263,7 @@ jobs:
       platforms: '["amd64"]'
       cuda_versions: '["13.1"]'
       make_efa: true
+      run_tests: false
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
