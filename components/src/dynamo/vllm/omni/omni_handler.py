@@ -393,7 +393,7 @@ class OmniHandler(BaseOmniHandler):
             for data_url in data_urls:
                 if response_format == "url":
                     image_data_list.append(ImageData(url=data_url))
-                elif response_format == "b64_json":
+                elif response_format == "b64_json" or response_format is None:
                     # strip explicit prefix if present
                     if data_url.startswith("data:image"):
                         _, b64_part = data_url.split(",", 1)
@@ -401,7 +401,7 @@ class OmniHandler(BaseOmniHandler):
                     else:
                         image_data_list.append(ImageData(b64_json=data_url))
                 else:
-                    image_data_list.append(ImageData())
+                    raise ValueError(f"Invalid response format: {response_format}")
 
             output = NvImagesResponse(created=int(time.time()), data=image_data_list)
             return output.model_dump()
