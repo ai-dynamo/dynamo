@@ -4,6 +4,8 @@
 import logging
 from typing import Optional
 
+import nvtx
+
 from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -66,21 +68,26 @@ class EncodeHandler(HandlerBase):
             self.tokenizer = self.multimodal_processor.tokenizer
 
     async def generate(self, request: dict, context: Context):
+        _rng_encode = nvtx.start_range(message="encode:total")
         logging.debug(f"New Request ID: {context.id()}")
         if self.multimodal_processor is None:
             logging.error("encode handler: no multimodal_processor configured")
+            nvtx.end_range(_rng_encode)
             raise RuntimeError("encode handler: no multimodal_processor configured")
 
-        async for response in EncodeHelper.process_encode_request(
-            request,
-            self.multimodal_processor,
-            self.connector,
-            self.tokenizer,
-            self.model_dir,
-            self.model_type,
-            self.engine,
-        ):
-            yield response
+        try:
+            async for response in EncodeHelper.process_encode_request(
+                request,
+                self.multimodal_processor,
+                self.connector,
+                self.tokenizer,
+                self.model_dir,
+                self.model_type,
+                self.engine,
+            ):
+                yield response
+        finally:
+            nvtx.end_range(_rng_encode)
         return
 
 
@@ -126,6 +133,7 @@ class PrefillHandler(HandlerBase):
         Prefill worker: process prompt and return disaggregated_params.
         Frontend routes to decode workers automatically.
         """
+        _rng_prefill = nvtx.start_range(message="prefill:total")
         logging.debug(f"Prefill Request ID: {context.id()}")
         logging.debug(f"PrefillHandler.generate received request: {request}")
         embeddings_tensor = None
@@ -145,7 +153,9 @@ class PrefillHandler(HandlerBase):
             if embedding_paths:
                 if self.encode_client and self.connector:
                     logging.info(f"PrefillHandler: embedding_paths={embedding_paths}")
+                    _rng_nixl = nvtx.start_range(message="prefill:fetch_embeddings_nixl")
                     embeddings_tensor = await self.remote_encode_with_nixl(request)
+                    nvtx.end_range(_rng_nixl)
                 else:
                     # We can still handle embedding_paths without NIXL:
                     # `MultimodalRequestProcessor.process_openai_request` will load the embeddings
@@ -159,12 +169,14 @@ class PrefillHandler(HandlerBase):
             elif image_urls:
                 if self.encode_client:
                     logging.info(f"PrefillHandler: image_urls={image_urls}")
+                    _rng_fetch = nvtx.start_range(message="prefill:fetch_embeddings_from_encoder")
                     result = await fetch_embeddings_from_encoder(
                         image_urls,
                         request,
                         self.encode_client,
                         self._encoder_cache,
                     )
+                    nvtx.end_range(_rng_fetch)
                     if isinstance(result, list):
                         # Cache path: got List[torch.Tensor]
                         embeddings_tensor = result
@@ -174,18 +186,23 @@ class PrefillHandler(HandlerBase):
 
         # Normal flow: Generate the prefill response locally with embeddings
         response_count = 0
-        async for res in self.generate_locally(
-            request, context, embeddings_tensor, ep_disaggregated_params
-        ):
-            response_count += 1
-            if response_count > 1:
-                raise ValueError("Prefill response should be generated only once.")
+        _rng_gen = nvtx.start_range(message="prefill:generate_locally")
+        try:
+            async for res in self.generate_locally(
+                request, context, embeddings_tensor, ep_disaggregated_params
+            ):
+                response_count += 1
+                if response_count > 1:
+                    raise ValueError("Prefill response should be generated only once.")
 
-            if context.is_stopped() or context.is_killed():
-                return
+                if context.is_stopped() or context.is_killed():
+                    return
 
-            # Return response with disaggregated_params to frontend
-            yield res
+                # Return response with disaggregated_params to frontend
+                yield res
+        finally:
+            nvtx.end_range(_rng_gen)
+            nvtx.end_range(_rng_prefill)
 
 
 class DecodeHandler(HandlerBase):
@@ -201,6 +218,7 @@ class DecodeHandler(HandlerBase):
         Decode worker: generate tokens using disaggregated_params from prefill.
         If disaggregated_params is present, prefill was done. Otherwise generate normally.
         """
+        _rng_decode = nvtx.start_range(message="decode:total")
         logging.debug(f"Decode Request ID: {context.id()}")
 
         disaggregated_params = request.get("disaggregated_params")
@@ -210,5 +228,8 @@ class DecodeHandler(HandlerBase):
             )
 
         # Generate tokens locally (with or without disaggregated_params)
-        async for res in self.generate_locally(request, context):
-            yield res
+        try:
+            async for res in self.generate_locally(request, context):
+                yield res
+        finally:
+            nvtx.end_range(_rng_decode)

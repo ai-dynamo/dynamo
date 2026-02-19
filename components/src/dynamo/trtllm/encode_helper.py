@@ -8,6 +8,7 @@ from dataclasses import asdict
 from typing import Any, Dict, Optional, Union
 
 import torch
+import nvtx
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -180,6 +181,7 @@ class EncodeHelper:
         descriptor = nixl_connect.Descriptor(encodings_tensor)
 
         # Create read operation to read from EncodeHandler
+        _rng_nixl_read = nvtx.start_range(message="prefill:nixl_read_embeddings")
         read_op = await connector.begin_read(readable_metadata, descriptor)
         with read_op:
             # Wait for the read operation to complete
@@ -187,6 +189,7 @@ class EncodeHelper:
             logging.debug(
                 f"Successfully read embeddings via NIXL: {encodings_tensor.shape}"
             )
+        nvtx.end_range(_rng_nixl_read)
 
         # Reconstruct original format and return
         if auxiliary_data:
@@ -262,6 +265,7 @@ class EncodeHelper:
             auxiliary_data = {}
 
         # Create NIXL readable operation for prefill worker to read
+        _rng_nixl_write = nvtx.start_range(message="encode:nixl_write_embeddings")
         descriptor = nixl_connect.Descriptor(encodings)
         with await connector.create_readable(descriptor) as readable_op:
             op_metadata = readable_op.metadata()
@@ -279,6 +283,7 @@ class EncodeHelper:
             )
             await readable_op.wait_for_completion()
             logging.debug("EncodeHelper completed readable operation.")
+        nvtx.end_range(_rng_nixl_write)
 
     @staticmethod
     async def _process_full_epd_flow(
@@ -307,9 +312,11 @@ class EncodeHelper:
             Response with ep_disaggregated_params, processed_prompt, and prompt_token_ids
         """
         # Load images with shared ImageLoader (async, same as multimodal_processor PD flow).
+        _rng_img_load = nvtx.start_range(message="encode:image_load_and_preprocess")
         image_items = [{"Url": u} for u in image_urls]
         image_loader = EncodeHelper._get_image_loader()
         pil_images = await image_loader.load_image_batch(image_items)
+        nvtx.end_range(_rng_img_load)
         if not pil_images:
             logging.error("ENCODE WORKER: no images loaded from image_urls")
             yield {"ep_disaggregated_params": None}
@@ -326,9 +333,11 @@ class EncodeHelper:
 
         # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid
         # blocking the encode worker's event loop under concurrency.
+        _rng_vision = nvtx.start_range(message="encode:vision_model_forward")
         encoder_outputs = await asyncio.to_thread(
             lambda: list(engine.llm.generate(inputs))
         )
+        nvtx.end_range(_rng_vision)
 
         if not encoder_outputs:
             logging.error("ENCODE WORKER: encoder_outputs is empty")

@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import torch
+import nvtx
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -273,9 +274,11 @@ class MultimodalRequestProcessor:
                 # TRT-LLM will auto-detect this and compute mrope_config
                 if image_urls:
                     try:
+                        _rng_img = nvtx.start_range(message="mm_processor:load_image_batch")
                         pil_images = await self.image_loader.load_image_batch(
                             image_urls
                         )
+                        nvtx.end_range(_rng_img)
                         if pil_images:
                             processed_mm_data["image"] = pil_images
                             logging.info(

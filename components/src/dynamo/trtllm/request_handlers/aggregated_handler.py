@@ -6,6 +6,8 @@
 import logging
 from typing import Optional
 
+import nvtx
+
 from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -35,6 +37,7 @@ class AggregatedHandler(HandlerBase):
 
     async def generate(self, request: dict, context: Context):
         """Generate response, optionally using remote encoder for multimodal."""
+        _rng_agg = nvtx.start_range(message="agg:total")
         logging.debug(f"AggregatedHandler Request ID: {context.id()}")
 
         embeddings = None
@@ -48,18 +51,23 @@ class AggregatedHandler(HandlerBase):
             )
             if image_urls:
                 logging.info(f"AggregatedHandler: image_urls={image_urls}")
+                _rng_fetch = nvtx.start_range(message="agg:fetch_embeddings_from_encoder")
                 result = await fetch_embeddings_from_encoder(
                     image_urls,
                     request,
                     self.encode_client,
                     self._encoder_cache,
                 )
+                nvtx.end_range(_rng_fetch)
                 if isinstance(result, list):
                     embeddings = result
                 else:
                     ep_disaggregated_params = result
 
-        async for res in self.generate_locally(
-            request, context, embeddings, ep_disaggregated_params
-        ):
-            yield res
+        try:
+            async for res in self.generate_locally(
+                request, context, embeddings, ep_disaggregated_params
+            ):
+                yield res
+        finally:
+            nvtx.end_range(_rng_agg)

@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional, Union
 
 import torch
+import nvtx
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
@@ -602,16 +603,20 @@ class HandlerBase(BaseGenerativeHandler):
         self._normalize_request_format(request)
 
         # Setup disaggregated params based on PREFILL/DECODE mode
+        _rng_setup = nvtx.start_range(message="generate_locally:setup_disagg_params")
         (
             disaggregated_params,
             ep_disaggregated_params,
             epd_metadata,
         ) = self._setup_disaggregated_params_for_mode(request, ep_disaggregated_params)
+        nvtx.end_range(_rng_setup)
 
         # Prepare input for generation (handles multimodal/text flows)
+        _rng_prep = nvtx.start_range(message="generate_locally:prepare_input")
         processed_input = await self._prepare_input_for_generation(
             request, embeddings, ep_disaggregated_params, epd_metadata
         )
+        nvtx.end_range(_rng_prep)
 
         # Check if there is an error in the publisher error queue
         publishers_error = (
@@ -712,8 +717,10 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
             )
 
+        _rng_stream = None
         try:
             # NEW: Updated engine call to include multimodal data
+            _rng_gen_async = nvtx.start_range(message="generate_locally:trtllm_generate_async")
             generation_result = self.engine.llm.generate_async(
                 inputs=processed_input,  # Use the correctly extracted inputs
                 sampling_params=sampling_params,
@@ -722,8 +729,10 @@ class HandlerBase(BaseGenerativeHandler):
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
             )
+            nvtx.end_range(_rng_gen_async)
 
             # Monitor for cancellation triggers and cancel by calling generation_result.abort()
+            _rng_stream = nvtx.start_range(message="generate_locally:stream_tokens")
             async with self._cancellation_monitor(generation_result, context):
                 async for res in generation_result:
                     # TRTLLM engine needs to start generating tokens first before stats
@@ -813,15 +822,21 @@ class HandlerBase(BaseGenerativeHandler):
                     # Yield the chunk to the client and update the token count for the next iteration.
                     yield out
                     num_output_tokens_so_far = next_total_toks
+            nvtx.end_range(_rng_stream)
+            _rng_stream = None  # Mark as ended
 
         # 1. Client cancellation - don't shutdown
         except asyncio.CancelledError:
+            if _rng_stream is not None:
+                nvtx.end_range(_rng_stream)
             logging.debug(f"Request {request_id}: Client cancelled")
             # _cancellation_monitor already called abort_request
             return  # Just stop, no error response
 
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
+            if _rng_stream is not None:
+                nvtx.end_range(_rng_stream)
             error_msg = str(e)
             logging.warning(f"Request {request_id} error: {error_msg}")
             yield {
@@ -831,6 +846,8 @@ class HandlerBase(BaseGenerativeHandler):
 
         # 3. ALL OTHER ERRORS - graceful shutdown
         except Exception as e:
+            if _rng_stream is not None:
+                nvtx.end_range(_rng_stream)
             error_type = type(e).__name__
             error_msg = str(e)
             logging.error(
