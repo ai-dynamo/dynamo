@@ -229,6 +229,46 @@ jobs:
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
     secrets: inherit
 
+  # ============================================================================
+  # VLLM EFA PIPELINE (amd64 only, CUDA 12)
+  # ============================================================================
+  vllm-efa-pipeline:
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      target: runtime
+      platforms: '["amd64"]'
+      cuda_versions: '["12.9"]'
+      make_efa: true
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: false
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+    secrets: inherit
+
+  # ============================================================================
+  # TRTLLM EFA PIPELINE (amd64 only, CUDA 13)
+  # ============================================================================
+  trtllm-efa-pipeline:
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platforms: '["amd64"]'
+      cuda_versions: '["13.1"]'
+      make_efa: true
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: false
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+    secrets: inherit
+
 
    # ============================================================================
    # DEPLOYMENT JOBS
@@ -454,7 +494,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, changed-files]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
