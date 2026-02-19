@@ -6,7 +6,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
@@ -19,7 +19,6 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher = None,
@@ -36,9 +35,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
             generate_endpoint: The endpoint handle for discovery.
             shutdown_event: Optional event to signal shutdown.
         """
-        super().__init__(
-            component, engine, config, publisher, generate_endpoint, shutdown_event
-        )
+        super().__init__(engine, config, publisher, generate_endpoint, shutdown_event)
 
         # Validate that diffusion algorithm is configured
         if (

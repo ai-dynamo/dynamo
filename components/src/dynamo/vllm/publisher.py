@@ -12,7 +12,7 @@ from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import WorkerMetricsPublisher
-from dynamo.runtime import Component
+from dynamo.runtime import Endpoint
 
 # Create a dedicated registry for dynamo_component metrics
 # This ensures these metrics are isolated and can be exposed via their own callback
@@ -42,15 +42,15 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 
     def __init__(
         self,
-        component: Component,
-        dp_rank: int,
-        component_gauges: LLMBackendMetrics,
+        endpoint: Endpoint,
+        dp_rank: int = 0,
+        component_gauges: Optional[LLMBackendMetrics] = None,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
-        self._component = component
+        self._endpoint = endpoint
         self.dp_rank = dp_rank
-        self.component_gauges = component_gauges
+        self.component_gauges = component_gauges or LLMBackendMetrics()
         self.num_gpu_block = 1
         # Schedule async endpoint creation
         self._endpoint_task = asyncio.create_task(self._create_endpoint())
@@ -58,7 +58,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
     async def _create_endpoint(self) -> None:
         """Create the NATS endpoint asynchronously."""
         try:
-            await self.inner.create_endpoint(self._component)
+            await self.inner.create_endpoint(self._endpoint)
             logging.debug("vLLM metrics publisher endpoint created")
         except Exception:
             logging.exception("Failed to create vLLM metrics publisher endpoint")
@@ -105,12 +105,12 @@ class StatLoggerFactory:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         component_gauges: Optional[LLMBackendMetrics] = None,
         dp_rank: int = 0,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
-        self.component = component
+        self.endpoint = endpoint
         self.component_gauges = component_gauges
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
         self.dp_rank = dp_rank
@@ -124,9 +124,10 @@ class StatLoggerFactory:
         assert (
             self.component_gauges is not None
         ), "component_gauges must be set before creating stat loggers"
+
         logger = DynamoStatLoggerPublisher(
-            self.component,
-            dp_rank,
+            endpoint=self.endpoint,
+            dp_rank=dp_rank,
             component_gauges=self.component_gauges,
             metrics_labels=self.metrics_labels,
         )

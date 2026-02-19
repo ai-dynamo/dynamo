@@ -13,18 +13,20 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-from dynamo._core import Component, Context
-from dynamo.common.protocols.video_protocol import (
+from dynamo._core import Context
+from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
+from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
+from dynamo.trtllm.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
     VideoData,
     VideoNvExt,
 )
-from dynamo.common.storage import get_fs, upload_to_fs
-from dynamo.common.utils.video_utils import encode_to_mp4_bytes
-from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
-from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
+from dynamo.trtllm.request_handlers.video_diffusion.video_utils import (
+    encode_to_mp4,
+    encode_to_mp4_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,26 +44,17 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: DiffusionEngine,
         config: DiffusionConfig,
     ):
         """Initialize the handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The DiffusionEngine instance.
             config: Diffusion generation configuration.
         """
-        self.component = component
         self.engine = engine
         self.config = config
-        if not config.media_output_fs_url:
-            raise ValueError(
-                "media_output_fs_url must be set; use --media-output-fs-url or DYN_MEDIA_OUTPUT_FS_URL."
-            )
-        self.media_output_fs = get_fs(config.media_output_fs_url)
-        self.media_output_http_url = config.media_output_http_url
         # Serialize pipeline access — visual_gen is not thread-safe (global
         # singleton configs, mutable instance state, unprotected CUDA graph cache).
         # asyncio.Lock suspends waiting coroutines cooperatively so the event
@@ -225,21 +218,21 @@ class VideoGenerationHandler(BaseGenerativeHandler):
             response_format = req.response_format or "url"
             fps = nvext.fps or self.config.default_fps
 
-            # Encode frames to MP4 bytes in memory
-            video_bytes = await asyncio.to_thread(encode_to_mp4_bytes, frames, fps=fps)
-
             if response_format == "url":
-                # Upload via filesystem
-                storage_path = f"videos/{request_id}.mp4"
-                video_url = await upload_to_fs(
-                    self.media_output_fs,
-                    storage_path,
-                    video_bytes,
-                    self.media_output_http_url,
+                # Encode to MP4 and save to file
+                output_path = await asyncio.to_thread(
+                    encode_to_mp4,
+                    frames,
+                    self.config.output_dir,
+                    request_id,
+                    fps=fps,
                 )
-                video_data = VideoData(url=video_url)
+                video_data = VideoData(url=output_path)
             else:
                 # Encode to base64
+                video_bytes = await asyncio.to_thread(
+                    encode_to_mp4_bytes, frames, fps=fps
+                )
                 b64_video = base64.b64encode(video_bytes).decode("utf-8")
                 video_data = VideoData(b64_json=b64_video)
 

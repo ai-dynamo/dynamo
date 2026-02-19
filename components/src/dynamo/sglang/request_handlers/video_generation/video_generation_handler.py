@@ -11,8 +11,7 @@ from typing import Any, AsyncGenerator, Optional
 
 import torch
 
-from dynamo._core import Component, Context
-from dynamo.common.storage import upload_to_fs
+from dynamo._core import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     CreateVideoRequest,
@@ -35,7 +34,6 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         generator: Any,  # DiffGenerator, not sgl.Engine
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
@@ -51,14 +49,13 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             fs: Optional fsspec filesystem for primary video storage.
         """
         # Call parent constructor for common setup
-        super().__init__(component, config, publisher)
+        super().__init__(config, publisher)
 
         # Video generation-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
         self._generate_lock = asyncio.Lock()  # Serialize generator access
         self.fs = fs
-        self.fs_url = config.dynamo_args.media_output_fs_url
-        self.base_url = config.dynamo_args.media_output_http_url
+        self.fs_url = config.dynamo_args.video_generation_fs_url
 
         logger.info(
             f"Video generation worker handler initialized with fs_url={self.fs_url}"
@@ -305,7 +302,11 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             URL for the uploaded video.
         """
         storage_path = f"{request_id}.mp4"
-        return await upload_to_fs(self.fs, storage_path, video_bytes, self.base_url)
+
+        # DirFileSystem handles root path and protocol internally
+        await asyncio.to_thread(self.fs.pipe, storage_path, video_bytes)
+
+        return f"{self.fs_url}/{storage_path}"
 
     def _encode_base64(self, video_bytes: bytes) -> str:
         """Encode video as base64 string"""

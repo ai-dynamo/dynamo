@@ -425,6 +425,12 @@ pub struct Namespace {
     /// This hierarchy's own metrics registry
     #[builder(default = "crate::MetricsRegistry::new()")]
     metrics_registry: crate::MetricsRegistry,
+
+    /// Cache for components to avoid duplicate registrations and metrics collisions.
+    /// When the same component is requested multiple times, we return the cached instance
+    /// to ensure all endpoints share the same Component and MetricsRegistry.
+    #[builder(default = "Arc::new(std::sync::RwLock::new(HashMap::new()))")]
+    component_cache: Arc<std::sync::RwLock<HashMap<String, Component>>>,
 }
 
 impl DistributedRuntimeProvider for Namespace {
@@ -469,14 +475,41 @@ impl Namespace {
     }
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
+    ///
+    /// Components are cached by name to ensure that multiple calls with the same name
+    /// return the same Component instance. This prevents duplicate metrics registrations
+    /// and ensures all endpoints share the same Component's MetricsRegistry.
     pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
+        let name_str = name.into();
+
+        // Check cache first (fast path with read lock)
+        {
+            let cache = self.component_cache.read().unwrap();
+            if let Some(cached_component) = cache.get(&name_str) {
+                return Ok(cached_component.clone());
+            }
+        }
+
+        // Not in cache, create new component (slow path)
         let component = ComponentBuilder::from_runtime(self.runtime.clone())
-            .name(name)
+            .name(name_str.clone())
             .namespace(self.clone())
             .build()?;
+
         // Attach component registry so scrapes traverse separate registries (avoids collisions).
         self.get_metrics_registry()
             .add_child_registry(component.get_metrics_registry());
+
+        // Cache the component for future calls
+        {
+            let mut cache = self.component_cache.write().unwrap();
+            // Double-check pattern: another thread might have inserted while we waited for write lock
+            if let Some(existing) = cache.get(&name_str) {
+                return Ok(existing.clone());
+            }
+            cache.insert(name_str, component.clone());
+        }
+
         Ok(component)
     }
 
