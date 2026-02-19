@@ -27,7 +27,6 @@ import (
 )
 
 const (
-	// LabelFilterType is the filter type that is used in the plugin registry.
 	LabelFilterType = "label-filter"
 )
 

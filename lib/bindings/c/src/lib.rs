@@ -957,194 +957,6 @@ pub unsafe extern "C" fn destroy(handle: RouterHandlesPtr) {
     }
 }
 
-/// Route a chat completion request in a single call.
-///
-/// This is the main function for EPP to route a `/v1/chat/completions` request.
-/// It combines tokenization and worker selection in one call:
-/// 1. Applies the chat template to the request JSON
-/// 2. Tokenizes the formatted prompt
-/// 3. Queries the prefill router (if disaggregated mode)
-/// 4. Queries the decode router
-/// 5. Returns worker IDs and token_ids
-///
-/// After this call, EPP should:
-/// - Call `add_request()` to register the request for bookkeeping
-/// - Set worker ID headers and forward to backend
-/// - Call `mark_prefill_complete()` on first token
-/// - Call `free_request()` when the stream ends
-/// - Call `free_routing_result()` to free the result
-///
-/// # Arguments
-/// - `handle`: Router handles created by `create_routers`
-/// - `request_json`: JSON string of the OpenAI-compatible chat completion request
-/// - `pods_json`: JSON string of available pods from the EPP plugin (nullable).
-///   When provided, restricts routing to the given set of pods.
-///   Expected format: JSON array of objects with at least `"address"` field.
-/// - `out_result`: Output routing result
-///
-/// # Safety
-/// - `handle` must be a valid RouterHandles handle
-/// - `request_json` must be a valid null-terminated C string containing JSON
-/// - `pods_json` must be a valid null-terminated C string containing JSON, or null
-/// - `out_result` must be a valid pointer
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn route_request(
-    handle: RouterHandlesPtr,
-    request_json: *const c_char,
-    pods_json: *const c_char,
-    out_result: *mut CRoutingResult,
-) -> QueryRouterResult {
-    if handle.is_null() || request_json.is_null() || out_result.is_null() {
-        return QueryRouterResult::ErrInvalidParam;
-    }
-
-    let handles = unsafe { &*handle };
-
-    // Parse pods JSON if provided (nullable — when null, routing uses discovery as before).
-    // Extract pod names and hash them to worker IDs using the same hash_pod_name function
-    // that workers use during registration. This creates a filter set that restricts the
-    // routing decision to only the pods that EPP considers eligible, without overwriting
-    // the router's internal worker state.
-    let allowed_worker_ids: Option<HashSet<WorkerId>> = if !pods_json.is_null() {
-        match unsafe { CStr::from_ptr(pods_json) }.to_str() {
-            Ok(s) if !s.is_empty() => match serde_json::from_str::<Vec<serde_json::Value>>(s) {
-                Ok(pods) => {
-                    let mut worker_ids = HashSet::new();
-                    for pod in &pods {
-                        // Extract pod name: try pod.podName first, then pod.pod.podName
-                        let pod_name = pod
-                            .get("pod")
-                            .and_then(|p| p.get("podName"))
-                            .or_else(|| pod.get("podName"))
-                            .and_then(|v| v.as_str());
-                        if let Some(name) = pod_name {
-                            let worker_id = hash_pod_name(name);
-                            tracing::debug!(
-                                pod_name = name,
-                                worker_id = format!("{:x}", worker_id),
-                                "Mapped EPP pod to worker_id"
-                            );
-                            worker_ids.insert(worker_id);
-                        }
-                    }
-                    tracing::info!(
-                        pod_count = pods.len(),
-                        unique_worker_ids = worker_ids.len(),
-                        "Parsed EPP pods into allowed_worker_ids filter"
-                    );
-                    if worker_ids.is_empty() {
-                        None
-                    } else {
-                        Some(worker_ids)
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = ?e, "Failed to parse pods JSON");
-                    return QueryRouterResult::ErrInvalidParam;
-                }
-            },
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    // Get preprocessor
-    let preprocessor = match &handles.preprocessor {
-        Some(p) => p,
-        None => {
-            tracing::error!("Preprocessor not available");
-            return QueryRouterResult::ErrInitFailed;
-        }
-    };
-
-    let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return QueryRouterResult::ErrInvalidParam,
-    };
-
-    // Parse JSON
-    let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-        match serde_json::from_str(json_str) {
-            Ok(req) => req,
-            Err(e) => {
-                tracing::error!(error = ?e, "Failed to parse request JSON");
-                return QueryRouterResult::ErrInvalidParam;
-            }
-        };
-
-    // Apply chat template
-    let formatted_prompt = match preprocessor.apply_template(&request) {
-        Ok(Some(prompt)) => prompt,
-        Ok(None) => String::new(),
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to apply chat template");
-            return QueryRouterResult::ErrQueryFailed;
-        }
-    };
-
-    // Tokenize
-    let encoding = match preprocessor.tokenize(&formatted_prompt) {
-        Ok(enc) => enc,
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to tokenize");
-            return QueryRouterResult::ErrQueryFailed;
-        }
-    };
-
-    let tokens = encoding.token_ids();
-    let token_count = tokens.len();
-    let is_disaggregated = handles.prefill_router.is_activated();
-
-    // Query workers, applying the EPP pod filter if provided
-    let result = handles.runtime.secondary().block_on(async {
-        let prefill_worker_id = if is_disaggregated {
-            handles
-                .query_prefill_worker(tokens, false, None, 0.0, None)
-                .await?
-        } else {
-            0
-        };
-
-        let (decode_worker, _overlap_blocks) = handles
-            .query_decode_worker(tokens, is_disaggregated, allowed_worker_ids)
-            .await?;
-
-        tracing::info!(
-            is_disaggregated = is_disaggregated,
-            prefill_worker_id = prefill_worker_id,
-            decode_worker_id = decode_worker.worker_id,
-            decode_dp_rank = decode_worker.dp_rank,
-            token_count = token_count,
-            "Routed chat request"
-        );
-
-        Ok((prefill_worker_id, decode_worker))
-    });
-
-    match result {
-        Ok((prefill_worker_id, decode_worker)) => {
-            // Allocate and copy token IDs for caller (needed for add_request bookkeeping)
-            let token_vec: Vec<u32> = tokens.to_vec();
-            let mut tokens_boxed = token_vec.into_boxed_slice();
-            let token_ptr = tokens_boxed.as_mut_ptr();
-            std::mem::forget(tokens_boxed);
-
-            unsafe {
-                *out_result = CRoutingResult {
-                    is_disaggregated,
-                    prefill_worker_id,
-                    decode_worker_id: decode_worker.worker_id,
-                    token_ids: token_ptr,
-                    token_count,
-                };
-            }
-            QueryRouterResult::Ok
-        }
-        Err(code) => code,
-    }
-}
-
 /// Free a routing result.
 ///
 /// # Safety
@@ -1169,10 +981,6 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
         res.token_count = 0;
     }
 }
-
-// ---------------------------------------------------------------------------
-//  Shared helpers for disaggregated prefill / decode FFI entry-points
-// ---------------------------------------------------------------------------
 
 /// Parse a JSON request string, apply the chat template, and tokenize.
 /// Returns the token IDs on success, or a `QueryRouterResult` error code.
@@ -1276,10 +1084,6 @@ fn write_tokens_to_result(tokens: &[u32], out: &mut CRoutingResult) {
     std::mem::forget(tokens_boxed);
 }
 
-// ---------------------------------------------------------------------------
-//  Disaggregated FFI: route_prefill_request
-// ---------------------------------------------------------------------------
-
 /// Route a request to select the best **prefill** worker only.
 ///
 /// This is used in disaggregated mode where the EPP runs separate prefill and decode
@@ -1342,10 +1146,6 @@ pub unsafe extern "C" fn route_prefill_request(
         Err(code) => code,
     }
 }
-
-// ---------------------------------------------------------------------------
-//  Disaggregated FFI: route_decode_request
-// ---------------------------------------------------------------------------
 
 /// Route a request to select the best **decode** worker only.
 ///

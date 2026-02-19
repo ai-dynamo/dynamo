@@ -184,8 +184,6 @@ func InitFFI() error {
 	return initFFI()
 }
 
-// --------------------------- pod serialization ---------------------------
-
 // podInfoJSON is the JSON-serializable representation of a backend.Pod (datalayer.PodInfo).
 type podInfoJSON struct {
 	Name        string            `json:"name"`
@@ -261,10 +259,6 @@ func SerializePodsToJSON(pods []schedtypes.Pod) (string, error) {
 	return string(data), nil
 }
 
-// --------------------------- request building ---------------------------
-
-// BuildOpenAIRequest constructs an OpenAI-compatible request from the GAIE LLMRequest structure.
-// Preserves message roles for correct chat template application and tokenization.
 func BuildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 	requestBody := make(map[string]any)
 
@@ -309,8 +303,6 @@ func BuildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 	return requestBody, nil
 }
 
-// --------------------------- router bookkeeping ---------------------------
-
 // CallAddRequest registers a request with the router's bookkeeping.
 func CallAddRequest(requestID string, tokenData []int64, workerID uint64, dpRank uint32) error {
 	if !routerInitialized {
@@ -354,7 +346,7 @@ func CallAddRequest(requestID string, tokenData []int64, workerID uint64, dpRank
 	return nil
 }
 
-// CallMarkPrefillComplete marks prefill as completed for a request.
+// CallMarkPrefillComplete marks prefill as completed for a request (bookkeeping).
 func CallMarkPrefillComplete(requestID string) error {
 	if !routerInitialized {
 		return fmt.Errorf("dynamo router not initialized")
@@ -378,7 +370,7 @@ func CallMarkPrefillComplete(requestID string) error {
 	return nil
 }
 
-// CallFreeRequest cleans up router state for a completed/cancelled request.
+// CallFreeRequest cleans up router state for a completed/cancelled request (bookkeeping).
 func CallFreeRequest(requestID string) error {
 	if !routerInitialized {
 		return fmt.Errorf("dynamo router not initialized")
@@ -401,8 +393,6 @@ func CallFreeRequest(requestID string) error {
 	}
 	return nil
 }
-
-// --------------------------- disaggregated FFI wrappers ---------------------------
 
 // RoutingResult holds the result of a prefill or decode routing call.
 type RoutingResult struct {
@@ -501,8 +491,6 @@ func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated
 
 	return &RoutingResult{WorkerID: workerID, TokenData: tokens64}, nil
 }
-
-// --------------------------- shutdown ---------------------------
 
 func cleanupDynamo() error {
 	routerHandlesMutex.Lock()
