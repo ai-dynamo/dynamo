@@ -508,17 +508,19 @@ def _generate_mocker_config_with_planner(
     # Add planner service (reuse the same planner config but with mocker backend)
     mocker_planner_dict = copy.deepcopy(planner_dict)
 
-    # Planner args use --key=value format, so we need to find and replace
+    # Planner args are ["--config", "<json>"] — parse the JSON, swap backend, re-serialise
     planner_main_container = mocker_planner_dict.get("extraPodSpec", {}).get(
         "mainContainer", {}
     )
     planner_args = planner_main_container.get("args", [])
-    updated_planner_args = []
-    for arg in planner_args:
-        if arg.startswith("--backend="):
-            updated_planner_args.append("--backend=mocker")
-        else:
-            updated_planner_args.append(arg)
+    updated_planner_args = list(planner_args)
+    try:
+        config_idx = updated_planner_args.index("--config")
+        config_dict = json.loads(updated_planner_args[config_idx + 1])
+        config_dict["backend"] = "mocker"
+        updated_planner_args[config_idx + 1] = json.dumps(config_dict)
+    except (ValueError, IndexError, json.JSONDecodeError):
+        pass
     planner_main_container["args"] = updated_planner_args
 
     mocker_config["spec"]["services"]["Planner"] = mocker_planner_dict
