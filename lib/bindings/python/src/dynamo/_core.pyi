@@ -399,7 +399,7 @@ class WorkerMetricsPublisher:
         on the correct NATS subject for routing decisions.
 
         Args:
-            endpoint: The endpoint to extract component information from
+            endpoint: The endpoint to extract component information from for metrics publishing
         """
 
     def publish(
@@ -694,8 +694,8 @@ class KvEventPublisher:
         When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
-            component: The component to publish events for
-            worker_id: The worker ID (unused, inferred from component)
+            endpoint: The endpoint to extract component information from for event publishing
+            worker_id: The worker ID (unused, inferred from endpoint)
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
             enable_local_indexer: Enable worker-local KV indexer

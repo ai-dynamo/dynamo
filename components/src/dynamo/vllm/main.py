@@ -696,8 +696,6 @@ async def init(
         f"{config.namespace}.{config.component}.list_loras"
     )
 
-    model_name = config.served_model_name or config.model
-
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
         (
@@ -712,7 +710,6 @@ async def init(
             endpoint=generate_endpoint,
             component_gauges=component_gauges,
             dp_rank=config.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", model_name)],
         )
     else:
         # Factory is created without component_gauges; setup_vllm_engine() will
@@ -721,7 +718,6 @@ async def init(
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,
             dp_rank=config.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", model_name)],
         )
         (
             engine_client,
