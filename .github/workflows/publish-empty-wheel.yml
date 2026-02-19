@@ -155,7 +155,7 @@ jobs:
           S3_KEY="${S3_PREFIX}${WHEEL_BASENAME}"
 
           echo "Uploading ${WHEEL_BASENAME} to s3://${S3_BUCKET}/${S3_KEY}"
-          aws s3 cp "${WHEEL_FILE}" "s3://${S3_BUCKET}/${S3_KEY}" --no-progress
+          aws s3 cp "${WHEEL_FILE}" "s3://${S3_BUCKET}/${S3_KEY}" --no-progress --sse AES256
           echo "S3 upload complete."
 
           echo "### S3 Upload" >> $GITHUB_STEP_SUMMARY
