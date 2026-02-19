@@ -631,7 +631,7 @@ impl PositionalIndexer {
         }
 
         // Lazily computed sequence hashes
-        let mut seq_hashes: Vec<ExternalSequenceBlockHash> = Vec::new();
+        let mut seq_hashes: Vec<ExternalSequenceBlockHash> = Vec::with_capacity(local_hashes.len());
 
         // Check first position to initialize active set
         let Some(initial_workers) =
