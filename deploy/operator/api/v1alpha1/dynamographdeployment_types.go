@@ -110,6 +110,9 @@ const (
 
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 type DynamoGraphDeploymentStatus struct {
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// State is a high-level textual status of the graph deployment lifecycle.
 	// +kubebuilder:default=initializing
 	State DGDState `json:"state"`
