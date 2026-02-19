@@ -18,15 +18,15 @@ spec:
           value: /home/dynamo/.cache/huggingface
       extraPodSpec:
         mainContainer:
-          args:
-            - --router-mode
-            - kv
-            - --router-reset-states
           command:
-            - python
-            - -m
-            - dynamo.frontend
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          - /bin/bash
+          - -c
+          - >-
+            ulimit -n 65536 &&
+            exec python -m dynamo.frontend
+            --router-mode kv
+            --router-reset-states
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
           workingDir: /workspace
       replicas: 1
       resources:
@@ -66,7 +66,7 @@ spec:
             --block-size 64
             --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
             --max-model-len 131072
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
           workingDir: /workspace
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
@@ -124,7 +124,7 @@ spec:
             --block-size 64
             --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
             --max-model-len 131072
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"
