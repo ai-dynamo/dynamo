@@ -341,10 +341,21 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg" --out target/wheels; \
     else \
-        maturin build --release --out /opt/dynamo/dist; \
+        maturin build --release --out target/wheels; \
     fi && \
+    auditwheel repair \
+        --exclude libnixl.so \
+        --exclude libnixl_build.so \
+        --exclude libnixl_common.so \
+        --exclude libstream.so \
+        --exclude libserdes.so \
+        --exclude 'libav*.so*' \
+        --exclude 'libsw*.so*' \
+        --plat manylinux_2_28_${ARCH_ALT} \
+        --wheel-dir /opt/dynamo/dist \
+        target/wheels/*.whl && \
     if [ "$ENABLE_KVBM" == "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
