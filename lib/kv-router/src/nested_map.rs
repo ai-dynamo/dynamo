@@ -461,6 +461,18 @@ impl PositionalIndexer {
 // -----------------------------------------------------------------------------
 
 impl PositionalIndexer {
+    /// Score all active workers at the given position and clear the active set.
+    #[inline]
+    fn drain_active(
+        active: &mut FxHashSet<WorkerWithDpRank>,
+        scores: &mut OverlapScores,
+        pos: usize,
+    ) {
+        for worker in active.drain() {
+            scores.scores.insert(worker, pos as u32);
+        }
+    }
+
     /// Compute sequence hash incrementally from previous hash and current local hash.
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
@@ -539,9 +551,6 @@ impl PositionalIndexer {
     }
 
     /// Scan positions sequentially, updating active set and recording drain scores.
-    ///
-    /// Inlines the DashMap lookup so the guard lives for each iteration,
-    /// avoiding a per-position `FxHashSet` clone.
     #[allow(clippy::too_many_arguments)]
     fn linear_scan_drain(
         &self,
@@ -559,43 +568,33 @@ impl PositionalIndexer {
             }
 
             let Some(pos_map) = self.index.get(pos) else {
-                for worker in active.iter() {
-                    scores.scores.insert(*worker, pos as u32);
-                }
-                active.clear();
+                Self::drain_active(active, scores, pos);
                 break;
             };
             let Some(entry) = pos_map.get(&sequence[pos]) else {
-                for worker in active.iter() {
-                    scores.scores.insert(*worker, pos as u32);
-                }
-                active.clear();
+                Self::drain_active(active, scores, pos);
                 break;
             };
 
             Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
-            let seq_hash = seq_hashes[pos];
+            let Some(workers) = entry.get(seq_hashes[pos]) else {
+                Self::drain_active(active, scores, pos);
+                break;
+            };
 
-            match entry.get(seq_hash) {
-                Some(workers) => {
-                    active.retain(|w| {
-                        if workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, pos as u32);
-                            false
-                        }
-                    });
-                    if early_exit && !active.is_empty() {
-                        break;
+            if workers.len() < active.len() {
+                active.retain(|w| {
+                    if workers.contains(w) {
+                        true
+                    } else {
+                        scores.scores.insert(*w, pos as u32);
+                        false
                     }
-                }
-                None => {
-                    for worker in active.iter() {
-                        scores.scores.insert(*worker, pos as u32);
-                    }
-                    active.clear();
-                }
+                });
+            }
+
+            if early_exit && !active.is_empty() {
+                break;
             }
         }
     }
