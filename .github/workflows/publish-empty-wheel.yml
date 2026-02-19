@@ -22,7 +22,7 @@ on:
         description: 'S3 bucket to upload the wheel'
         required: false
         type: string
-        default: 'dynamo-ci-wheels-test'
+        default: 'dynamo-ops-test-wheel-utils'
       s3_prefix:
         description: 'S3 key prefix for the wheel'
         required: false
@@ -36,7 +36,7 @@ permissions:
 jobs:
   build-and-publish:
     name: Build and Publish Empty Wheel
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: prod-default-v1
     environment: automated-release
     steps:
       - name: Set up Python and build tools
@@ -59,7 +59,7 @@ jobs:
           S3_PREFIX="${{ inputs.s3_prefix }}"
 
           echo "pkg_name=${PKG_NAME:-ai-dynamo-test}" >> $GITHUB_OUTPUT
-          echo "s3_bucket=${S3_BUCKET:-dynamo-ci-wheels-test}" >> $GITHUB_OUTPUT
+          echo "s3_bucket=${S3_BUCKET:-dynamo-ops-test-wheel-utils}" >> $GITHUB_OUTPUT
           echo "s3_prefix=${S3_PREFIX:-wheels/}" >> $GITHUB_OUTPUT
 
           echo "pkg_version=${PKG_VERSION:-0.0.1}" >> $GITHUB_OUTPUT
