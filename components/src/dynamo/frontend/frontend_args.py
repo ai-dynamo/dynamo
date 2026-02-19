@@ -517,7 +517,7 @@ class FrontendArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--chat-processor",
+            flag_name="--dyn-chat-processor",
             env_var="DYN_CHAT_PROCESSOR",
             default="dynamo",
             help=(
@@ -529,26 +529,26 @@ class FrontendArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--debug-perf",
+            flag_name="--dyn-debug-perf",
             env_var="DYN_DEBUG_PERF",
             default=False,
             help=(
                 "Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
-                "Logs GIL contention, per-function timing via sys.monitoring, request concurrency, "
-                "and hot-path section durations. '--chat-processor vllm' only."
+                "Logs per-function timing, request concurrency, and hot-path section durations. "
+                "'--dyn-chat-processor vllm' only."
             ),
         )
 
         add_argument(
             g,
-            flag_name="--preprocess-workers",
+            flag_name="--dyn-preprocess-workers",
             env_var="DYN_PREPROCESS_WORKERS",
             default=0,
             help=(
                 "Number of worker processes for preprocessing and output processing. "
                 "When > 0, offloads CPU-bound work (tokenization, template rendering, "
                 "detokenization) to a ProcessPoolExecutor with N workers, each with its "
-                "own GIL. 0 (default) keeps all processing on the main event loop. '--chat-processor vllm' only."
+                "own GIL. 0 (default) keeps all processing on the main event loop. '--dyn-chat-processor vllm' only."
             ),
             arg_type=int,
         )
