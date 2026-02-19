@@ -142,6 +142,7 @@ spec:
           - --namespace-scope-lease-duration={{ .Values.namespaceRestriction.lease.duration }}
           - --namespace-scope-lease-renew-interval={{ .Values.namespaceRestriction.lease.renewInterval }}
         {{- end }}
+          - --gpu-discovery-enabled={{ .Values.gpuDiscovery.enabled }}
         {{- end }}
           - --operator-version={{ .Chart.AppVersion }}
         {{- if .Values.webhook.enabled }}

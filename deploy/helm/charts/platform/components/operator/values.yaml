@@ -31,6 +31,13 @@ namespaceRestriction:
     duration: 30s
     # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
     renewInterval: 10s
+# -- GPU discovery configuration (only applies when namespaceRestriction.enabled=true)
+gpuDiscovery:
+  # -- Whether to provision a ClusterRole for the namespace-scoped operator to read GPU node labels.
+  # When true (default), Helm creates a ClusterRole/ClusterRoleBinding granting node read access.
+  # Set to false if your installer lacks ClusterRole creation permissions; you must then provide
+  # hardware config manually in each DynamoGraphDeploymentRequest.
+  enabled: true
 controllerManager:
   tolerations: []
   affinity: {}
