@@ -58,7 +58,7 @@ class EncodeWorkerHandler:
             self.model, trust_remote_code=True
         )
         self.vision_model = load_vision_model(self.model)
-        logger.info(f"Output {self.vision_model.out_hidden_size}?")
+        logger.debug(f"embedding hidden dim: {self.vision_model.out_hidden_size}")
         self.min_workers = 1
 
         # Get encoder components for the model
