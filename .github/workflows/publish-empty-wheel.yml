@@ -16,9 +16,8 @@ on:
         default: 'ai-dynamo-test'
       package_version:
         description: 'Package version (e.g., 0.0.1)'
-        required: false
+        required: true
         type: string
-        default: '0.0.1'
       s3_bucket:
         description: 'S3 bucket to upload the wheel'
         required: false
@@ -41,64 +40,97 @@ jobs:
     steps:
       - name: Set up Python and build tools
         run: |
-          apt-get update && apt-get install -y python3 python3-pip python3-venv
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip python3-venv python3.12-venv
           python3 -m venv /tmp/wheel-venv
           source /tmp/wheel-venv/bin/activate
           pip install --upgrade pip wheel setuptools twine
           echo "/tmp/wheel-venv/bin" >> $GITHUB_PATH
 
-      - name: Validate inputs
-        env:
-          PKG_NAME: ${{ inputs.package_name }}
-          PKG_VERSION: ${{ inputs.package_version }}
-          S3_BUCKET: ${{ inputs.s3_bucket }}
-          S3_PREFIX: ${{ inputs.s3_prefix }}
+      - name: Resolve inputs
+        id: resolve
         run: |
           set -euo pipefail
+          PKG_NAME="${{ inputs.package_name }}"
+          PKG_VERSION="${{ inputs.package_version }}"
+          S3_BUCKET="${{ inputs.s3_bucket }}"
+          S3_PREFIX="${{ inputs.s3_prefix }}"
+
+          echo "pkg_name=${PKG_NAME:-ai-dynamo-test}" >> $GITHUB_OUTPUT
+          echo "s3_bucket=${S3_BUCKET:-dynamo-ops-test-utils}" >> $GITHUB_OUTPUT
+          echo "s3_prefix=${S3_PREFIX:-wheels/}" >> $GITHUB_OUTPUT
+
+          echo "pkg_version=${PKG_VERSION:-0.0.1}" >> $GITHUB_OUTPUT
+
+      - name: Validate inputs
+        env:
+          PKG_NAME: ${{ steps.resolve.outputs.pkg_name }}
+          PKG_VERSION: ${{ steps.resolve.outputs.pkg_version }}
+          S3_BUCKET: ${{ steps.resolve.outputs.s3_bucket }}
+          S3_PREFIX: ${{ steps.resolve.outputs.s3_prefix }}
+        run: |
+          set -euo pipefail
+          echo "Validating: name=${PKG_NAME} version=${PKG_VERSION} bucket=${S3_BUCKET} prefix=${S3_PREFIX}"
+
+          if [[ -z "${PKG_NAME}" ]]; then
+            echo "::error::Package name is empty"
+            exit 1
+          fi
           if [[ ! "${PKG_NAME}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
             echo "::error::Invalid package name: must be alphanumeric with hyphens/underscores only"
+            exit 1
+          fi
+          if [[ -z "${PKG_VERSION}" ]]; then
+            echo "::error::Package version is empty"
             exit 1
           fi
           if [[ ! "${PKG_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9.]+)?$ ]]; then
             echo "::error::Invalid version: must follow PEP 440 (e.g., 0.0.1)"
             exit 1
           fi
+          if [[ -z "${S3_BUCKET}" ]]; then
+            echo "::error::S3 bucket is empty"
+            exit 1
+          fi
           if [[ ! "${S3_BUCKET}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
             echo "::error::Invalid S3 bucket name"
             exit 1
           fi
-          if [[ ! "${S3_PREFIX}" =~ ^[a-zA-Z0-9/_-]*$ ]]; then
+          if [[ ! "${S3_PREFIX}" =~ ^[a-zA-Z0-9/_.-]*$ ]]; then
             echo "::error::Invalid S3 prefix"
             exit 1
           fi
 
       - name: Generate empty wheel
         env:
-          PKG_NAME: ${{ inputs.package_name }}
-          PKG_VERSION: ${{ inputs.package_version }}
+          PKG_NAME: ${{ steps.resolve.outputs.pkg_name }}
+          PKG_VERSION: ${{ steps.resolve.outputs.pkg_version }}
         run: |
           set -euo pipefail
           PKG_DIR="${PKG_NAME//-/_}"
 
           mkdir -p "${PKG_DIR}"
-          cat > "${PKG_DIR}/__init__.py" <<'PYEOF'
-          __version__ = "0.0.0"
-          PYEOF
-          sed -i "s/0.0.0/${PKG_VERSION}/" "${PKG_DIR}/__init__.py"
+          printf '__version__ = "%s"\n' "${PKG_VERSION}" > "${PKG_DIR}/__init__.py"
 
-          cat > pyproject.toml <<TOMLEOF
-          [project]
-          name = "${PKG_NAME}"
-          version = "${PKG_VERSION}"
-          description = "Empty test wheel for Artifactory PrivateLink validation"
-          requires-python = ">=3.10"
+          cat > pyproject.toml <<EOF
+[project]
+name = "${PKG_NAME}"
+version = "${PKG_VERSION}"
+description = "Empty test wheel for Artifactory PrivateLink validation"
+requires-python = ">=3.10"
 
-          [build-system]
-          requires = ["setuptools>=64", "wheel"]
-          build-backend = "setuptools.build_meta"
-          TOMLEOF
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+EOF
 
           python3 -m pip wheel . --no-deps --wheel-dir dist/
+
+          if ! ls dist/*.whl 1>/dev/null 2>&1; then
+            echo "::error::Wheel generation failed -- no .whl file in dist/"
+            exit 1
+          fi
           echo "Generated wheel:"
           ls -la dist/
 
@@ -107,8 +139,8 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          S3_BUCKET: ${{ inputs.s3_bucket }}
-          S3_PREFIX: ${{ inputs.s3_prefix }}
+          S3_BUCKET: ${{ steps.resolve.outputs.s3_bucket }}
+          S3_PREFIX: ${{ steps.resolve.outputs.s3_prefix }}
         run: |
           set -euo pipefail
           WHEEL_FILE=$(ls dist/*.whl)
@@ -129,8 +161,8 @@ jobs:
           ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           TWINE_NON_INTERACTIVE: "1"
-          PKG_NAME: ${{ inputs.package_name }}
-          PKG_VERSION: ${{ inputs.package_version }}
+          PKG_NAME: ${{ steps.resolve.outputs.pkg_name }}
+          PKG_VERSION: ${{ steps.resolve.outputs.pkg_version }}
         run: |
           set -euo pipefail
 
@@ -150,8 +182,8 @@ jobs:
 
       - name: Summary
         env:
-          PKG_NAME: ${{ inputs.package_name }}
-          PKG_VERSION: ${{ inputs.package_version }}
+          PKG_NAME: ${{ steps.resolve.outputs.pkg_name }}
+          PKG_VERSION: ${{ steps.resolve.outputs.pkg_version }}
         run: |
           WHEEL_FILE=$(basename dist/*.whl)
           echo "" >> $GITHUB_STEP_SUMMARY
