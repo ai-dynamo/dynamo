@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import dataclasses
 import logging
 import os
 import socket
@@ -205,10 +206,6 @@ def update_dynamo_config_with_engine(
             f"Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
         )
 
-    has_kv_transfer_config = (
-        hasattr(engine_config, "kv_transfer_config")
-        and engine_config.kv_transfer_config is not None
-    )
     if not normalized or "none" in normalized or "null" in normalized:
         if len(normalized) > 1:
             raise ValueError(
@@ -216,10 +213,6 @@ def update_dynamo_config_with_engine(
             )
         dynamo_config.connector = []  # type: ignore[assignment]
     else:
-        if has_kv_transfer_config:
-            raise ValueError(
-                "Cannot specify both --kv-transfer-config and --connector flags"
-            )
         dynamo_config.connector = normalized  # type: ignore[assignment]
 
     # Validate ModelExpress P2P server URL
@@ -360,25 +353,43 @@ def create_kv_transfer_config(
 ) -> Optional[KVTransferConfig]:
     """Create KVTransferConfig based on user config or connector list.
 
-    Handles logging and returns the appropriate config or None.
+    When both --connector and --kv-transfer-config are provided, the user's
+    kv-transfer-config is merged into the matching connector config built from
+    --connector.  For example, setting --connector kvbm nixl together with
+    --kv-transfer-config '{"kv_connector":"NixlConnector", ...}' will merge
+    the user-provided fields (e.g. kv_connector_extra_config) into the nixl
+    connector entry.
     """
     has_user_kv_config = (
         hasattr(engine_config, "kv_transfer_config")
         and engine_config.kv_transfer_config is not None
     )
-    if has_user_kv_config:
-        logger.info("Using user-provided kv_transfer_config from --kv-transfer-config")
-        return None
     if not dynamo_config.connector:
-        logger.info("Using vLLM defaults for kv_transfer_config")
+        if has_user_kv_config:
+            logger.info(
+                "Using user-provided kv_transfer_config from --kv-transfer-config"
+            )
         return None
-    logger.info(
-        f"Creating kv_transfer_config from --connector {dynamo_config.connector}"
-    )
+
+    user_kv_config = engine_config.kv_transfer_config if has_user_kv_config else None
+
+    if user_kv_config is not None:
+        logger.info(
+            "Merging user-provided --kv-transfer-config into "
+            f"--connector {dynamo_config.connector}"
+        )
+    else:
+        logger.info(
+            f"Creating kv_transfer_config from --connector {dynamo_config.connector}"
+        )
+
     multi_connectors = []
     for conn in dynamo_config.connector:
         if conn == "lmcache":
-            connector_cfg = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+            connector_cfg: Dict[str, Any] = {
+                "kv_connector": "LMCacheConnectorV1",
+                "kv_role": "kv_both",
+            }
         elif conn == "nixl":
             connector_cfg = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
         elif conn == "kvbm":
@@ -389,6 +400,11 @@ def create_kv_transfer_config(
             }
         else:
             continue
+
+        # Merge user's --kv-transfer-config into the matching connector
+        if user_kv_config is not None:
+            _merge_user_kv_config(connector_cfg, user_kv_config)
+
         multi_connectors.append(connector_cfg)
 
     # For single connector, return direct config
@@ -403,6 +419,55 @@ def create_kv_transfer_config(
         kv_connector_extra_config={"connectors": multi_connectors},
         kv_connector_module_path="kvbm.vllm_integration.connector",
     )
+
+
+def _merge_user_kv_config(
+    connector_cfg: Dict[str, Any], user_kv_config: KVTransferConfig
+) -> None:
+    """Merge user-provided --kv-transfer-config fields into a connector config.
+
+    Only merges when the user's ``kv_connector`` matches the connector being
+    built (or when the user did not specify ``kv_connector``).  Any
+    ``KVTransferConfig`` field whose value differs from its default is applied
+    to *connector_cfg*.  Dict-valued fields (``kv_connector_extra_config``)
+    are merged rather than replaced so that existing keys are preserved.
+
+    Example — selecting an alternative NIXL backend::
+
+        --kv-transfer-config '{"kv_connector":"NixlConnector",
+            "kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+    """
+    # Only merge into the connector that matches the user's kv_connector.
+    if user_kv_config.kv_connector != connector_cfg["kv_connector"]:
+        return
+
+    # Fields that are used for matching / auto-generated — never overwrite.
+    skip = {"kv_connector", "engine_id"}
+
+    for f in dataclasses.fields(user_kv_config):
+        if f.name in skip:
+            continue
+
+        user_val = getattr(user_kv_config, f.name)
+
+        # Determine the field's default value.
+        if f.default is not dataclasses.MISSING:
+            default = f.default
+        elif f.default_factory is not dataclasses.MISSING:
+            default = f.default_factory()
+        else:
+            continue
+
+        if user_val == default:
+            continue
+
+        # Dict fields are merged so existing keys are preserved.
+        if isinstance(user_val, dict):
+            existing = connector_cfg.get(f.name, {})
+            existing.update(user_val)
+            connector_cfg[f.name] = existing
+        else:
+            connector_cfg[f.name] = user_val
 
 
 def get_host_ip() -> str:
