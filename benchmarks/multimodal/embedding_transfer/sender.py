@@ -45,13 +45,13 @@ class Sender:
         await self.client.wait_for_instances()
 
     async def send_request(self):
-        request = []
+        request = TransferRequest(requests=[])
         futures = []
         for _ in range(self.config.tensor_count_per_request):
             transfer_request, send_future = await self.sender.send_embeddings(
                 self.tensor, stage_embeddings=True
             )
-            request.append(transfer_request)
+            request.requests.append(transfer_request)
             futures.append(send_future)
         stream = await self.client.round_robin(request.model_dump_json())
         async for response in stream:
