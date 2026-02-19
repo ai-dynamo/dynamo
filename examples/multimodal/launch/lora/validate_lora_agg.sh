@@ -11,8 +11,8 @@
 #   A running multimodal worker via lora_agg.sh
 #
 # Usage:
-#   ./validate_multimodal_lora.sh                            # defaults: frontend=8000, system=8081
-#   ./validate_multimodal_lora.sh --lora-path /tmp/my-vlm-lora  # with a real LoRA adapter
+#   ./validate_lora_agg.sh                            # defaults: frontend=8000, system=8081
+#   ./validate_lora_agg.sh --lora-path /tmp/my-vlm-lora  # with a real LoRA adapter
 
 set -euo pipefail
 

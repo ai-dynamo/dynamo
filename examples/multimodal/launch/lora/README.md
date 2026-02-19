@@ -181,17 +181,20 @@ A validation script is provided to test the LoRA endpoints against a running ser
 # Start the server in one terminal
 ./lora_agg.sh
 
-# download the LoRA adapter
-export HF_TOKEN=<your-huggingface-token>
+# In another terminal, download a LoRA adapter
 hf download Chhagan005/Chhagan-DocVL-Qwen3 --local-dir /tmp/my-vlm-lora
 
-# In another terminal, run the validation script
-./validate_multimodal_lora.sh --lora-path /tmp/my-vlm-lora
+# Run the full test suite (with end-to-end LoRA load/infer/unload)
+./validate_lora_agg.sh --lora-path /tmp/my-vlm-lora
+
+# Or run only the error-handling and base-model tests (no adapter needed)
+./validate_lora_agg.sh
 ```
 
-The validation script validates:
-- Frontend health
-- LoRA list/load/unload error handling
+The validation script covers:
+- Frontend health and base model discovery
+- LoRA load/unload error handling (missing fields, non-existent adapter)
+- End-to-end LoRA lifecycle: load, verify in `/v1/models`, infer, unload (when `--lora-path` provided)
 - Base model multimodal inference
 
 ## Troubleshooting
