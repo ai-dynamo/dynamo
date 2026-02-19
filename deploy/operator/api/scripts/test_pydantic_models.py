@@ -25,17 +25,25 @@ from pathlib import Path
 
 
 def _repo_root() -> Path:
+    start = Path(__file__).parent
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             check=True,
-            cwd=Path(__file__).parent,
+            cwd=start,
         )
         return Path(result.stdout.strip())
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return Path(__file__).parent.parent.parent.parent.parent
+        pass
+    # Fallback: walk up until we find go.mod (same logic as generate_pydantic_from_go.py)
+    p = start
+    while p != p.parent:
+        if (p / "go.mod").exists():
+            return p
+        p = p.parent
+    return start
 
 
 # Add the components src to path so we can import the generated models
