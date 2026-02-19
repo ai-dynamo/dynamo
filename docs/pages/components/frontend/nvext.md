@@ -81,7 +81,7 @@ When `--router-queue-threshold` is set and the queue is active, this value shift
 
 Expected output sequence length — the estimated number of output tokens the request will generate. The router uses this hint in two ways:
 
-1. **Output block tracking**: When `--track-output-blocks` is enabled, the router adds placeholder blocks during generation and applies fractional decay based on progress toward `osl`.
+1. **Output block tracking**: When `--router-track-output-blocks` is enabled, the router adds placeholder blocks during generation and applies fractional decay based on progress toward `osl`.
 2. **Resource estimation**: Helps the router estimate total resource requirements when making routing decisions.
 
 ```json

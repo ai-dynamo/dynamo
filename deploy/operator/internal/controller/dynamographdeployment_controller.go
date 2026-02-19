@@ -136,6 +136,12 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			LastTransitionTime: metav1.Now(),
 		})
 
+		// Only set ObservedGeneration when reconciliation succeeded (no error),
+		// so it accurately reflects the last successfully processed generation.
+		if err == nil {
+			dynamoDeployment.Status.ObservedGeneration = dynamoDeployment.Generation
+		}
+
 		updateErr := r.Status().Update(ctx, dynamoDeployment)
 		if updateErr != nil {
 			logger.Error(updateErr, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)

@@ -103,19 +103,6 @@ pub struct PrefillRouter {
 }
 
 impl PrefillRouter {
-    fn routing_inputs(req: &PreprocessedRequest) -> (&[u32], Option<&[Option<BlockExtraInfo>]>) {
-        if let Some(mm_routing_info) = req.mm_routing_info.as_ref() {
-            let routing_tokens = mm_routing_info.routing_token_ids.as_slice();
-            if !routing_tokens.is_empty() {
-                return (
-                    routing_tokens,
-                    Some(mm_routing_info.block_mm_infos.as_slice()),
-                );
-            }
-        }
-        (&req.token_ids, None)
-    }
-
     /// Create a disabled prefill router that will never activate (passthrough only)
     pub fn disabled(
         model_manager: Arc<ModelManager>,
@@ -298,7 +285,7 @@ impl PrefillRouter {
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
-            let (routing_token_ids, block_mm_infos) = Self::routing_inputs(req);
+            let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
             match self
                 .query_prefill_worker(
                     routing_token_ids,
