@@ -3,13 +3,13 @@
 
 """Dynamo runtime configuration ArgGroup."""
 
-import os
 from typing import List, Optional
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
 
@@ -36,12 +36,7 @@ class DynamoRuntimeConfig(ConfigBase):
     media_output_http_url: Optional[str] = None
 
     def validate(self) -> None:
-        # Apply DYN_NAMESPACE_WORKER_SUFFIX to the namespace if set.
-        # This enables multiple sets of workers for the same model by giving
-        # each set a distinct namespace (e.g., "dynamo-pool1", "dynamo-pool2").
-        suffix = os.environ.get("DYN_NAMESPACE_WORKER_SUFFIX")
-        if suffix:
-            self.namespace = f"{self.namespace}-{suffix}"
+        self.namespace = get_worker_namespace(self.namespace)
 
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events

@@ -2,16 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from typing import Optional
 
 
-def get_worker_namespace(default="dynamo"):
+def get_worker_namespace(namespace: Optional[str] = None) -> str:
     """Get the Dynamo namespace for a worker.
 
-    If DYN_NAMESPACE_WORKER_SUFFIX is set, the namespace becomes
-    "{DYN_NAMESPACE}-{DYN_NAMESPACE_WORKER_SUFFIX}". This enables supporting
-    multiple sets of workers for the same model.
+    Uses the provided namespace, or falls back to the DYN_NAMESPACE environment
+    variable (defaulting to "dynamo"). If DYN_NAMESPACE_WORKER_SUFFIX is set,
+    it is appended as "{namespace}-{suffix}" to support multiple sets of workers
+    for the same model.
     """
-    namespace = os.environ.get("DYN_NAMESPACE", default)
+    if not namespace:
+        namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+
     suffix = os.environ.get("DYN_NAMESPACE_WORKER_SUFFIX")
     if suffix:
         namespace = f"{namespace}-{suffix}"
