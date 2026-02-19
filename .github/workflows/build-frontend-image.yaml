@@ -40,7 +40,7 @@ env:
 
 jobs:
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     outputs:
       frontend: ${{ steps.changes.outputs.frontend }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
@@ -100,10 +100,10 @@ jobs:
         shell: bash
         run: |
           TARGET_TAG="${{ github.sha }}-${{ env.TARGET }}-${{ matrix.arch }}"
-          DEFAULT_TARGET_IMAGE_URI="${{ env.ECR_HOSTNAME }}/{{ env.IMAGE_REGISTRY }}/{{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}"
+          DEFAULT_TARGET_IMAGE_URI="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}"
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
-          echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/{{ env.IMAGE_REGISTRY }}/{{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
+          echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
       - name: Print Build Container parameters
         run: |
           echo "=== Build Container Parameters ==="
