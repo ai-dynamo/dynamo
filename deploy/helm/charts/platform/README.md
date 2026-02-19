@@ -115,8 +115,6 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.controllerManager.manager.args[1] | string | `"--metrics-bind-address=127.0.0.1:8080"` | Metrics endpoint for Prometheus scraping (localhost only for security) |
 | dynamo-operator.imagePullSecrets | list | `[]` | Secrets for pulling private container images |
 | dynamo-operator.dynamo.groveTerminationDelay | string | `"4h"` | How long to wait before forcefully terminating Grove instances |
-| dynamo-operator.dynamo.internalImages.debugger | string | `"python:3.12-slim"` | Debugger image for troubleshooting deployments |
-| dynamo-operator.dynamo.enableRestrictedSecurityContext | bool | `false` | Whether to enable restricted security contexts for enhanced security |
 | dynamo-operator.dynamo.dockerRegistry.useKubernetesSecret | bool | `false` | Whether to use Kubernetes secrets for registry authentication |
 | dynamo-operator.dynamo.dockerRegistry.server | string | `nil` | Docker registry server URL |
 | dynamo-operator.dynamo.dockerRegistry.username | string | `nil` | Registry username |

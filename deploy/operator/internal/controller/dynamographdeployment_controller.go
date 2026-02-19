@@ -623,6 +623,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		// else, only create for the frontend component
 		isK8sDiscoveryEnabled := r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations)
 		if isK8sDiscoveryEnabled || component.ComponentType == consts.ComponentTypeFrontend {
+			if component.DynamoNamespace == nil {
+				return ReconcileResult{}, fmt.Errorf("expected component %s to have a dynamoNamespace", componentName)
+			}
 			mainComponentService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 				ServiceName:     dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""),
 				Namespace:       dynamoDeployment.Namespace,
