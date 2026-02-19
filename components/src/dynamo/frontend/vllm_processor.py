@@ -85,6 +85,7 @@ _w_input_processor: InputProcessor | None = None
 _w_tokenizer: Any = None
 _w_tool_parser_class: type[ToolParser] | None = None
 _w_reasoning_parser_class: type[ReasoningParser] | None = None
+_w_stream_interval: int = 20
 _WORKER_STOP_SENTINEL = "__dynamo_worker_stop__"
 
 
@@ -95,9 +96,11 @@ def _init_worker(
     load_format: str,
     tool_parser_name: str | None,
     reasoning_parser_name: str | None,
+    stream_interval: int,
 ) -> None:
     """Initialize a worker process with its own VllmConfig and InputProcessor."""
-    global _w_input_processor, _w_tokenizer, _w_tool_parser_class, _w_reasoning_parser_class
+    global _w_input_processor, _w_tokenizer, _w_tool_parser_class
+    global _w_reasoning_parser_class, _w_stream_interval
 
     model_config = ModelConfig(
         model=model_path,
@@ -124,6 +127,7 @@ def _init_worker(
         )
     else:
         _w_reasoning_parser_class = None
+    _w_stream_interval = max(1, stream_interval)
 
 
 def _worker_warmup() -> bool:
@@ -274,7 +278,7 @@ def _request_handler(
         output_processor = OutputProcessor(
             _w_tokenizer,
             log_stats=False,
-            stream_interval=1,
+            stream_interval=_w_stream_interval,
         )
         vllm_request_id = vllm_preproc.request_id
         output_processor.add_request(vllm_preproc, None)
@@ -676,7 +680,9 @@ class VllmProcessor:
                 )
             else:
                 # Round robin or random, depending on cmd line flag
-                dynamo_stream = await self.router.generate(dynamo_preproc)
+                dynamo_stream = await self.router.generate(
+                    dynamo_preproc, annotated=False
+                )
 
             async for dynamo_response in dynamo_stream:
                 # dynamo_response looks like this for regular router:
@@ -685,8 +691,10 @@ class VllmProcessor:
 
                 if self.is_kv_router:
                     engine_response = dynamo_response
-                else:
+                elif hasattr(dynamo_response, "data"):
                     engine_response = dynamo_response.data()
+                else:
+                    engine_response = dynamo_response
 
                 # engine_response:
                 # Normal: {'token_ids': [151658]}
@@ -847,14 +855,18 @@ class VllmProcessor:
                     output_options=dynamo_preproc["output_options"],
                 )
             else:
-                dynamo_stream = await self.router.generate(dynamo_preproc)
+                dynamo_stream = await self.router.generate(
+                    dynamo_preproc, annotated=False
+                )
 
             # Stream tokens to worker, yield processed results back
             async for dynamo_response in dynamo_stream:
                 if self.is_kv_router:
                     engine_response = dynamo_response
-                else:
+                elif hasattr(dynamo_response, "data"):
                     engine_response = dynamo_response.data()
+                else:
+                    engine_response = dynamo_response
 
                 input_q.put(engine_response)
 
@@ -904,6 +916,17 @@ class EngineFactory:
         self.config = config
         self.flags = flags
         self.debug_perf = debug_perf
+        self.stream_interval = 20
+        raw_stream_interval = os.getenv("DYN_VLLM_STREAM_INTERVAL")
+        if raw_stream_interval:
+            try:
+                self.stream_interval = max(1, int(raw_stream_interval))
+            except ValueError:
+                logger.warning(
+                    "Invalid DYN_VLLM_STREAM_INTERVAL=%r, using default=%d",
+                    raw_stream_interval,
+                    self.stream_interval,
+                )
 
     async def chat_engine_factory(
         self,
@@ -945,8 +968,9 @@ class EngineFactory:
         output_processor = OutputProcessor(
             tokenizer,
             log_stats=False,
-            stream_interval=1,
+            stream_interval=self.stream_interval,
         )
+        logger.info("vLLM OutputProcessor stream_interval=%d", self.stream_interval)
 
         tool_parser_name = self.flags.tool_call_parser or mdc.runtime_config().get(
             "tool_call_parser"
@@ -1002,6 +1026,7 @@ class EngineFactory:
                     load_format,
                     tool_parser_name,
                     reasoning_parser_name,
+                    self.stream_interval,
                 ),
             )
             # Warm up all workers to ensure initialization completes

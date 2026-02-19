@@ -520,6 +520,7 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--dyn-chat-processor",
             env_var="DYN_CHAT_PROCESSOR",
             default="dynamo",
+            dest="chat_processor",
             help=(
                 "[EXPERIMENTAL] When set to 'vllm', use local vllm for the pre and post "
                 "processor."
@@ -532,6 +533,7 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--dyn-debug-perf",
             env_var="DYN_DEBUG_PERF",
             default=False,
+            dest="debug_perf",
             help=(
                 "Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
                 "Logs per-function timing, request concurrency, and hot-path section durations. "
@@ -544,6 +546,7 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--dyn-preprocess-workers",
             env_var="DYN_PREPROCESS_WORKERS",
             default=0,
+            dest="preprocess_workers",
             help=(
                 "Number of worker processes for preprocessing and output processing. "
                 "When > 0, offloads CPU-bound work (tokenization, template rendering, "
