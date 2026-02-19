@@ -36,6 +36,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -606,6 +607,41 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 					Labels:    map[string]string{"instance-id": "0"},
 				},
 				Spec: volcanov1beta1.PodGroupSpec{MinMember: 2},
+			},
+			want1:   false,
+			wantErr: false,
+		},
+		{
+			name: "nil instanceID with Replicas - MinMember scales for gang scheduling",
+			args: args{
+				ctx: context.Background(),
+				opt: generateResourceOption{
+					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "service-native-replicas",
+							Namespace: "default",
+						},
+						Spec: v1alpha1.DynamoComponentDeploymentSpec{
+							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+								ServiceName:     "service-native-replicas",
+								DynamoNamespace: &[]string{"default"}[0],
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
+								Replicas: ptr.To(int32(3)),
+							},
+						},
+					},
+					instanceID: nil,
+				},
+			},
+			want: &volcanov1beta1.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "service-native-replicas",
+					Namespace: "default",
+					Labels:    map[string]string{"instance-id": "0"},
+				},
+				Spec: volcanov1beta1.PodGroupSpec{MinMember: 6}, // 2 nodes * 3 replicas
 			},
 			want1:   false,
 			wantErr: false,
@@ -1786,11 +1822,11 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				// Check that legacy LWS resources are deleted
 				legacyLWS0 := &leaderworkersetv1.LeaderWorkerSet{}
 				err := fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-0", Namespace: "default"}, legacyLWS0)
-				g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy LWS test-component-0 should be deleted")
+				g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy LWS test-component-0 should be deleted")
 
 				legacyLWS1 := &leaderworkersetv1.LeaderWorkerSet{}
 				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-1", Namespace: "default"}, legacyLWS1)
-				g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy LWS test-component-1 should be deleted")
+				g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy LWS test-component-1 should be deleted")
 
 				// Check that new native-scaling LWS still exists
 				newLWS := &leaderworkersetv1.LeaderWorkerSet{}
@@ -1800,11 +1836,11 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				// Check that legacy PodGroups are deleted
 				legacyPG0 := &volcanov1beta1.PodGroup{}
 				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-0", Namespace: "default"}, legacyPG0)
-				g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy PodGroup test-component-0 should be deleted")
+				g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy PodGroup test-component-0 should be deleted")
 
 				legacyPG1 := &volcanov1beta1.PodGroup{}
 				err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-component-1", Namespace: "default"}, legacyPG1)
-				g.Expect(k8serrors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy PodGroup test-component-1 should be deleted")
+				g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "Legacy PodGroup test-component-1 should be deleted")
 			}
 		})
 	}

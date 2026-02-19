@@ -591,6 +591,9 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 
 	minMember := opt.dynamoComponentDeployment.GetNumberOfNodes()
+	if opt.instanceID == nil && opt.dynamoComponentDeployment.Spec.Replicas != nil {
+		minMember = minMember * *opt.dynamoComponentDeployment.Spec.Replicas
+	}
 
 	podGroup := &volcanov1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -765,9 +768,9 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 
 	// Set the replica count from the DynamoComponentDeployment spec
 	// In native scaling mode, this creates one LWS with N replicas
-	// In legacy mode, this would typically be 1, but we honor the spec value
+	// In legacy mode, keep 1 replica per indexed LWS
 	desiredReplicas := int32(1)
-	if opt.dynamoComponentDeployment.Spec.Replicas != nil {
+	if opt.instanceID == nil && opt.dynamoComponentDeployment.Spec.Replicas != nil {
 		desiredReplicas = *opt.dynamoComponentDeployment.Spec.Replicas
 	}
 
