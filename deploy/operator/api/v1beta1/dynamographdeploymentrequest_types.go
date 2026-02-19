@@ -19,9 +19,101 @@ package v1beta1
 
 import (
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
+
+// LegacyConfigMapKeySelector selects a specific key from a ConfigMap.
+// Used to reference external configuration data stored in ConfigMaps.
+type LegacyConfigMapKeySelector struct {
+	// Name of the ConfigMap containing the desired data.
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml".
+	// +kubebuilder:default=disagg.yaml
+	Key string `json:"key,omitempty"`
+}
+
+// LegacyProfilingConfigSpec defines configuration for the profiling process.
+// This structure maps directly to the profile_sla.py config format.
+type LegacyProfilingConfigSpec struct {
+	// Config is the profiling configuration as arbitrary JSON/YAML.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Config *apiextensionsv1.JSON `json:"config,omitempty"`
+
+	// ConfigMapRef is an optional reference to a ConfigMap containing the DGD base config file.
+	// +kubebuilder:validation:Optional
+	ConfigMapRef *LegacyConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// ProfilerImage specifies the container image to use for profiling jobs.
+	// +kubebuilder:validation:Optional
+	ProfilerImage string `json:"profilerImage,omitempty"`
+
+	// OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.
+	// +kubebuilder:validation:Optional
+	OutputPVC string `json:"outputPVC,omitempty"`
+
+	// Resources specifies the compute resource requirements for the profiling job container.
+	// +kubebuilder:validation:Optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Tolerations allows the profiling job to be scheduled on nodes with matching taints.
+	// +kubebuilder:validation:Optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// NodeSelector is a selector for scheduling the profiling pod.
+	// +kubebuilder:validation:Optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+}
+
+// LegacyDeploymentOverridesSpec allows customizing metadata for auto-created DGDs.
+type LegacyDeploymentOverridesSpec struct {
+	// Name is the desired name for the created DynamoGraphDeployment.
+	// +kubebuilder:validation:Optional
+	Name string `json:"name,omitempty"`
+
+	// Namespace is the desired namespace for the created DynamoGraphDeployment.
+	// +kubebuilder:validation:Optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Labels are additional labels to add to the DynamoGraphDeployment metadata.
+	// +kubebuilder:validation:Optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// Annotations are additional annotations to add to the DynamoGraphDeployment metadata.
+	// +kubebuilder:validation:Optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// WorkersImage specifies the container image to use for DGD worker components.
+	// +kubebuilder:validation:Optional
+	WorkersImage string `json:"workersImage,omitempty"`
+}
+
+// LegacySpec contains v1alpha1-style fields for incremental migration.
+// DEPRECATED: This field is for internal migration only and will be removed.
+// Use the new top-level v1beta1 fields instead.
+type LegacySpec struct {
+	// Backend specifies the inference backend for profiling (v1alpha1 style - string not enum).
+	// +kubebuilder:validation:Optional
+	Backend string `json:"backend,omitempty"`
+
+	// UseMocker indicates whether to deploy a mocker DynamoGraphDeployment.
+	// +kubebuilder:default=false
+	UseMocker bool `json:"useMocker,omitempty"`
+
+	// ProfilingConfig provides the complete configuration for the profiling job.
+	// +kubebuilder:validation:Optional
+	ProfilingConfig *LegacyProfilingConfigSpec `json:"profilingConfig,omitempty"`
+
+	// DeploymentOverrides allows customizing metadata for the auto-created DGD.
+	// +kubebuilder:validation:Optional
+	DeploymentOverrides *LegacyDeploymentOverridesSpec `json:"deploymentOverrides,omitempty"`
+}
 
 // DGDRPhase represents the lifecycle phase of a DynamoGraphDeploymentRequest.
 // +kubebuilder:validation:Enum=Pending;Profiling;Ready;Deploying;Deployed;Failed
@@ -415,7 +507,13 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// for manual review and application.
 	// +optional
 	// +kubebuilder:default=true
-	AutoApply bool `json:"autoApply,omitempty"`
+	AutoApply bool `json:"autoApply"`
+
+	// Legacy contains v1alpha1-style fields for incremental controller migration.
+	// DEPRECATED: This field is for internal migration only and will be removed.
+	// New users should use the top-level v1beta1 fields instead.
+	// +optional
+	Legacy *LegacySpec `json:"legacy,omitempty"`
 }
 
 // ParetoConfig represents a single Pareto-optimal deployment configuration
@@ -441,6 +539,42 @@ type ProfilingResultsStatus struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
 	SelectedConfig *runtime.RawExtension `json:"selectedConfig,omitempty"`
+}
+
+// LegacyDeploymentStatus tracks the state of an auto-created DynamoGraphDeployment (v1alpha1 style).
+type LegacyDeploymentStatus struct {
+	// Name is the name of the created DynamoGraphDeployment.
+	Name string `json:"name,omitempty"`
+
+	// Namespace is the namespace of the created DynamoGraphDeployment.
+	Namespace string `json:"namespace,omitempty"`
+
+	// State is the current state of the DynamoGraphDeployment.
+	State string `json:"state,omitempty"`
+
+	// Created indicates whether the DGD has been successfully created.
+	Created bool `json:"created,omitempty"`
+}
+
+// LegacyStatus contains v1alpha1-style status fields for incremental migration.
+// DEPRECATED: This field is for internal migration only and will be removed.
+type LegacyStatus struct {
+	// State is a high-level textual status (v1alpha1 style).
+	State string `json:"state,omitempty"`
+
+	// Backend is extracted from profilingConfig for display.
+	Backend string `json:"backend,omitempty"`
+
+	// ProfilingResults contains a reference to the ConfigMap (v1alpha1 style - string ref).
+	ProfilingResults string `json:"profilingResults,omitempty"`
+
+	// GeneratedDeployment contains the full generated DGD spec (v1alpha1 style).
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:EmbeddedResource
+	GeneratedDeployment *runtime.RawExtension `json:"generatedDeployment,omitempty"`
+
+	// Deployment tracks the auto-created DGD (v1alpha1 style).
+	Deployment *LegacyDeploymentStatus `json:"deployment,omitempty"`
 }
 
 // DeploymentInfoStatus tracks the state of the deployed DynamoGraphDeployment.
@@ -493,6 +627,11 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Legacy contains v1alpha1-style status fields for incremental controller migration.
+	// DEPRECATED: This field is for internal migration only and will be removed.
+	// +optional
+	Legacy *LegacyStatus `json:"legacy,omitempty"`
 }
 
 // DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.

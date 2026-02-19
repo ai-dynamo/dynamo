@@ -146,6 +146,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 )
 
@@ -220,9 +221,11 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 		dst.Backend = v1beta1.BackendType(src.Backend)
 	}
 
-	// WorkersImage → Image
+	// Image: prefer workersImage (deployment image), fall back to profilerImage
 	if src.DeploymentOverrides != nil && src.DeploymentOverrides.WorkersImage != "" {
 		dst.Image = src.DeploymentOverrides.WorkersImage
+	} else if src.ProfilingConfig.ProfilerImage != "" {
+		dst.Image = src.ProfilingConfig.ProfilerImage
 	}
 
 	// UseMocker → Features.Mocker.Enabled
@@ -320,8 +323,8 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 		setAnnotation(dstObj, annDGDROutputPVC, src.ProfilingConfig.OutputPVC)
 	}
 
-	// Resources, Tolerations → Overrides.ProfilingJob
-	if src.ProfilingConfig.Resources != nil || len(src.ProfilingConfig.Tolerations) > 0 {
+	// Resources, Tolerations, NodeSelector → Overrides.ProfilingJob
+	if src.ProfilingConfig.Resources != nil || len(src.ProfilingConfig.Tolerations) > 0 || len(src.ProfilingConfig.NodeSelector) > 0 {
 		if dst.Overrides == nil {
 			dst.Overrides = &v1beta1.OverridesSpec{}
 		}
@@ -345,9 +348,13 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 		if len(src.ProfilingConfig.Tolerations) > 0 {
 			podSpec.Tolerations = src.ProfilingConfig.Tolerations
 		}
+
+		if len(src.ProfilingConfig.NodeSelector) > 0 {
+			podSpec.NodeSelector = src.ProfilingConfig.NodeSelector
+		}
 	}
 
-	// DeploymentOverrides (Name, Namespace, Labels, Annotations) — no v1beta1 equivalent; store as annotation
+	// DeploymentOverrides → Overrides.DGD (partial DGD) + annotation for round-trip
 	if src.DeploymentOverrides != nil {
 		overrides := struct {
 			Name        string            `json:"name,omitempty"`
@@ -360,11 +367,78 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 			Labels:      src.DeploymentOverrides.Labels,
 			Annotations: src.DeploymentOverrides.Annotations,
 		}
-		// Only store if there's meaningful data (beyond WorkersImage which is handled above)
+		// Store in annotation for round-trip
 		if overrides.Name != "" || overrides.Namespace != "" || len(overrides.Labels) > 0 || len(overrides.Annotations) > 0 {
 			if data, err := json.Marshal(overrides); err == nil {
 				setAnnotation(dstObj, annDGDRDeployOverrides, string(data))
 			}
+		}
+
+		// Also populate Overrides.DGD as a partial DGD for controller consumption
+		partialDGD := map[string]interface{}{
+			"apiVersion": "nvidia.com/v1alpha1",
+			"kind":       "DynamoGraphDeployment",
+			"metadata":   map[string]interface{}{},
+		}
+		meta := partialDGD["metadata"].(map[string]interface{})
+		hasOverride := false
+		if src.DeploymentOverrides.Name != "" {
+			meta["name"] = src.DeploymentOverrides.Name
+			hasOverride = true
+		}
+		if src.DeploymentOverrides.Namespace != "" {
+			meta["namespace"] = src.DeploymentOverrides.Namespace
+			hasOverride = true
+		}
+		if len(src.DeploymentOverrides.Labels) > 0 {
+			meta["labels"] = src.DeploymentOverrides.Labels
+			hasOverride = true
+		}
+		if len(src.DeploymentOverrides.Annotations) > 0 {
+			meta["annotations"] = src.DeploymentOverrides.Annotations
+			hasOverride = true
+		}
+		if hasOverride {
+			if data, err := json.Marshal(partialDGD); err == nil {
+				if dst.Overrides == nil {
+					dst.Overrides = &v1beta1.OverridesSpec{}
+				}
+				dst.Overrides.DGD = &runtime.RawExtension{Raw: data}
+			}
+		}
+	}
+
+	// --- Populate Legacy spec for controller compatibility ---
+	// The controller currently uses Legacy fields to access v1alpha1-style data
+	dst.Legacy = &v1beta1.LegacySpec{
+		Backend:   src.Backend,
+		UseMocker: src.UseMocker,
+	}
+
+	// ProfilingConfig
+	dst.Legacy.ProfilingConfig = &v1beta1.LegacyProfilingConfigSpec{
+		ProfilerImage: src.ProfilingConfig.ProfilerImage,
+		Config:        src.ProfilingConfig.Config,
+		OutputPVC:     src.ProfilingConfig.OutputPVC,
+		Resources:     src.ProfilingConfig.Resources,
+		Tolerations:   src.ProfilingConfig.Tolerations,
+		NodeSelector:  src.ProfilingConfig.NodeSelector,
+	}
+	if src.ProfilingConfig.ConfigMapRef != nil {
+		dst.Legacy.ProfilingConfig.ConfigMapRef = &v1beta1.LegacyConfigMapKeySelector{
+			Name: src.ProfilingConfig.ConfigMapRef.Name,
+			Key:  src.ProfilingConfig.ConfigMapRef.Key,
+		}
+	}
+
+	// DeploymentOverrides
+	if src.DeploymentOverrides != nil {
+		dst.Legacy.DeploymentOverrides = &v1beta1.LegacyDeploymentOverridesSpec{
+			Name:         src.DeploymentOverrides.Name,
+			Namespace:    src.DeploymentOverrides.Namespace,
+			Labels:       src.DeploymentOverrides.Labels,
+			Annotations:  src.DeploymentOverrides.Annotations,
+			WorkersImage: src.DeploymentOverrides.WorkersImage,
 		}
 	}
 }
@@ -486,7 +560,7 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 		}
 	}
 
-	// Resources, Tolerations from Overrides.ProfilingJob
+	// Resources, Tolerations, NodeSelector from Overrides.ProfilingJob
 	if src.Overrides != nil && src.Overrides.ProfilingJob != nil {
 		podSpec := &src.Overrides.ProfilingJob.Template.Spec
 		if len(podSpec.Containers) > 0 {
@@ -498,9 +572,12 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 		if len(podSpec.Tolerations) > 0 {
 			dst.ProfilingConfig.Tolerations = podSpec.Tolerations
 		}
+		if len(podSpec.NodeSelector) > 0 {
+			dst.ProfilingConfig.NodeSelector = podSpec.NodeSelector
+		}
 	}
 
-	// DeploymentOverrides from annotation + Image
+	// DeploymentOverrides from annotation + Overrides.DGD + Image
 	if srcObj.Annotations != nil {
 		if v, ok := srcObj.Annotations[annDGDRDeployOverrides]; ok && v != "" {
 			var overrides struct {
@@ -517,6 +594,37 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 				dst.DeploymentOverrides.Namespace = overrides.Namespace
 				dst.DeploymentOverrides.Labels = overrides.Labels
 				dst.DeploymentOverrides.Annotations = overrides.Annotations
+			}
+		}
+	}
+	// Also extract from Overrides.DGD if annotation is missing
+	if dst.DeploymentOverrides == nil && src.Overrides != nil && src.Overrides.DGD != nil && src.Overrides.DGD.Raw != nil {
+		var partialDGD map[string]interface{}
+		if err := json.Unmarshal(src.Overrides.DGD.Raw, &partialDGD); err == nil {
+			if metadata, ok := partialDGD["metadata"].(map[string]interface{}); ok {
+				dst.DeploymentOverrides = &DeploymentOverridesSpec{}
+				if name, ok := metadata["name"].(string); ok {
+					dst.DeploymentOverrides.Name = name
+				}
+				if ns, ok := metadata["namespace"].(string); ok {
+					dst.DeploymentOverrides.Namespace = ns
+				}
+				if labels, ok := metadata["labels"].(map[string]interface{}); ok {
+					dst.DeploymentOverrides.Labels = make(map[string]string)
+					for k, v := range labels {
+						if s, ok := v.(string); ok {
+							dst.DeploymentOverrides.Labels[k] = s
+						}
+					}
+				}
+				if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
+					dst.DeploymentOverrides.Annotations = make(map[string]string)
+					for k, v := range annotations {
+						if s, ok := v.(string); ok {
+							dst.DeploymentOverrides.Annotations[k] = s
+						}
+					}
+				}
 			}
 		}
 	}
@@ -559,6 +667,25 @@ func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.D
 		// Store the full deployment status as annotation for round-trip
 		if data, err := json.Marshal(src.Deployment); err == nil {
 			setAnnotation(dstObj, annDGDRDeploymentStatus, string(data))
+		}
+	}
+
+	// --- Populate Legacy status for controller compatibility ---
+	// The controller currently uses Legacy fields to access v1alpha1-style status
+	dst.Legacy = &v1beta1.LegacyStatus{
+		State:            src.State,
+		Backend:          src.Backend,
+		ProfilingResults: src.ProfilingResults,
+	}
+	if src.GeneratedDeployment != nil {
+		dst.Legacy.GeneratedDeployment = src.GeneratedDeployment
+	}
+	if src.Deployment != nil {
+		dst.Legacy.Deployment = &v1beta1.LegacyDeploymentStatus{
+			Name:      src.Deployment.Name,
+			Namespace: src.Deployment.Namespace,
+			State:     src.Deployment.State,
+			Created:   src.Deployment.Created,
 		}
 	}
 }

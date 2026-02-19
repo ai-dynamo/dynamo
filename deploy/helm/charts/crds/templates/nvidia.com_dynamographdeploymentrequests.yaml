@@ -629,6 +629,173 @@ spec:
                     Image is the container image reference for the deployment.
                     Example: "nvcr.io/nvidia/dynamo-runtime:latest"
                   type: string
+                legacy:
+                  description: |-
+                    Legacy contains v1alpha1-style fields for incremental controller migration.
+                    DEPRECATED: This field is for internal migration only and will be removed.
+                    New users should use the top-level v1beta1 fields instead.
+                  properties:
+                    backend:
+                      description: Backend specifies the inference backend for profiling (v1alpha1 style - string not enum).
+                      type: string
+                    deploymentOverrides:
+                      description: DeploymentOverrides allows customizing metadata for the auto-created DGD.
+                      properties:
+                        annotations:
+                          additionalProperties:
+                            type: string
+                          description: Annotations are additional annotations to add to the DynamoGraphDeployment metadata.
+                          type: object
+                        labels:
+                          additionalProperties:
+                            type: string
+                          description: Labels are additional labels to add to the DynamoGraphDeployment metadata.
+                          type: object
+                        name:
+                          description: Name is the desired name for the created DynamoGraphDeployment.
+                          type: string
+                        namespace:
+                          description: Namespace is the desired namespace for the created DynamoGraphDeployment.
+                          type: string
+                        workersImage:
+                          description: WorkersImage specifies the container image to use for DGD worker components.
+                          type: string
+                      type: object
+                    profilingConfig:
+                      description: ProfilingConfig provides the complete configuration for the profiling job.
+                      properties:
+                        config:
+                          description: Config is the profiling configuration as arbitrary JSON/YAML.
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        configMapRef:
+                          description: ConfigMapRef is an optional reference to a ConfigMap containing the DGD base config file.
+                          properties:
+                            key:
+                              default: disagg.yaml
+                              description: Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml".
+                              type: string
+                            name:
+                              description: Name of the ConfigMap containing the desired data.
+                              type: string
+                          required:
+                            - name
+                          type: object
+                        nodeSelector:
+                          additionalProperties:
+                            type: string
+                          description: NodeSelector is a selector for scheduling the profiling pod.
+                          type: object
+                        outputPVC:
+                          description: OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.
+                          type: string
+                        profilerImage:
+                          description: ProfilerImage specifies the container image to use for profiling jobs.
+                          type: string
+                        resources:
+                          description: Resources specifies the compute resource requirements for the profiling job container.
+                          properties:
+                            claims:
+                              description: |-
+                                Claims lists the names of resources, defined in spec.resourceClaims,
+                                that are used by this container.
+
+                                This field depends on the
+                                DynamicResourceAllocation feature gate.
+
+                                This field is immutable. It can only be set for containers.
+                              items:
+                                description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                                properties:
+                                  name:
+                                    description: |-
+                                      Name must match the name of one entry in pod.spec.resourceClaims of
+                                      the Pod where this field is used. It makes that resource available
+                                      inside a container.
+                                    type: string
+                                  request:
+                                    description: |-
+                                      Request is the name chosen for a request in the referenced claim.
+                                      If empty, everything from the claim is made available, otherwise
+                                      only the result of this request.
+                                    type: string
+                                required:
+                                  - name
+                                type: object
+                              type: array
+                              x-kubernetes-list-map-keys:
+                                - name
+                              x-kubernetes-list-type: map
+                            limits:
+                              additionalProperties:
+                                anyOf:
+                                  - type: integer
+                                  - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              description: |-
+                                Limits describes the maximum amount of compute resources allowed.
+                                More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                              type: object
+                            requests:
+                              additionalProperties:
+                                anyOf:
+                                  - type: integer
+                                  - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              description: |-
+                                Requests describes the minimum amount of compute resources required.
+                                If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                                otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                                More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                              type: object
+                          type: object
+                        tolerations:
+                          description: Tolerations allows the profiling job to be scheduled on nodes with matching taints.
+                          items:
+                            description: |-
+                              The pod this Toleration is attached to tolerates any taint that matches
+                              the triple <key,value,effect> using the matching operator <operator>.
+                            properties:
+                              effect:
+                                description: |-
+                                  Effect indicates the taint effect to match. Empty means match all taint effects.
+                                  When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                                type: string
+                              key:
+                                description: |-
+                                  Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                                  If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                                type: string
+                              operator:
+                                description: |-
+                                  Operator represents a key's relationship to the value.
+                                  Valid operators are Exists and Equal. Defaults to Equal.
+                                  Exists is equivalent to wildcard for value, so that a pod can
+                                  tolerate all taints of a particular category.
+                                type: string
+                              tolerationSeconds:
+                                description: |-
+                                  TolerationSeconds represents the period of time the toleration (which must be
+                                  of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                                  it is not set, which means tolerate the taint forever (do not evict). Zero and
+                                  negative values will be treated as 0 (evict immediately) by the system.
+                                format: int64
+                                type: integer
+                              value:
+                                description: |-
+                                  Value is the taint value the toleration matches to.
+                                  If the operator is Exists, the value should be empty, otherwise just a regular string.
+                                type: string
+                            type: object
+                          type: array
+                      type: object
+                    useMocker:
+                      default: false
+                      description: UseMocker indicates whether to deploy a mocker DynamoGraphDeployment.
+                      type: boolean
+                  type: object
                 model:
                   description: |-
                     Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
@@ -9204,6 +9371,42 @@ spec:
                 dgdName:
                   description: DGDName is the name of the generated or created DynamoGraphDeployment.
                   type: string
+                legacy:
+                  description: |-
+                    Legacy contains v1alpha1-style status fields for incremental controller migration.
+                    DEPRECATED: This field is for internal migration only and will be removed.
+                  properties:
+                    backend:
+                      description: Backend is extracted from profilingConfig for display.
+                      type: string
+                    deployment:
+                      description: Deployment tracks the auto-created DGD (v1alpha1 style).
+                      properties:
+                        created:
+                          description: Created indicates whether the DGD has been successfully created.
+                          type: boolean
+                        name:
+                          description: Name is the name of the created DynamoGraphDeployment.
+                          type: string
+                        namespace:
+                          description: Namespace is the namespace of the created DynamoGraphDeployment.
+                          type: string
+                        state:
+                          description: State is the current state of the DynamoGraphDeployment.
+                          type: string
+                      type: object
+                    generatedDeployment:
+                      description: GeneratedDeployment contains the full generated DGD spec (v1alpha1 style).
+                      type: object
+                      x-kubernetes-embedded-resource: true
+                      x-kubernetes-preserve-unknown-fields: true
+                    profilingResults:
+                      description: ProfilingResults contains a reference to the ConfigMap (v1alpha1 style - string ref).
+                      type: string
+                    state:
+                      description: State is a high-level textual status (v1alpha1 style).
+                      type: string
+                  type: object
                 observedGeneration:
                   description: ObservedGeneration is the most recent generation observed by the controller.
                   format: int64
