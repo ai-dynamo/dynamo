@@ -39,6 +39,10 @@ ARG BASE_IMAGE=ubuntu:24.04
 # =============================================================================
 FROM ${RUST_IMAGE} AS rust-builder
 
+# TARGETARCH is provided automatically by buildx for multi-platform builds.
+# Used here only for per-platform cache isolation.
+ARG TARGETARCH
+
 WORKDIR /dynamo
 
 # Copy Cargo workspace manifests and lockfile from the dynamo context
@@ -49,10 +53,11 @@ COPY --from=dynamo lib/ lib/
 
 # Build the static library; use BuildKit cache mounts for cargo registry and
 # build artifacts so incremental Docker rebuilds are fast.
+# Cache IDs are keyed by TARGETARCH so multi-platform builds don't collide.
 # Artifacts are copied to /out/ because the target/ cache mount is ephemeral.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/dynamo/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH} \
+    --mount=type=cache,target=/dynamo/target,id=cargo-target-${TARGETARCH} \
     cargo build --release -p libdynamo_llm && \
     mkdir -p /out && \
     cp target/release/libdynamo_llm_capi.a /out/ && \

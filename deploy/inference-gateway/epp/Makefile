@@ -10,7 +10,8 @@ IMAGE_REPO ?= $(DOCKER_SERVER)/$(IMAGE_NAME)
 IMAGE_TAG ?= $(IMAGE_REPO):$(GIT_TAG)
 
 # Build configuration
-# Auto-detect host architecture
+# PLATFORMS: defaults to host arch for fast local builds (image-load, image-kind)
+# MULTIARCH_PLATFORMS: used by image-multiarch for multi-architecture manifests
 HOST_ARCH := $(shell uname -m)
 ifeq ($(HOST_ARCH),x86_64)
     PLATFORMS ?= linux/amd64
@@ -21,6 +22,7 @@ else ifeq ($(HOST_ARCH),arm64)
 else
     PLATFORMS ?= linux/amd64
 endif
+MULTIARCH_PLATFORMS ?= linux/amd64,linux/arm64
 # Docker proxy for avoiding rate limits (e.g., ECR mirror)
 DOCKER_PROXY ?=
 
@@ -103,6 +105,38 @@ image-load: image-build
 image-kind: image-load ## Build and load the image into kind cluster
 	kind load docker-image $(IMAGE_TAG) --name $(KIND_CLUSTER)
 
+##@ Multi-Architecture Builds
+
+.PHONY: image-multiarch
+image-multiarch: ## Build multi-arch image (requires --push or OCI export; --load not supported)
+	$(IMAGE_BUILD_CMD) -t $(IMAGE_TAG) \
+		--platform=$(MULTIARCH_PLATFORMS) \
+		--build-context dynamo=$(DYNAMO_DIR) \
+		--build-arg RUST_IMAGE=$(RUST_IMAGE) \
+		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
+		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
+		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
+		--build-arg BUILD_REF=$(GIT_TAG) \
+		$(PUSH) \
+		.
+
+.PHONY: image-multiarch-push
+image-multiarch-push: PUSH=--push ## Build and push multi-arch image to registry
+image-multiarch-push: image-multiarch
+
+.PHONY: image-multiarch-oci
+image-multiarch-oci: ## Build multi-arch image and export as OCI tarball
+	$(IMAGE_BUILD_CMD) -t $(IMAGE_TAG) \
+		--platform=$(MULTIARCH_PLATFORMS) \
+		--build-context dynamo=$(DYNAMO_DIR) \
+		--build-arg RUST_IMAGE=$(RUST_IMAGE) \
+		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
+		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
+		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
+		--build-arg BUILD_REF=$(GIT_TAG) \
+		--output type=oci,dest=$(IMAGE_NAME)-$(GIT_TAG).tar \
+		.
+
 ##@ Local Development with Buildx
 
 .PHONY: image-local-build
@@ -170,6 +204,7 @@ info: ## Show build info
 	@echo "Git Commit: $(GIT_COMMIT_SHA)"
 	@echo "Git Tag: $(GIT_TAG)"
 	@echo "Platforms: $(PLATFORMS)"
+	@echo "Multi-Arch Platforms: $(MULTIARCH_PLATFORMS)"
 	@echo "Docker Proxy: $(DOCKER_PROXY)"
 	@echo "Rust Image: $(RUST_IMAGE)"
 	@echo "Builder Image: $(BUILDER_IMAGE)"
