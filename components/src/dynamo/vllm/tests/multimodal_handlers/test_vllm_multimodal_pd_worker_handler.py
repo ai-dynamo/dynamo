@@ -172,7 +172,7 @@ class TestGenerateAgg:
         handler.engine_client.generate = fake_generate
 
         chunks = []
-        async for chunk in handler._generate_agg(request, {"image": []}):
+        async for chunk in handler._generate_agg(request, {"image": []}, []):
             chunks.append(chunk)
 
         assert len(chunks) == 1
@@ -220,7 +220,7 @@ class TestGenerateDisagg:
 
         request = _make_vllm_request()
         chunks = []
-        async for chunk in handler._generate_disagg(request, {"image": []}):
+        async for chunk in handler._generate_disagg(request, {"image": []}, []):
             chunks.append(chunk)
 
         assert len(chunks) == 1

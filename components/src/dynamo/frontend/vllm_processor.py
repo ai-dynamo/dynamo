@@ -438,10 +438,8 @@ class EngineFactory:
             reasoning_parser_class = None
 
         (namespace_name, component_name, endpoint_name) = instance_id.triple()
-        generate_endpoint = (
-            self.runtime.namespace(namespace_name)
-            .component(component_name)
-            .endpoint(endpoint_name)
+        generate_endpoint = self.runtime.endpoint(
+            f"{namespace_name}.{component_name}.{endpoint_name}"
         )
 
         if self.router_config.router_mode == RouterMode.KV:

@@ -443,7 +443,6 @@ impl ModelManager {
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
-            instance_id,
             worker_type,
         )
         .await?;

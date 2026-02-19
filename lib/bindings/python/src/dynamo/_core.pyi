@@ -58,9 +58,24 @@ class DistributedRuntime:
         """
         ...
 
-    def namespace(self, name: str) -> Namespace:
+    def endpoint(self, path: str) -> Endpoint:
         """
-        Create a `Namespace` object
+        Get an endpoint directly by path.
+
+        Args:
+            path: Endpoint path in format 'namespace.component.endpoint'
+                  or 'dyn://namespace.component.endpoint'
+
+        Returns:
+            Endpoint: The requested endpoint
+
+        Raises:
+            ValueError: If path format is invalid (not 3 parts separated by dots)
+            Exception: If namespace or component creation fails
+
+        Example:
+            endpoint = runtime.endpoint("demo.backend.generate")
+            endpoint = runtime.endpoint("dyn://demo.backend.generate")
         """
         ...
 
@@ -115,19 +130,6 @@ class CancellationToken:
         """
         ...
 
-
-class Namespace:
-    """
-    A namespace is a collection of components
-    """
-
-    ...
-
-    def component(self, name: str) -> Component:
-        """
-        Create a `Component` object
-        """
-        ...
 
 class Component:
     """
@@ -205,6 +207,24 @@ class Endpoint:
         This adds the endpoint back to the instances bucket, allowing the router
         to send requests to this worker again. Use this when a worker wakes up
         and should start receiving requests.
+        """
+        ...
+
+    def component(self) -> Component:
+        """
+        Get the parent Component that this endpoint belongs to.
+
+        Returns:
+            Component: The parent component
+
+        Note:
+            To avoid duplicate metrics registries, reuse the returned Component for
+            multiple endpoints: component.endpoint("ep1"), component.endpoint("ep2")
+
+        Example:
+            endpoint = runtime.endpoint("demo.backend.generate")
+            component = endpoint.component()
+            health_endpoint = component.endpoint("health")  # Reuse component
         """
         ...
 
