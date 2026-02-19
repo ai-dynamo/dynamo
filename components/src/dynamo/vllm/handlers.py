@@ -22,20 +22,22 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import (
+    KvEventPublisher,
     ModelInput,
     ModelType,
-    ZmqKvEventPublisher,
     lora_name_to_id,
-    register_llm,
-    unregister_llm,
+    register_model,
+    unregister_model,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
+from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.image_loader import ImageLoader
 
 # Multimodal data dictionary keys
@@ -46,6 +48,27 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def _compute_mm_uuids(
+    multi_modal_data: Dict[str, Any] | None
+) -> Dict[str, list[str]] | None:
+    """
+    Compute multi_modal_uuids from multi_modal_data.
+
+    Each image gets a SHA256 hex digest as its UUID, ensuring consistent
+    hashing across the MM Router, vLLM handler, and Rust KV publisher.
+    """
+    if not multi_modal_data or "image" not in multi_modal_data:
+        return None
+    images = multi_modal_data["image"]
+    if not isinstance(images, list):
+        images = [images]
+    if not images:
+        return None
+    uuids = compute_mm_uuids_from_images(images)
+    return {"image": uuids}
+
 
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
 # None = not yet initialized, False = disabled/failed, LoRAManager = initialized
@@ -252,7 +275,7 @@ class BaseWorkerHandler(ABC):
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.kv_publishers: list[ZmqKvEventPublisher] | None = None
+        self.kv_publishers: list[KvEventPublisher] | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
@@ -291,7 +314,8 @@ class BaseWorkerHandler(ABC):
 
         Order of operations:
         1. Unregister from discovery - stop accepting new requests
-        2. Sleep engine - safe now that no new requests will arrive
+        2. Abort and drain in-flight requests
+        3. Sleep engine - safe now that GPU is quiesced
         """
         level = body.get("level", 1)
         try:
@@ -306,7 +330,11 @@ class BaseWorkerHandler(ABC):
                     f"[Sleep] Failed to unregister endpoint from discovery: {unreg_err}"
                 )
 
-            # Step 2: Now safe to sleep - no new requests will be routed here
+            # Step 2: Abort in-flight requests and wait for them to drain so the
+            # GPU is fully quiesced before unmapping memory.
+            await self.engine_client.pause_generation()
+
+            # Step 3: Now safe to sleep - no in-flight GPU work
             await self.engine_client.sleep(level)
 
             return {"status": "ok", "message": f"Engine slept (level={level})"}
@@ -329,7 +357,10 @@ class BaseWorkerHandler(ABC):
             # Step 1: Wake engine first - must be ready before accepting requests
             await self.engine_client.wake_up(tags)
 
-            # Step 2: Re-register endpoint instance to discovery so frontend can route to us again
+            # Step 2: Resume generation so new requests can be processed
+            await self.engine_client.resume_generation()
+
+            # Step 3: Re-register endpoint instance to discovery so frontend can route to us again
             try:
                 await self.generate_endpoint.register_endpoint_instance()
                 logger.info(
@@ -435,20 +466,6 @@ class BaseWorkerHandler(ABC):
                 lock = asyncio.Lock()
                 self._lora_load_locks[lora_name] = lock
             return lock
-
-    def _normalize_finish_reason(self, finish_reason: str) -> str:
-        """
-        Normalize vLLM finish reasons to Dynamo-compatible values.
-
-        vLLM may return finish reasons that aren't recognized by Dynamo's Rust layer.
-        This method maps them to compatible values.
-        [TODO]: Remove this method and add the right code in the Rust layer.
-        """
-        # Map vLLM's "abort" to Dynamo's "cancelled"
-        if finish_reason.startswith("abort"):
-            logging.debug(f"Normalizing finish reason: {finish_reason} to cancelled")
-            return "cancelled"
-        return finish_reason
 
     async def load_lora(self, request=None):
         """
@@ -584,7 +601,7 @@ class BaseWorkerHandler(ABC):
                             }
 
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                            await register_llm(
+                            await register_model(
                                 model_input=ModelInput.Tokens,
                                 model_type=ModelType.Chat | ModelType.Completions,
                                 endpoint=self.generate_endpoint,
@@ -704,7 +721,7 @@ class BaseWorkerHandler(ABC):
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
                         try:
-                            await unregister_llm(
+                            await unregister_model(
                                 endpoint=self.generate_endpoint,
                                 lora_name=lora_name,
                             )
@@ -806,7 +823,6 @@ class BaseWorkerHandler(ABC):
         Decode base64-encoded prompt embeddings in PyTorch format.
 
         Format: PyTorch tensor serialized with torch.save() and base64-encoded.
-        This matches NIM-LLM's implementation for compatibility.
 
         Args:
             prompt_embeds_base64: Base64-encoded PyTorch tensor
@@ -1024,12 +1040,17 @@ class BaseWorkerHandler(ABC):
                         "token_ids": [],
                     },
                 )
-        else:
-            # Normal path: use token IDs
-            prompt = TokensPrompt(
-                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
-            )
-            return prompt, embedding_sequence_length, None
+        # Normal path: use token IDs
+        mm_uuids = _compute_mm_uuids(multi_modal_data)
+        prompt_kwargs = dict[str, Any](
+            prompt_token_ids=request["token_ids"],
+            multi_modal_data=multi_modal_data,
+        )
+        if mm_uuids is not None:
+            prompt_kwargs["multi_modal_uuids"] = mm_uuids
+
+        prompt = TokensPrompt(**prompt_kwargs)
+        return prompt, embedding_sequence_length, None
 
     @staticmethod
     def _build_completion_usage(
@@ -1175,6 +1196,7 @@ class BaseWorkerHandler(ABC):
         lora_request=None,
         embedding_sequence_length=None,
         trace_headers=None,
+        priority=0,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -1190,6 +1212,7 @@ class BaseWorkerHandler(ABC):
                 lora_request=lora_request,
                 data_parallel_rank=data_parallel_rank,
                 trace_headers=trace_headers,
+                priority=priority,
             )
 
             num_output_tokens_so_far = 0
@@ -1224,9 +1247,7 @@ class BaseWorkerHandler(ABC):
                     out["top_logprobs"] = top_logprobs
 
                 if output.finish_reason:
-                    out["finish_reason"] = self._normalize_finish_reason(
-                        output.finish_reason
-                    )
+                    out["finish_reason"] = normalize_finish_reason(output.finish_reason)
                     out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
                         request_output=res,
                         embedding_sequence_length=embedding_sequence_length,
@@ -1351,8 +1372,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             logger.debug(
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
-
-        dp_rank = request.get("dp_rank", None)
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+        priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
 
@@ -1366,6 +1388,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     lora_request=lora_request,
                     embedding_sequence_length=embedding_sequence_length,
                     trace_headers=trace_headers,
+                    priority=priority,
                 ):
                     if prefill_result is not None and "completion_usage" in tok:
                         tok["completion_usage"][
@@ -1396,7 +1419,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params
         )
 
-        dp_rank = request.get("dp_rank", None)
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+        priority = routing.get("priority", 0)
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
@@ -1410,6 +1435,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
+                    priority=priority,
                 )
 
                 async for res in gen:
@@ -1440,9 +1466,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "role": "assistant",
                             "content": delta_text,
                         },
-                        "finish_reason": self._normalize_finish_reason(
-                            output.finish_reason
-                        ),
+                        "finish_reason": normalize_finish_reason(output.finish_reason),
                     }
 
                     chunk = {
@@ -1566,7 +1590,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
             )
 
-        dp_rank = request.get("dp_rank", None)
+        routing = request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+        priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
 
@@ -1579,6 +1605,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    priority=priority,
                 )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")

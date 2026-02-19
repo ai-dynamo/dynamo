@@ -28,7 +28,7 @@ pub use etcd::EtcdStore;
 mod file;
 pub use file::FileStore;
 
-const WATCH_SEND_TIMEOUT: Duration = Duration::from_millis(100);
+const WATCH_SEND_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// String we use as the Key in a key-value storage operation. Simple String wrapper
 /// that can encode / decode a string.
@@ -324,7 +324,7 @@ impl Manager {
         tokio::sync::mpsc::Receiver<WatchEvent>,
     ) {
         let bucket_name = bucket_name.to_string();
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
         let watch_task = tokio::spawn(async move {
             // Start listening for changes but don't poll this yet
             let bucket = self

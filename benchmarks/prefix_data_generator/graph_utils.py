@@ -15,8 +15,12 @@
 
 import networkx as nx
 import numpy as np
-from prefix_data_generator.protocols import CACHE_END, END_NODE, SUPER_ROOT
 from prefix_data_generator.sampler import get_cdf
+
+# Protocol-level constants for synthetic data graph structure
+SUPER_ROOT = -1  # Dummy node preceding all real nodes; not an actual data root
+CACHE_END = -2  # Special node indicating end of a path
+END_NODE = -3  # Special node indicating to skip leaf sampling
 
 
 def _verify_tree(G: nx.DiGraph) -> None:

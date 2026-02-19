@@ -28,7 +28,7 @@ spec:
   profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
-  # See benchmarks/profiler/utils/profiler_argparse.py for complete schema
+  # See dynamo/profiler/utils/profiler_argparse.py for complete schema
   # Note: deployment.model and engine.backend are automatically set from model and backend above
   profilingConfig:
     config:
@@ -39,22 +39,23 @@ spec:
       engine:
         maxContextLength: 16384  # will override max context length of the model if provided
 
+      # Search strategy: 'rapid' for AI Configurator estimation (20-30s), 'thorough' for actual deployments (2-4h)
+      searchStrategy: thorough
+
       # Hardware configuration
+      # Note: Operator auto-discovers GPU info from cluster nodes when available
       hardware:
         minNumGpusPerEngine: 1  # Minimum GPUs to test
-        maxNumGpusPerEngine: 4  # Maximum GPUs to test (limited by model's num_heads/4)
-        numGpusPerNode: 8  # GPUs per node (for MoE models)
+        maxNumGpusPerEngine: 4  # Maximum GPUs to test
+        numGpusPerNode: 8       # GPUs per node (optional - auto-discovered if not specified)
+        system: h200_sxm        # Hardware system (optional - auto-detected if not specified)
+        # gpuModel: "H200-SXM"  # GPU model (optional - auto-discovered)
+        # gpuVramMib: 141557    # GPU VRAM in MiB (optional - auto-discovered)
 
       # Sweep/profiling configuration
       sweep:
         prefillInterpolationGranularity: 16  # Samples for TTFT interpolation
-        decodeInterpolationGranularity: 6  # Samples for ITL interpolation
-
-        # AI Configurator mode (fast simulation-based profiling, 20-30 seconds)
-        useAiConfigurator: false  # Set to false for online profiling (2-4 hours)
-        aicSystem: h200_sxm  # Target GPU system for AI Configurator
-        aicHfId: Qwen/Qwen3-0.6B  # HuggingFace model ID for AI Configurator
-        aicBackendVersion: "0.20.0"  # Backend version for AI Configurator
+        decodeInterpolationGranularity: 6    # Samples for ITL interpolation
 
       # SLA targets for profiling
       sla:

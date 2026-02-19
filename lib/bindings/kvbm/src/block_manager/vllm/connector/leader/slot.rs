@@ -174,6 +174,7 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     /// Cache statistics tracker
     cache_stats: Arc<CacheStatsTracker>,
     /// KVBM metrics for exposing cache hit rates
+    #[allow(dead_code)]
     kvbm_metrics: KvbmMetrics,
     /// Minimum priority threshold for host offload filtering (read once at init)
     offload_min_priority: u32,
@@ -779,8 +780,8 @@ impl Slot for VllmConnectorSlot {
             let block_size = self.block_size;
 
             // Convert cached tokens to blocks (rounding up)
-            let host_blocks = (self.tokens_cached_from_host + block_size - 1) / block_size;
-            let disk_blocks = (self.tokens_cached_from_disk + block_size - 1) / block_size;
+            let host_blocks = self.tokens_cached_from_host.div_ceil(block_size);
+            let disk_blocks = self.tokens_cached_from_disk.div_ceil(block_size);
 
             tracing::debug!(
                 request_id = %self.request_id,
@@ -864,7 +865,7 @@ impl Slot for VllmConnectorSlot {
 
         let block_size = self.block_manager.block_size();
         let num_computed_blocks = num_computed_tokens / block_size;
-        debug_assert!(num_computed_tokens % block_size == 0);
+        debug_assert!(num_computed_tokens.is_multiple_of(block_size));
 
         let sequence_hashes = self
             .sequence()

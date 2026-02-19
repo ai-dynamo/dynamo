@@ -299,7 +299,7 @@ spec:
                       autoscaling:
                         description: |-
                           Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-                          with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+                          with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md
                           for migration guidance. This field will be removed in a future API version.
                         properties:
                           behavior:
@@ -11369,6 +11369,10 @@ spec:
                       - type
                     type: object
                   type: array
+                observedGeneration:
+                  description: ObservedGeneration is the most recent generation observed by the controller.
+                  format: int64
+                  type: integer
                 restart:
                   description: Restart contains the status of the restart of the graph deployment.
                   properties:
@@ -11385,6 +11389,37 @@ spec:
                     phase:
                       description: Phase is the phase of the restart.
                       type: string
+                  type: object
+                rollingUpdate:
+                  description: |-
+                    RollingUpdate tracks the progress of operator manged rolling updates.
+                    Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
+                  properties:
+                    endTime:
+                      description: EndTime is when the rolling update completed (successfully or failed).
+                      format: date-time
+                      type: string
+                    phase:
+                      description: Phase indicates the current phase of the rolling update.
+                      enum:
+                        - Pending
+                        - InProgress
+                        - Completed
+                        - Failed
+                        - ""
+                      type: string
+                    startTime:
+                      description: StartTime is when the rolling update began.
+                      format: date-time
+                      type: string
+                    updatedServices:
+                      description: |-
+                        UpdatedServices is the list of services that have completed the rolling update.
+                        A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.
+                        Only services of componentType Worker (or Prefill/Decode) are considered.
+                      items:
+                        type: string
+                      type: array
                   type: object
                 services:
                   additionalProperties:
@@ -11409,8 +11444,19 @@ spec:
                           - LeaderWorkerSet
                         type: string
                       componentName:
-                        description: ComponentName is the name of the underlying resource.
+                        description: |-
+                          ComponentName is the name of the primary underlying resource.
+                          DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.
+                          During rolling updates, this reflects the new (target) component name.
                         type: string
+                      componentNames:
+                        description: |-
+                          ComponentNames is the list of underlying resource names for this service.
+                          During normal operation, this contains a single name.
+                          During rolling updates, this contains both old and new component names.
+                        items:
+                          type: string
+                        type: array
                       readyReplicas:
                         description: |-
                           ReadyReplicas is the number of ready replicas.
@@ -11445,8 +11491,16 @@ spec:
                     The map key is the service name from spec.services.
                   type: object
                 state:
+                  default: initializing
                   description: State is a high-level textual status of the graph deployment lifecycle.
+                  enum:
+                    - initializing
+                    - pending
+                    - successful
+                    - failed
                   type: string
+              required:
+                - state
               type: object
           type: object
       served: true

@@ -17,7 +17,7 @@ use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::{MockEngineArgs, WorkerType};
 use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
-use crate::preprocessor::media::{ImageDecoder, MediaDecoder, MediaFetcher};
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -56,8 +56,6 @@ pub struct LocalModelBuilder {
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
-    custom_backend_metrics_endpoint: Option<String>,
-    custom_backend_metrics_polling_interval: Option<f64>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
 }
@@ -85,8 +83,6 @@ impl Default for LocalModelBuilder {
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
-            custom_backend_metrics_endpoint: Default::default(),
-            custom_backend_metrics_polling_interval: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
         }
@@ -199,16 +195,6 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn custom_backend_metrics_endpoint(&mut self, endpoint: Option<String>) -> &mut Self {
-        self.custom_backend_metrics_endpoint = endpoint;
-        self
-    }
-
-    pub fn custom_backend_metrics_polling_interval(&mut self, interval: Option<f64>) -> &mut Self {
-        self.custom_backend_metrics_polling_interval = interval;
-        self
-    }
-
     pub fn media_decoder(&mut self, media_decoder: Option<MediaDecoder>) -> &mut Self {
         self.media_decoder = media_decoder;
         self
@@ -253,14 +239,12 @@ impl LocalModelBuilder {
             self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
             self.runtime_config.max_num_batched_tokens =
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer;
+            // Decode workers don't create the WorkerKvQuery endpoint (scheduler_component is None),
+            // so they must not advertise enable_local_indexer=true or the router will hang
+            // trying to query them during initial recovery.
+            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer
+                && mocker_engine_args.worker_type != WorkerType::Decode;
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
-            self.media_decoder = Some(MediaDecoder {
-                image: Some(ImageDecoder::default()),
-                #[cfg(feature = "media-ffmpeg")]
-                video: None,
-            });
-            self.media_fetcher = Some(MediaFetcher::default());
 
             // Set bootstrap endpoint for prefill workers with bootstrap_port configured
             if mocker_engine_args.worker_type == WorkerType::Prefill
@@ -304,9 +288,7 @@ impl LocalModelBuilder {
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
-                custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
-                custom_backend_metrics_polling_interval: self
-                    .custom_backend_metrics_polling_interval,
+                migration_limit: self.migration_limit,
             });
         }
 
@@ -358,8 +340,7 @@ impl LocalModelBuilder {
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
-            custom_backend_metrics_endpoint: self.custom_backend_metrics_endpoint.clone(),
-            custom_backend_metrics_polling_interval: self.custom_backend_metrics_polling_interval,
+            migration_limit: self.migration_limit,
         })
     }
 }
@@ -378,8 +359,7 @@ pub struct LocalModel {
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
-    custom_backend_metrics_endpoint: Option<String>,
-    custom_backend_metrics_polling_interval: Option<f64>,
+    migration_limit: u32,
 }
 
 impl LocalModel {
@@ -443,16 +423,12 @@ impl LocalModel {
         &self.runtime_config
     }
 
+    pub fn migration_limit(&self) -> u32 {
+        self.migration_limit
+    }
+
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
-    }
-
-    pub fn custom_backend_metrics_endpoint(&self) -> Option<&str> {
-        self.custom_backend_metrics_endpoint.as_deref()
-    }
-
-    pub fn custom_backend_metrics_polling_interval(&self) -> Option<f64> {
-        self.custom_backend_metrics_polling_interval
     }
 
     /// An endpoint to identify this model by.
@@ -476,14 +452,16 @@ impl LocalModel {
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
-        lora_name: Option<&str>,
+        lora_info: Option<crate::model_card::LoraInfo>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
-        self.card.lora_name = lora_name.map(|name| name.to_string());
+        self.card.lora = lora_info.clone();
 
         // Compute model_suffix from lora_name if present
-        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let model_suffix = lora_info
+            .as_ref()
+            .map(|info| Slug::slugify(&info.name).to_string());
 
         let suffix_for_log = model_suffix
             .as_ref()

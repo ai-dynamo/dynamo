@@ -19,6 +19,7 @@ from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +32,16 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             "DYN_LOG": "debug",
             "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
         }
+        # WARNING: terminate_all_matching_process_names=True is NOT pytest-xdist safe!
+        # DANGER: Kills ALL dynamo-frontend processes system-wide, including other parallel tests.
+        # For parallel-safe alternative, use terminate_all_matching_process_names=False.
+        # See tests/kvbm_integration/common.py:llm_server_kvbm for example.
+        # TODO: Switch to terminate_all_matching_process_names=False with dynamic ports
         super().__init__(
             request,
             router_mode="round-robin",
             extra_env=extra_env,
-            terminate_existing=True,
+            terminate_all_matching_process_names=True,  # TODO: Change to False
         )
 
 
@@ -90,7 +96,7 @@ class EtcdReplicaServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             data_dir=data_dir,
             log_dir=log_dir,
         )
@@ -138,7 +144,9 @@ class EtcdCluster:
         self.base_port = base_port
         self.replicas: List[Optional[EtcdReplicaServer]] = []
         self.data_dirs: List[str] = []
-        self.log_base_dir = f"{request.node.name}_etcd_cluster"
+        self.log_base_dir = resolve_test_output_path(
+            f"{request.node.name}_etcd_cluster"
+        )
 
         # Clean up any existing log directory
         try:

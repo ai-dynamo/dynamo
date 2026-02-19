@@ -16,6 +16,6 @@ curl -X POST http://localhost:${PORT}/v1/chat/completions \
         {"role": "user", "content": "What is 2+2?"}
     ],
     "stream": true,
-    "max_tokens": 10,
+    "max_completion_tokens": 10,
     "ignore_eos": true
     }'

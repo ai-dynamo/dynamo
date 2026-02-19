@@ -48,9 +48,6 @@ storage:
     # OCI URI (e.g., oci://registry.io/repo/checkpoints)
     uri: ""
 
-  # Host path for signal files (inter-pod communication)
-  signalHostPath: /var/lib/chrek/signals
-
 # DaemonSet configuration for chrek (checkpoint/restore) agent
 daemonset:
   # Container image
@@ -97,19 +94,6 @@ daemonset:
   # Affinity rules
   affinity: {}
 
-  # CRIU configuration
-  criu:
-    # CUDA plugin directory
-    cudaPluginDir: /usr/local/lib/criu
-    # CRIU timeout in seconds (6 hours)
-    timeout: "21600"
-    # Ghost file size limit in bytes
-    # 512MB is recommended for GPU workloads with large memory allocations
-    ghostLimit: "536870912"
-
-  # Container runtime socket path
-  containerRuntimeSocket: /run/containerd/containerd.sock
-
 # Seccomp profile configuration
 seccomp:
   # Deploy seccomp profile for blocking io_uring (required for CRIU)
@@ -135,3 +119,61 @@ rbac:
   # Note: PVC storage requires namespace-scoped mode (true) as PVCs are namespace-scoped
   namespaceRestricted: true
 
+# Static configuration (loaded from ConfigMap)
+# Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) still come from environment variables
+config:
+  agent:
+    # How checkpoints are triggered: "http" or "watcher"
+    signalSource: "watcher"
+    # HTTP server address for health checks and API
+    listenAddr: ":8080"
+
+  checkpoint:
+    criu:
+      # Ghost file size limit in bytes (512MB recommended for GPU workloads)
+      ghostLimit: 536870912
+      # CRIU timeout in seconds (6 hours for large GPU checkpoints)
+      timeout: 21600
+      # CRIU logging verbosity (0-4)
+      logLevel: 4
+      # CRIU work directory for temporary files
+      workDir: "/var/criu-work"
+
+      # K8s-specific options (recommended defaults for containers)
+      leaveRunning: true      # Keep process running after checkpoint
+      shellJob: true          # Containers are often session leaders
+      tcpClose: true          # Pod IPs change on restore/migration
+      fileLocks: true         # Applications use file locks
+      orphanPtsMaster: true   # Containers with TTYs
+      extUnixSk: true         # External Unix sockets
+      linkRemap: true         # Handle deleted-but-open files
+      extMasters: true        # External bind mount masters
+      manageCgroupsMode: "ignore"  # Let K8s manage cgroups (ignore/soft/full/strict)
+
+      # Advanced options
+      autoDedup: false        # Auto-deduplication of memory pages
+      lazyPages: false        # Lazy page migration (experimental)
+
+      # Config file options (NOT available via RPC - written to criu.conf)
+      libDir: "/usr/local/lib/criu"  # Plugin directory (required for GPU checkpoints)
+      allowUprobes: true             # Required for CUDA
+      skipInFlight: true             # Skip in-flight TCP connections
+
+    rootfsExclusions:
+      # System directories excluded from rootfs diff capture
+      # These are injected by NVIDIA GPU Operator and cause conflicts during restore
+      systemDirs:
+        - "./usr"
+        - "./etc"
+        - "./opt"
+        - "./var"
+        - "./run"
+      # Cache directories to exclude (reduces checkpoint size)
+      cacheDirs:
+        - "./.cache/huggingface"
+      # Additional custom exclusions (application-specific)
+      additionalExclusions: []
+
+  # NOTE: Restore configuration is NOT in this ConfigMap.
+  # Placeholder containers do not mount it. Restore defaults are hardcoded in Go.
+  # CRIU options for restore come from the saved checkpoint manifest (manifest.yaml).

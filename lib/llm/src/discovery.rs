@@ -5,10 +5,12 @@ mod model_manager;
 pub use model_manager::{ModelManager, ModelManagerError};
 
 pub(crate) mod runtime_configs;
-pub use runtime_configs::{RuntimeConfigs, RuntimeConfigsSubscriber};
+pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};
 
 mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 
 mod worker_monitor;
-pub use worker_monitor::{KvWorkerMonitor, LoadThresholdConfig, WorkerLoadState};
+pub use worker_monitor::{
+    KvWorkerMonitor, LoadThresholdConfig, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL, WorkerLoadState,
+};

@@ -1,310 +1,218 @@
-// mounts provides mount parsing from /proc for CRIU checkpoint.
-// This is used for runtime mount state that requires /proc inspection.
+// mounts parses runtime mount state from /proc.
 package checkpoint
 
 import (
-	"bufio"
 	"fmt"
-	"os"
+	"path"
+	"path/filepath"
 	"strings"
+
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
 )
 
-// MountMapping represents an external mount for CRIU
-type MountMapping struct {
-	InsidePath  string // Path inside container (mount point)
-	OutsidePath string // Path on host (source)
-	FSType      string // Filesystem type
-	Source      string // Mount source
-	Options     string // Mount options
+type MountInfo struct {
+	MountID      string
+	ParentID     string
+	MountPoint   string
+	Root         string
+	FSType       string
+	Source       string
+	Options      string
+	SuperOptions string
 }
 
-// System mount types that should be filtered out
-var systemMountTypes = map[string]bool{
-	"proc":        true,
-	"sysfs":       true,
-	"devpts":      true,
-	"mqueue":      true,
-	"tmpfs":       true, // Note: some tmpfs mounts may need special handling
-	"cgroup":      true,
-	"cgroup2":     true,
-	"securityfs":  true,
-	"debugfs":     true,
-	"tracefs":     true,
-	"fusectl":     true,
-	"configfs":    true,
-	"devtmpfs":    true,
-	"hugetlbfs":   true,
-	"pstore":      true,
-	"bpf":         true,
+// MountPolicy is the classified mount plan for CRIU dump options.
+type MountPolicy struct {
+	Externalized []string
+	Skipped      []string
 }
 
-// System mount paths that should always be filtered
-var systemMountPaths = map[string]bool{
-	"/proc":        true,
-	"/sys":         true,
-	"/dev":         true,
-	"/dev/pts":     true,
-	"/dev/shm":     true,
-	"/dev/mqueue":  true,
-	"/run":         true,
-	"/run/secrets": true,
-}
+// BuildMountPolicy classifies mounts into CRIU extMnt and skipMnt lists.
+//
+// Rule order and precedence (top to bottom):
+//  1. Skip non-OCI proc/sys submounts and non-OCI runtime /run submounts.
+//     These mounts are typically node/kernel/runtime specific and are the
+//     highest-risk source of cross-node restore failures, so skip wins.
+//  2. Externalize mounts owned by runtime/OCI:
+//     - "/" (rootfs is recreated by runtime in OCI restore path)
+//     - OCI mount destinations
+//     - OCI masked/readonly paths
+//  3. Externalize non-OCI bind-like mounts (mount root is not "/" or ".").
+//     This captures runtime-injected file mounts (for example driver files)
+//     so CRIU does not try to recreate them from checkpoint data.
+//  4. Anything else is left unflagged and handled by CRIU default behavior.
+//
+// Precedence: skip > externalize. If a path is classified as skipped, it is
+// removed from the externalized set.
+func BuildMountPolicy(mountInfo []MountInfo, ociSpec *specs.Spec, rootFS string) *MountPolicy {
+	ociManagedSet := collectOCIManagedDestinations(ociSpec, rootFS)
 
-// ParseMountInfo parses /proc/<pid>/mountinfo and returns bind mounts
-// that need to be handled by CRIU as external mounts
-func ParseMountInfo(pid int, hostProc string) ([]MountMapping, error) {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
+	externalizedSet := make(map[string]struct{}, len(mountInfo)+len(ociManagedSet))
+	skippedSet := make(map[string]struct{}, len(mountInfo))
 
-	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", hostProc, pid)
-	file, err := os.Open(mountinfoPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open mountinfo: %w", err)
-	}
-	defer file.Close()
-
-	var mounts []MountMapping
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		mount, skip := parseMountInfoLine(line)
-		if skip {
+	for _, mount := range mountInfo {
+		mp := normalizeMountPath(mount.MountPoint)
+		if mp == "" {
 			continue
 		}
-		mounts = append(mounts, mount)
+
+		source := path.Clean(strings.TrimSpace(mount.Source))
+		root := path.Clean(strings.TrimSpace(mount.Root))
+		isOCIManaged := false
+		if _, ok := ociManagedSet[mp]; ok {
+			isOCIManaged = true
+		}
+		if !isOCIManaged && strings.HasPrefix(mp, "/run/") {
+			if _, ok := ociManagedSet["/var"+mp]; ok {
+				isOCIManaged = true
+			}
+		}
+		if !isOCIManaged && strings.HasPrefix(mp, "/var/run/") {
+			if _, ok := ociManagedSet[strings.TrimPrefix(mp, "/var")]; ok {
+				isOCIManaged = true
+			}
+		}
+
+		// Runtime-owned /run mounts are usually ephemeral tmpfs/overlay mounts
+		// or bind-like mounts sourced from host runtime directories.
+		// We skip these unless OCI explicitly manages that destination.
+		isRunRuntimeMount := strings.HasPrefix(mp, "/run/") &&
+			(mount.FSType == "tmpfs" ||
+				mount.FSType == "overlay" ||
+				strings.HasPrefix(source, "/run/") ||
+				strings.HasPrefix(source, "/var/run/") ||
+				strings.HasPrefix(root, "/run/") ||
+				strings.HasPrefix(root, "/var/run/"))
+
+		if !isOCIManaged && (strings.HasPrefix(mp, "/proc/") || strings.HasPrefix(mp, "/sys/") || isRunRuntimeMount) {
+			skippedSet[mp] = struct{}{}
+			delete(externalizedSet, mp)
+			continue
+		}
+
+		if mp == "/" || isOCIManaged || (root != "." && root != "/") {
+			externalizedSet[mp] = struct{}{}
+			continue
+		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading mountinfo: %w", err)
+	// Ensure OCI-managed destinations are externalized, even when mountinfo does not
+	// include a direct entry (e.g., runtime-managed masked/readonly paths).
+	for mp := range ociManagedSet {
+		if _, skipped := skippedSet[mp]; skipped {
+			continue
+		}
+		externalizedSet[mp] = struct{}{}
+	}
+
+	externalized := make([]string, 0, len(externalizedSet))
+	for mp := range externalizedSet {
+		externalized = append(externalized, mp)
+	}
+	skipped := make([]string, 0, len(skippedSet))
+	for mp := range skippedSet {
+		skipped = append(skipped, mp)
+	}
+
+	return &MountPolicy{
+		Externalized: externalized,
+		Skipped:      skipped,
+	}
+}
+
+// collectOCIManagedDestinations returns the canonical set of OCI-owned mount
+// targets. This includes regular OCI mounts plus Linux masked/readonly paths.
+// Those masked/readonly paths may not appear as direct mountinfo entries, but
+// still need to be treated as runtime-owned and externalized.
+func collectOCIManagedDestinations(ociSpec *specs.Spec, rootFS string) map[string]struct{} {
+	set := map[string]struct{}{}
+	if ociSpec == nil {
+		return set
+	}
+
+	paths := make([]string, 0, len(ociSpec.Mounts))
+	for _, mount := range ociSpec.Mounts {
+		paths = append(paths, mount.Destination)
+	}
+	if ociSpec.Linux != nil {
+		paths = append(paths, ociSpec.Linux.MaskedPaths...)
+		paths = append(paths, ociSpec.Linux.ReadonlyPaths...)
+	}
+	for _, raw := range paths {
+		if p := normalizeOCIDestinationPath(raw, rootFS); p != "" {
+			set[p] = struct{}{}
+		}
+	}
+
+	return set
+}
+
+// normalizeMountPath applies lexical normalization only.
+// Mountinfo paths are already kernel truth for the container namespace.
+func normalizeMountPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	p := path.Clean(raw)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return path.Clean(p)
+}
+
+// normalizeOCIDestinationPath canonicalizes OCI destinations against container
+// rootfs symlinks (for example /var/run -> /run) with lexical fallback.
+func normalizeOCIDestinationPath(raw, rootFS string) string {
+	p := normalizeMountPath(raw)
+	if p == "" || rootFS == "" {
+		return p
+	}
+
+	hostPath := filepath.Join(rootFS, strings.TrimPrefix(p, "/"))
+	resolved, err := filepath.EvalSymlinks(hostPath)
+	if err != nil {
+		return p
+	}
+
+	rel, err := filepath.Rel(rootFS, resolved)
+	if err != nil {
+		return p
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." {
+		return "/"
+	}
+	if strings.HasPrefix(rel, "../") || rel == ".." {
+		return p
+	}
+
+	return normalizeMountPath("/" + rel)
+}
+
+func ReadMountInfoFromHostProcPath(pid int) ([]MountInfo, error) {
+	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", HostProcPath, pid)
+	parsedMounts, err := common.ParseMountInfoFile(mountinfoPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse mountinfo at %s: %w", mountinfoPath, err)
+	}
+
+	mounts := make([]MountInfo, 0, len(parsedMounts))
+	for _, parsed := range parsedMounts {
+		mounts = append(mounts, MountInfo{
+			MountID:      parsed.MountID,
+			ParentID:     parsed.ParentID,
+			MountPoint:   parsed.Path,
+			Root:         parsed.Root,
+			FSType:       parsed.FSType,
+			Source:       parsed.Source,
+			Options:      parsed.Options,
+			SuperOptions: parsed.SuperOpts,
+		})
 	}
 
 	return mounts, nil
-}
-
-// parseMountInfoLine parses a single line from mountinfo
-// Returns the mount mapping and whether to skip this mount
-//
-// mountinfo format:
-// 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
-// (1)(2)(3)   (4)   (5)      (6)     (7)   (8) (9)   (10)         (11)
-//
-// (1) mount ID
-// (2) parent ID
-// (3) major:minor
-// (4) root: root of the mount within the filesystem (host-side path for bind mounts)
-// (5) mount point: mount point relative to process's root
-// (6) mount options
-// (7) optional fields (terminated by single hyphen)
-// (8) separator (hyphen)
-// (9) filesystem type
-// (10) mount source (device)
-// (11) super options
-func parseMountInfoLine(line string) (MountMapping, bool) {
-	fields := strings.Fields(line)
-	if len(fields) < 10 {
-		return MountMapping{}, true
-	}
-
-	root := fields[3]       // Host-side path within the filesystem (important for bind mounts)
-	mountPoint := fields[4] // Container-side mount point
-	mountOptions := fields[5]
-
-	// Find separator (-) to get fstype and source
-	sepIdx := -1
-	for i, f := range fields {
-		if f == "-" {
-			sepIdx = i
-			break
-		}
-	}
-
-	if sepIdx == -1 || sepIdx+2 >= len(fields) {
-		return MountMapping{}, true
-	}
-
-	fsType := fields[sepIdx+1]
-	source := fields[sepIdx+2]
-	superOptions := ""
-	if sepIdx+3 < len(fields) {
-		superOptions = fields[sepIdx+3]
-	}
-
-	// Skip system mount types
-	if systemMountTypes[fsType] {
-		return MountMapping{}, true
-	}
-
-	// Skip system mount paths
-	if systemMountPaths[mountPoint] {
-		return MountMapping{}, true
-	}
-
-	// Skip /sys and /proc prefixed paths
-	if strings.HasPrefix(mountPoint, "/sys/") || strings.HasPrefix(mountPoint, "/proc/") {
-		return MountMapping{}, true
-	}
-
-	// Skip overlay (the root filesystem itself)
-	if fsType == "overlay" && mountPoint == "/" {
-		return MountMapping{}, true
-	}
-
-	// For bind mounts, the root field contains the actual host path
-	// Use root as OutsidePath since it gives us the host-side path for volume mounts
-	outsidePath := root
-	if root == "/" {
-		// If root is /, this isn't a bind mount from a subdirectory
-		outsidePath = source
-	}
-
-	return MountMapping{
-		InsidePath:  mountPoint,
-		OutsidePath: outsidePath,
-		FSType:      fsType,
-		Source:      source,
-		Options:     mountOptions + "," + superOptions,
-	}, false
-}
-
-// GetBindMounts returns only bind mounts (type "bind" or with bind option)
-func GetBindMounts(pid int, hostProc string) ([]MountMapping, error) {
-	mounts, err := ParseMountInfo(pid, hostProc)
-	if err != nil {
-		return nil, err
-	}
-
-	var bindMounts []MountMapping
-	for _, m := range mounts {
-		// Bind mounts typically show the underlying filesystem type
-		// and have paths that look like kubelet volume paths
-		if strings.Contains(m.OutsidePath, "/var/lib/kubelet/pods/") ||
-			strings.Contains(m.OutsidePath, "/volumes/") ||
-			strings.Contains(m.Options, "bind") {
-			bindMounts = append(bindMounts, m)
-		}
-	}
-
-	return bindMounts, nil
-}
-
-// GetKubernetesVolumeMounts returns mounts that appear to be Kubernetes volumes
-func GetKubernetesVolumeMounts(pid int, hostProc string) ([]MountMapping, error) {
-	mounts, err := ParseMountInfo(pid, hostProc)
-	if err != nil {
-		return nil, err
-	}
-
-	var k8sMounts []MountMapping
-	for _, m := range mounts {
-		// Kubernetes volumes are identified by:
-		// 1. Standard kubelet paths: /var/lib/kubelet/pods/
-		// 2. Minikube/Docker paths: /var/lib/docker/volumes/minikube/_data/lib/kubelet/pods/
-		// 3. Kubernetes volume markers: kubernetes.io~empty-dir, kubernetes.io~configmap, etc.
-		if strings.Contains(m.OutsidePath, "/kubelet/pods/") ||
-			strings.Contains(m.OutsidePath, "/kubernetes.io~") ||
-			strings.Contains(m.OutsidePath, "/containerd/io.containerd") {
-			k8sMounts = append(k8sMounts, m)
-		}
-	}
-
-	return k8sMounts, nil
-}
-
-// AllMountInfo represents a mount entry from /proc/<pid>/mountinfo
-// This includes ALL mounts without filtering, which CRIU captures during checkpoint.
-type AllMountInfo struct {
-	MountID      string // Mount ID
-	ParentID     string // Parent mount ID
-	MountPoint   string // Mount point inside container (container-side path)
-	Root         string // Root of mount within filesystem (host-side path for bind mounts)
-	FSType       string // Filesystem type
-	Source       string // Mount source
-	Options      string // Mount options
-	SuperOptions string // Super block options
-}
-
-// GetAllMountsFromMountinfo parses /proc/<pid>/mountinfo and returns ALL mounts.
-// This is used for CRIU checkpoint to mark ALL mounts as external, since CRIU
-// captures everything from mountinfo, not just the filtered subset.
-// Without marking ALL mounts as external, CRIU restore fails with
-// "No mapping for <mount_id>:(null) mountpoint" errors.
-func GetAllMountsFromMountinfo(pid int, hostProc string) ([]AllMountInfo, error) {
-	if hostProc == "" {
-		hostProc = "/proc"
-	}
-
-	mountinfoPath := fmt.Sprintf("%s/%d/mountinfo", hostProc, pid)
-	file, err := os.Open(mountinfoPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open mountinfo: %w", err)
-	}
-	defer file.Close()
-
-	var mounts []AllMountInfo
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		mount, err := parseAllMountInfoLine(line)
-		if err != nil {
-			continue // Skip malformed lines
-		}
-		mounts = append(mounts, mount)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading mountinfo: %w", err)
-	}
-
-	return mounts, nil
-}
-
-// parseAllMountInfoLine parses a single line from mountinfo without filtering.
-// mountinfo format:
-// 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
-// (1)(2)(3)   (4)   (5)      (6)     (7)   (8) (9)   (10)         (11)
-func parseAllMountInfoLine(line string) (AllMountInfo, error) {
-	fields := strings.Fields(line)
-	if len(fields) < 10 {
-		return AllMountInfo{}, fmt.Errorf("malformed mountinfo line: %s", line)
-	}
-
-	mountID := fields[0]
-	parentID := fields[1]
-	root := fields[3]       // Host-side path within the filesystem
-	mountPoint := fields[4] // Container-side mount point
-	mountOptions := fields[5]
-
-	// Find separator (-) to get fstype and source
-	sepIdx := -1
-	for i, f := range fields {
-		if f == "-" {
-			sepIdx = i
-			break
-		}
-	}
-
-	if sepIdx == -1 || sepIdx+2 >= len(fields) {
-		return AllMountInfo{}, fmt.Errorf("malformed mountinfo line (no separator): %s", line)
-	}
-
-	fsType := fields[sepIdx+1]
-	source := fields[sepIdx+2]
-	superOptions := ""
-	if sepIdx+3 < len(fields) {
-		superOptions = fields[sepIdx+3]
-	}
-
-	return AllMountInfo{
-		MountID:      mountID,
-		ParentID:     parentID,
-		MountPoint:   mountPoint,
-		Root:         root,
-		FSType:       fsType,
-		Source:       source,
-		Options:      mountOptions,
-		SuperOptions: superOptions,
-	}, nil
 }

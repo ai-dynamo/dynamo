@@ -12,7 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use dynamo_runtime::pipeline::RouterMode;
+use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
@@ -20,9 +20,10 @@ use crate::{
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
-/// Callback type for engine factory (async)
-pub type EngineFactoryCallback = Arc<
+/// Callback type for chat engine factory (async)
+pub type ChatEngineFactoryCallback = Arc<
     dyn Fn(
+            ModelCardInstanceId,
             ModelDeploymentCard,
         ) -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
@@ -65,7 +66,7 @@ pub enum EngineConfig {
     /// Remote networked engines that we discover via etcd
     Dynamic {
         model: Box<LocalModel>,
-        engine_factory: Option<EngineFactoryCallback>,
+        chat_engine_factory: Option<ChatEngineFactoryCallback>,
     },
 
     /// A Text engine receives text, does it's own tokenization and prompt formatting.
@@ -92,9 +93,12 @@ impl EngineConfig {
         }
     }
 
-    pub fn engine_factory(&self) -> Option<&EngineFactoryCallback> {
+    pub fn chat_engine_factory(&self) -> Option<&ChatEngineFactoryCallback> {
         match self {
-            EngineConfig::Dynamic { engine_factory, .. } => engine_factory.as_ref(),
+            EngineConfig::Dynamic {
+                chat_engine_factory,
+                ..
+            } => chat_engine_factory.as_ref(),
             _ => None,
         }
     }

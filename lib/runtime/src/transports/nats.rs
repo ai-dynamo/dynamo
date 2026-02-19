@@ -548,7 +548,7 @@ impl NatsQueue {
             if let Some(ref consumer_name) = self.consumer_name {
                 let consumer_config = jetstream::consumer::pull::Config {
                     durable_name: Some(consumer_name.clone()),
-                    inactive_threshold: std::time::Duration::from_secs(3600), // 1 hour
+                    inactive_threshold: std::time::Duration::from_secs(300), // 5 minutes
                     ..Default::default()
                 };
 

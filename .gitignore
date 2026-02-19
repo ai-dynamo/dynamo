@@ -2,6 +2,7 @@
 .vs/
 .vscode/
 .helix
+*rendered.Dockerfile
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
 [Oo][Bb][Jj]/
@@ -101,6 +102,11 @@ generated-values.yaml
 **/.devcontainer/.env
 TensorRT-LLM
 
+# The Linux kernel generates core dump files when a process crashes (receives signals
+# like SIGSEGV, SIGABRT, SIGBUS, etc.). The Linux container's /proc/sys/kernel/core_pattern
+# determines the filename (typically core or core.<pid>)
+core
+
 # Ruler Generated Files
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
@@ -108,6 +114,9 @@ TensorRT-LLM
 /.claude
 /CLAUDE.md
 /CLAUDE.md.bak
+
+# AI generated worklogs
+worklogs/
 
 # Benchmarks
 benchmarks/results
@@ -122,3 +131,7 @@ package-lock.json
 
 # Compiled static libraries
 *.a
+
+# macOS
+.DS_Store
+**/.DS_Store

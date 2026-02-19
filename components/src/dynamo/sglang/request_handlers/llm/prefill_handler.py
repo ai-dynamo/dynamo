@@ -3,7 +3,7 @@
 
 import asyncio
 import logging
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
@@ -23,6 +23,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         config: Config,
         publisher: DynamoSglangPublisher,
         generate_endpoint=None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         """Initialize prefill worker handler.
 
@@ -32,10 +33,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             config: SGLang and Dynamo configuration.
             publisher: The SGLang publisher instance.
             generate_endpoint: The endpoint handle for discovery registration.
+            shutdown_event: Optional event to signal shutdown.
         """
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
-        super().__init__(component, engine, config, publisher, generate_endpoint)
+        super().__init__(
+            component, engine, config, publisher, generate_endpoint, shutdown_event
+        )
         self._consume_tasks = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
@@ -114,6 +118,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+        priority = (inner_request.get("routing") or {}).get("priority")
 
         trace_header = self._get_trace_header(context) if self.enable_trace else None
 
@@ -126,6 +131,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
+            **self._priority_kwargs(priority),
         )
 
         task = asyncio.create_task(self._consume_results(results, context))
