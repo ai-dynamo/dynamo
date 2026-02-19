@@ -279,6 +279,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeploymentRequest is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentRequest"
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
