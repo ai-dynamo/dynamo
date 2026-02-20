@@ -31,8 +31,8 @@ typedef void* cudaStream_t;
 
 cudaError_t
 kvbm_kernels_launch_universal_from_block(
-    void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl,
-    size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
+    void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
+    size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
   (void)universal_ptrs;
   (void)block_ptrs;
@@ -51,8 +51,8 @@ kvbm_kernels_launch_universal_from_block(
 
 cudaError_t
 kvbm_kernels_launch_block_from_universal(
-    const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl,
-    size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
+    const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
+    size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
   (void)universal_ptrs;
   (void)block_ptrs;

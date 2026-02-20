@@ -230,8 +230,8 @@ kvbm_kernels_universal_to_block_kernel(
 template <typename T>
 cudaError_t
 kvbm_kernels_launch_block_to_universal_impl(
-    void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl,
-    size_t no, size_t nt, size_t hd, BlockLayout layout, cudaStream_t stream)
+    void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
+    size_t nt, size_t hd, BlockLayout layout, cudaStream_t stream)
 {
   size_t block_stride = nl * no;
   size_t total_per_block = nh * nl * no * nt * hd;
@@ -267,8 +267,8 @@ kvbm_kernels_launch_block_to_universal_impl(
 template <typename T>
 cudaError_t
 kvbm_kernels_launch_block_from_universal_impl(
-    const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl,
-    size_t no, size_t nt, size_t hd, BlockLayout layout, cudaStream_t stream)
+    const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
+    size_t nt, size_t hd, BlockLayout layout, cudaStream_t stream)
 {
   size_t block_stride = nl * no;
   size_t total_per_block = nh * nl * no * nt * hd;
@@ -305,8 +305,8 @@ kvbm_kernels_launch_block_from_universal_impl(
 
 extern "C" cudaError_t
 kvbm_kernels_launch_universal_from_block(
-    void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl,
-    size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
+    void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
+    size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
   auto dtype = static_cast<TensorDataType>(dtype_value);
   auto layout = static_cast<BlockLayout>(layout_value);
@@ -331,8 +331,8 @@ kvbm_kernels_launch_universal_from_block(
 
 extern "C" cudaError_t
 kvbm_kernels_launch_block_from_universal(
-    const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl,
-    size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
+    const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
+    size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
   auto dtype = static_cast<TensorDataType>(dtype_value);
   auto layout = static_cast<BlockLayout>(layout_value);
@@ -388,8 +388,8 @@ enum class MemcpyBatchMode : int {
 /// @return cudaSuccess on success, cudaErrorNotSupported if batch API unavailable and mode disallows fallback
 extern "C" cudaError_t
 kvbm_kernels_memcpy_batch(
-    const void* const* src_ptrs, void* const* dst_ptrs, size_t size_per_copy, size_t num_copies,
-    int mode_value, cudaStream_t stream)
+    const void* const* src_ptrs, void* const* dst_ptrs, size_t size_per_copy, size_t num_copies, int mode_value,
+    cudaStream_t stream)
 {
   auto mode = static_cast<MemcpyBatchMode>(mode_value);
 
@@ -403,8 +403,7 @@ kvbm_kernels_memcpy_batch(
 
   auto launch_memcpy_async_fallback = [&]() -> cudaError_t {
     for (size_t i = 0; i < num_copies; ++i) {
-      cudaError_t copy_err =
-          cudaMemcpyAsync(dst_ptrs[i], src_ptrs[i], size_per_copy, cudaMemcpyDefault, stream);
+      cudaError_t copy_err = cudaMemcpyAsync(dst_ptrs[i], src_ptrs[i], size_per_copy, cudaMemcpyDefault, stream);
       if (copy_err != cudaSuccess) {
         return copy_err;
       }
