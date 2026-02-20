@@ -161,6 +161,14 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--model-express-url",
+            env_var="MODEL_EXPRESS_URL",
+            default=None,
+            help="ModelExpress P2P server URL (e.g., modelexpress-server:8001). "
+            "When set, weights are received via RDMA instead of loaded from disk.",
+        )
+        add_argument(
+            g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
             default=DisaggregationMode.AGGREGATED.value,
@@ -371,6 +379,8 @@ class DynamoTrtllmConfig(ConfigBase):
     override_engine_args: str
     publish_events_and_metrics: bool
     disable_request_abort: bool
+
+    model_express_url: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
     modality: Modality

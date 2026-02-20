@@ -233,6 +233,14 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
 
+# Optional: ModelExpress P2P weight transfer support
+ARG ENABLE_MODELEXPRESS_P2P
+ARG MODELEXPRESS_REF
+RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
+        echo "Installing ModelExpress P2P support..."; \
+        uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
+    fi
+
 # Install common and test dependencies
 # --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \

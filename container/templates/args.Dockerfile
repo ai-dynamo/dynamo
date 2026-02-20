@@ -82,6 +82,8 @@ ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
 
 {% if framework == "trtllm" %}
 # TensorRT-LLM specific configuration
+ARG ENABLE_MODELEXPRESS_P2P={{ context.trtllm.enable_modelexpress_p2p }}
+ARG MODELEXPRESS_REF={{ context.trtllm.modelexpress_ref }}
 ARG HAS_TRTLLM_CONTEXT={{ context.trtllm.has_trtllm_context }}
 ARG TENSORRTLLM_PIP_WHEEL={{ context.trtllm.pip_wheel }}
 ARG TENSORRTLLM_INDEX_URL={{ context.trtllm.index_url }}

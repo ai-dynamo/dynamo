@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek-V3.2 DEP8x2 Disaggregated Prefill/Decode with P2P Weight Transfer
+#
+# Architecture:
+#   - ModelExpress Server: CPU-only metadata coordinator
+#   - MX Source: Loads FP4 weights, shards for EP8, serves via NIXL/RDMA
+#   - Prefill: 2 nodes x 8 GPUs (DEP8x2), receives weights via P2P
+#   - Decode: 2 nodes x 8 GPUs (DEP8x2), receives weights via P2P
+#
+# Prerequisites:
+#   1. ModelExpress server deployed (see modelexpress-server.yaml)
+#   2. MX source loaded with DeepSeek-V3.2 FP4 weights
+#   3. RDMA/InfiniBand connectivity between nodes
+#
+# Usage:
+#   kubectl apply -f deploy.yaml -n <namespace>
+
+# ConfigMap for prefill engine configuration (DEP8)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prefill-config-dep8x2
+data:
+  prefill_config.yaml: |
+    max_batch_size: 4
+    max_num_tokens: 4608
+    max_seq_len: 8192
+    tensor_parallel_size: 1
+    moe_expert_parallel_size: 8
+    enable_attention_dp: true
+    pipeline_parallel_size: 1
+    disable_overlap_scheduler: true
+    print_iter_log: true
+    kv_cache_config:
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.85
+      dtype: fp8
+    cache_transceiver_config:
+      max_tokens_in_buffer: 4608
+      backend: DEFAULT
+---
+
+# ConfigMap for decode engine configuration (DEP8)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: decode-config-dep8x2
+data:
+  decode_config.yaml: |
+    tensor_parallel_size: 1
+    moe_expert_parallel_size: 8
+    enable_attention_dp: true
+    pipeline_parallel_size: 1
+    max_batch_size: 256
+    max_num_tokens: 256
+    max_seq_len: 8448
+    cuda_graph_config:
+      enable_padding: true
+      batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+    print_iter_log: true
+    disable_overlap_scheduler: false
+    kv_cache_config:
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.7
+      dtype: fp8
+    cache_transceiver_config:
+      max_tokens_in_buffer: 4608
+      backend: DEFAULT
+---
+
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: dsv32-dep8x2-compute-domain
+spec:
+  numNodes: 5
+  channel:
+    resourceClaimTemplate:
+      name: dsv32-dep8x2-channel
+---
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv32-dep8x2-disagg
+spec:
+  envs:
+    - name: NCCL_MNNVL_ENABLE
+      value: "1"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+    - name: TLLM_LOG_LEVEL
+      value: "info"
+    - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
+      value: "1"
+    - name: TRTLLM_ENABLE_PDL
+      value: "1"
+  backendFramework: trtllm
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
+          args:
+          - |
+            python3 -m dynamo.frontend --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
+      sharedMemory:
+        size: 800Gi
+      resources:
+        requests:
+          cpu: "130"
+          memory: "850Gi"
+        limits:
+          cpu: "130"
+          memory: "850Gi"
+          gpu: "8"
+        claims:
+          - name: compute-domain-channel
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
+          workingDir: /workspace/components/backends/trtllm
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 600
+          volumeMounts:
+            - name: prefill-config-volume
+              mountPath: /config
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - >-
+            python3 -m dynamo.trtllm
+            --model deepseek-ai/DeepSeek-V3.2
+            --served-model-name deepseek-ai/DeepSeek-V3.2
+            --model-express-url modelexpress-server:8001
+            --extra-engine-args /config/prefill_config.yaml
+            --disaggregation-mode prefill
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: dsv32-dep8x2-channel
+        volumes:
+          - name: prefill-config-volume
+            configMap:
+              name: prefill-config-dep8x2
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
+      sharedMemory:
+        size: 800Gi
+      resources:
+        requests:
+          cpu: "130"
+          memory: "850Gi"
+        limits:
+          cpu: "130"
+          memory: "850Gi"
+          gpu: "8"
+        claims:
+          - name: compute-domain-channel
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
+          workingDir: /workspace/components/backends/trtllm
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 600
+          volumeMounts:
+            - name: decode-config-volume
+              mountPath: /config
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - >-
+            python3 -m dynamo.trtllm
+            --model deepseek-ai/DeepSeek-V3.2
+            --served-model-name deepseek-ai/DeepSeek-V3.2
+            --model-express-url modelexpress-server:8001
+            --extra-engine-args /config/decode_config.yaml
+            --disaggregation-mode decode
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: dsv32-dep8x2-channel
+        volumes:
+          - name: decode-config-volume
+            configMap:
+              name: decode-config-dep8x2

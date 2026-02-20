@@ -328,6 +328,7 @@ async def init_llm_worker(
         engine_args,
         config.disaggregation_mode,
         component_gauges=component_gauges,
+        model_express_url=config.model_express_url,
     ) as engine:
         endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
