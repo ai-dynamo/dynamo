@@ -559,3 +559,75 @@ class TestVllmRendererApi:
             "ReasoningParser.is_reasoning_end_streaming signature changed; "
             f"expected ['self', 'input_ids', 'delta_ids'], got {end_params}"
         )
+
+    def test_preprocess_worker_result_picklability(self):
+        """Verify PreprocessWorkerResult survives pickle round-trip.
+
+        _preprocess_worker returns this dataclass via a ProcessPoolExecutor
+        Future. If any field becomes unpicklable, the pool path breaks.
+        """
+        import pickle
+
+        from dynamo.frontend.vllm_processor import PreprocessWorkerResult
+
+        result = PreprocessWorkerResult(
+            dynamo_preproc={
+                "model": "test-model",
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {
+                    "max_tokens": 100,
+                    "stop": [],
+                    "stop_token_ids": [2],
+                    "min_tokens": 0,
+                    "ignore_eos": False,
+                },
+                "sampling_options": {
+                    "n": 1,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "repetition_penalty": 1.0,
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": 0,
+                    "min_p": 0.0,
+                    "seed": None,
+                },
+                "output_options": {
+                    "logprobs": None,
+                    "prompt_logprobs": None,
+                    "skip_special_tokens": True,
+                },
+                "eos_token_ids": [2],
+                "annotations": [],
+            },
+            tokens=[1, 2, 3],
+            vllm_preproc=EngineCoreRequest(
+                request_id="test-123",
+                prompt_token_ids=[1, 2, 3],
+                mm_features=None,
+                sampling_params=SamplingParams(),
+                pooling_params=None,
+                eos_token_id=2,
+                arrival_time=0.0,
+                lora_request=None,
+                cache_salt=None,
+                data_parallel_rank=None,
+                prompt_embeds=None,
+                client_index=0,
+                current_wave=0,
+                priority=0,
+                trace_headers=None,
+            ),
+            sampling_params=SamplingParams(),
+            request_for_sampling={"model": "test-model", "tools": None},
+            chat_template_kwargs={"reasoning_effort": None},
+        )
+
+        data = pickle.dumps(result)
+        restored = pickle.loads(data)
+
+        assert restored.dynamo_preproc == result.dynamo_preproc
+        assert restored.tokens == result.tokens
+        assert restored.vllm_preproc.request_id == "test-123"
+        assert restored.request_for_sampling == result.request_for_sampling
+        assert restored.chat_template_kwargs == result.chat_template_kwargs
