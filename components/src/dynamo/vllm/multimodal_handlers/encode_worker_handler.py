@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import AsyncIterator
 
+import nvtx
 import torch
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -112,6 +113,7 @@ class EncodeWorkerHandler:
             else:
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
+        rng = nvtx.start_range("encode_worker_generate")
 
         request_id = request.request_id
 
@@ -178,6 +180,7 @@ class EncodeWorkerHandler:
                 )
 
             if loaded_images:
+                img_rng = nvtx.start_range("encode_worker_image_processing")
                 image_embeds = await asyncio.to_thread(
                     self.image_processor, images=loaded_images, return_tensors="pt"
                 )
@@ -216,6 +219,7 @@ class EncodeWorkerHandler:
                     if "image_grid_thw" in image_embeds
                     else None
                 )
+                nvtx.end_range(img_rng)
 
             # fill in the embedding_lists with new computed embeddings and cache them
             for split_idx, (list_idx, key) in enumerate(need_encode_indexes):
@@ -281,6 +285,8 @@ class EncodeWorkerHandler:
                 f"Encoded image(s) for request {{ id: {request_id} }} in {time_end - time_start:.4f} seconds. "
                 f"Average encoding time: {self._accumulated_time / self._processed_requests:.4f} seconds over {self._processed_requests} requests."
             )
+
+            nvtx.end_range(rng)
 
             # Yield transformed request back
             yield request.model_dump_json()

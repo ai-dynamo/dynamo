@@ -9,6 +9,7 @@ import uuid
 from collections import defaultdict
 from typing import Any
 
+import nvtx
 import torch
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -195,6 +196,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
 
         No-op when --route-to-encoder is not set.
         """
+        rng = nvtx.start_range("worker_request_generate")
         multimodal_inputs: list[MultiModalGroup] = request.multimodal_inputs or []
         multi_modal_data: dict[str, Any] = defaultdict(list)
 
@@ -221,6 +223,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 mi.image_grid_thw,
             )
 
+        nvtx.end_range(rng)
         return multi_modal_data, receiver_tensor_ids
 
     # ── Request metadata finalization ────────────────────────────────
@@ -321,6 +324,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         received_tensor_ids: list[int],
     ):
         """Run prefill and decode on this worker (aggregated mode)."""
+        rng = nvtx.start_range("worker_request_generate")
         lora_request = self._resolve_lora_request(request.model)
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
@@ -331,6 +335,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             request_id=request.request_id,
             lora_request=lora_request,
         )
+
+        nvtx.end_range(rng)
+        rng = nvtx.start_range("worker_request_generate_streaming")
 
         for tensor_id in received_tensor_ids:
             self.embedding_receiver.release_tensor(tensor_id)
@@ -344,6 +351,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             yield self._format_engine_output(response, num_output_tokens_so_far)
             if response.outputs:
                 num_output_tokens_so_far = len(response.outputs[0].token_ids)
+
+        nvtx.end_range(rng)
 
     # ── Disaggregated generation (prefill here, decode remote) ───────
 
