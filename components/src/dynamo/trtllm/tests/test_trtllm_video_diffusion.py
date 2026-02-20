@@ -18,14 +18,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
-from dynamo.trtllm.constants import Modality
-from dynamo.trtllm.protocols.video_protocol import (
+from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
     VideoData,
     VideoNvExt,
 )
+from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
+from dynamo.trtllm.constants import Modality
 
 pytestmark = [
     pytest.mark.unit,
