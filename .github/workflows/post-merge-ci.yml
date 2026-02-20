@@ -82,7 +82,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
-    # if: failure()
+    if: always() && failure()
     needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
     permissions:
       contents: read
