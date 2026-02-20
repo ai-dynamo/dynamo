@@ -1597,6 +1597,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
+                nvtx_range = nvtx.start_range("put request", color="red")
                 gen = self.engine_client.generate(
                     prompt,
                     sampling_params,
@@ -1606,6 +1607,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     trace_headers=trace_headers,
                     priority=priority,
                 )
+                nvtx.end_range(nvtx_range)
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
