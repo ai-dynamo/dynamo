@@ -72,7 +72,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 <Note>
 - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
-- **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+- **NATS** is optional - only needed if using KV routing with events. Workers must be explicitly configured to publish events. Use `--no-router-kv-events` on the frontend for prediction-based routing without events
 - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 </Note>
 
