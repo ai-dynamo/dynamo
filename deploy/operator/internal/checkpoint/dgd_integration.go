@@ -21,9 +21,9 @@ import (
 	"context"
 	"fmt"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -47,7 +47,7 @@ func getCheckpointInfoFromCheckpoint(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *
 
 // getPVCBasePath returns the PVC base path from storage config.
 // Only applicable for PVC storage type
-func getPVCBasePath(storageConfig *controller_common.CheckpointStorageConfig) string {
+func getPVCBasePath(storageConfig *configv1alpha1.CheckpointStorageConfiguration) string {
 	if storageConfig != nil && storageConfig.PVC.BasePath != "" {
 		return storageConfig.PVC.BasePath
 	}
@@ -57,7 +57,7 @@ func getPVCBasePath(storageConfig *controller_common.CheckpointStorageConfig) st
 // GetPVCBasePath returns the configured PVC base path from controller config.
 // This is used by both CheckpointReconciler and DynamoGraphDeploymentReconciler.
 // Only applicable for PVC storage type.
-func GetPVCBasePath(config *controller_common.CheckpointConfig) string {
+func GetPVCBasePath(config *configv1alpha1.CheckpointConfiguration) string {
 	if config != nil {
 		return getPVCBasePath(&config.Storage)
 	}
@@ -161,7 +161,7 @@ func ResolveCheckpointForService(
 // Sets PATH, HASH, RESTORE_MARKER_FILE, and SKIP_WAIT_FOR_CHECKPOINT. The restore entrypoint constructs
 // the full checkpoint location from PATH + "/" + HASH.
 // DYN_CHECKPOINT_LOCATION is reserved for future S3/OCI support.
-func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo, checkpointConfig *controller_common.CheckpointConfig) {
+func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo, checkpointConfig *configv1alpha1.CheckpointConfiguration) {
 	if !info.Enabled {
 		return
 	}
@@ -170,13 +170,13 @@ func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo, 
 
 	// For PVC storage: inject base path so restore-entrypoint constructs location = path/hash.
 	// For S3/OCI (future): inject DYN_CHECKPOINT_LOCATION directly.
-	storageType := controller_common.CheckpointStorageTypePVC
+	storageType := configv1alpha1.CheckpointStorageTypePVC
 	if checkpointConfig != nil && checkpointConfig.Storage.Type != "" {
 		storageType = checkpointConfig.Storage.Type
 	}
 
 	switch storageType {
-	case controller_common.CheckpointStorageTypePVC:
+	case configv1alpha1.CheckpointStorageTypePVC:
 		basePath := ""
 		if checkpointConfig != nil {
 			basePath = getPVCBasePath(&checkpointConfig.Storage)
@@ -257,7 +257,7 @@ func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 
 // InjectCheckpointSignalVolume adds the checkpoint signal hostPath volume to a pod spec
 // This is needed for CRIU mount namespace consistency between checkpoint and restore pods
-func InjectCheckpointSignalVolume(podSpec *corev1.PodSpec, checkpointConfig *controller_common.CheckpointConfig) {
+func InjectCheckpointSignalVolume(podSpec *corev1.PodSpec, checkpointConfig *configv1alpha1.CheckpointConfiguration) {
 	// Check if volume already exists
 	for _, v := range podSpec.Volumes {
 		if v.Name == consts.CheckpointSignalVolumeName {
@@ -401,7 +401,7 @@ func InjectPodInfoVolumeMount(container *corev1.Container) {
 func InjectCheckpointIntoPodSpec(
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
-	checkpointConfig *controller_common.CheckpointConfig,
+	checkpointConfig *configv1alpha1.CheckpointConfiguration,
 ) error {
 	if checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
@@ -473,8 +473,8 @@ func InjectCheckpointIntoPodSpec(
 	mainContainer.SecurityContext.Privileged = ptr.To(true)
 
 	// Determine storage type and compute location/path
-	storageType := controller_common.CheckpointStorageTypePVC // default
-	var storageConfig *controller_common.CheckpointStorageConfig
+	storageType := configv1alpha1.CheckpointStorageTypePVC // default
+	var storageConfig *configv1alpha1.CheckpointStorageConfiguration
 	if checkpointConfig != nil {
 		storageConfig = &checkpointConfig.Storage
 		if storageConfig.Type != "" {
@@ -483,7 +483,7 @@ func InjectCheckpointIntoPodSpec(
 	}
 
 	switch storageType {
-	case controller_common.CheckpointStorageTypeS3:
+	case configv1alpha1.CheckpointStorageTypeS3:
 		// S3 storage: location is s3:// URI
 		// URI format: s3://[endpoint/]bucket/prefix
 		info.StorageType = storageTypeToAPI(storageType)
@@ -492,7 +492,7 @@ func InjectCheckpointIntoPodSpec(
 		}
 		info.Location = fmt.Sprintf("%s/%s.tar", storageConfig.S3.URI, info.Hash)
 
-	case controller_common.CheckpointStorageTypeOCI:
+	case configv1alpha1.CheckpointStorageTypeOCI:
 		// OCI storage: location is oci:// URI
 		// URI format: oci://registry/repository
 		info.StorageType = storageTypeToAPI(storageType)
@@ -501,7 +501,7 @@ func InjectCheckpointIntoPodSpec(
 		}
 		info.Location = fmt.Sprintf("%s:%s", storageConfig.OCI.URI, info.Hash)
 
-	default: // controller_common.CheckpointStorageTypePVC
+	default: // configv1alpha1.CheckpointStorageTypePVC
 		// PVC storage: location is the checkpoint directory
 		// k8s-runc-bypass expects: /checkpoints/{hash}/ (directory with checkpoint data)
 		info.StorageType = storageTypeToAPI(storageType)

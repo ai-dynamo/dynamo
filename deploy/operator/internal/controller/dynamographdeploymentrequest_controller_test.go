@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"time"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	. "github.com/onsi/ginkgo/v2"
@@ -86,13 +87,16 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
 			Client:   k8sClient,
 			Recorder: recorder,
-			Config: commonController.Config{
-				RestrictedNamespace: "",
-				RBAC: commonController.RBACConfig{
+			Config: &configv1alpha1.OperatorConfiguration{
+				Namespace: configv1alpha1.NamespaceConfiguration{
+					Restricted: "",
+				},
+				RBAC: configv1alpha1.RBACConfiguration{
 					DGDRProfilingClusterRoleName: "test-cluster-role",
 				},
 			},
-			RBACManager: &MockRBACManager{},
+			RuntimeConfig: &commonController.RuntimeConfig{},
+			RBACManager:   &MockRBACManager{},
 		}
 	})
 
@@ -956,10 +960,13 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
 			Client:   k8sClient,
 			Recorder: record.NewFakeRecorder(100),
-			Config: commonController.Config{
-				RestrictedNamespace: "",
+			Config: &configv1alpha1.OperatorConfiguration{
+				Namespace: configv1alpha1.NamespaceConfiguration{
+					Restricted: "",
+				},
 			},
-			RBACManager: &MockRBACManager{},
+			RuntimeConfig: &commonController.RuntimeConfig{},
+			RBACManager:   &MockRBACManager{},
 		}
 	})
 
@@ -1199,10 +1206,13 @@ var _ = Describe("DGDR Error Handling", func() {
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
 			Client:   k8sClient,
 			Recorder: recorder,
-			Config: commonController.Config{
-				RestrictedNamespace: "",
+			Config: &configv1alpha1.OperatorConfiguration{
+				Namespace: configv1alpha1.NamespaceConfiguration{
+					Restricted: "",
+				},
 			},
-			RBACManager: &MockRBACManager{},
+			RuntimeConfig: &commonController.RuntimeConfig{},
+			RBACManager:   &MockRBACManager{},
 		}
 	})
 

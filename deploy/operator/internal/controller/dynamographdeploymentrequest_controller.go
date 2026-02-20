@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	sigsyaml "sigs.k8s.io/yaml"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -298,8 +299,9 @@ echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
-	Config   commonController.Config
+	Recorder      record.EventRecorder
+	Config        *configv1alpha1.OperatorConfiguration
+	RuntimeConfig *commonController.RuntimeConfig
 
 	// RBACMgr handles RBAC setup for profiling jobs
 	RBACManager RBACManager
@@ -1015,7 +1017,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 
 	logger.Info("GPU discovery not available", "reason", err.Error())
 
-	isNamespaceScoped := r.Config.RestrictedNamespace != ""
+	isNamespaceScoped := r.Config.Namespace.Restricted != ""
 	if isNamespaceScoped {
 		tmpl := template.Must(template.New("nsGPUErr").Parse(
 			`GPU hardware info required but cannot be auto-discovered.` +
@@ -1073,7 +1075,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	}
 
 	// Ensure profiling job RBAC exists (only for cluster-wide installation)
-	if r.Config.RestrictedNamespace == "" {
+	if r.Config.Namespace.Restricted == "" {
 		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
 			ctx,
 			dgdr.Namespace,
@@ -1791,7 +1793,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 				GenericFunc: func(ge event.GenericEvent) bool { return true },
 			}),
-		).                                                                          // Watch DGDs created by this controller (via label)
-		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
+		).
+		// Watch DGDs created by this controller (via label)
+		// Set the event filter to ignore resources handled by other controllers in namespace-restricted mode
+		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentRequest))
 }
