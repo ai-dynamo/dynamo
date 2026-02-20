@@ -301,11 +301,10 @@ async def init(
     engine = sgl.Engine(server_args=server_args)
     load_time = time.time() - start_time
 
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     # Setup metrics and KV events for ALL nodes (including non-leader)
@@ -393,11 +392,10 @@ async def init_prefill(
 
     engine = sgl.Engine(server_args=server_args)
 
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     # Setup metrics and KV events for ALL nodes (including non-leader)
@@ -486,11 +484,10 @@ async def init_diffusion(
 
     engine = sgl.Engine(server_args=server_args)
 
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     # Setup metrics and KV events for ALL nodes (including non-leader)
@@ -567,11 +564,10 @@ async def init_embedding(
 
     engine = sgl.Engine(server_args=server_args)
 
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     # publisher instantiates the metrics and kv event publishers
@@ -658,18 +654,12 @@ async def init_image_diffusion(
         dist_timeout=dist_timeout,
     )
 
-    # Initialize fsspec filesystems for image storage
-    fs_url = dynamo_args.image_diffusion_fs_url
+    fs_url = dynamo_args.media_output_fs_url
 
-    # Initialize primary filesystem
-    if not fs_url:
-        raise ValueError("--image-diffusion-fs-url is required for diffusion workers")
-
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     # Image diffusion doesn't have metrics publisher like LLM
@@ -749,20 +739,12 @@ async def init_video_generation(
         dist_timeout=dist_timeout,
     )
 
-    # Initialize fsspec filesystems for video storage
-    fs_url = dynamo_args.video_generation_fs_url
+    fs_url = dynamo_args.media_output_fs_url
 
-    # Initialize primary filesystem
-    if not fs_url:
-        raise ValueError(
-            "--video-generation-fs-url is required for video generation workers"
-        )
-
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     handler = VideoGenerationWorkerHandler(
@@ -814,20 +796,16 @@ async def init_multimodal_processor(
 ):
     """Initialize multimodal processor component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     # For processor, we need to connect to the encode worker
-    encode_worker_client = (
-        await runtime.namespace(dynamo_args.namespace)
-        .component("encoder")
-        .endpoint("generate")
-        .client()
-    )
+    encode_worker_client = await runtime.endpoint(
+        f"{dynamo_args.namespace}.encoder.generate"
+    ).client()
 
     ready_event = asyncio.Event()
 
@@ -877,20 +855,16 @@ async def init_multimodal_encode_worker(
     """Initialize multimodal encode worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     # For encode worker, we need to connect to the downstream LLM worker
-    pd_worker_client = (
-        await runtime.namespace(dynamo_args.namespace)
-        .component("backend")
-        .endpoint("generate")
-        .client()
-    )
+    pd_worker_client = await runtime.endpoint(
+        f"{dynamo_args.namespace}.backend.generate"
+    ).client()
 
     handler = MultimodalEncodeWorkerHandler(
         component, config, pd_worker_client, shutdown_event
@@ -935,23 +909,19 @@ async def init_multimodal_worker(
     """
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     engine = sgl.Engine(server_args=server_args)
 
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client for multimodal decode worker")
-        prefill_client = (
-            await runtime.namespace(dynamo_args.namespace)
-            .component("prefill")
-            .endpoint("generate")
-            .client()
-        )
+        prefill_client = await runtime.endpoint(
+            f"{dynamo_args.namespace}.prefill.generate"
+        ).client()
         handler = MultimodalWorkerHandler(
             component, engine, config, prefill_client, shutdown_event
         )
@@ -995,11 +965,10 @@ async def init_multimodal_prefill_worker(
 
     engine = sgl.Engine(server_args=server_args)
 
-    component = runtime.namespace(dynamo_args.namespace).component(
-        dynamo_args.component
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    component = generate_endpoint.component()
     shutdown_endpoints[:] = [generate_endpoint]
 
     handler = MultimodalPrefillWorkerHandler(component, engine, config, shutdown_event)

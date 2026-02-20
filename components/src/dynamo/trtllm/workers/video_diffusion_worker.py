@@ -65,7 +65,8 @@ async def init_video_diffusion_worker(
         event_plane=config.event_plane,
         model_path=config.model,
         served_model_name=config.served_model_name,
-        output_dir=config.output_dir,
+        media_output_fs_url=config.media_output_fs_url,
+        media_output_http_url=config.media_output_http_url,
         default_height=config.default_height,
         default_width=config.default_width,
         default_num_frames=config.default_num_frames,
@@ -86,9 +87,11 @@ async def init_video_diffusion_worker(
         enable_async_cpu_offload=config.enable_async_cpu_offload,
     )
 
-    # Get the component and endpoint from the runtime
-    component = runtime.namespace(config.namespace).component(config.component)
-    endpoint = component.endpoint(config.endpoint)
+    # Get the endpoint from the runtime
+    endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    component = endpoint.component()
     if shutdown_endpoints is not None:
         shutdown_endpoints[:] = [endpoint]
 

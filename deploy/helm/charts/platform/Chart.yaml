@@ -33,7 +33,7 @@ dependencies:
   - name: etcd
     version: 12.0.18
     repository: "https://charts.bitnami.com/bitnami"
-    condition: etcd.enabled
+    condition: global.etcd.install
   - name: kai-scheduler
     version: v0.9.4
     repository: oci://ghcr.io/nvidia/kai-scheduler
