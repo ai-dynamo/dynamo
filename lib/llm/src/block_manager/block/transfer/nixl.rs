@@ -31,13 +31,13 @@ where
                 src_desc.as_ptr() as usize,
                 src_desc.size(),
                 src_desc.device_id(),
-            )?;
+            );
 
             dst_dl.add_desc(
                 dst_desc.as_ptr() as usize,
                 dst_desc.size(),
                 dst_desc.device_id(),
-            )?;
+            );
         }
 
         Ok(())
@@ -58,13 +58,13 @@ where
                         src_desc.as_ptr() as usize,
                         src_desc.size(),
                         src_desc.device_id(),
-                    )?;
+                    );
 
                     dst_dl.add_desc(
                         dst_desc.as_ptr() as usize,
                         dst_desc.size(),
                         dst_desc.device_id(),
-                    )?;
+                    );
                 }
             }
         }

@@ -47,6 +47,8 @@ class BasePayload:
     # Optional additional ports used by specialized payloads (e.g. LoRA system/control-plane APIs).
     # This is intentionally empty by default to preserve prior semantics.
     system_ports: list[int] = field(default_factory=list)
+    # When True, the HTTP request is made with stream=True (for SSE responses).
+    http_stream: bool = False
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")
@@ -486,6 +488,255 @@ class CompletionPayloadWithLogprobs(CompletionPayload):
 
 
 @dataclass
+class ResponsesPayload(BasePayload):
+    """Payload for the Responses API endpoint (/v1/responses).
+
+    For full compliance testing, use the OpenResponses bun CLI:
+      bun run test:compliance --base-url http://localhost:<port>/v1 --api-key test --model <model>
+    See https://www.openresponses.org/compliance
+    """
+
+    endpoint: str = "/v1/responses"
+
+    @staticmethod
+    def extract_content(response):
+        """Extract text content from a Responses API response."""
+        response.raise_for_status()
+        result = response.json()
+
+        assert (
+            result.get("object") == "response"
+        ), f"Expected object='response', got {result.get('object')}"
+        assert result.get("id", "").startswith(
+            "resp_"
+        ), f"Expected id to start with 'resp_', got {result.get('id')}"
+        assert (
+            result.get("status") == "completed"
+        ), f"Expected status='completed', got {result.get('status')}"
+
+        output = result.get("output", [])
+        assert len(output) > 0, "Response output is empty"
+
+        msg = output[0]
+        assert (
+            msg.get("type") == "message"
+        ), f"Expected output[0].type='message', got {msg.get('type')}"
+        assert (
+            msg.get("role") == "assistant"
+        ), f"Expected role='assistant', got {msg.get('role')}"
+
+        content_parts = msg.get("content", [])
+        assert len(content_parts) > 0, "Message content is empty"
+        assert (
+            content_parts[0].get("type") == "output_text"
+        ), f"Expected content[0].type='output_text', got {content_parts[0].get('type')}"
+
+        return content_parts[0].get("text", "")
+
+    def response_handler(self, response: Any) -> str:
+        return ResponsesPayload.extract_content(response)
+
+
+@dataclass
+class ResponsesStreamPayload(BasePayload):
+    """Streaming payload for the Responses API endpoint (/v1/responses).
+
+    Validates SSE event structure and lifecycle ordering.
+    """
+
+    endpoint: str = "/v1/responses"
+    http_stream: bool = True
+
+    @staticmethod
+    def extract_content(response):
+        """Parse SSE stream and validate event structure."""
+        import json
+
+        response.raise_for_status()
+
+        events = []
+        event_type = ""
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                event_type = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data_str = line[len("data: ") :]
+                if data_str == "[DONE]":
+                    events.append(("done", None))
+                else:
+                    events.append((event_type, json.loads(data_str)))
+
+        event_types = [e[0] for e in events]
+
+        # Validate lifecycle event ordering
+        assert len(event_types) >= 2, f"Too few events: {event_types}"
+        assert (
+            event_types[0] == "response.created"
+        ), f"First event should be response.created, got {event_types[0]}"
+        assert (
+            event_types[1] == "response.in_progress"
+        ), f"Second event should be response.in_progress, got {event_types[1]}"
+
+        non_done = [e for e in event_types if e != "done"]
+        assert (
+            non_done[-1] == "response.completed"
+        ), f"Last real event should be response.completed, got {non_done[-1]}"
+
+        # Validate text content events
+        assert "response.output_item.added" in event_types, "Missing output_item.added"
+        assert (
+            "response.content_part.added" in event_types
+        ), "Missing content_part.added"
+        assert "response.output_text.delta" in event_types, "Missing output_text.delta"
+        assert "response.output_text.done" in event_types, "Missing output_text.done"
+        assert "response.content_part.done" in event_types, "Missing content_part.done"
+        assert "response.output_item.done" in event_types, "Missing output_item.done"
+
+        # Verify text deltas concatenate to the final text
+        deltas = [e[1]["delta"] for e in events if e[0] == "response.output_text.delta"]
+        done_events = [e for e in events if e[0] == "response.output_text.done"]
+        assert (
+            len(done_events) == 1
+        ), f"Expected 1 output_text.done, got {len(done_events)}"
+        full_text = "".join(deltas)
+        assert (
+            done_events[0][1]["text"] == full_text
+        ), "Concatenated deltas don't match output_text.done text"
+
+        return full_text
+
+    def response_handler(self, response: Any) -> str:
+        return ResponsesStreamPayload.extract_content(response)
+
+
+@dataclass
+class AnthropicMessagesPayload(BasePayload):
+    """Payload for the Anthropic Messages API endpoint (/v1/messages)."""
+
+    endpoint: str = "/v1/messages"
+
+    @staticmethod
+    def extract_content(response):
+        """Extract text content from an Anthropic Messages API response."""
+        response.raise_for_status()
+        result = response.json()
+
+        assert (
+            result.get("type") == "message"
+        ), f"Expected type='message', got {result.get('type')}"
+        assert result.get("id", "").startswith(
+            "msg_"
+        ), f"Expected id to start with 'msg_', got {result.get('id')}"
+        assert (
+            result.get("role") == "assistant"
+        ), f"Expected role='assistant', got {result.get('role')}"
+        assert result.get("stop_reason") in (
+            "end_turn",
+            "max_tokens",
+            "stop_sequence",
+            "tool_use",
+        ), f"Unexpected stop_reason: {result.get('stop_reason')}"
+
+        content = result.get("content", [])
+        assert len(content) > 0, "Response content is empty"
+        assert (
+            content[0].get("type") == "text"
+        ), f"Expected content[0].type='text', got {content[0].get('type')}"
+
+        usage = result.get("usage", {})
+        assert "input_tokens" in usage, "Missing input_tokens in usage"
+        assert "output_tokens" in usage, "Missing output_tokens in usage"
+
+        return content[0].get("text", "")
+
+    def response_handler(self, response: Any) -> str:
+        return AnthropicMessagesPayload.extract_content(response)
+
+
+@dataclass
+class AnthropicMessagesStreamPayload(BasePayload):
+    """Streaming payload for the Anthropic Messages API endpoint (/v1/messages).
+
+    Validates SSE event structure and lifecycle ordering per the Anthropic streaming spec.
+    """
+
+    endpoint: str = "/v1/messages"
+    http_stream: bool = True
+
+    @staticmethod
+    def extract_content(response):
+        """Parse SSE stream and validate Anthropic event structure."""
+        import json
+
+        response.raise_for_status()
+
+        events = []
+        event_type = ""
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                event_type = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data_str = line[len("data: ") :]
+                events.append((event_type, json.loads(data_str)))
+
+        event_types = [e[0] for e in events]
+
+        # Validate lifecycle event ordering
+        assert len(event_types) >= 3, f"Too few events: {event_types}"
+        assert (
+            event_types[0] == "message_start"
+        ), f"First event should be message_start, got {event_types[0]}"
+        assert (
+            event_types[-1] == "message_stop"
+        ), f"Last event should be message_stop, got {event_types[-1]}"
+
+        # Validate message_start structure
+        msg_start = events[0][1]
+        assert msg_start.get("type") == "message_start", "message_start missing type"
+        message = msg_start.get("message", {})
+        assert message.get("id", "").startswith(
+            "msg_"
+        ), "message id should start with msg_"
+        assert message.get("role") == "assistant", "message role should be assistant"
+
+        # Validate required event types
+        assert "content_block_start" in event_types, "Missing content_block_start"
+        assert "content_block_delta" in event_types, "Missing content_block_delta"
+        assert "content_block_stop" in event_types, "Missing content_block_stop"
+        assert "message_delta" in event_types, "Missing message_delta"
+
+        # Validate message_delta has stop_reason
+        delta_events = [e for e in events if e[0] == "message_delta"]
+        assert (
+            len(delta_events) == 1
+        ), f"Expected 1 message_delta, got {len(delta_events)}"
+        delta_body = delta_events[0][1].get("delta", {})
+        assert delta_body.get("stop_reason") in (
+            "end_turn",
+            "max_tokens",
+            "stop_sequence",
+            "tool_use",
+        ), f"Unexpected stop_reason in message_delta: {delta_body.get('stop_reason')}"
+
+        # Collect text deltas
+        deltas = []
+        for e_type, e_data in events:
+            if e_type == "content_block_delta":
+                delta = e_data.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    deltas.append(delta.get("text", ""))
+
+        return "".join(deltas)
+
+    def response_handler(self, response: Any) -> str:
+        return AnthropicMessagesStreamPayload.extract_content(response)
+
+
+@dataclass
 class EmbeddingPayload(BasePayload):
     """Payload for embeddings endpoint."""
 
@@ -540,13 +791,16 @@ class MetricCheck:
 
 @dataclass
 class MetricsPayload(BasePayload):
+    """Base class for Prometheus metrics validation payloads.
+
+    Validates common dynamo_component_* metrics shared across all backends.
+    Backend-specific subclasses handle engine-specific metrics.
+    """
+
     endpoint: str = "/metrics"
     method: str = "GET"
     port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
-    backend: Optional[
-        str
-    ] = None  # Backend identifier for metrics validation (e.g., 'vllm', 'sglang', 'trtllm')
 
     def with_model(self, model):
         # Metrics does not use model in request body
@@ -556,16 +810,14 @@ class MetricsPayload(BasePayload):
         response.raise_for_status()
         return response.text
 
-    def validate(self, response: Any, content: str) -> None:
-        # Use backend from payload configuration
-        backend = self.backend
-
-        # Filter out _bucket metrics from content (histogram buckets inflate counts)
+    def _filter_bucket_metrics(self, content: str) -> str:
+        """Filter out histogram bucket metrics to avoid count inflation"""
         content_lines = content.split("\n")
         filtered_lines = [line for line in content_lines if "_bucket{" not in line]
-        content = "\n".join(filtered_lines)
+        return "\n".join(filtered_lines)
 
-        # Build full metric names with prefix
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        """Get common dynamo_component_* metric checks shared across all backends"""
         prefix = prometheus_names.name_prefix.COMPONENT
 
         # Define metrics to check
@@ -573,18 +825,19 @@ class MetricsPayload(BasePayload):
         # Examples:
         #   - dynamo_component_requests_total{model="Qwen/Qwen3-0.6B"} 6
         #   - dynamo_component_uptime_seconds 150.390999059
+        # Note: Supports scientific notation (e.g., 8.34e-05)
         def metric_pattern(name):
-            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.]+)"
+            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
 
-        metrics_to_check = [
+        return [
             MetricCheck(
                 # Check: Minimum count of unique dynamo_component_* metrics
                 name=f"{prefix}_*",
                 pattern=lambda name: rf"^{prefix}_\w+",
                 validator=lambda value: len(set(value))
-                >= 11,  # 80% of typical ~17 metrics (excluding _bucket) as of 2025-12-02
-                error_msg=lambda name, value: f"Expected at least 11 unique {prefix}_* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 11)",
+                >= 7,  # 80% of typical ~13 metrics (excluding _bucket and removed kvstats metrics)
+                error_msg=lambda name, value: f"Expected at least 7 unique {prefix}_* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 7)",
                 multiline=True,
             ),
             MetricCheck(
@@ -604,68 +857,34 @@ class MetricsPayload(BasePayload):
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}",
                 pattern=metric_pattern,
-                validator=lambda value: int(float(value))
-                >= 0,  # Allow 0 for SGLang (hardcoded issue in components/src/dynamo/sglang/publisher.py:70)
+                validator=lambda value: float(value) >= 0,
                 error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
             ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.kvstats.GPU_CACHE_USAGE_PERCENT}",
+                pattern=metric_pattern,
+                validator=lambda value: 0.0 <= float(value) <= 1.0,
+                error_msg=lambda name, value: f"{name} should be between 0.0 and 1.0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.model_info.LOAD_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) > 0,
+                error_msg=lambda name, value: f"{name} should be > 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {float(value):.2f}s",
+            ),
         ]
 
-        # Add backend-specific metric checks
-        if backend == "vllm":
-            metrics_to_check.append(
-                MetricCheck(
-                    # Check: Minimum count of unique vllm:* metrics
-                    name="vllm:*",
-                    pattern=lambda name: r"^vllm:\w+",
-                    validator=lambda value: len(set(value))
-                    >= 52,  # 80% of typical ~65 vllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                    error_msg=lambda name, value: f"Expected at least 52 unique vllm:* metrics, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique vllm:* metrics (minimum required: 52)",
-                    multiline=True,
-                )
-            )
-        elif backend == "lmcache":
-            metrics_to_check.append(
-                MetricCheck(
-                    # Check: Minimum count of unique lmcache:* metrics
-                    name="lmcache:*",
-                    pattern=lambda name: r"^lmcache:\w+",
-                    validator=lambda value: len(set(value))
-                    >= 1,  # At least 1 lmcache metric
-                    error_msg=lambda name, value: f"Expected at least 1 lmcache:* metric, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} lmcache:* metrics",
-                    multiline=True,
-                )
-            )
-        elif backend == "sglang":
-            metrics_to_check.append(
-                MetricCheck(
-                    # Check: Minimum count of unique sglang:* metrics
-                    name="sglang_*",
-                    pattern=lambda name: r"^sglang_\w+",
-                    validator=lambda value: len(set(value))
-                    >= 20,  # 80% of typical ~25 sglang metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                    error_msg=lambda name, value: f"Expected at least 20 unique sglang:* metrics, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 20)",
-                    multiline=True,
-                )
-            )
-        elif backend == "trtllm":
-            metrics_to_check.append(
-                MetricCheck(
-                    # Check: Minimum count of unique trtllm_* metrics
-                    name="trtllm_*",
-                    pattern=lambda name: r"^trtllm_\w+",
-                    validator=lambda value: len(set(value))
-                    >= 4,  # 80% of typical ~5 trtllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                    error_msg=lambda name, value: f"Expected at least 4 unique trtllm_* metrics, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)",
-                    multiline=True,
-                )
-            )
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """Get backend-specific metric checks. Override in subclasses."""
+        return []
 
-        # Check all metrics
+    def _validate_metric_checks(
+        self, metrics_to_check: list[MetricCheck], content: str
+    ) -> None:
+        """Run all metric checks and raise AssertionError if any fail"""
         for metric in metrics_to_check:
             # Special handling for multiline patterns (like counting unique metrics)
             if metric.multiline:
@@ -712,6 +931,163 @@ class MetricsPayload(BasePayload):
                             metric.name, last_value if last_value else "N/A"
                         )
                     )
+
+    def validate(self, response: Any, content: str) -> None:
+        """Validate Prometheus metrics output"""
+        content = self._filter_bucket_metrics(content)
+
+        # Collect all checks: common + backend-specific
+        metrics_to_check = self._get_common_metric_checks()
+        metrics_to_check.extend(self._get_backend_specific_checks())
+
+        # Run all validations
+        self._validate_metric_checks(metrics_to_check, content)
+
+
+@dataclass
+class VLLMMetricsPayload(MetricsPayload):
+    """Metrics validation for vLLM backend with auto-label checks"""
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """vLLM-specific metric checks"""
+        checks = [
+            MetricCheck(
+                # Check: Minimum count of unique vllm:* metrics
+                name="vllm:*",
+                pattern=lambda name: r"^vllm:\w+",
+                validator=lambda value: len(set(value))
+                >= 56,  # 80% of typical ~70 vllm metrics (excluding _bucket) as of 2026-02-05 (but will grow)
+                error_msg=lambda name, value: f"Expected at least 56 unique vllm:* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique vllm:* metrics (minimum required: 56)",
+                multiline=True,
+            )
+        ]
+
+        # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend
+        required_labels = [
+            prometheus_names.labels.NAMESPACE,
+            prometheus_names.labels.COMPONENT,
+            prometheus_names.labels.ENDPOINT,
+            prometheus_names.labels.MODEL,  # OpenAI standard (injected by all backends)
+            prometheus_names.labels.MODEL_NAME,  # Alternative label (injected for compatibility)
+        ]
+        for label_name in required_labels:
+            checks.append(
+                MetricCheck(
+                    name=f"vllm:* with {label_name}",
+                    pattern=lambda name, lbl=label_name: rf'vllm:\w+\{{[^}}]*{lbl}="[^"]+"',
+                    validator=lambda value: len(value) > 0,
+                    error_msg=lambda name, value, lbl=label_name: f"vLLM metrics missing label: {lbl}",
+                    success_msg=lambda name, value, lbl=label_name: f"SUCCESS: vLLM metrics include {lbl} label (found {len(value)} metrics)",
+                    multiline=True,
+                )
+            )
+
+        return checks
+
+
+@dataclass
+class LMCacheMetricsPayload(MetricsPayload):
+    """Metrics validation for lmcache"""
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """lmcache-specific metric checks"""
+        return [
+            MetricCheck(
+                # Check: Minimum count of unique lmcache:* metrics
+                name="lmcache:*",
+                pattern=lambda name: r"^lmcache:\w+",
+                validator=lambda value: len(set(value))
+                >= 26,  # 80% of typical ~33 lmcache metrics (excluding _bucket) as of 2026-02-05 (but will grow)
+                error_msg=lambda name, value: f"Expected at least 26 unique lmcache:* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} lmcache:* metrics (minimum required: 26)",
+                multiline=True,
+            )
+        ]
+
+
+@dataclass
+class SGLangMetricsPayload(MetricsPayload):
+    """Metrics validation for SGLang backend with auto-label checks"""
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """SGLang-specific metric checks"""
+        checks = [
+            MetricCheck(
+                # Check: Minimum count of unique sglang:* metrics
+                name="sglang:*",
+                pattern=lambda name: r"^sglang:\w+",
+                validator=lambda value: len(set(value))
+                >= 20,  # 80% of typical ~25 sglang metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                error_msg=lambda name, value: f"Expected at least 20 unique sglang:* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 20)",
+                multiline=True,
+            )
+        ]
+
+        # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend
+        required_labels = [
+            prometheus_names.labels.NAMESPACE,
+            prometheus_names.labels.COMPONENT,
+            prometheus_names.labels.ENDPOINT,
+            prometheus_names.labels.MODEL,  # OpenAI standard (injected by all backends)
+            prometheus_names.labels.MODEL_NAME,  # Alternative label (injected for compatibility)
+        ]
+        for label_name in required_labels:
+            checks.append(
+                MetricCheck(
+                    name=f"sglang:* with {label_name}",
+                    pattern=lambda name, lbl=label_name: rf'sglang:\w+\{{[^}}]*{lbl}="[^"]+"',
+                    validator=lambda value: len(value) > 0,
+                    error_msg=lambda name, value, lbl=label_name: f"sglang metrics missing label: {lbl}",
+                    success_msg=lambda name, value, lbl=label_name: f"SUCCESS: sglang metrics include {lbl} label (found {len(value)} metrics)",
+                    multiline=True,
+                )
+            )
+
+        return checks
+
+
+@dataclass
+class TRTLLMMetricsPayload(MetricsPayload):
+    """Metrics validation for TensorRT-LLM backend"""
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        """TRT-LLM-specific metric checks"""
+        checks = [
+            MetricCheck(
+                # Check: Minimum count of unique trtllm_* metrics
+                name="trtllm_*",
+                pattern=lambda name: r"^trtllm_\w+",
+                validator=lambda value: len(set(value))
+                >= 4,  # 80% of typical ~5 trtllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
+                error_msg=lambda name, value: f"Expected at least 4 unique trtllm_* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)",
+                multiline=True,
+            )
+        ]
+
+        # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend
+        required_labels = [
+            prometheus_names.labels.NAMESPACE,
+            prometheus_names.labels.COMPONENT,
+            prometheus_names.labels.ENDPOINT,
+            prometheus_names.labels.MODEL,  # OpenAI standard (injected by all backends)
+            prometheus_names.labels.MODEL_NAME,  # Alternative label (injected for compatibility)
+        ]
+        for label_name in required_labels:
+            checks.append(
+                MetricCheck(
+                    name=f"trtllm_* with {label_name}",
+                    pattern=lambda name, lbl=label_name: rf'trtllm_\w+\{{[^}}]*{lbl}="[^"]+"',
+                    validator=lambda value: len(value) > 0,
+                    error_msg=lambda name, value, lbl=label_name: f"TRT-LLM metrics missing label: {lbl}",
+                    success_msg=lambda name, value, lbl=label_name: f"SUCCESS: TRT-LLM metrics include {lbl} label (found {len(value)} metrics)",
+                    multiline=True,
+                )
+            )
+
+        return checks
 
 
 def check_models_api(response):

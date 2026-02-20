@@ -96,14 +96,38 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       DYNAMO_INGRESS_SUFFIX: ${{ secrets.DYNAMO_INGRESS_SUFFIX }}
 
+  # Build frontend images (needed for NGC publish)
+  frontend-build:
+    name: Build Frontend Images
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+    uses: ./.github/workflows/build-frontend-image.yaml
+    secrets:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
+      AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+      SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+
   # Tag the commit as release candidate and publish to NGC
   # This job uses the automated-release environment for sensitive secrets
-  # Runs after ci-pipeline completes (regardless of test results) - environment approval is the gate
+  # Runs after ci-pipeline and frontend-build complete - requires builds to succeed
+  # Note: Tests may fail but builds must succeed for publishing
   release-publish:
     name: Tag RC & Publish to NGC
-    needs: [prepare-release, ci-pipeline]
+    needs: [prepare-release, ci-pipeline, frontend-build]
     if: |
-      always() && !cancelled() && needs.prepare-release.result == 'success'
+      always() && !cancelled() &&
+      needs.prepare-release.result == 'success' &&
+      (needs.ci-pipeline.result == 'success' || needs.ci-pipeline.result == 'failure') &&
+      (needs.frontend-build.result == 'success' || needs.frontend-build.result == 'failure')
     runs-on: cpu-amd-m5-4xlarge  # Self-hosted runner with IAM instance role for ECR access
     environment: automated-release
     env:
@@ -162,6 +186,7 @@ jobs:
           RC_TAG="v${VERSION}-rc${NEXT_RC}"
           echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "Will create tag: ${RC_TAG}"
 
       - name: Create RC tag
@@ -207,12 +232,20 @@ jobs:
           echo "${NGC_TOKEN}" | crane auth login nvcr.io -u '$oauthtoken' --password-stdin
 
       - name: Copy images to NGC
+        id: copy_images
         env:
           NGC_REGISTRY: nvcr.io
           NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
           RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
+          NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+          CI_PIPELINE_RESULT: ${{ needs.ci-pipeline.result }}
+          FRONTEND_BUILD_RESULT: ${{ needs.frontend-build.result }}
         run: |
           set -euo pipefail
+
+          # Track success/failure for summary
+          SUCCESSFUL_COPIES=()
+          FAILED_COPIES=()
 
           # Get ECR hostname from instance role
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
@@ -221,51 +254,189 @@ jobs:
           FRAMEWORKS=("vllm" "trtllm" "sglang")
           ARCHITECTURES=("amd64" "arm64")
 
+          echo "========================================"
+          echo "Build Status:"
+          echo "  CI Pipeline: ${CI_PIPELINE_RESULT}"
+          echo "  Frontend Build: ${FRONTEND_BUILD_RESULT}"
+          echo "========================================"
+          echo ""
           echo "Copying images from ECR to NGC (registry-to-registry)"
-          echo "Version: ${VERSION}, RC: rc${RC_NUMBER}"
+          echo "NGC Version Tag: ${NGC_VERSION_TAG}"
 
+          # Copy runtime images (from ci-test-suite.yml)
           for FRAMEWORK in "${FRAMEWORKS[@]}"; do
             for ARCH in "${ARCHITECTURES[@]}"; do
               SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-${ARCH}"
               SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
-              NGC_TAG="${VERSION}rc${RC_NUMBER}-${ARCH}"
+              NGC_TAG="${NGC_VERSION_TAG}-${ARCH}"
               NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_TAG}"
 
               echo "----------------------------------------"
               echo "Copying: ${FRAMEWORK}-runtime:${NGC_TAG}"
 
-              if ! crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
+              if crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
+                echo "✅ Copied: ${FRAMEWORK}-runtime:${NGC_TAG}"
+                SUCCESSFUL_COPIES+=("${FRAMEWORK}-runtime:${NGC_TAG}")
+              else
                 echo "⚠️  Warning: Failed to copy ${FRAMEWORK} (${ARCH}), skipping..."
-                continue
+                FAILED_COPIES+=("${FRAMEWORK}-runtime:${NGC_TAG}")
               fi
-
-              echo "✅ Copied: ${FRAMEWORK}-runtime:${NGC_TAG}"
             done
           done
 
+          # Copy CUDA 13 images - both architectures
+          echo ""
+          echo "Copying CUDA 13 images from ECR..."
+          CUDA13_FRAMEWORKS=("vllm" "sglang")
+          for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
+            for ARCH in "${ARCHITECTURES[@]}"; do
+              SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-cuda13-${ARCH}"
+              SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
+              NGC_TAG="${NGC_VERSION_TAG}-cuda13-${ARCH}"
+              NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_TAG}"
+
+              echo "----------------------------------------"
+              echo "Copying: ${FRAMEWORK}-runtime:${NGC_TAG}"
+
+              if crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
+                echo "✅ Copied: ${FRAMEWORK}-runtime:${NGC_TAG}"
+                SUCCESSFUL_COPIES+=("${FRAMEWORK}-runtime:${NGC_TAG}")
+              else
+                echo "⚠️  Warning: Failed to copy ${FRAMEWORK} CUDA13 (${ARCH}), skipping..."
+                FAILED_COPIES+=("${FRAMEWORK}-runtime:${NGC_TAG}")
+              fi
+            done
+
+            # Create multi-arch manifest
+            MULTIARCH="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13"
+            echo "Creating manifest: ${MULTIARCH}"
+            docker manifest create "${MULTIARCH}" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13-amd64" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13-arm64" || true
+            if docker manifest push "${MULTIARCH}"; then
+              echo "✅ Created multi-arch: ${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13"
+              SUCCESSFUL_COPIES+=("${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13 (multi-arch)")
+            else
+              echo "⚠️  Failed to create ${FRAMEWORK} CUDA13 multi-arch"
+              FAILED_COPIES+=("${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13 (multi-arch)")
+            fi
+          done
+
+          # Copy frontend images from ECR (built by build-frontend-image.yaml)
+          echo ""
+          echo "Copying frontend images from ECR..."
+          FRONTEND_IMAGES=()
+          for ARCH in "${ARCHITECTURES[@]}"; do
+            SOURCE_TAG="${{ github.sha }}-frontend-${ARCH}"
+            SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
+            NGC_TAG="${NGC_VERSION_TAG}-${ARCH}"
+            NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_TAG}"
+
+            echo "----------------------------------------"
+            echo "Copying: dynamo-frontend:${NGC_TAG}"
+
+            if crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
+              echo "✅ Copied: dynamo-frontend:${NGC_TAG}"
+              SUCCESSFUL_COPIES+=("dynamo-frontend:${NGC_TAG}")
+              FRONTEND_IMAGES+=("${NGC_IMAGE}")
+            else
+              echo "⚠️  Warning: Failed to copy dynamo-frontend (${ARCH}), skipping..."
+              FAILED_COPIES+=("dynamo-frontend:${NGC_TAG}")
+            fi
+          done
+
+          # Create multi-arch manifest for frontend
+          echo ""
+          echo "Creating multi-arch manifest for dynamo-frontend..."
+          FRONTEND_MULTIARCH="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
+
+          if [ ${#FRONTEND_IMAGES[@]} -eq 2 ]; then
+            echo "Creating manifest index: ${FRONTEND_MULTIARCH}"
+            docker manifest create "${FRONTEND_MULTIARCH}" \
+              "${FRONTEND_IMAGES[0]}" \
+              "${FRONTEND_IMAGES[1]}" || true
+
+            if docker manifest push "${FRONTEND_MULTIARCH}"; then
+              echo "✅ Created multi-arch manifest: dynamo-frontend:${NGC_VERSION_TAG}"
+              SUCCESSFUL_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch)")
+            else
+              echo "⚠️  Warning: Failed to create multi-arch manifest"
+              FAILED_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch)")
+            fi
+          else
+            echo "⚠️  Warning: Not all architectures available, skipping multi-arch manifest"
+            FAILED_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch - missing archs)")
+          fi
+
+          # Output counts for summary
+          echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
+          echo "failed_count=${#FAILED_COPIES[@]}" >> $GITHUB_OUTPUT
+
+          # Save lists for summary (newline-separated)
+          printf '%s\n' "${SUCCESSFUL_COPIES[@]}" > /tmp/successful_copies.txt
+          printf '%s\n' "${FAILED_COPIES[@]}" > /tmp/failed_copies.txt 2>/dev/null || true
+
           echo "========================================"
-          echo "✅ NGC publishing completed for ${VERSION}rc${RC_NUMBER}"
+          echo "NGC Publishing Summary:"
+          echo "  Successful: ${#SUCCESSFUL_COPIES[@]}"
+          echo "  Failed: ${#FAILED_COPIES[@]}"
           echo "========================================"
+
+          # Fail the step if all copies failed
+          if [ ${#SUCCESSFUL_COPIES[@]} -eq 0 ]; then
+            echo "❌ ERROR: No images were successfully copied to NGC!"
+            exit 1
+          fi
 
       - name: Create release summary
         env:
           RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
           RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
+          NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+          SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
+          FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
+          CI_PIPELINE_RESULT: ${{ needs.ci-pipeline.result }}
+          FRONTEND_BUILD_RESULT: ${{ needs.frontend-build.result }}
         run: |
           echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Version | ${VERSION} |" >> $GITHUB_STEP_SUMMARY
-          echo "| RC Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
-          echo "| RC Number | ${RC_NUMBER} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Git Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
+          echo "| NGC Version Tag | ${NGC_VERSION_TAG} |" >> $GITHUB_STEP_SUMMARY
           echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Published Images" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Status" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Image tags published to NGC:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`trtllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "| Pipeline | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| CI Pipeline | ${CI_PIPELINE_RESULT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend Build | ${FRONTEND_BUILD_RESULT} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### NGC Publishing Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ **Successful copies**: ${SUCCESSFUL_COUNT}" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚠️ **Failed copies**: ${FAILED_COUNT}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 12):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`trtllm-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 13):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch: amd64, arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13-arm64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch: amd64, arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13-arm64\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch: amd64, arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-arm64\`" >> $GITHUB_STEP_SUMMARY
 

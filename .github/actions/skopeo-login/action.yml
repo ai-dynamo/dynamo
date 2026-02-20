@@ -1,0 +1,58 @@
+name: 'Skopeo Login'
+description: 'Login to multiple container registries using skopeo (ECR, ACR)'
+
+inputs:
+  aws_default_region:
+    description: 'AWS Default Region'
+    required: false
+  aws_account_id:
+    description: 'AWS Account ID'
+    required: false
+  azure_acr_hostname:
+    description: 'Azure ACR hostname'
+    required: false
+  azure_acr_user:
+    description: 'Azure ACR user'
+    required: false
+  azure_acr_password:
+    description: 'Azure ACR password'
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install skopeo
+      shell: bash
+      run: |
+        if ! command -v skopeo &> /dev/null; then
+          echo "Installing skopeo..."
+          if [ -f /etc/debian_version ]; then
+            # Added --fix-missing to handle 404s on transient package versions
+            sudo apt-get update
+            sudo apt-get install -y --fix-missing skopeo
+          elif [ -f /etc/redhat-release ]; then
+            sudo dnf install -y skopeo
+          else
+            echo "Unsupported OS for automatic skopeo installation"
+            exit 1
+          fi
+        else
+          echo "skopeo is already installed"
+        fi
+        skopeo --version
+
+    - name: ECR Login
+      shell: bash
+      if: ${{ inputs.aws_default_region != '' && inputs.aws_account_id != '' }}
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        set -euo pipefail
+        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | skopeo login --username AWS --password-stdin "${ECR_HOSTNAME}"
+
+    - name: ACR Login
+      shell: bash
+      if: ${{ inputs.azure_acr_hostname != '' && inputs.azure_acr_user != '' && inputs.azure_acr_password != '' }}
+      run: |
+        set -euo pipefail
+        echo "${{ inputs.azure_acr_password }}" | skopeo login "${{ inputs.azure_acr_hostname }}" --username "${{ inputs.azure_acr_user }}" --password-stdin

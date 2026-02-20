@@ -42,7 +42,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
-	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
 const (
@@ -96,45 +96,6 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	logs = logs.WithValues("dynamoModel", model.Name, "namespace", model.Namespace, "baseModelName", model.Spec.BaseModelName)
 	logs.Info("Reconciling DynamoModel")
-
-	// Validate the DynamoModel spec (defense in depth - only when webhooks are disabled)
-	if !r.Config.WebhooksEnabled {
-		validator := webhookvalidation.NewDynamoModelValidator(model)
-		if _, err := validator.Validate(); err != nil {
-			logs.Error(err, "DynamoModel validation failed, refusing to reconcile")
-
-			// Set validation error condition
-			meta.SetStatusCondition(&model.Status.Conditions, metav1.Condition{
-				Type:               "Valid",
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: model.Generation,
-				Reason:             "ValidationFailed",
-				Message:            fmt.Sprintf("Validation failed: %v", err),
-			})
-
-			// Update status and don't requeue (user must fix the spec)
-			if statusErr := r.Status().Update(ctx, model); statusErr != nil {
-				logs.Error(statusErr, "Failed to update DynamoModel status with validation error")
-				return ctrl.Result{}, statusErr
-			}
-
-			// Record event for visibility
-			r.Recorder.Event(model, corev1.EventTypeWarning, "ValidationFailed", err.Error())
-
-			// Don't requeue - user must fix the spec
-			logs.Info("DynamoModel is invalid, not reconciling until spec is fixed")
-			return ctrl.Result{}, nil
-		}
-
-		// Set Valid condition to True
-		meta.SetStatusCondition(&model.Status.Conditions, metav1.Condition{
-			Type:               "Valid",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: model.Generation,
-			Reason:             "ValidationPassed",
-			Message:            "DynamoModel spec is valid",
-		})
-	}
 
 	// Handle finalizer using common handler
 	finalized, err := commoncontroller.HandleFinalizer(ctx, model, r.Client, r)
@@ -294,6 +255,7 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoModel{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Named(consts.ResourceTypeDynamoModel).
 		// Watch EndpointSlices - reconcile when endpoints change (Service changes trigger EndpointSlice updates)
 		Watches(
 			&discoveryv1.EndpointSlice{},
@@ -303,7 +265,7 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 		).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
-		Complete(r)
+		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoModel))
 }
 
 // findModelsForEndpointSlice maps an EndpointSlice to DynamoModels

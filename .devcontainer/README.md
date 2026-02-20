@@ -142,22 +142,11 @@ Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) fro
 
 ```bash
 # Single command approach (recommended)
-export FRAMEWORK=VLLM         # Note: any of VLLM, SGLANG, TRTLLM can be used
-./container/build.sh --framework $FRAMEWORK --target local-dev
+export FRAMEWORK=vllm         # Note: any of vllm, sglang, trtllm can be used
+python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
+docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
 
 # Now you've created both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
-```
-
-Alternatively, you can build a development container, then build local-dev:
-
-```bash
-export FRAMEWORK=VLLM
-
-./container/build.sh --framework $FRAMEWORK
-# Now you have a development image dynamo:latest-vllm
-
-./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,}
-# Now you have a local-dev image dynamo:latest-vllm-local-dev
 ```
 
 The local-dev image will give you local user permissions matching your host user and includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
@@ -222,7 +211,7 @@ If `post-create.sh` fails, you can try to debug or [submit](https://github.com/a
 
 ### Building Rust Code
 
-If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries such as dynamo-run.
+If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries.
 
 ```bash
 cd /workspace && cargo build --locked --profile dev
@@ -427,10 +416,8 @@ If you see errors like "container is not running" or "An error occurred setting 
 
    # If missing, build the dev image first, then build local-dev
    export FRAMEWORK=VLLM  # Replace with VLLM, SGLANG, or TRTLLM
-   ./container/build.sh --framework $FRAMEWORK
-   # change to lower case portable way across shells
-   ./container/build.sh --dev-image dynamo:latest-$(echo "$FRAMEWORK" | tr '[:upper:]' '[:lower:]') --framework "$FRAMEWORK"
-   # Now you have dynamo:latest-vllm-local-dev
+   python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
+   docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
    ```
 
 2. **Container startup failure:**

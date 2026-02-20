@@ -33,7 +33,7 @@ HABANA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
     --connector none \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}' &
+    --is-decode-worker &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 HABANA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
@@ -41,7 +41,7 @@ HABANA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
     --connector none \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557", "enable_kv_cache_events":true}' &
+    --is-decode-worker &
 
 # two prefill workers
 # When registered with --is-prefill-worker, these workers are automatically detected

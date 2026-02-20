@@ -111,7 +111,8 @@ $SANITY_STATUS
 Now build the project:
   cargo build --locked --profile dev --features dynamo-llm/block-manager
   cd lib/bindings/python && maturin develop --uv
-  DYNAMO_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
+  uv pip install -e lib/gpu_memory_service  # GPU memory manager with C++ extension
+  DYNAMO_BIN_PATH=\$CARGO_TARGET_DIR/debug uv pip install -e .
 
 Optional: cd lib/bindings/kvbm && maturin develop --uv  # For KVBM support
 

@@ -72,7 +72,8 @@ ensure-yq:
 .PHONY: manifests
 manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000 webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	# allowDangerousTypes=true is needed for the EndpointPickerConfig from gateway-api-inference-extension which contains float fields
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000,allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	echo "Removing name from mainContainer required fields"
 	for file in config/crd/bases/*.yaml; do \
 		yq eval '(.. | select(has("mainContainer")) | .mainContainer.required) |= (. - ["name"])' -i --indent 2 $$file || exit 1; \
@@ -140,8 +141,16 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	done
 
 .PHONY: generate
-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
+
+.PHONY: generate-pydantic
+generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (requires Python 3 + pydantic)
+	@python3 -c "import pydantic" 2>/dev/null || { echo "Error: pydantic not found. Install with: pip install pydantic"; exit 1; }
+	@echo "Generating Pydantic models from v1beta1 DGDR types..."
+	@python3 api/scripts/generate_pydantic_from_go.py
+	@echo "Running Pydantic validation tests..."
+	@python3 api/scripts/test_pydantic_models.py
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -326,9 +335,12 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--output-path=./docs/api_reference.md
 	@echo "✅ Generated API reference at ./docs/api_reference.md"
 	# concatenate header.md, api_reference.md, and footer.md
-	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/kubernetes/api_reference.md
+	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/pages/kubernetes/api-reference.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
+	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
+	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
+	python3 docs/fix-api-anchors.py ../../docs/pages/kubernetes/api-reference.md
 
 .PHONY: coverage
 coverage: test

@@ -12,17 +12,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use dynamo_runtime::pipeline::RouterMode;
+use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 
 use crate::{
-    backend::ExecutionContext, engines::StreamingEngine, kv_router::KvRouterConfig,
-    local_model::LocalModel, model_card::ModelDeploymentCard,
+    backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
+    kv_router::KvRouterConfig, local_model::LocalModel, model_card::ModelDeploymentCard,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
-/// Callback type for engine factory (async)
-pub type EngineFactoryCallback = Arc<
+/// Callback type for chat engine factory (async)
+pub type ChatEngineFactoryCallback = Arc<
     dyn Fn(
+            ModelCardInstanceId,
             ModelDeploymentCard,
         ) -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
@@ -34,10 +35,8 @@ pub type EngineFactoryCallback = Arc<
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
-    /// Threshold for active decode blocks utilization (0.0-1.0)
-    pub active_decode_blocks_threshold: Option<f64>,
-    /// Threshold for active prefill tokens utilization (literal token count)
-    pub active_prefill_tokens_threshold: Option<u64>,
+    /// Load threshold configuration for busy detection
+    pub load_threshold_config: LoadThresholdConfig,
     pub enforce_disagg: bool,
 }
 
@@ -46,19 +45,13 @@ impl RouterConfig {
         Self {
             router_mode,
             kv_router_config,
-            active_decode_blocks_threshold: None,
-            active_prefill_tokens_threshold: None,
+            load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
         }
     }
 
-    pub fn with_active_decode_blocks_threshold(mut self, threshold: Option<f64>) -> Self {
-        self.active_decode_blocks_threshold = threshold;
-        self
-    }
-
-    pub fn with_active_prefill_tokens_threshold(mut self, threshold: Option<u64>) -> Self {
-        self.active_prefill_tokens_threshold = threshold;
+    pub fn with_load_threshold_config(mut self, config: LoadThresholdConfig) -> Self {
+        self.load_threshold_config = config;
         self
     }
 
@@ -73,7 +66,7 @@ pub enum EngineConfig {
     /// Remote networked engines that we discover via etcd
     Dynamic {
         model: Box<LocalModel>,
-        engine_factory: Option<EngineFactoryCallback>,
+        chat_engine_factory: Option<ChatEngineFactoryCallback>,
     },
 
     /// A Text engine receives text, does it's own tokenization and prompt formatting.
@@ -100,9 +93,12 @@ impl EngineConfig {
         }
     }
 
-    pub fn engine_factory(&self) -> Option<&EngineFactoryCallback> {
+    pub fn chat_engine_factory(&self) -> Option<&ChatEngineFactoryCallback> {
         match self {
-            EngineConfig::Dynamic { engine_factory, .. } => engine_factory.as_ref(),
+            EngineConfig::Dynamic {
+                chat_engine_factory,
+                ..
+            } => chat_engine_factory.as_ref(),
             _ => None,
         }
     }

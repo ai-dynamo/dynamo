@@ -120,12 +120,24 @@ async fn perform_allocation_and_build_handler(
         num_outer_components: device_layout.config().outer_dim,
         num_layers: device_layout.config().num_layers,
     };
-    let transfer_context = Arc::new(TransferContext::new(
-        Arc::new(Some(agent)),
-        DeviceAllocator::new(device_id)?.ctx().new_stream()?,
-        Handle::current(),
-        Some(pool_config),
-    ));
+    let transfer_context = Arc::new(
+        TransferContext::new(
+            Arc::new(Some(agent)),
+            DeviceAllocator::new(device_id)?.ctx().new_stream()?,
+            Handle::current(),
+            Some(pool_config),
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create transfer context for worker {} with CUDA memory pool: {}. \
+                 This is a critical error - the worker cannot start without CUDA memory pools. \
+                 Please ensure sufficient GPU memory is available on device {}.",
+                worker_id,
+                e,
+                device_id
+            )
+        })?,
+    );
 
     // device
     let device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(

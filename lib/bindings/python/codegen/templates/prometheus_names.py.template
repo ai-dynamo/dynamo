@@ -17,12 +17,12 @@ Usage (both patterns supported):
     # Pattern 1: Import module
     from dynamo import prometheus_names
     print(prometheus_names.frontend_service.REQUESTS_TOTAL)  # "requests_total"
-    print(prometheus_names.kvstats.ACTIVE_BLOCKS)  # "kvstats_active_blocks"
+    print(prometheus_names.work_handler.ERRORS_TOTAL)  # "errors_total"
 
     # Pattern 2: Import specific classes
-    from dynamo.prometheus_names import frontend_service, kvstats
+    from dynamo.prometheus_names import frontend_service, work_handler
     print(frontend_service.REQUESTS_TOTAL)  # "requests_total"
-    print(kvstats.ACTIVE_BLOCKS)  # "kvstats_active_blocks"
+    print(work_handler.ERRORS_TOTAL)  # "errors_total"
 """
 
 from __future__ import annotations

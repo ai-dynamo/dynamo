@@ -22,9 +22,9 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import torch
-from tensorrt_llm.inputs import default_multimodal_input_loader
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -59,12 +59,16 @@ class MultimodalRequestProcessor:
         self.allowed_local_media_path = allowed_local_media_path
         self.max_file_size_mb = max_file_size_mb
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
+        # Used for streaming delta computation in create_response_chunk()
+        self.previous_decoded_text = ""
 
         # Initialize tokenizer ONCE at startup to avoid per-request overhead
         if tokenizer is not None:
             self.tokenizer = tokenizer
         else:
             self.tokenizer = tokenizer_factory(model_dir)
+
+        self.image_loader = ImageLoader()
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -160,59 +164,150 @@ class MultimodalRequestProcessor:
                         else:
                             image_urls.append(url)
 
-        return " ".join(text_parts), image_urls, embedding_paths
+        return "".join(text_parts), image_urls, embedding_paths
 
     async def process_openai_request(
-        self, request: Dict, embeddings: Any
+        self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
     ) -> Optional[Any]:
-        """Process OpenAI request and return with multimodal data."""
-        # Extract messages - check extra_args first (from Rust preprocessor for multimodal)
-        # Fall back to direct messages field for backward compatibility
-        messages = request.get("extra_args", {}).get(
-            "messages", request.get("messages", [])
-        )
-        text_prompt, image_urls, embedding_paths = self.extract_prompt_and_media(
-            messages
-        )
+        """
+        Process OpenAI request and return multimodal data in TokensPrompt format.
 
-        if not image_urls and not embedding_paths:
-            logging.warning("No multimodal content, returning None")
+        Supports three flows:
+        1. EPD Case 1: Encoder fully processed (has _epd_processed_prompt)
+        2. EPD Case 2: NIXL embeddings (embeddings parameter is not None)
+        3. PD Flow: Rust pre-tokenized with direct media loading
+
+        Returns dict compatible with TRT-LLM's generate_async:
+        {
+            "prompt_token_ids": List[int],
+            "multi_modal_data": Dict[str, List[torch.Tensor]]
+        }
+        or for EPD Case 1:
+        {
+            "prompt": str,
+            "prompt_token_ids": List[int]
+        }
+        """
+        self.previous_decoded_text = ""
+
+        # EPD Flow Case 1: Encoder has fully processed the prompt
+        # The encode worker has done everything: vision encoding, prompt processing, tokenization
+        # Return the encoder's processed prompt and tokens directly
+        processed_prompt_from_encoder = request.get("_epd_processed_prompt")
+        if processed_prompt_from_encoder is not None:
+            logging.info("MM: Using fully processed prompt from encoder")
+            result = {"prompt": processed_prompt_from_encoder}
+            prompt_token_ids = request.get("_epd_prompt_token_ids")
+            if prompt_token_ids:
+                result["prompt_token_ids"] = prompt_token_ids
+            else:
+                logging.warning("MM: No prompt_token_ids from encoder")
+            return result
+
+        # Get token_ids from request (already tokenized by Rust frontend)
+        token_ids = request.get("token_ids")
+        if not token_ids:
+            logging.warning("No token_ids in request")
             return None
 
-        loader_kwargs = {}
+        # Initialize result in TokensPrompt format
+        # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
+        processed_inputs = {"prompt_token_ids": token_ids, "mm_processor_kwargs": {}}
+
+        # EPD Flow Case 2: Embeddings received via NIXL from encode worker
+        # The encode worker computed vision embeddings and transferred them via RDMA/NIXL
+        # We need to pass these embeddings directly to TRT-LLM's generate_async
         if embeddings is not None:
-            # EPD flow
-            loader_kwargs["mm_embeddings"] = [embeddings]
-            logging.debug(f"Using NIXL embeddings in prefill worker: {embeddings}")
-        elif image_urls:
-            # Image-only flow
-            loader_kwargs["media"] = [image_urls]
-        elif embedding_paths:
-            # PD flow with no NIXL and no encoder
-            loader_kwargs["mm_embeddings"] = [
-                self.load_tensor_from_path_or_url(path) for path in embedding_paths
-            ]
-            logging.debug(f"Using embedding paths in prefill worker: {embedding_paths}")
+            logging.info(
+                f"Using NIXL embeddings from encoder: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
+            )
 
-        # Process with default_multimodal_input_loader
-        # Pass self.tokenizer to reuse the pre-initialized tokenizer instead of
-        # creating a new one per request
-        processed_inputs = default_multimodal_input_loader(
-            tokenizer=self.tokenizer,
-            model_dir=self.model_dir,
-            model_type=self.model_type,
-            modality=self.modality,
-            prompts=[text_prompt],
-            image_data_format="pt",
-            device="cuda",
-            **loader_kwargs,
-        )
+            # Structure embeddings in the format TRT-LLM's generate_async expects
+            processed_inputs["multi_modal_embeddings"] = embeddings
 
-        # Return the first processed input if available
-        if processed_inputs:
-            return processed_inputs[0]
+            return processed_inputs
 
-        return None
+        # PD Flow: Pre-tokenized by Rust frontend with direct media loading
+        # TODO: Add frontend decoding support
+
+        # Handle multimodal data if present
+        multi_modal_data = request.get("multi_modal_data")
+        if multi_modal_data and isinstance(multi_modal_data, dict):
+            processed_mm_data = {}
+
+            # Process images and embedding paths from image_url field
+            image_items = multi_modal_data.get("image_url", [])
+            if image_items and isinstance(image_items, list):
+                # Separate embedding paths from regular image URLs
+                # Items come from Rust in format: {"Url": "..."} or {"Decoded": ...}
+                embedding_paths = []
+                image_urls = []
+
+                for item in image_items:
+                    # Extract URL from item (Rust enum serialization uses "Url" with capital U)
+                    if isinstance(item, dict) and "Url" in item:
+                        url = item["Url"]
+                    elif isinstance(item, dict) and "Decoded" in item:
+                        # Already decoded data (NIXL) - always treat as image
+                        image_urls.append(item)
+                        continue
+                    elif isinstance(item, str):
+                        # Fallback for string URLs (backward compatibility)
+                        url = item
+                    else:
+                        logging.warning(
+                            f"Unexpected item format in image_items: {item}"
+                        )
+                        continue
+
+                    # Check if this is an embedding file based on extension
+                    if url.endswith((".pt", ".pth", ".bin")):
+                        embedding_paths.append(url)
+                    else:
+                        # Keep original item format for load_image_batch
+                        image_urls.append(
+                            item if isinstance(item, dict) else {"Url": item}
+                        )
+
+                # Load regular images as PIL Images for TRT-LLM's input processor
+                # TRT-LLM will auto-detect this and compute mrope_config
+                if image_urls:
+                    try:
+                        pil_images = await self.image_loader.load_image_batch(
+                            image_urls
+                        )
+                        if pil_images:
+                            processed_mm_data["image"] = pil_images
+                            logging.info(
+                                f"Loaded {len(pil_images)} image(s) as PIL Images"
+                            )
+                    except Exception as e:
+                        logging.error(f"Failed to load images: {e}")
+                        return None
+
+                # Load embedding files (.pt, .pth, .bin) for PD flow
+                # These are pre-computed vision encoder outputs
+                if embedding_paths:
+                    try:
+                        loaded_embeddings = [
+                            self.load_tensor_from_path_or_url(path)
+                            for path in embedding_paths
+                        ]
+                        if loaded_embeddings:
+                            processed_mm_data["embedding"] = loaded_embeddings
+                            logging.info(
+                                f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
+                            )
+                    except Exception as e:
+                        logging.error(f"Failed to load embeddings: {e}")
+                        return None
+
+            # TODO: Add support for video_url, audio_url
+
+            if processed_mm_data:
+                processed_inputs["multi_modal_data"] = processed_mm_data
+
+        return processed_inputs
 
     def create_response_chunk(
         self,
@@ -225,10 +320,20 @@ class MultimodalRequestProcessor:
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided for creating response chunks.")
 
-        new_tokens = output.token_ids[num_output_tokens_so_far:]
-        # Decode the new token IDs into a string. This is the incremental piece
-        # of text to be sent to the client.
-        delta_text = self.tokenizer.decode(new_tokens)
+        all_tokens = output.token_ids
+        current_text = self.tokenizer.decode(
+            all_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=True
+        )
+        if num_output_tokens_so_far == 0:
+            # First chunk: use all decoded text
+            delta_text = current_text
+            # Store for next iteration
+            self.previous_decoded_text = current_text
+        else:
+            # Incremental chunk: extract delta using cached previous text
+            delta_text = current_text[len(self.previous_decoded_text) :]
+            # Update cache for next iteration
+            self.previous_decoded_text = current_text
         # Assemble the delta payload for the response chunk.
         delta = {"content": delta_text if delta_text else ""}
         if num_output_tokens_so_far == 0:

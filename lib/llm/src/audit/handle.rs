@@ -56,7 +56,12 @@ impl AuditHandle {
 }
 
 pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> Option<AuditHandle> {
-    if !config::policy().enabled || !req.inner.store.unwrap_or(false) {
+    let policy = config::policy();
+    if !policy.enabled {
+        return None;
+    }
+    // If force_logging is enabled, ignore the store flag
+    if !policy.force_logging && !req.inner.store.unwrap_or(false) {
         return None;
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
@@ -69,4 +74,41 @@ pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> O
         req_full: None,
         resp_full: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use temp_env::with_vars;
+
+    fn create_test_request(model: &str, store: bool) -> NvCreateChatCompletionRequest {
+        let json = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "test"}],
+            "store": store
+        });
+        serde_json::from_value(json).expect("Failed to create test request")
+    }
+
+    /// Test that DYN_AUDIT_FORCE_LOGGING=true bypasses store=false
+    /// When force logging is enabled, audit handle should be created even when store=false
+    #[test]
+    fn test_force_logging_bypasses_store() {
+        with_vars(
+            [
+                ("DYN_AUDIT_SINKS", Some("stderr")),
+                ("DYN_AUDIT_FORCE_LOGGING", Some("true")),
+            ],
+            || {
+                // Create request with store=false
+                let request = create_test_request("test-model", false);
+                let handle = create_handle(&request, "test-id");
+
+                assert!(
+                    handle.is_some(),
+                    "When DYN_AUDIT_FORCE_LOGGING=true, handle should be created even with store=false"
+                );
+            },
+        );
+    }
 }

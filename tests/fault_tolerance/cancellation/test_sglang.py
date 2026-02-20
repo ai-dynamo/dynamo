@@ -29,6 +29,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.sglang,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
@@ -142,7 +143,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             # Ensure any orphaned SGLang engine cores or child helpers are cleaned up
             stragglers=[
                 "SGLANG:EngineCore",

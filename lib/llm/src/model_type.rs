@@ -37,6 +37,9 @@ bitflags! {
         const Embedding = 1 << 2;
         const TensorBased = 1 << 3;
         const Prefill = 1 << 4;
+        const Images = 1 << 5;
+        const Audios = 1 << 6;
+        const Videos = 1 << 7;
     }
 }
 
@@ -60,6 +63,15 @@ impl ModelType {
     pub fn supports_prefill(&self) -> bool {
         self.contains(ModelType::Prefill)
     }
+    pub fn supports_images(&self) -> bool {
+        self.contains(ModelType::Images)
+    }
+    pub fn supports_audios(&self) -> bool {
+        self.contains(ModelType::Audios)
+    }
+    pub fn supports_videos(&self) -> bool {
+        self.contains(ModelType::Videos)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -77,6 +89,15 @@ impl ModelType {
         }
         if self.supports_prefill() {
             result.push("prefill");
+        }
+        if self.supports_images() {
+            result.push("images");
+        }
+        if self.supports_audios() {
+            result.push("audios");
+        }
+        if self.supports_videos() {
+            result.push("videos");
         }
         result
     }
@@ -100,6 +121,15 @@ impl ModelType {
         if self.supports_prefill() {
             result.push(ModelType::Prefill);
         }
+        if self.supports_images() {
+            result.push(ModelType::Images);
+        }
+        if self.supports_audios() {
+            result.push(ModelType::Audios);
+        }
+        if self.supports_videos() {
+            result.push(ModelType::Videos);
+        }
         result
     }
 
@@ -109,12 +139,29 @@ impl ModelType {
         let mut endpoint_types = Vec::new();
         if self.contains(Self::Chat) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Chat);
+            // Translation layers over chat completions
+            endpoint_types.push(crate::endpoint_type::EndpointType::Responses);
+            // AnthropicMessages is gated by DYN_ENABLE_ANTHROPIC_API env var
+            if dynamo_runtime::config::env_is_truthy(
+                dynamo_runtime::config::environment_names::llm::DYN_ENABLE_ANTHROPIC_API,
+            ) {
+                endpoint_types.push(crate::endpoint_type::EndpointType::AnthropicMessages);
+            }
         }
         if self.contains(Self::Completions) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Completion);
         }
         if self.contains(Self::Embedding) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Embedding);
+        }
+        if self.contains(Self::Images) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Images);
+        }
+        if self.contains(Self::Audios) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Audios);
+        }
+        if self.contains(Self::Videos) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Videos);
         }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP

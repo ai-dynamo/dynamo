@@ -7,6 +7,8 @@
 //! https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main/encoding
 
 use dynamo_llm::preprocessor::prompt::deepseek_v32::{ThinkingMode, encode_messages};
+use dynamo_llm::preprocessor::prompt::{OAIChatLikeRequest, OAIPromptFormatter};
+use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::PathBuf;
@@ -275,6 +277,48 @@ fn test_with_reasoning_content() {
     assert!(result.contains("<think>"));
     assert!(result.contains("</think>"));
     assert!(result.contains("Let me compute this step by step"));
+}
+
+#[test]
+fn test_reasoning_content_survives_chat_request_parsing_and_rendering() {
+    let json = r#"{
+        "model": "deepseek-v3.2",
+        "messages": [
+            {"role": "user", "content": "weather tomorrow?"},
+            {
+                "role": "assistant",
+                "reasoning_content": "need date first",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_datetime",
+                        "arguments": "{\"timezone\":\"UTC\"}"
+                    }
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "{\"current_date\":\"2024-01-15\"}"
+            }
+        ]
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+    let messages = serde_json::to_value(request.messages()).unwrap();
+    assert_eq!(
+        messages[1]["reasoning_content"],
+        serde_json::Value::String("need date first".to_string())
+    );
+
+    let formatter =
+        dynamo_llm::preprocessor::prompt::deepseek_v32::DeepSeekV32Formatter::new_thinking();
+    let rendered = formatter.render(&request).unwrap();
+
+    assert!(rendered.contains("need date first"));
+    assert!(rendered.contains("<think>"));
+    assert!(rendered.contains("</think>"));
 }
 
 #[test]

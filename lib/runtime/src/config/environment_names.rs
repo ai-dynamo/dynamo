@@ -14,11 +14,13 @@
 //! - **Runtime**: Tokio runtime configuration and system server settings
 //! - **NATS**: NATS client connection and authentication
 //! - **ETCD**: ETCD client connection and authentication
+//! - **Event Plane**: Event transport selection (NATS)
 //! - **KVBM**: Key-Value Block Manager configuration
 //! - **LLM**: Language model inference configuration
 //! - **Model**: Model loading and caching
 //! - **Worker**: Worker lifecycle and shutdown
 //! - **Testing**: Test-specific configuration
+//! - **Mocker**: Mocker (mock scheduler/KV manager) configuration
 
 /// Logging and tracing environment variables
 pub mod logging {
@@ -172,8 +174,8 @@ pub mod kvbm {
     /// KVBM metrics endpoint port
     pub const DYN_KVBM_METRICS_PORT: &str = "DYN_KVBM_METRICS_PORT";
 
-    /// Enable KVBM recording for debugging
-    pub const ENABLE_KVBM_RECORD: &str = "ENABLE_KVBM_RECORD";
+    /// Enable KVBM recording for debugging.
+    pub const DYN_KVBM_ENABLE_RECORD: &str = "DYN_KVBM_ENABLE_RECORD";
 
     /// Disable disk offload filter
     pub const DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER: &str = "DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER";
@@ -268,6 +270,9 @@ pub mod llm {
     /// LoRA cache directory path
     pub const DYN_LORA_PATH: &str = "DYN_LORA_PATH";
 
+    /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
+    pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -300,16 +305,49 @@ pub mod model {
 
         /// Hugging Face home directory
         pub const HF_HOME: &str = "HF_HOME";
+
+        /// Offline mode - skip API calls when model is cached
+        /// Set to "1" or "true" to enable
+        pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
+}
+
+/// Event Plane transport environment variables
+pub mod event_plane {
+    /// Event transport selection: "zmq" or "nats". Default: "nats"
+    pub const DYN_EVENT_PLANE: &str = "DYN_EVENT_PLANE";
+
+    /// Event plane codec selection: "json" or "msgpack".
+    pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+}
+
+/// ZMQ Broker environment variables
+pub mod zmq_broker {
+    /// Explicit ZMQ broker URL (takes precedence over discovery)
+    /// Format: "xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"
+    /// Example: "xsub=tcp://broker:5555 , xpub=tcp://broker:5556"
+    pub const DYN_ZMQ_BROKER_URL: &str = "DYN_ZMQ_BROKER_URL";
+
+    /// Enable ZMQ broker discovery mode
+    pub const DYN_ZMQ_BROKER_ENABLED: &str = "DYN_ZMQ_BROKER_ENABLED";
+
+    /// XSUB bind address (broker binary only)
+    pub const ZMQ_BROKER_XSUB_BIND: &str = "ZMQ_BROKER_XSUB_BIND";
+
+    /// XPUB bind address (broker binary only)
+    pub const ZMQ_BROKER_XPUB_BIND: &str = "ZMQ_BROKER_XPUB_BIND";
+
+    /// Namespace for broker discovery registration
+    pub const ZMQ_BROKER_NAMESPACE: &str = "ZMQ_BROKER_NAMESPACE";
 }
 
 /// CUDA and GPU environment variables
 pub mod cuda {
-    /// Path to custom CUDA fatbin file
+    /// Path to custom CUDA fatbin file.
     ///
     /// Note: build.rs files cannot import this constant at build time,
     /// so they must define local constants with the same value.
-    pub const DYNAMO_FATBIN_PATH: &str = "DYNAMO_FATBIN_PATH";
+    pub const DYN_FATBIN_PATH: &str = "DYN_FATBIN_PATH";
 }
 
 /// Build-time environment variables
@@ -320,6 +358,18 @@ pub mod build {
     /// which requires a string literal at compile time.
     /// Build scripts (build.rs) also cannot import this constant.
     pub const OUT_DIR: &str = "OUT_DIR";
+}
+
+/// Mocker (mock scheduler/KV manager) environment variables
+pub mod mocker {
+    /// Enable structured KV cache allocation/eviction trace logs (set to "1" or "true" to enable)
+    pub const DYN_MOCKER_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
+
+    /// Use the original direct() code path in the mocker request dispatch.
+    ///
+    /// This path is race-prone during startup; prefer leaving it unset unless you are
+    /// explicitly trying to reproduce the original behavior.
+    pub const DYN_MOCKER_SYNC_DIRECT: &str = "DYN_MOCKER_SYNC_DIRECT";
 }
 
 /// Testing environment variables
@@ -385,7 +435,7 @@ mod tests {
             // KVBM
             kvbm::DYN_KVBM_METRICS,
             kvbm::DYN_KVBM_METRICS_PORT,
-            kvbm::ENABLE_KVBM_RECORD,
+            kvbm::DYN_KVBM_ENABLE_RECORD,
             kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
             kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_GB,
             kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
@@ -399,6 +449,7 @@ mod tests {
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
+            llm::DYN_ENABLE_ANTHROPIC_API,
             llm::metrics::DYN_METRICS_PREFIX,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
@@ -406,10 +457,23 @@ mod tests {
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
+            model::huggingface::HF_HUB_OFFLINE,
+            // Event Plane
+            event_plane::DYN_EVENT_PLANE,
+            event_plane::DYN_EVENT_PLANE_CODEC,
+            // ZMQ Broker
+            zmq_broker::DYN_ZMQ_BROKER_URL,
+            zmq_broker::DYN_ZMQ_BROKER_ENABLED,
+            zmq_broker::ZMQ_BROKER_XSUB_BIND,
+            zmq_broker::ZMQ_BROKER_XPUB_BIND,
+            zmq_broker::ZMQ_BROKER_NAMESPACE,
             // CUDA
-            cuda::DYNAMO_FATBIN_PATH,
+            cuda::DYN_FATBIN_PATH,
             // Build
             build::OUT_DIR,
+            // Mocker
+            mocker::DYN_MOCKER_KV_CACHE_TRACE,
+            mocker::DYN_MOCKER_SYNC_DIRECT,
             // Testing
             testing::DYN_QUEUED_UP_PROCESSING,
             testing::DYN_SOAK_RUN_DURATION,

@@ -39,6 +39,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
 // DynamoGraphDeploymentScalingAdapterReconciler reconciles a DynamoGraphDeploymentScalingAdapter object
@@ -155,7 +156,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 		For(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
 		)).
-		Named("dgdscalingadapter").
+		Named(consts.ResourceTypeDynamoGraphDeploymentScalingAdapter).
 		// Watch DGDs to sync status when DGD service replicas change
 		Watches(
 			&nvidiacomv1alpha1.DynamoGraphDeployment{},
@@ -177,7 +178,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 			}),
 		).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)).
-		Complete(r)
+		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentScalingAdapter))
 }
 
 // findAdaptersForDGD maps DGD changes to adapter reconcile requests

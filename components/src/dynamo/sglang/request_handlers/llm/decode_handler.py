@@ -4,11 +4,12 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
 from dynamo._core import Component, Context
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -24,6 +25,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         config: Config,
         publisher: DynamoSglangPublisher,
         generate_endpoint=None,
+        shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -32,6 +34,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
+            shutdown_event: Optional event to signal shutdown.
             generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
@@ -40,6 +43,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             publisher,
             generate_endpoint,
+            shutdown_event,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
@@ -50,9 +54,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
+        super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
-        super().cleanup()
 
     def _build_sampling_params(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Build sampling params from request format.
@@ -105,6 +109,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        priority = (request.get("routing") or {}).get("priority")
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -126,6 +131,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 self._get_trace_header(context) if self.enable_trace else None
             )
 
+            # Extract dp_rank from routing info (set by KV router)
+            routing = request.get("routing") or {}
+            dp_rank = routing.get("dp_rank")
+
             decode = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
@@ -135,6 +144,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_room=bootstrap_info["bootstrap_room"],
                 external_trace_header=trace_header,
                 rid=trace_id,
+                data_parallel_rank=dp_rank,
+                **self._priority_kwargs(priority),
             )
 
             if self.skip_tokenizer_init:
@@ -161,6 +172,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 self._get_trace_header(context) if self.enable_trace else None
             )
 
+            # Extract dp_rank from routing info (set by KV router)
+            routing = request.get("routing") or {}
+            dp_rank = routing.get("dp_rank")
+
             agg = await self.engine.async_generate(
                 **input_param,
                 image_data=image_data,
@@ -168,6 +183,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 stream=True,
                 external_trace_header=trace_header,
                 rid=trace_id,
+                data_parallel_rank=dp_rank,
+                **self._priority_kwargs(priority),
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
@@ -212,15 +229,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out = {}
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
-                    out["finish_reason"] = finish_reason["type"]
+                    out["finish_reason"] = normalize_finish_reason(
+                        finish_reason["type"]
+                    )
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
-                # If request is not finished yet, but there are no outputs, return an error.
+                # Empty, non-final chunks can happen during scheduler idle ticks.
+                # Keep waiting for the next chunk unless cancellation was requested.
                 if not output_ids and not finish_reason:
-                    if not context.is_stopped():
-                        yield {"finish_reason": "error", "token_ids": []}
-                    break
+                    if context.is_stopped():
+                        break
+                    continue
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
@@ -277,7 +297,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 text = res.get("text", "")
 
                 finish_reason = res["meta_info"]["finish_reason"]
-                finish_reason_type = finish_reason["type"] if finish_reason else None
+                finish_reason_type = (
+                    normalize_finish_reason(finish_reason["type"])
+                    if finish_reason
+                    else None
+                )
                 next_count = len(text)
                 delta = text[count:]
 

@@ -26,7 +26,7 @@ spec:
             - python
             - -m
             - dynamo.frontend
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace
       replicas: 1
       resources:
@@ -60,7 +60,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
@@ -108,11 +108,13 @@ spec:
           - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
           - --max-model-len
           - '131072'
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
           command:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"
