@@ -340,11 +340,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    NIXL_PREFIX_SAVED=$NIXL_PREFIX && \
+    unset NIXL_PREFIX NIXL_LIB_DIR NIXL_PLUGIN_DIR && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
         maturin build --release --features "media-ffmpeg" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
+    export NIXL_PREFIX=$NIXL_PREFIX_SAVED && \
+    export NIXL_LIB_DIR=$NIXL_PREFIX/lib64 && \
+    export NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins && \
     if [ "$ENABLE_KVBM" == "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
