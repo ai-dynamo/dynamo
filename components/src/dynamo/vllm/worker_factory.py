@@ -21,8 +21,8 @@ from .multimodal_handlers import (
 
 logger = logging.getLogger(__name__)
 
-# (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir)
-EngineSetupResult = tuple[Any, Any, Any, Any]
+# (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
+EngineSetupResult = tuple[Any, Any, Any, Any, Any]
 
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
 SetupKvEventPublisherFn = Callable[..., Optional[Any]]
@@ -88,10 +88,17 @@ class WorkerFactory:
         - Aggregated (P+D): Prefill and decode on same worker
         - Disaggregated (P→D): Prefill forwards to separate decode worker
         """
-        component = runtime.namespace(config.namespace).component(config.component)
-
-        generate_endpoint = component.endpoint(config.endpoint)
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        component = generate_endpoint.component()
         clear_endpoint = component.endpoint("clear_kv_blocks")
+
+        lora_enabled = config.engine_args.enable_lora
+        if lora_enabled:
+            load_lora_endpoint = component.endpoint("load_lora")
+            unload_lora_endpoint = component.endpoint("unload_lora")
+            list_loras_endpoint = component.endpoint("list_loras")
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         if pre_created_engine is not None:
@@ -114,12 +121,9 @@ class WorkerFactory:
         # Set up encode worker client when routing to encoder is enabled
         encode_worker_client = None
         if config.route_to_encoder:
-            encode_worker_client = (
-                await runtime.namespace(config.namespace)
-                .component("encoder")
-                .endpoint("generate")
-                .client()
-            )
+            encode_worker_client = await runtime.endpoint(
+                f"{config.namespace}.encoder.generate"
+            ).client()
             logger.info("Waiting for Encoder Worker Instances ...")
             await encode_worker_client.wait_for_instances()
             logger.info("Connected to encoder workers")
@@ -127,19 +131,21 @@ class WorkerFactory:
         # Set up decode worker client for disaggregated mode
         decode_worker_client = None
         if config.is_prefill_worker:
-            decode_worker_client = (
-                await runtime.namespace(config.namespace)
-                .component("decoder")
-                .endpoint("generate")
-                .client()
-            )
+            decode_worker_client = await runtime.endpoint(
+                f"{config.namespace}.decoder.generate"
+            ).client()
             await decode_worker_client.wait_for_instances()
             logger.info("Connected to decode worker for disaggregated mode")
 
         # Choose handler based on worker type
         if config.multimodal_decode_worker:
             handler = MultimodalDecodeWorkerHandler(
-                runtime, component, engine_client, config, shutdown_event
+                runtime,
+                component,
+                engine_client,
+                config,
+                shutdown_event,
+                generate_endpoint=generate_endpoint,
             )
         else:
             handler = MultimodalPDWorkerHandler(
@@ -150,6 +156,7 @@ class WorkerFactory:
                 encode_worker_client,
                 decode_worker_client,
                 shutdown_event,
+                generate_endpoint=generate_endpoint,
             )
         handler.add_temp_dir(prometheus_temp_dir)
 
@@ -178,7 +185,7 @@ class WorkerFactory:
 
         metrics_labels = [("model", config.served_model_name or config.model)]
         try:
-            await asyncio.gather(
+            serve_tasks = [
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,
@@ -187,7 +194,27 @@ class WorkerFactory:
                     handler.clear_kv_blocks,
                     metrics_labels=metrics_labels,
                 ),
-            )
+            ]
+
+            if lora_enabled:
+                serve_tasks.extend(
+                    [
+                        load_lora_endpoint.serve_endpoint(
+                            handler.load_lora,
+                            metrics_labels=metrics_labels,
+                        ),
+                        unload_lora_endpoint.serve_endpoint(
+                            handler.unload_lora,
+                            metrics_labels=metrics_labels,
+                        ),
+                        list_loras_endpoint.serve_endpoint(
+                            handler.list_loras,
+                            metrics_labels=metrics_labels,
+                        ),
+                    ]
+                )
+
+            await asyncio.gather(*serve_tasks)
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
             raise
@@ -201,8 +228,9 @@ class WorkerFactory:
         shutdown_event: asyncio.Event,
     ) -> None:
         """Initialize standalone multimodal encode worker."""
-        component = runtime.namespace(config.namespace).component(config.component)
-        generate_endpoint = component.endpoint(config.endpoint)
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
 
         handler = EncodeWorkerHandler(config.engine_args)
         await handler.async_init(runtime)

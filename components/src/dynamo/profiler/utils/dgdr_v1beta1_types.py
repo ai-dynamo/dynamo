@@ -78,7 +78,6 @@ class WorkloadSpec(BaseModel):
 
     @field_validator("concurrency", "requestRate", mode="after")
     def check_concurrency_or_requestrate(cls, v, info):
-        # Get whole instance dict to cross-check the other value
         values = info.data
         concurrency = values.get("concurrency")
         request_rate = values.get("requestRate")
