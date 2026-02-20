@@ -156,7 +156,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
             g,
             flag_name="--disable-request-abort",
             env_var="DYN_TRTLLM_DISABLE_REQUEST_ABORT",
-            default=False,
+            default=True,
             help="Disable calling abort() on the TRT-LLM engine when a request is cancelled.",
         )
         add_argument(

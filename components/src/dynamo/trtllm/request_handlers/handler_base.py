@@ -72,7 +72,7 @@ class RequestHandlerConfig:
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
-    disable_request_abort: bool = False
+    disable_request_abort: bool = True
 
 
 class HandlerBase(BaseGenerativeHandler):
