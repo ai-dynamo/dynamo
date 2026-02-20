@@ -4,6 +4,7 @@
 use super::maybe_error::MaybeError;
 use anyhow::{Result, anyhow as error};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 
 pub trait AnnotationsProvider {
     fn annotations(&self) -> Option<Vec<String>>;
@@ -114,6 +115,31 @@ impl<R> Annotated<R> {
                 comment: self.comment,
             },
             Err(e) => Annotated::from_error(e),
+        }
+    }
+
+    /// Async version of map_data
+    pub async fn map_data_async<U, Fut, F>(self, transform: F) -> Annotated<U>
+    where
+        F: FnOnce(R) -> Fut,
+        Fut: Future<Output = Result<U, String>>,
+    {
+        match self.data {
+            Some(r) => match transform(r).await {
+                Ok(u) => Annotated::<U> {
+                    data: Some(u),
+                    id: self.id,
+                    event: self.event,
+                    comment: self.comment,
+                },
+                Err(e) => Annotated::from_error(e),
+            },
+            None => Annotated::<U> {
+                data: None,
+                id: self.id,
+                event: self.event,
+                comment: self.comment,
+            },
         }
     }
 
