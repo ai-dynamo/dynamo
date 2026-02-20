@@ -16,9 +16,7 @@ TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
 
 @pytest.mark.asyncio
 async def test_register(runtime: DistributedRuntime):
-    component = runtime.namespace("test").component("tensor")
-
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("test.tensor.generate")
 
     model_config = {
         "name": "tensor",

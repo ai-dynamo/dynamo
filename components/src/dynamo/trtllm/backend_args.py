@@ -197,13 +197,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             diffusion_group,
-            flag_name="--output-dir",
-            env_var="DYN_TRTLLM_OUTPUT_DIR",
-            default="/tmp/dynamo_videos",
-            help="Directory to store generated videos/images.",
-        )
-        add_argument(
-            diffusion_group,
             flag_name="--default-height",
             env_var="DYN_TRTLLM_DEFAULT_HEIGHT",
             default=480,
@@ -377,7 +370,6 @@ class DynamoTrtllmConfig(ConfigBase):
     allowed_local_media_path: str
     max_file_size_mb: int
 
-    output_dir: str
     default_height: int
     default_width: int
     default_num_frames: int

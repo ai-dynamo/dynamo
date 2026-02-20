@@ -486,12 +486,9 @@ class BasePlanner:
 
     async def _get_or_create_client(self, component_name: str, endpoint_name: str):
         """Create a client for the given component and endpoint, with a brief sleep for state sync."""
-        client = (
-            await self.runtime.namespace(self.namespace)
-            .component(component_name)
-            .endpoint(endpoint_name)
-            .client()
-        )
+        client = await self.runtime.endpoint(
+            f"{self.namespace}.{component_name}.{endpoint_name}"
+        ).client()
         # TODO: remove this sleep after rust client() is blocking until watching state
         await asyncio.sleep(0.1)
         return client
