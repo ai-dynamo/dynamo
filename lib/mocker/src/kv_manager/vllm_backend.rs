@@ -384,6 +384,99 @@ impl KvManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::protocols::KvCacheEventData;
+    use std::sync::Mutex;
+
+    /// Mock event sink that captures all published KvCacheEvents for inspection.
+    struct MockEventSink {
+        events: Mutex<Vec<KvCacheEvent>>,
+    }
+
+    impl MockEventSink {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                events: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn drain(&self) -> Vec<KvCacheEvent> {
+            self.events.lock().unwrap().drain(..).collect()
+        }
+    }
+
+    impl KvCacheEventSink for MockEventSink {
+        fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    /// Verifies that when a single `Use` call must evict multiple inactive blocks to
+    /// make room, all evictions are batched into a single `Removed` event rather than
+    /// one event per eviction (the behaviour introduced by the batch-remove commit).
+    #[test]
+    fn test_batch_eviction_events_on_use() {
+        let sink = MockEventSink::new();
+        // Capacity of 3 so we can easily saturate and force evictions
+        let mut manager = KvManager::new_with_event_sink(
+            3,
+            16,
+            Some(sink.clone() as Arc<dyn KvCacheEventSink>),
+            0,
+        );
+
+        // Fill all 3 slots with blocks 0, 1, 2
+        let blocks: Vec<UniqueBlock> = (0u64..3).map(UniqueBlock::FullBlock).collect();
+        let hashes: Vec<u64> = (0..3).collect();
+        manager.process(&MoveBlock::Use(blocks.clone(), hashes));
+
+        // Move them to the inactive pool via Deref
+        manager.process(&MoveBlock::Deref(blocks));
+
+        // Discard the store event from the initial Use; Deref emits no events
+        sink.drain();
+
+        // Use 3 new blocks — each one must evict an inactive block to make room.
+        // With the batching change this should produce exactly ONE Removed event
+        // (containing all 3 evicted blocks) instead of three separate ones.
+        let new_blocks: Vec<UniqueBlock> = (3u64..6).map(UniqueBlock::FullBlock).collect();
+        let new_hashes: Vec<u64> = (3..6).collect();
+        manager.process(&MoveBlock::Use(new_blocks, new_hashes));
+
+        let events = sink.drain();
+
+        // Expect exactly 2 events: 1 batched Removed + 1 Stored
+        assert_eq!(
+            events.len(),
+            2,
+            "Expected exactly 2 events (1 batched remove + 1 store), got {}",
+            events.len()
+        );
+
+        // First event must be the single batched remove carrying all 3 evictions
+        match &events[0].data {
+            KvCacheEventData::Removed(remove_data) => {
+                assert_eq!(
+                    remove_data.block_hashes.len(),
+                    3,
+                    "All 3 evictions should be batched into one Removed event"
+                );
+            }
+            other => panic!("Expected Removed event as first event, got {:?}", other),
+        }
+
+        // Second event must be the store for the 3 newly allocated blocks
+        match &events[1].data {
+            KvCacheEventData::Stored(store_data) => {
+                assert_eq!(
+                    store_data.blocks.len(),
+                    3,
+                    "Stored event should contain all 3 newly allocated blocks"
+                );
+            }
+            other => panic!("Expected Stored event as second event, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_failure_on_max_capacity() {
