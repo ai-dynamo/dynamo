@@ -588,6 +588,18 @@ def main():
     args.output.write_text(pydantic_code + "\n")
     print(f"Generated Pydantic models at: {args.output}")
 
+    # Format with black to match the project linter style
+    try:
+        subprocess.run(
+            ["black", "--line-length=88", "--quiet", str(args.output)],
+            check=True,
+        )
+        print(f"Formatted with black: {args.output}")
+    except FileNotFoundError:
+        print("Warning: black not found; output may not match linter formatting")
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: black formatting failed: {e}")
+
     return 0
 
 
