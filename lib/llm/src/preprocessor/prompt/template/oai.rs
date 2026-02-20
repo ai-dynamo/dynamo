@@ -246,19 +246,18 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        // Using vLLM default behavior
-        true
-        // // Only add generation prompt if the last message was not assistant (default to true when no last message)
-        // self.inner
-        //     .messages
-        //     .last()
-        //     .map(|last| {
-        //         !matches!(
-        //             last,
-        //             dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(_)
-        //         )
-        //     })
-        //     .unwrap_or(true)
+        // Only add generation prompt if the last message was not assistant
+        // (default to true when no last message).
+        self.inner
+            .messages
+            .last()
+            .map(|last| {
+                !matches!(
+                    last,
+                    dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(_)
+                )
+            })
+            .unwrap_or(true)
     }
 
     fn extract_text(&self) -> Option<TextInput> {
