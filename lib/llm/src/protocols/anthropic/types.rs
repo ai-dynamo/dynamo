@@ -13,7 +13,7 @@ use dynamo_async_openai::types::{
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionTool, ChatCompletionToolChoiceOption,
-    ChatCompletionToolType, FunctionName, FunctionObject,
+    ChatCompletionToolType, FunctionName, FunctionObject, ReasoningContent,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -557,6 +557,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 // Assistant with plain text
                 (AnthropicRole::Assistant, AnthropicMessageContent::Text { content }) => {
                     messages.push(ChatCompletionRequestMessage::Assistant(
+                        #[allow(deprecated)]
                         ChatCompletionRequestAssistantMessage {
                             content: Some(ChatCompletionRequestAssistantMessageContent::Text(
                                 content.clone(),
@@ -566,7 +567,6 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                             name: None,
                             audio: None,
                             tool_calls: None,
-                            #[allow(deprecated)]
                             function_call: None,
                         },
                     ));
@@ -685,15 +685,33 @@ fn convert_user_blocks(
 }
 
 /// Convert assistant-role content blocks into chat completion messages.
-/// Text blocks become an assistant message; tool_use blocks become tool_calls on an assistant message.
-/// Thinking blocks are passed through as `reasoning_content`.
+///
+/// Text blocks become an assistant message; tool_use blocks become tool_calls on an assistant
+/// message. Thinking blocks are preserved via `reasoning_content: Option<ReasoningContent>`:
+///
+/// - `ReasoningContent::Text(s)`: flat reasoning string (no tool calls present).
+/// - `ReasoningContent::Segments(segs)`: one entry **per position** in the interleaved sequence,
+///   enabling chat templates to reconstruct the exact token order:
+///   `<think>segments[0]</think><call>tc[0]</call><think>segments[1]</think><call>tc[1]</call>…<think>segments[N]</think>`
+///   - `segments[i]` is the thinking that immediately preceded `tool_calls[i]`
+///   - `segments[tool_calls.len()]` is any trailing thinking after the last tool call
+///   - `segments.len() == tool_calls.len() + 1` always
+///   - Individual entries may be empty strings (no reasoning at that position)
+/// - `None` when there is no reasoning content at all.
+///
+/// Preserving the original interleaved order is required for KV cache correctness: a prompt
+/// reconstructed from a flattened `reasoning_content` will differ token-by-token from the
+/// original assistant turn, causing a cache miss on every multi-tool exchange.
 fn convert_assistant_blocks(
     blocks: &[AnthropicContentBlock],
     messages: &mut Vec<ChatCompletionRequestMessage>,
 ) {
     let mut text_content = String::new();
-    let mut thinking_content = String::new();
     let mut tool_calls = Vec::new();
+    // One reasoning segment per tool call — segments[i] precedes tool_calls[i].
+    let mut segments: Vec<String> = Vec::new();
+    // Accumulates thinking text until the next tool_use block (or end of blocks).
+    let mut pending_reasoning = String::new();
 
     for block in blocks {
         match block {
@@ -701,12 +719,14 @@ fn convert_assistant_blocks(
                 text_content.push_str(text);
             }
             AnthropicContentBlock::Thinking { thinking, .. } => {
-                if !thinking_content.is_empty() {
-                    thinking_content.push('\n');
+                if !pending_reasoning.is_empty() {
+                    pending_reasoning.push('\n');
                 }
-                thinking_content.push_str(thinking);
+                pending_reasoning.push_str(thinking);
             }
             AnthropicContentBlock::ToolUse { id, name, input } => {
+                // Snapshot the reasoning that preceded this tool call.
+                segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: id.clone(),
                     r#type: ChatCompletionToolType::Function,
@@ -720,6 +740,11 @@ fn convert_assistant_blocks(
         }
     }
 
+    // Append any trailing reasoning (after the last tool call) as the final segment.
+    // This makes segments.len() == tool_calls.len() + 1, preserving the full interleaved
+    // order including reasoning that follows the last tool call.
+    segments.push(std::mem::take(&mut pending_reasoning));
+
     let content = if text_content.is_empty() {
         None
     } else {
@@ -728,10 +753,25 @@ fn convert_assistant_blocks(
         ))
     };
 
-    let reasoning = if thinking_content.is_empty() {
-        None
+    // Produce a single ReasoningContent value:
+    // - Segments variant when there are tool calls and at least one segment is non-empty
+    //   (genuine interleaving present).
+    // - Text variant when there's reasoning but no tool calls (flat form).
+    // - None when there's no reasoning at all.
+    let reasoning_content = if !tool_calls.is_empty() && segments.iter().any(|s| !s.is_empty()) {
+        Some(ReasoningContent::Segments(segments))
     } else {
-        Some(thinking_content)
+        let flat: String = segments
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        if flat.is_empty() {
+            None
+        } else {
+            Some(ReasoningContent::Text(flat))
+        }
     };
 
     let tc = if tool_calls.is_empty() {
@@ -743,7 +783,7 @@ fn convert_assistant_blocks(
     messages.push(ChatCompletionRequestMessage::Assistant(
         ChatCompletionRequestAssistantMessage {
             content,
-            reasoning_content: reasoning,
+            reasoning_content,
             refusal: None,
             name: None,
             audio: None,
@@ -1339,7 +1379,10 @@ mod tests {
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         match &chat_req.inner.messages[0] {
             ChatCompletionRequestMessage::Assistant(a) => {
-                assert_eq!(a.reasoning_content.as_deref(), Some("I should think..."));
+                assert_eq!(
+                    a.reasoning_content,
+                    Some(ReasoningContent::Text("I should think...".into()))
+                );
                 match &a.content {
                     Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => {
                         assert_eq!(t, "Answer");
@@ -1475,5 +1518,206 @@ mod tests {
         assert!(tokens > 0, "should estimate non-zero tokens");
         // "Hello, world! This is a test message." (37) + "You are helpful." (16) + role (4) = 57 / 3 = 19
         assert_eq!(tokens, 19);
+    }
+
+    // --- ReasoningContent enum tests ---
+
+    fn make_req(blocks: Vec<AnthropicContentBlock>) -> ChatCompletionRequestAssistantMessage {
+        let req = AnthropicCreateMessageRequest {
+            model: "test-model".into(),
+            max_tokens: 100,
+            messages: vec![AnthropicMessage {
+                role: AnthropicRole::Assistant,
+                content: AnthropicMessageContent::Blocks { content: blocks },
+            }],
+            system: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: false,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        match chat_req.inner.messages.into_iter().next().unwrap() {
+            ChatCompletionRequestMessage::Assistant(a) => a,
+            other => panic!("expected assistant, got {other:?}"),
+        }
+    }
+
+    fn tool_use(id: &str) -> AnthropicContentBlock {
+        AnthropicContentBlock::ToolUse {
+            id: id.into(),
+            name: "fn".into(),
+            input: serde_json::json!({}),
+        }
+    }
+
+    fn thinking(text: &str) -> AnthropicContentBlock {
+        AnthropicContentBlock::Thinking {
+            thinking: text.into(),
+            signature: "sig".into(),
+        }
+    }
+
+    #[test]
+    fn test_interleaved_thinking_and_tool_calls() {
+        // [Thinking("A"), ToolUse("t1"), Thinking("B"), ToolUse("t2")]
+        // segments = ["A", "B", ""] (trailing empty), tool_calls = [t1, t2]
+        let msg = make_req(vec![
+            thinking("A"),
+            tool_use("t1"),
+            thinking("B"),
+            tool_use("t2"),
+        ]);
+
+        let segs = msg
+            .reasoning_content
+            .as_ref()
+            .expect("reasoning_content should be set")
+            .segments()
+            .expect("should be Segments variant");
+        assert_eq!(segs.len(), 3); // tool_calls.len() + 1
+        assert_eq!(segs[0], "A");
+        assert_eq!(segs[1], "B");
+        assert_eq!(segs[2], ""); // no trailing reasoning
+
+        assert_eq!(
+            msg.reasoning_content.as_ref().unwrap().to_flat_string(),
+            "A\nB"
+        );
+
+        let tcs = msg.tool_calls.as_ref().expect("tool_calls should be set");
+        assert_eq!(tcs.len(), 2);
+        assert_eq!(tcs[0].id, "t1");
+        assert_eq!(tcs[1].id, "t2");
+    }
+
+    #[test]
+    fn test_trailing_reasoning_preserved_in_segments() {
+        // [Thinking("A"), ToolUse("t1"), Thinking("B")]
+        // segments = ["A", "B"], trailing reasoning "B" must appear in segments[1]
+        let msg = make_req(vec![thinking("A"), tool_use("t1"), thinking("B")]);
+
+        let segs = msg
+            .reasoning_content
+            .as_ref()
+            .expect("reasoning_content should be set")
+            .segments()
+            .expect("should be Segments variant");
+        assert_eq!(segs.len(), 2); // 1 tool call + 1 trailing
+        assert_eq!(segs[0], "A");
+        assert_eq!(segs[1], "B"); // trailing reasoning preserved
+
+        assert_eq!(
+            msg.reasoning_content.as_ref().unwrap().to_flat_string(),
+            "A\nB"
+        );
+    }
+
+    #[test]
+    fn test_tool_use_before_thinking() {
+        // [ToolUse("t1"), Thinking("A"), ToolUse("t2")]
+        // segments = ["", "A", ""] — empty first segment, reasoning before t2
+        let msg = make_req(vec![tool_use("t1"), thinking("A"), tool_use("t2")]);
+
+        let segs = msg
+            .reasoning_content
+            .as_ref()
+            .expect("reasoning_content should be set")
+            .segments()
+            .expect("should be Segments variant");
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], ""); // no reasoning before t1
+        assert_eq!(segs[1], "A");
+        assert_eq!(segs[2], ""); // no trailing
+
+        assert_eq!(
+            msg.reasoning_content.as_ref().unwrap().to_flat_string(),
+            "A"
+        );
+    }
+
+    #[test]
+    fn test_all_thinking_then_all_tools() {
+        // [Thinking("A"), Thinking("B"), ToolUse("t1"), ToolUse("t2")]
+        // segments = ["A\nB", "", ""] — all reasoning before first tool
+        let msg = make_req(vec![
+            thinking("A"),
+            thinking("B"),
+            tool_use("t1"),
+            tool_use("t2"),
+        ]);
+
+        let segs = msg
+            .reasoning_content
+            .as_ref()
+            .expect("reasoning_content should be set")
+            .segments()
+            .expect("should be Segments variant");
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], "A\nB");
+        assert_eq!(segs[1], "");
+        assert_eq!(segs[2], "");
+
+        assert_eq!(
+            msg.reasoning_content.as_ref().unwrap().to_flat_string(),
+            "A\nB"
+        );
+    }
+
+    #[test]
+    fn test_tool_calls_no_thinking_produces_no_segments() {
+        // [ToolUse("t1"), ToolUse("t2")] — all empty segments → reasoning_content = None
+        let msg = make_req(vec![tool_use("t1"), tool_use("t2")]);
+
+        assert!(
+            msg.reasoning_content.is_none(),
+            "no reasoning means no reasoning_content"
+        );
+    }
+
+    #[test]
+    fn test_thinking_only_no_tools_produces_text_variant() {
+        // [Thinking("A"), Text("answer")] — no tool calls → ReasoningContent::Text
+        let msg = make_req(vec![
+            thinking("A"),
+            AnthropicContentBlock::Text {
+                text: "answer".into(),
+            },
+        ]);
+
+        assert_eq!(
+            msg.reasoning_content,
+            Some(ReasoningContent::Text("A".into()))
+        );
+        assert!(msg.reasoning_content.as_ref().unwrap().segments().is_none());
+        assert!(matches!(
+            msg.content,
+            Some(ChatCompletionRequestAssistantMessageContent::Text(ref t)) if t == "answer"
+        ));
+    }
+
+    #[test]
+    fn test_single_thinking_then_single_tool() {
+        // [Thinking("reason"), ToolUse("t1")] → Segments(["reason", ""])
+        let msg = make_req(vec![thinking("reason"), tool_use("t1")]);
+
+        let segs = msg
+            .reasoning_content
+            .as_ref()
+            .expect("reasoning_content should be set")
+            .segments()
+            .expect("should be Segments variant");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0], "reason");
+        assert_eq!(segs[1], "");
+
+        assert_eq!(
+            msg.reasoning_content.as_ref().unwrap().to_flat_string(),
+            "reason"
+        );
     }
 }
