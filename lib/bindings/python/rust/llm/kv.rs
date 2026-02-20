@@ -11,7 +11,7 @@ use tokio_stream::StreamExt;
 use super::*;
 use crate::Component;
 use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
-use rs::pipeline::{AsyncEngine, SingleIn};
+use rs::pipeline::AsyncEngine;
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
@@ -615,8 +615,18 @@ impl KvRouter {
         tracker: Option<Arc<RequestTracker>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let single_in = SingleIn::new(request);
-            let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
+            // Create parent context BEFORE generating request for proper cancellation propagation
+            let internal_context = crate::context::Context::py_new(None);
+
+            // Create child context linked to parent - enables cancellation to propagate from
+            // client (parent) to backend (child) when stream.cancel() is called
+            let request_ctx = crate::create_request_context(
+                request,
+                &Some(internal_context.clone())
+            );
+
+            // Pass linked child context to backend so it can observe cancellation
+            let stream = inner.generate(request_ctx).await.map_err(to_pyerr)?;
             let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(100);
 
             tokio::spawn(async move {
@@ -670,7 +680,7 @@ impl KvRouter {
                 }
             });
 
-            let internal_context = crate::context::Context::py_new(None);
+            // Return stream with parent context for client-side cancellation control
             Ok(crate::AsyncResponseStream::new(rx, false, internal_context))
         })
     }

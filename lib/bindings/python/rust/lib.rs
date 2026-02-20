@@ -102,11 +102,15 @@ fn get_span_for_direct_context(
     )
 }
 
-// Helper to create request context with proper linking and cancellation handling
-fn create_request_context(
-    request: serde_json::Value,
+// Helper to create request context with proper linking and cancellation handling.
+// Works with any request type (not just JSON) to enable proper cancellation propagation.
+fn create_request_context<T>(
+    request: T,
     parent_ctx: &Option<context::Context>,
-) -> RsContext<serde_json::Value> {
+) -> RsContext<T>
+where
+    T: Send + Sync + 'static,
+{
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
@@ -121,7 +125,7 @@ fn create_request_context(
             child_ctx
         }
         // Otherwise if there is no parent context, use the request as-is
-        _ => request.into(),
+        None => request.into(),
     }
 }
 
@@ -1215,5 +1219,112 @@ impl Annotated {
             self.inner.comment.as_deref().unwrap_or(&[]),
             self.inner.id.as_deref().unwrap_or("None")
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_request_context_with_cancellation_propagation() {
+        // Test that cancellation propagates from parent context to child context
+        // This is the core functionality needed for stream.cancel() to work
+
+        // Create a parent context
+        let parent = context::Context::py_new(Some("test-parent-123".to_string()));
+
+        // Create a request (using String as a simple test type)
+        let request = "test request data".to_string();
+
+        // Create child context linked to parent
+        let child_ctx = create_request_context(request.clone(), &Some(parent.clone()));
+
+        // Verify the child context contains the request data
+        assert_eq!(child_ctx.content(), "test request data");
+
+        // Verify child is not stopped initially
+        assert!(!child_ctx.context().is_stopped());
+
+        // Simulate user calling stream.cancel() by calling stop_generating on parent
+        parent.inner().stop_generating();
+
+        // Verify cancellation propagated to child
+        assert!(child_ctx.context().is_stopped(),
+            "Child context should be stopped after parent.stop_generating()");
+    }
+
+    #[test]
+    fn test_create_request_context_with_json() {
+        // Test with serde_json::Value (the original use case)
+        use serde_json::json;
+
+        let parent = context::Context::py_new(None);
+        let request = json!({"prompt": "test", "max_tokens": 100});
+
+        let child_ctx = create_request_context(request.clone(), &Some(parent.clone()));
+
+        // Verify request data is preserved
+        assert_eq!(child_ctx.content(), &request);
+
+        // Test cancellation
+        parent.inner().stop_generating();
+        assert!(child_ctx.context().is_stopped());
+    }
+
+    #[test]
+    fn test_create_request_context_without_parent() {
+        // Test creating context without parent (should still work)
+        let request = "test data".to_string();
+        let child_ctx = create_request_context(request, &None);
+
+        // Should create a standalone context
+        assert_eq!(child_ctx.content(), "test data");
+        assert!(!child_ctx.context().is_stopped());
+    }
+
+    #[test]
+    fn test_create_request_context_already_cancelled() {
+        // Test that if parent is already cancelled, child starts cancelled
+        let parent = context::Context::py_new(None);
+
+        // Cancel parent BEFORE creating child
+        parent.inner().stop_generating();
+        assert!(parent.inner().is_stopped());
+
+        // Create child with already-cancelled parent
+        let request = "test".to_string();
+        let child_ctx = create_request_context(request, &Some(parent.clone()));
+
+        // Child should immediately be stopped
+        assert!(child_ctx.context().is_stopped(),
+            "Child should be stopped if created from already-stopped parent");
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct CustomRequest {
+        id: String,
+        tokens: Vec<u32>,
+    }
+
+    #[test]
+    fn test_create_request_context_with_custom_type() {
+        // Test that generic function works with any type (like PreprocessedRequest)
+        let parent = context::Context::py_new(None);
+
+        let request = CustomRequest {
+            id: "req-123".to_string(),
+            tokens: vec![1, 2, 3, 4, 5],
+        };
+
+        let child_ctx = create_request_context(request.clone(), &Some(parent.clone()));
+
+        // Verify custom type is preserved
+        assert_eq!(child_ctx.content(), &request);
+        assert_eq!(child_ctx.content().tokens, vec![1, 2, 3, 4, 5]);
+
+        // Verify cancellation works
+        parent.inner().stop_generating();
+        assert!(child_ctx.context().is_stopped());
     }
 }
