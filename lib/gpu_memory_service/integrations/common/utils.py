@@ -16,6 +16,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def get_gms_lock_mode(extra_config: dict) -> "RequestedLockType":
+    """Resolve GMS lock mode from model_loader_extra_config.
+
+    Returns RO if gms_read_only=True, otherwise RW_OR_RO (default).
+    """
+    from gpu_memory_service.common.types import RequestedLockType
+
+    if extra_config.get("gms_read_only", False):
+        logger.info("[GMS] gms_read_only=True, forcing RO mode")
+        return RequestedLockType.RO
+    return RequestedLockType.RW_OR_RO
+
+
 def setup_meta_tensor_workaround() -> None:
     """Enable workaround for meta tensor operations like torch.nonzero()."""
     try:
@@ -30,9 +43,8 @@ def finalize_gms_write(
     allocator: "GMSClientMemoryManager", model: torch.nn.Module
 ) -> int:
     """Finalize GMS write mode: register tensors, commit, switch to read.
-    This is typically called when the (writing) model loader finishes, and
-    is ready to commit the weights so that other engines can import these
-    weights and read them.
+
+    Flow: register tensors -> sync -> commit (server-only) -> disconnect -> connect(RO)
 
     Args:
         allocator: The GMS client memory manager in write mode.
@@ -45,17 +57,20 @@ def finalize_gms_write(
         RuntimeError: If commit fails.
     """
     from gpu_memory_service.client.torch.module import register_module_tensors
+    from gpu_memory_service.common.types import RequestedLockType
 
     register_module_tensors(allocator, model)
     total_bytes = allocator.total_bytes
 
-    # Wait for all writes to weights (from caller) to complete before mode switch
+    # Synchronize before commit — caller's writes must be visible
     torch.cuda.synchronize()
 
     if not allocator.commit():
         raise RuntimeError("GMS commit failed")
 
-    allocator.switch_to_read()
+    # commit() closed the RW socket; acquire RO for inference
+    allocator.disconnect()  # no-op if commit already cleared _client, but safe
+    allocator.connect(RequestedLockType.RO)
 
     logger.info(
         "[GMS] Committed %.2f GiB, switched to read mode with %d mappings",

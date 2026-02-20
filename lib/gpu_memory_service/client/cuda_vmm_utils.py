@@ -29,13 +29,15 @@ def import_handle_from_fd(fd: int) -> int:
     Returns:
         CUDA memory handle.
     """
-    result, handle = cuda.cuMemImportFromShareableHandle(
-        fd,
-        cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-    )
-    check_cuda_result(result, "cuMemImportFromShareableHandle")
-    os.close(fd)
-    return int(handle)
+    try:
+        result, handle = cuda.cuMemImportFromShareableHandle(
+            fd,
+            cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+        )
+        check_cuda_result(result, "cuMemImportFromShareableHandle")
+        return int(handle)
+    finally:
+        os.close(fd)
 
 
 def reserve_va(size: int, granularity: int) -> int:
@@ -116,6 +118,31 @@ def release_handle(handle: int) -> None:
     """
     (result,) = cuda.cuMemRelease(handle)
     check_cuda_result(result, "cuMemRelease")
+
+
+def validate_pointer(va: int) -> bool:
+    """Validate that a mapped VA is accessible.
+
+    Returns True if the pointer is valid, False otherwise (logs a warning).
+    """
+    result, _dev_ptr = cuda.cuPointerGetAttribute(
+        cuda.CUpointer_attribute.CU_POINTER_ATTRIBUTE_DEVICE_POINTER, va
+    )
+    if result != cuda.CUresult.CUDA_SUCCESS:
+        err_result, err_str = cuda.cuGetErrorString(result)
+        err_msg = ""
+        if err_result == cuda.CUresult.CUDA_SUCCESS and err_str:
+            err_msg = err_str.decode() if isinstance(err_str, bytes) else str(err_str)
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "cuPointerGetAttribute failed for VA 0x%x: %s (%s)",
+            va,
+            result,
+            err_msg,
+        )
+        return False
+    return True
 
 
 def synchronize() -> None:

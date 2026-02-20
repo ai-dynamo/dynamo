@@ -21,6 +21,7 @@ from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import (
     finalize_gms_write,
+    get_gms_lock_mode,
     setup_meta_tensor_workaround,
 )
 
@@ -60,16 +61,18 @@ def register_gms_loader(load_format: str = "gms") -> None:
         def load_weights(self, model: torch.nn.Module, model_config) -> None:
             self.default_loader.load_weights(model, model_config)
 
-        def load_model(self, vllm_config, model_config) -> torch.nn.Module:
+        def load_model(self, vllm_config, model_config, prefix="") -> torch.nn.Module:
             device = torch.cuda.current_device()
+            extra = getattr(self.load_config, "model_loader_extra_config", {}) or {}
+            mode = get_gms_lock_mode(extra)
             gms_client, pool = get_or_create_gms_client_memory_manager(
                 get_socket_path(device),
                 device,
-                mode=RequestedLockType.RW_OR_RO,
+                mode=mode,
                 tag="weights",
             )
 
-            if gms_client.mode == GrantedLockType.RO:
+            if gms_client.granted_lock_type == GrantedLockType.RO:
                 return _load_read_mode(gms_client, vllm_config, model_config, device)
             else:
                 return _load_write_mode(
@@ -133,7 +136,7 @@ def _load_write_mode(
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
-    gms_client.clear_all()
+    gms_client.clear_all_handles()
 
     # Allocate model tensors using GMS memory pool
     with set_default_torch_dtype(model_config.dtype):
