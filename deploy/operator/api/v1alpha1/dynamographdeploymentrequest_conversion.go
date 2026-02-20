@@ -32,8 +32,8 @@
 //	Spec.Backend            (string)           Spec.Backend              (BackendType)
 //	Spec.AutoApply          (bool)             Spec.AutoApply                  (bool)
 //	Spec.UseMocker          (bool)             Spec.Features.Mocker.Enabled    (bool)
-//	Spec.ProfilingConfig.ProfilerImage         Spec.Image                    (string)
-//	Spec.DeploymentOverrides.WorkersImage      (no v1beta1 equivalent yet — TODO: overrides.dgd)
+//	Spec.DeploymentOverrides.WorkersImage      Spec.Image                    (string)
+//	Spec.ProfilingConfig.ProfilerImage         Spec.Image (overwrites if set; also annotation)
 //
 // JSON blob → structured fields (parsed/reconstructed on each trip):
 //
@@ -66,6 +66,7 @@
 //	v1alpha1 field                             Annotation key
 //	──────────────────────────────────────────  ──────────────────────────────────────
 //	Spec.EnableGPUDiscovery                    nvidia.com/dgdr-enable-gpu-discovery
+//	Spec.ProfilingConfig.ProfilerImage         nvidia.com/dgdr-profiler-image
 //	Spec.ProfilingConfig.ConfigMapRef          nvidia.com/dgdr-config-map-ref
 //	Spec.ProfilingConfig.OutputPVC             nvidia.com/dgdr-output-pvc
 //	Spec.ProfilingConfig.Config (full blob)    nvidia.com/dgdr-profiling-config
@@ -146,11 +147,13 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 )
 
 // Annotation keys used to round-trip v1alpha1 fields that have no v1beta1 equivalent.
 const (
+	annDGDRProfilerImage    = "nvidia.com/dgdr-profiler-image"
 	annDGDRConfigMapRef     = "nvidia.com/dgdr-config-map-ref"
 	annDGDROutputPVC        = "nvidia.com/dgdr-output-pvc"
 	annDGDREnableGPUDisc    = "nvidia.com/dgdr-enable-gpu-discovery"
@@ -247,6 +250,11 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 	if src.ProfilingConfig.ProfilerImage != "" {
 		dst.Image = src.ProfilingConfig.ProfilerImage
 	}
+
+	// Also store profilerImage as annotation for round-trip preservation
+	if src.ProfilingConfig.ProfilerImage != "" {
+		setAnnotation(dstObj, annDGDRProfilerImage, src.ProfilingConfig.ProfilerImage)
+	}
 	if src.ProfilingConfig.ConfigMapRef != nil {
 		if data, err := json.Marshal(src.ProfilingConfig.ConfigMapRef); err == nil {
 			setAnnotation(dstObj, annDGDRConfigMapRef, string(data))
@@ -258,6 +266,70 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 
 	convertProfilingResourcesToOverrides(&src.ProfilingConfig, dst)
 	convertDeploymentOverridesToAnnotation(src.DeploymentOverrides, dstObj)
+
+	// DeploymentOverrides → Overrides.DGD (partial DGD for controller consumption)
+	if src.DeploymentOverrides != nil {
+		partialDGD := map[string]interface{}{
+			"apiVersion": "nvidia.com/v1alpha1",
+			"kind":       "DynamoGraphDeployment",
+			"metadata":   map[string]interface{}{},
+		}
+		meta := partialDGD["metadata"].(map[string]interface{})
+		hasOverride := false
+		if src.DeploymentOverrides.Name != "" {
+			meta["name"] = src.DeploymentOverrides.Name
+			hasOverride = true
+		}
+		if src.DeploymentOverrides.Namespace != "" {
+			meta["namespace"] = src.DeploymentOverrides.Namespace
+			hasOverride = true
+		}
+		if len(src.DeploymentOverrides.Labels) > 0 {
+			meta["labels"] = src.DeploymentOverrides.Labels
+			hasOverride = true
+		}
+		if len(src.DeploymentOverrides.Annotations) > 0 {
+			meta["annotations"] = src.DeploymentOverrides.Annotations
+			hasOverride = true
+		}
+		if hasOverride {
+			if data, err := json.Marshal(partialDGD); err == nil {
+				if dst.Overrides == nil {
+					dst.Overrides = &v1beta1.OverridesSpec{}
+				}
+				dst.Overrides.DGD = &runtime.RawExtension{Raw: data}
+			}
+		}
+	}
+
+	// --- Populate Legacy spec for controller compatibility ---
+	dst.Legacy = &v1beta1.LegacySpec{
+		Backend:   src.Backend,
+		UseMocker: src.UseMocker,
+	}
+	dst.Legacy.ProfilingConfig = &v1beta1.LegacyProfilingConfigSpec{
+		ProfilerImage: src.ProfilingConfig.ProfilerImage,
+		Config:        src.ProfilingConfig.Config,
+		OutputPVC:     src.ProfilingConfig.OutputPVC,
+		Resources:     src.ProfilingConfig.Resources,
+		Tolerations:   src.ProfilingConfig.Tolerations,
+		NodeSelector:  src.ProfilingConfig.NodeSelector,
+	}
+	if src.ProfilingConfig.ConfigMapRef != nil {
+		dst.Legacy.ProfilingConfig.ConfigMapRef = &v1beta1.LegacyConfigMapKeySelector{
+			Name: src.ProfilingConfig.ConfigMapRef.Name,
+			Key:  src.ProfilingConfig.ConfigMapRef.Key,
+		}
+	}
+	if src.DeploymentOverrides != nil {
+		dst.Legacy.DeploymentOverrides = &v1beta1.LegacyDeploymentOverridesSpec{
+			Name:         src.DeploymentOverrides.Name,
+			Namespace:    src.DeploymentOverrides.Namespace,
+			Labels:       src.DeploymentOverrides.Labels,
+			Annotations:  src.DeploymentOverrides.Annotations,
+			WorkersImage: src.DeploymentOverrides.WorkersImage,
+		}
+	}
 
 	return nil
 }
@@ -335,7 +407,7 @@ func applyModelCacheFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGra
 // convertProfilingResourcesToOverrides maps ProfilingConfig Resources and Tolerations
 // into the v1beta1 Overrides.ProfilingJob pod spec.
 func convertProfilingResourcesToOverrides(src *ProfilingConfigSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if src.Resources == nil && len(src.Tolerations) == 0 {
+	if src.Resources == nil && len(src.Tolerations) == 0 && len(src.NodeSelector) == 0 {
 		return
 	}
 	if dst.Overrides == nil {
@@ -358,6 +430,9 @@ func convertProfilingResourcesToOverrides(src *ProfilingConfigSpec, dst *v1beta1
 	}
 	if len(src.Tolerations) > 0 {
 		podSpec.Tolerations = src.Tolerations
+	}
+	if len(src.NodeSelector) > 0 {
+		podSpec.NodeSelector = src.NodeSelector
 	}
 }
 
@@ -439,8 +514,55 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 		dst.ProfilingConfig.ProfilerImage = src.Image
 	}
 
+	// Restore profilerImage from annotation if it was explicitly stored
+	if srcObj.Annotations != nil {
+		if v, ok := srcObj.Annotations[annDGDRProfilerImage]; ok {
+			dst.ProfilingConfig.ProfilerImage = v
+		}
+	}
+
 	restoreAnnotationFields(srcObj, dst)
 	restoreProfilingJobResources(src, dst)
+
+	// Restore WorkersImage from Image
+	if src.Image != "" {
+		if dst.DeploymentOverrides == nil {
+			dst.DeploymentOverrides = &DeploymentOverridesSpec{}
+		}
+		dst.DeploymentOverrides.WorkersImage = src.Image
+	}
+
+	// Fallback: extract DeploymentOverrides from Overrides.DGD if annotation was missing
+	if dst.DeploymentOverrides == nil && src.Overrides != nil && src.Overrides.DGD != nil && src.Overrides.DGD.Raw != nil {
+		var partialDGD map[string]interface{}
+		if err := json.Unmarshal(src.Overrides.DGD.Raw, &partialDGD); err == nil {
+			if metadata, ok := partialDGD["metadata"].(map[string]interface{}); ok {
+				dst.DeploymentOverrides = &DeploymentOverridesSpec{}
+				if name, ok := metadata["name"].(string); ok {
+					dst.DeploymentOverrides.Name = name
+				}
+				if ns, ok := metadata["namespace"].(string); ok {
+					dst.DeploymentOverrides.Namespace = ns
+				}
+				if labels, ok := metadata["labels"].(map[string]interface{}); ok {
+					dst.DeploymentOverrides.Labels = make(map[string]string)
+					for k, v := range labels {
+						if s, ok := v.(string); ok {
+							dst.DeploymentOverrides.Labels[k] = s
+						}
+					}
+				}
+				if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
+					dst.DeploymentOverrides.Annotations = make(map[string]string)
+					for k, v := range annotations {
+						if s, ok := v.(string); ok {
+							dst.DeploymentOverrides.Annotations[k] = s
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 // mergeSLAWorkloadIntoBlob writes SLA and Workload structured fields back into the JSON blob,
@@ -541,6 +663,9 @@ func restoreProfilingJobResources(src *v1beta1.DynamoGraphDeploymentRequestSpec,
 	if len(podSpec.Tolerations) > 0 {
 		dst.ProfilingConfig.Tolerations = podSpec.Tolerations
 	}
+	if len(podSpec.NodeSelector) > 0 {
+		dst.ProfilingConfig.NodeSelector = podSpec.NodeSelector
+	}
 }
 
 // convertDGDRStatusTo converts the v1alpha1 Status into the v1beta1 Status.
@@ -571,6 +696,24 @@ func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.D
 	// ProfilingJobName — read from annotation (stored during ConvertFrom for round-trip)
 	if ann, ok := dstObj.Annotations[annDGDRProfilingJobName]; ok && ann != "" {
 		dst.ProfilingJobName = ann
+	}
+
+	// --- Populate Legacy status for controller compatibility ---
+	dst.Legacy = &v1beta1.LegacyStatus{
+		State:            string(src.State),
+		Backend:          src.Backend,
+		ProfilingResults: src.ProfilingResults,
+	}
+	if src.GeneratedDeployment != nil {
+		dst.Legacy.GeneratedDeployment = src.GeneratedDeployment
+	}
+	if src.Deployment != nil {
+		dst.Legacy.Deployment = &v1beta1.LegacyDeploymentStatus{
+			Name:      src.Deployment.Name,
+			Namespace: src.Deployment.Namespace,
+			State:     string(src.Deployment.State),
+			Created:   src.Deployment.Created,
+		}
 	}
 }
 

@@ -93,7 +93,6 @@ type DynamoModelStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="BaseModel",type="string",JSONPath=".spec.baseModelName",description="Base model name"
 // +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".spec.modelType",description="Model type"
 // +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.readyEndpoints",description="Ready endpoints"
