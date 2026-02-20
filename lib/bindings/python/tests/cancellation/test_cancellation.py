@@ -128,8 +128,7 @@ async def server(runtime, namespace):
 
     async def init_server():
         """Initialize the test server component and serve the generate endpoint"""
-        component = runtime.namespace(namespace).component("backend")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{namespace}.backend.generate")
         print("Started test server instance")
 
         # Serve the endpoint - this will block until shutdown
@@ -156,7 +155,7 @@ async def server(runtime, namespace):
 async def client(runtime, namespace):
     """Create a client connected to the test server"""
     # Create client
-    endpoint = runtime.namespace(namespace).component("backend").endpoint("generate")
+    endpoint = runtime.endpoint(f"{namespace}.backend.generate")
     client = await endpoint.client()
     await client.wait_for_instances()
 
