@@ -3,49 +3,48 @@
 
 # E2E test for the full GlobalPlanner flow with --throughput-metrics-source=router.
 #
-# This validates the complete pipeline:
+# Validates the complete pipeline:
 #   1. GlobalRouter forwards requests to pool LocalRouters
 #   2. LocalRouter pods emit dynamo_component_router_* metrics to cluster Prometheus
-#   3. SLA Planner reads router histogram metrics (no dynamo_namespace filter — our bug fix)
+#   3. SLA Planner reads router histogram metrics (no dynamo_namespace filter — our fix)
 #      and computes scaling decisions
-#   4. SLA Planner sends scaling decisions to GlobalPlanner via the scale_request endpoint
-#   5. GlobalPlanner receives and logs the requests in NO-OPERATION mode
-#      (does not call K8s API — prevents local planner from crashing on scaling errors)
+#   4. SLA Planner sends scaling decisions to GlobalPlanner via scale_request endpoint
+#   5. GlobalPlanner receives and logs in NO-OPERATION mode (no K8s API calls)
 #
 # Architecture:
 #   DGD 1 (gp-ctrl):    Frontend + GlobalRouter + GlobalPlanner (no-op) + SLA Planner
-#                        Dynamo namespace: darfeen-dynamo-cloud-gp-ctrl
 #   DGD 2 (gp-prefill): LocalRouter (port 9090) + MockerPrefill
-#                        Dynamo namespace: darfeen-dynamo-cloud-gp-prefill
 #   DGD 3 (gp-decode):  LocalRouter (port 9090) + MockerDecode
-#                        Dynamo namespace: darfeen-dynamo-cloud-gp-decode
 #
-# Both GlobalPlanner and SLA Planner self-patch from feat/throughput-metrics-source:
-#   - GlobalPlanner gets: scale_handler.py (no-op mode), argparse_config.py, __main__.py
-#   - SLA Planner gets:   entire planner/ directory (new __main__.py + PlannerConfig),
-#                         prometheus_names.py (router metric constants)
-#
-# The SLA Planner runs with environment=global-planner and throughput_metrics_source=router.
-# It reads aggregate router histograms from Prometheus (all routers, no namespace filter)
-# and sends TargetReplica scale requests to GlobalPlanner.GlobalPlanner logs [NO-OP] lines
-# and returns ScaleStatus.SUCCESS — local planner never crashes.
+# Image: uses CI-built image from main (has new runtime.endpoint() API + PlannerConfig).
+# Self-patch applies only our branch-specific changes:
+#   - prometheus.py       (router histogram dispatch + dynamo_namespace filter removal)
+#   - planner_config.py   (throughput_metrics_source field)
+#   - defaults.py         (throughput_metrics_source default)
+#   - prometheus_names.py (router metric name constants)
+#   - global_planner_connector.py (**kwargs on validate_deployment)
+#   - global_planner/{argparse_config,scale_handler,__main__}.py (--no-operation mode)
 #
 # Prerequisites (already deployed in darfeen-dynamo-cloud):
 #   kubectl apply -f standalone-prometheus.yaml -n darfeen-dynamo-cloud
 #
-# Optional: tear down the existing mocker-hierarchical-* DGDs first to free resources
+# Tear down old test if running:
 #   kubectl delete dgd mocker-hierarchical-frontend mocker-hierarchical-prefill-pool \
-#     mocker-hierarchical-decode-pool -n darfeen-dynamo-cloud
+#     mocker-hierarchical-decode-pool -n darfeen-dynamo-cloud 2>/dev/null || true
 #
 # Deploy:
 #   kubectl apply -f aks-router-metrics-test-global-planner.yaml -n darfeen-dynamo-cloud
 #
 # Watch GlobalPlanner receive scale requests:
-#   kubectl logs -n darfeen-dynamo-cloud -l nvidia.com/dynamo-component=GlobalPlanner -f \
+#   kubectl logs -n darfeen-dynamo-cloud \
+#     $(kubectl get pods -n darfeen-dynamo-cloud -l nvidia.com/dynamo-component=GlobalPlanner \
+#       -o jsonpath='{.items[0].metadata.name}') -f \
 #     | grep -E "NO-OP|Scale request|Starting GlobalPlanner"
 #
-# Watch SLA Planner compute metrics and delegate to GlobalPlanner:
-#   kubectl logs -n darfeen-dynamo-cloud -l nvidia.com/dynamo-component-type=planner -f \
+# Watch SLA Planner compute + delegate:
+#   kubectl logs -n darfeen-dynamo-cloud \
+#     $(kubectl get pods -n darfeen-dynamo-cloud -l nvidia.com/dynamo-component-type=planner \
+#       -o jsonpath='{.items[0].metadata.name}') -f \
 #     | grep -E "adjustment started|Observed|Delegating scale|GlobalPlanner scaling"
 #
 # Send load:
@@ -54,9 +53,23 @@
 # Cleanup:
 #   kubectl delete -f aks-router-metrics-test-global-planner.yaml -n darfeen-dynamo-cloud
 
+# Base image: CI-built from main, has new runtime.endpoint() + planner/__main__.py
+# Does NOT have: throughput_metrics_source, router prometheus fix, GlobalPlanner no-op
+x-image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
+
+# Self-patch script shared by both gp-ctrl pods (GlobalPlanner and SLA Planner).
+# Clones only our feat/throughput-metrics-source branch and copies the delta files.
+x-patch-cmd: &patch-cmd |
+  SP=/opt/dynamo/venv/lib/python3.12/site-packages
+  echo "Cloning feat/throughput-metrics-source..."
+  git clone --depth=1 \
+    --branch feat/throughput-metrics-source \
+    https://github.com/ai-dynamo/dynamo /tmp/dynamo-pr 2>&1 | tail -3
+  SRC_LIB=/tmp/dynamo-pr/lib/bindings/python/src/dynamo
+  SRC_COMP=/tmp/dynamo-pr/components/src/dynamo
+
 # =============================================================================
 # GlobalRouter ConfigMap
-# Pool namespaces = "{k8s-namespace}-{dgd-metadata-name}"
 # =============================================================================
 apiVersion: v1
 kind: ConfigMap
@@ -102,7 +115,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
           workingDir: /workspace
           command:
             - python3
@@ -127,7 +140,7 @@ spec:
             configMap:
               name: gp-global-router-config
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
           workingDir: /workspace
           command:
             - python3
@@ -152,7 +165,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
           command:
             - bash
             - -c
@@ -164,11 +177,11 @@ spec:
                 --branch feat/throughput-metrics-source \
                 https://github.com/ai-dynamo/dynamo /tmp/dynamo-pr 2>&1 | tail -3
               SRC_COMP=/tmp/dynamo-pr/components/src/dynamo
-              echo "Patching venv (global_planner)..."
+              echo "Patching: GlobalPlanner no-op mode..."
               cp $SRC_COMP/global_planner/argparse_config.py  $SP/dynamo/global_planner/argparse_config.py
               cp $SRC_COMP/global_planner/scale_handler.py    $SP/dynamo/global_planner/scale_handler.py
               cp $SRC_COMP/global_planner/__main__.py         $SP/dynamo/global_planner/__main__.py
-              echo "Patches applied. Starting GlobalPlanner in no-op mode..."
+              echo "Patches applied. Starting GlobalPlanner --no-operation..."
               exec python3 -m dynamo.global_planner --no-operation
 
     Planner:
@@ -178,7 +191,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
           command:
             - bash
             - -c
@@ -191,17 +204,19 @@ spec:
                 https://github.com/ai-dynamo/dynamo /tmp/dynamo-pr 2>&1 | tail -3
               SRC_LIB=/tmp/dynamo-pr/lib/bindings/python/src/dynamo
               SRC_COMP=/tmp/dynamo-pr/components/src/dynamo
-              echo "Patching venv (planner)..."
-              cp -r $SRC_COMP/planner $SP/dynamo/
-              cp $SRC_LIB/prometheus_names.py $SP/dynamo/prometheus_names.py
-              echo "Patches applied. Starting SLA Planner in global-planner mode..."
+              echo "Patching: throughput_metrics_source + router prometheus fix..."
+              cp $SRC_LIB/prometheus_names.py                       $SP/dynamo/prometheus_names.py
+              cp $SRC_COMP/planner/defaults.py                      $SP/dynamo/planner/defaults.py
+              cp $SRC_COMP/planner/utils/planner_config.py          $SP/dynamo/planner/utils/planner_config.py
+              cp $SRC_COMP/planner/utils/prometheus.py              $SP/dynamo/planner/utils/prometheus.py
+              cp $SRC_COMP/planner/global_planner_connector.py      $SP/dynamo/planner/global_planner_connector.py
+              echo "Patches applied. Starting SLA Planner global-planner mode..."
               exec python3 -m dynamo.planner --config \
                 '{"environment":"global-planner","global_planner_namespace":"darfeen-dynamo-cloud-gp-ctrl","backend":"mocker","mode":"disagg","throughput_metrics_source":"router","throughput_adjustment_interval":30,"ttft":2000,"itl":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","metric_pulling_prometheus_endpoint":"http://prometheus:9090","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8","enable_load_scaling":false}'
 ---
 # =============================================================================
 # DGD 2: Prefill Pool
 # Dynamo namespace: darfeen-dynamo-cloud-gp-prefill
-# LocalRouter exposes dynamo_component_router_* on DYN_SYSTEM_PORT=9090
 # =============================================================================
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -216,10 +231,9 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
           workingDir: /workspace
           env:
-            # Expose system_status_server so Prometheus can scrape router metrics
             - name: DYN_SYSTEM_PORT
               value: "9090"
           command:
@@ -239,7 +253,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
           workingDir: /workspace
           command:
             - python3
@@ -259,7 +273,6 @@ spec:
 # =============================================================================
 # DGD 3: Decode Pool
 # Dynamo namespace: darfeen-dynamo-cloud-gp-decode
-# LocalRouter exposes dynamo_component_router_* on DYN_SYSTEM_PORT=9090
 # =============================================================================
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -274,10 +287,9 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
           workingDir: /workspace
           env:
-            # Expose system_status_server so Prometheus can scrape router metrics
             - name: DYN_SYSTEM_PORT
               value: "9090"
           command:
@@ -298,7 +310,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
           workingDir: /workspace
           command:
             - python3
