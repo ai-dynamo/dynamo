@@ -77,3 +77,46 @@ jobs:
       single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
     secrets: inherit
+
+  ############################## SLACK NOTIFICATION ##############################
+  notify-slack:
+    name: Notify Slack
+    runs-on: prod-builder-amd-v1
+    # if: failure()
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
+    permissions:
+      contents: read
+    steps:
+      - name: Get Failed jobs
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          JOBS_JSON=$(curl -sSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100"
+          )
+
+          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "• " + .name' "$JOBS_JSON")
+          echo "FAILED_JOBS=$FAILED_JOBS" >> $GITHUB_ENV
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
+        with:
+          method: chat.postMessage
+          payload: |
+            channel: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+            text: "THIS IS A TEST :alert: Github Post-merge Build Failure"
+            blocks:
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: [Workflow Summary]("https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}")
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: $FAILED_JOBS
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: <!subteam^${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}|@ops-support> Please investigate the failures above.
