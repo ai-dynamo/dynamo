@@ -104,10 +104,7 @@ fn get_span_for_direct_context(
 
 // Helper to create request context with proper linking and cancellation handling.
 // Works with any request type (not just JSON) to enable proper cancellation propagation.
-fn create_request_context<T>(
-    request: T,
-    parent_ctx: &Option<context::Context>,
-) -> RsContext<T>
+fn create_request_context<T>(request: T, parent_ctx: &Option<context::Context>) -> RsContext<T>
 where
     T: Send + Sync + 'static,
 {
@@ -1046,7 +1043,8 @@ impl Client {
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let span = get_span_for_direct_context(&internal_context, "direct", &instance_id.to_string());
+            let span =
+                get_span_for_direct_context(&internal_context, "direct", &instance_id.to_string());
             let stream = client
                 .direct(request_ctx, instance_id)
                 .instrument(span)
@@ -1250,8 +1248,10 @@ mod tests {
         parent.inner().stop_generating();
 
         // Verify cancellation propagated to child
-        assert!(child_ctx.context().is_stopped(),
-            "Child context should be stopped after parent.stop_generating()");
+        assert!(
+            child_ctx.context().is_stopped(),
+            "Child context should be stopped after parent.stop_generating()"
+        );
     }
 
     #[test]
@@ -1297,8 +1297,10 @@ mod tests {
         let child_ctx = create_request_context(request, &Some(parent.clone()));
 
         // Child should immediately be stopped
-        assert!(child_ctx.context().is_stopped(),
-            "Child should be stopped if created from already-stopped parent");
+        assert!(
+            child_ctx.context().is_stopped(),
+            "Child should be stopped if created from already-stopped parent"
+        );
     }
 
     #[derive(Debug, Clone, PartialEq)]

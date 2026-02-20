@@ -620,10 +620,8 @@ impl KvRouter {
 
             // Create child context linked to parent - enables cancellation to propagate from
             // client (parent) to backend (child) when stream.cancel() is called
-            let request_ctx = crate::create_request_context(
-                request,
-                &Some(internal_context.clone())
-            );
+            let request_ctx =
+                crate::create_request_context(request, &Some(internal_context.clone()));
 
             // Pass linked child context to backend so it can observe cancellation
             let stream = inner.generate(request_ctx).await.map_err(to_pyerr)?;
