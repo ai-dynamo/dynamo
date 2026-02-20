@@ -33,8 +33,8 @@ helm-docs-install: $(HELM_DOCS) ## Download helm-docs locally if necessary
 $(HELM_DOCS): $(LOCALBIN)
 	@echo "Downloading helm-docs $(HELM_DOCS_VERSION)..."
 	@ARCH=$$(uname -m); \
-	OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
-	curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v$(HELM_DOCS_VERSION)/helm-docs_$(HELM_DOCS_VERSION)_$${OS}_$${ARCH}.tar.gz" | \
+	OS=$$(uname -s); \
+	curl -fsSL "https://github.com/norwoodj/helm-docs/releases/download/v$(HELM_DOCS_VERSION)/helm-docs_$(HELM_DOCS_VERSION)_$${OS}_$${ARCH}.tar.gz" | \
 	tar xz -C $(LOCALBIN) helm-docs && \
 	mv $(LOCALBIN)/helm-docs $(HELM_DOCS)
 
