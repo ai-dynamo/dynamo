@@ -5,6 +5,7 @@
 # - GPU-1 subset (`-m "gpu_1 and not gpu_2"`): 130.43s total for 3 tests.
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
+import json
 import logging
 import os
 import time
@@ -219,13 +220,23 @@ class VLLMProcess:
             kv_event_port = self._kv_event_ports[worker_idx]
             nixl_port = self._nixl_ports[worker_idx]
 
+            # Pass KV events config explicitly via CLI
+            kv_events_cfg = json.dumps(
+                {
+                    "publisher": "zmq",
+                    "topic": "kv-events",
+                    "endpoint": f"tcp://*:{kv_event_port}",
+                    "enable_kv_cache_events": True,
+                }
+            )
+            command.extend(["--kv-events-config", kv_events_cfg])
+
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
                 "CUDA_VISIBLE_DEVICES": gpu_device,
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
-                "DYN_VLLM_KV_EVENT_PORT": str(kv_event_port),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }

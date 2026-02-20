@@ -426,6 +426,7 @@ async def init_llm_worker(
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+            disable_request_abort=config.disable_request_abort,
         )
 
         # Register the model with runtime config

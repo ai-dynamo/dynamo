@@ -236,7 +236,7 @@ def test_request_migration_trtllm_aggregated(
                     frontend,
                     worker1,
                     worker2,
-                    receiving_pattern="New Request ID: ",
+                    receiving_pattern="AggregatedHandler Request ID: ",
                     migration_limit=migration_limit,
                     immediate_kill=immediate_kill,
                     use_chat_completion=(request_api == "chat"),

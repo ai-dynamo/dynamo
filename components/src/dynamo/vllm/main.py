@@ -17,6 +17,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.prometheus import (
@@ -687,9 +688,12 @@ async def init(
     )
     component = generate_endpoint.component()
     clear_endpoint = component.endpoint("clear_kv_blocks")
-    load_lora_endpoint = component.endpoint("load_lora")
-    unload_lora_endpoint = component.endpoint("unload_lora")
-    list_loras_endpoint = component.endpoint("list_loras")
+
+    lora_enabled = config.engine_args.enable_lora
+    if lora_enabled:
+        load_lora_endpoint = component.endpoint("load_lora")
+        unload_lora_endpoint = component.endpoint("unload_lora")
+        list_loras_endpoint = component.endpoint("list_loras")
 
     model_name = config.served_model_name or config.model
 
@@ -812,77 +816,52 @@ async def init(
 
     try:
         logger.debug("Starting serve_endpoint for decode worker")
-        await asyncio.gather(
+
+        model_metrics_labels = [
+            (
+                prometheus_names.labels.MODEL,
+                config.served_model_name or config.model,
+            ),
+            (
+                prometheus_names.labels.MODEL_NAME,
+                config.served_model_name or config.model,
+            ),
+        ]
+
+        serve_tasks = [
             # for decode, we want to transfer the in-flight requests to other decode engines,
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
-                    ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
+                metrics_labels=model_metrics_labels,
                 health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
-                    ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
+                metrics_labels=model_metrics_labels,
             ),
-            load_lora_endpoint.serve_endpoint(
-                handler.load_lora,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
+        ]
+
+        if lora_enabled:
+            serve_tasks.extend(
+                [
+                    load_lora_endpoint.serve_endpoint(
+                        handler.load_lora,
+                        metrics_labels=model_metrics_labels,
                     ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
+                    unload_lora_endpoint.serve_endpoint(
+                        handler.unload_lora,
+                        metrics_labels=model_metrics_labels,
                     ),
-                ],
-            ),
-            unload_lora_endpoint.serve_endpoint(
-                handler.unload_lora,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
+                    list_loras_endpoint.serve_endpoint(
+                        handler.list_loras,
+                        metrics_labels=model_metrics_labels,
                     ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
-            ),
-            list_loras_endpoint.serve_endpoint(
-                handler.list_loras,
-                metrics_labels=[
-                    (
-                        prometheus_names.labels.MODEL,
-                        config.served_model_name or config.model,
-                    ),
-                    (
-                        prometheus_names.labels.MODEL_NAME,
-                        config.served_model_name or config.model,
-                    ),
-                ],
-            ),
-        )
+                ]
+            )
+
+        await asyncio.gather(*serve_tasks)
         logger.debug("serve_endpoint completed for decode worker")
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")
@@ -924,13 +903,11 @@ def get_engine_cache_info(engine: AsyncLLM):
 async def init_omni(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
 ):
-    """
-    Initialize Omni worker for text-to-text generation using vLLM-Omni orchestrator.
+    """Initialize Omni worker for multi-stage pipeline generation using vLLM-Omni.
 
-    Uses vLLM-Omni's Omni class for single-stage text generation pipeline.
-    For now, supports text-to-text only (no multimodal).
+    Supports text-to-text, text-to-image, and text-to-video generation
+    through a single unified OmniHandler.
     """
-    # Lazy import to avoid loading vllm-omni unless explicitly needed
     from dynamo.vllm.omni import OmniHandler
 
     generate_endpoint = runtime.endpoint(
@@ -938,13 +915,20 @@ async def init_omni(
     )
     component = generate_endpoint.component()
 
-    # Initialize OmniHandler with Omni orchestrator
+    # Initialize media filesystem for storing generated images/videos
+    media_fs = (
+        get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
+    )
+
+    # Initialize unified OmniHandler
     handler = OmniHandler(
         runtime=runtime,
         component=component,
         config=config,
         default_sampling_params={},
         shutdown_event=shutdown_event,
+        media_output_fs=media_fs,
+        media_output_http_url=config.media_output_http_url,
     )
 
     logger.info(f"Omni worker initialized for model: {config.model}")

@@ -156,9 +156,6 @@ dynamo-operator:
 
   # Webhook configuration for admission control and validation
   webhook:
-    # -- Whether to enable admission webhooks for resource validation. When enabled, the operator will validate DynamoComponentDeployment and DynamoGraphDeployment resources before they are created or updated in the cluster. Enabled by default for production-ready validation and better error reporting.
-    enabled: true
-
     # Certificate configuration for webhook TLS
     certificateSecret:
       # -- Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate).
