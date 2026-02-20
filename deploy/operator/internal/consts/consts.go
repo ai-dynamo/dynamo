@@ -43,17 +43,17 @@ const (
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 
-	KubeLabelDynamoGraphDeploymentName  = "nvidia.com/dynamo-graph-deployment-name"
-	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
-	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
-	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
-	KubeLabelDynamoComponentType        = "nvidia.com/dynamo-component-type"
-	KubeLabelDynamoSubComponentType     = "nvidia.com/dynamo-sub-component-type"
-	KubeLabelDynamoBaseModel            = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoBaseModelHash        = "nvidia.com/dynamo-base-model-hash"
-	KubeAnnotationDynamoBaseModel       = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoDiscoveryBackend     = "nvidia.com/dynamo-discovery-backend"
-	KubeLabelDynamoDiscoveryEnabled     = "nvidia.com/dynamo-discovery-enabled"
+	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
+	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
+	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
+	KubeLabelDynamoComponentType       = "nvidia.com/dynamo-component-type"
+	KubeLabelDynamoSubComponentType    = "nvidia.com/dynamo-sub-component-type"
+	KubeLabelDynamoBaseModel           = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoBaseModelHash       = "nvidia.com/dynamo-base-model-hash"
+	KubeAnnotationDynamoBaseModel      = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoDiscoveryBackend    = "nvidia.com/dynamo-discovery-backend"
+	KubeLabelDynamoDiscoveryEnabled    = "nvidia.com/dynamo-discovery-enabled"
+	KubeLabelDynamoWorkerHash          = "nvidia.com/dynamo-worker-hash"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -62,10 +62,12 @@ const (
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
-	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
-	DynamoNamespaceEnvVar        = "DYN_NAMESPACE"
-	DynamoComponentEnvVar        = "DYN_COMPONENT"
-	DynamoDiscoveryBackendEnvVar = "DYN_DISCOVERY_BACKEND"
+	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
+	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
+	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"
+	DynamoNamespaceWorkerSuffixEnvVar = "DYN_NAMESPACE_WORKER_SUFFIX"
+	DynamoComponentEnvVar             = "DYN_COMPONENT"
+	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
 
 	GlobalDynamoNamespace = "dynamo"
 
@@ -177,6 +179,14 @@ const (
 	AnnotationDynParentDGDName    = "nvidia.com/dyn-parent-dgd-name"
 	AnnotationDynParentDGDNS      = "nvidia.com/dyn-parent-dgd-namespace"
 	AnnotationDynDiscoveryBackend = "nvidia.com/dyn-discovery-backend"
+
+	// Rolling update annotations
+	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
+
+	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
+	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged
+	// with this value so the existing rolling update machinery can manage the transition.
+	LegacyWorkerHash = "legacy"
 )
 
 type MultinodeDeploymentType string

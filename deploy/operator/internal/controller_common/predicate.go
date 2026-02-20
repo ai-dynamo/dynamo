@@ -80,10 +80,9 @@ type Config struct {
 	// DiscoveryBackend is the discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery.
 	DiscoveryBackend string
 
-	// WebhooksEnabled indicates whether admission webhooks are enabled
-	// When true, controllers skip validation (webhooks handle it)
-	// When false, controllers perform validation (defense in depth)
-	WebhooksEnabled bool
+	// GPUDiscoveryEnabled indicates whether Helm provisioned node read access for the namespace-scoped operator.
+	// Only relevant for namespace-scoped operators (RestrictedNamespace != "").
+	GPUDiscoveryEnabled bool
 
 	// Checkpoint configuration for checkpoint/restore functionality
 	Checkpoint CheckpointConfig
