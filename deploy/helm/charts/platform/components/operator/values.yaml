@@ -208,10 +208,6 @@ checkpoint:
 
 # Webhook configuration
 webhook:
-  # Enable admission webhooks for validation
-  # Enabled by default for production-ready validation and better error reporting
-  enabled: true
-
   # Certificate configuration
   certificateSecret:
     # Name of the secret containing webhook TLS certificates

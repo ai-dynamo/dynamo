@@ -40,7 +40,6 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
-	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -145,52 +144,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status after reconcile error")
 		}
 	}()
-
-	// Validate the DynamoComponentDeployment spec (defense in depth - only when webhooks are disabled)
-	if !r.Config.WebhooksEnabled {
-		validator := webhookvalidation.NewDynamoComponentDeploymentValidator(dynamoComponentDeployment)
-		if _, validationErr := validator.Validate(ctx); validationErr != nil {
-			logs.Error(validationErr, "DynamoComponentDeployment validation failed, refusing to reconcile")
-
-			// Set validation error condition
-			meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, metav1.Condition{
-				Type:               "Valid",
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: dynamoComponentDeployment.Generation,
-				Reason:             "ValidationFailed",
-				Message:            fmt.Sprintf("Validation failed: %v", validationErr),
-			})
-
-			// Update status and don't requeue (user must fix the spec)
-			if statusErr := r.Status().Update(ctx, dynamoComponentDeployment); statusErr != nil {
-				logs.Error(statusErr, "Failed to update DynamoComponentDeployment status with validation error")
-				err = statusErr
-				return ctrl.Result{}, err
-			}
-
-			// Record event for visibility
-			r.Recorder.Event(dynamoComponentDeployment, corev1.EventTypeWarning, "ValidationFailed", validationErr.Error())
-
-			// Don't requeue - user must fix the spec
-			logs.Info("DynamoComponentDeployment is invalid, not reconciling until spec is fixed")
-			err = nil
-			return ctrl.Result{}, nil
-		}
-
-		// Set Valid condition to True and persist it
-		meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, metav1.Condition{
-			Type:               "Valid",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: dynamoComponentDeployment.Generation,
-			Reason:             "ValidationPassed",
-			Message:            "DynamoComponentDeployment spec is valid",
-		})
-		if statusErr := r.Status().Update(ctx, dynamoComponentDeployment); statusErr != nil {
-			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status with validation success")
-			err = statusErr
-			return ctrl.Result{}, err
-		}
-	}
 
 	deleted, err := commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r)
 	if err != nil {
