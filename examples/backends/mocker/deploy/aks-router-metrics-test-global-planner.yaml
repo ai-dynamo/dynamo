@@ -55,18 +55,7 @@
 
 # Base image: CI-built from main, has new runtime.endpoint() + planner/__main__.py
 # Does NOT have: throughput_metrics_source, router prometheus fix, GlobalPlanner no-op
-x-image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
-
-# Self-patch script shared by both gp-ctrl pods (GlobalPlanner and SLA Planner).
-# Clones only our feat/throughput-metrics-source branch and copies the delta files.
-x-patch-cmd: &patch-cmd |
-  SP=/opt/dynamo/venv/lib/python3.12/site-packages
-  echo "Cloning feat/throughput-metrics-source..."
-  git clone --depth=1 \
-    --branch feat/throughput-metrics-source \
-    https://github.com/ai-dynamo/dynamo /tmp/dynamo-pr 2>&1 | tail -3
-  SRC_LIB=/tmp/dynamo-pr/lib/bindings/python/src/dynamo
-  SRC_COMP=/tmp/dynamo-pr/components/src/dynamo
+# Image: dynamoci.azurecr.io/ai-dynamo/dynamo:e95d0f99167fd9041b4083a3458044d588f95a37-vllm-cuda12-amd64
 
 # =============================================================================
 # GlobalRouter ConfigMap
