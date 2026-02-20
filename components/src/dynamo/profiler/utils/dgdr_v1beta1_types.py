@@ -119,17 +119,17 @@ class SLASpec(BaseModel):
             if val is not None and val <= 0:
                 raise ValueError(f"{name} must be positive.")
 
-        has_ttft_itl = self.ttft is not None and self.itl is not None
         has_e2e = self.e2eLatency is not None
 
+        # When e2eLatency is provided, it takes precedence — clear ttft/itl defaults
+        if has_e2e:
+            self.ttft = None
+            self.itl = None
+
+        has_ttft_itl = self.ttft is not None and self.itl is not None
         if not has_ttft_itl and not has_e2e:
             raise ValueError(
                 "Either both 'ttft' and 'itl', or 'e2eLatency', must be provided in the SLA spec."
-            )
-
-        if has_e2e and (self.ttft is not None or self.itl is not None):
-            raise ValueError(
-                "Specify either both 'ttft' and 'itl', or 'e2eLatency', but not both."
             )
 
         return self
