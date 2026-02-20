@@ -170,7 +170,12 @@ class PlannerConfig(BaseModel):
         inline JSON string, loads it, and validates.
         """
         path = Path(config_arg)
-        if path.is_file():
+        try:
+            is_file = path.is_file()
+        except OSError:
+            # Path component too long (e.g. inline JSON string passed as config arg)
+            is_file = False
+        if is_file:
             return cls._load_from_file(path)
 
         # Try parsing as inline JSON
