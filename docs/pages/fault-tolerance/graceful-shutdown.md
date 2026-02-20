@@ -42,7 +42,7 @@ for sig in (signal.SIGTERM, signal.SIGINT):
 The `graceful_shutdown()` function:
 1. Logs the shutdown signal
 2. Unregisters all endpoints from discovery
-3. Waits for a configurable grace period (`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, default 40s)
+3. Waits for a configurable grace period (`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, default 5s)
 4. Calls `runtime.shutdown()` to invalidate endpoints and stop accepting new requests
 5. Waits for in-flight requests (based on `graceful_shutdown` per endpoint)
 6. Returns to allow cleanup to proceed

@@ -10,7 +10,7 @@ from typing import Iterable, Optional
 logger = logging.getLogger(__name__)
 
 # TODO: make this using cli flag
-_DEFAULT_GRACE_PERIOD_SECS = 40.0
+_DEFAULT_GRACE_PERIOD_SECS = 5.0
 _GRACE_PERIOD_ENV = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"
 _shutdown_started = asyncio.Event()
 
