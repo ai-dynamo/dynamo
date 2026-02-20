@@ -50,7 +50,9 @@ pub enum ModelManagerError {
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
 
-    #[error("Checksum mismatch for model {model}: expected {expected}, got {got}. All WorkerSets of a model must share the same checksum. Drain all old workers before deploying a new version.")]
+    #[error(
+        "Checksum mismatch for model {model}: expected {expected}, got {got}. All WorkerSets of a model must share the same checksum. Drain all old workers before deploying a new version."
+    )]
     ChecksumMismatch {
         model: String,
         expected: String,
@@ -149,11 +151,7 @@ impl ModelManager {
     /// Check if a candidate checksum is valid for a model.
     /// Returns `Some(true)` if it matches the model's canonical checksum, `Some(false)` if it
     /// doesn't match, or `None` if the model doesn't exist or has no canonical checksum yet.
-    pub fn is_valid_checksum(
-        &self,
-        model_name: &str,
-        candidate_checksum: &str,
-    ) -> Option<bool> {
+    pub fn is_valid_checksum(&self, model_name: &str, candidate_checksum: &str) -> Option<bool> {
         let model = self.models.get(model_name)?;
         model.is_valid_checksum(candidate_checksum)
     }
