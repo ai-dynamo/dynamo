@@ -1567,9 +1567,17 @@ mod tests {
     fn test_interleaved_thinking_and_tool_calls() {
         // [Thinking("A"), ToolUse("t1"), Thinking("B"), ToolUse("t2")]
         // segments = ["A", "B", ""] (trailing empty), tool_calls = [t1, t2]
-        let msg = make_req(vec![thinking("A"), tool_use("t1"), thinking("B"), tool_use("t2")]);
+        let msg = make_req(vec![
+            thinking("A"),
+            tool_use("t1"),
+            thinking("B"),
+            tool_use("t2"),
+        ]);
 
-        let segs = msg.reasoning_segments.as_ref().expect("segments should be set");
+        let segs = msg
+            .reasoning_segments
+            .as_ref()
+            .expect("segments should be set");
         assert_eq!(segs.len(), 3); // tool_calls.len() + 1
         assert_eq!(segs[0], "A");
         assert_eq!(segs[1], "B");
@@ -1589,7 +1597,10 @@ mod tests {
         // segments = ["A", "B"], trailing reasoning "B" must appear in segments[1]
         let msg = make_req(vec![thinking("A"), tool_use("t1"), thinking("B")]);
 
-        let segs = msg.reasoning_segments.as_ref().expect("segments should be set");
+        let segs = msg
+            .reasoning_segments
+            .as_ref()
+            .expect("segments should be set");
         assert_eq!(segs.len(), 2); // 1 tool call + 1 trailing
         assert_eq!(segs[0], "A");
         assert_eq!(segs[1], "B"); // trailing reasoning preserved
@@ -1603,7 +1614,10 @@ mod tests {
         // segments = ["", "A", ""] — empty first segment, reasoning before t2
         let msg = make_req(vec![tool_use("t1"), thinking("A"), tool_use("t2")]);
 
-        let segs = msg.reasoning_segments.as_ref().expect("segments should be set");
+        let segs = msg
+            .reasoning_segments
+            .as_ref()
+            .expect("segments should be set");
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0], ""); // no reasoning before t1
         assert_eq!(segs[1], "A");
@@ -1623,7 +1637,10 @@ mod tests {
             tool_use("t2"),
         ]);
 
-        let segs = msg.reasoning_segments.as_ref().expect("segments should be set");
+        let segs = msg
+            .reasoning_segments
+            .as_ref()
+            .expect("segments should be set");
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0], "A\nB");
         assert_eq!(segs[1], "");
@@ -1649,7 +1666,9 @@ mod tests {
         // [Thinking("A"), Text("answer")] — no tool calls → reasoning_segments = None
         let msg = make_req(vec![
             thinking("A"),
-            AnthropicContentBlock::Text { text: "answer".into() },
+            AnthropicContentBlock::Text {
+                text: "answer".into(),
+            },
         ]);
 
         assert!(msg.reasoning_segments.is_none());
@@ -1665,7 +1684,10 @@ mod tests {
         // [Thinking("reason"), ToolUse("t1")] → segments = ["reason", ""]
         let msg = make_req(vec![thinking("reason"), tool_use("t1")]);
 
-        let segs = msg.reasoning_segments.as_ref().expect("segments should be set");
+        let segs = msg
+            .reasoning_segments
+            .as_ref()
+            .expect("segments should be set");
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0], "reason");
         assert_eq!(segs[1], "");
