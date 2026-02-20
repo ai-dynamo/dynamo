@@ -60,6 +60,8 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+            - --connector
+            - none
             - --enable-lora
             - --max-lora-rank
             - "64"

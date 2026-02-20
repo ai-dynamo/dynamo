@@ -50,4 +50,5 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --model "$MODEL" \
     --omni \
     --stage-configs-path "$STAGE_CONFIG" \
+    --connector none \
     "${EXTRA_ARGS[@]}"

@@ -200,8 +200,8 @@ def test_endpoint_invalid_format_raises(mock_vllm_cli):
 # --connector deprecation tests
 
 
-def test_connector_nixl_emits_deprecation_warning(mock_vllm_cli):
-    """Test that --connector nixl emits a DeprecationWarning with exact JSON."""
+def test_connector_nixl_emits_future_warning(mock_vllm_cli):
+    """Test that --connector nixl emits a FutureWarning with exact JSON."""
     mock_vllm_cli(
         "--model", "Qwen/Qwen3-0.6B", "--connector", "nixl", "--enforce-eager"
     )
@@ -210,7 +210,7 @@ def test_connector_nixl_emits_deprecation_warning(mock_vllm_cli):
         parse_args()
 
     dep_warnings = [x for x in w if issubclass(x.category, FutureWarning)]
-    assert len(dep_warnings) >= 1, "Expected at least one DeprecationWarning"
+    assert len(dep_warnings) >= 1, "Expected at least one FutureWarning"
 
     messages = [str(x.message) for x in dep_warnings]
     json_warning = [m for m in messages if "--kv-transfer-config" in m]
@@ -260,8 +260,8 @@ def test_implicit_default_connector_emits_warning(mock_vllm_cli):
     assert "--kv-transfer-config" in str(dep_warnings[0].message)
 
 
-def test_env_var_dyn_connector_emits_deprecation_warning(monkeypatch, mock_vllm_cli):
-    """Test that DYN_CONNECTOR env var also triggers deprecation warning."""
+def test_env_var_dyn_connector_emits_future_warning(monkeypatch, mock_vllm_cli):
+    """Test that DYN_CONNECTOR env var also triggers FutureWarning."""
     monkeypatch.setenv("DYN_CONNECTOR", "nixl")
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--enforce-eager")
     with warnings.catch_warnings(record=True) as w:
@@ -269,9 +269,7 @@ def test_env_var_dyn_connector_emits_deprecation_warning(monkeypatch, mock_vllm_
         parse_args()
 
     dep_warnings = [x for x in w if issubclass(x.category, FutureWarning)]
-    assert (
-        len(dep_warnings) >= 1
-    ), "Expected DeprecationWarning for DYN_CONNECTOR env var"
+    assert len(dep_warnings) >= 1, "Expected FutureWarning for DYN_CONNECTOR env var"
 
     messages = [str(x.message) for x in dep_warnings]
     json_warning = [m for m in messages if "--kv-transfer-config" in m]

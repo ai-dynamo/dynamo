@@ -109,6 +109,8 @@ class VLLMWorkerProcess(ManagedProcess):
                 "0.85",
                 "--max-model-len",
                 "8192",
+                "--connector",
+                "none",
                 "--served-model-name",
                 f"{VLLM_MM_MODEL}__internal",
             ],

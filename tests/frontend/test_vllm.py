@@ -93,6 +93,8 @@ class VllmWorkerProcess(ManagedProcess):
             "harmony",
             "--dyn-reasoning-parser",
             "gpt_oss",
+            "--connector",
+            "none",
         ]
 
         env = os.environ.copy()

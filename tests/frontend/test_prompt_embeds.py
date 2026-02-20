@@ -73,6 +73,8 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
             "dynamo.vllm",
             "--model",
             TEST_MODEL,
+            "--connector",
+            "none",
             "--max-model-len",
             "4096",
             "--discovery-backend",

@@ -112,7 +112,8 @@ def parse_args() -> Config:
 
     # Detect whether --connector was explicitly set (CLI or env var)
     _connector_explicitly_set = (
-        "--connector" in sys.argv or "DYN_CONNECTOR" in os.environ
+        any(a == "--connector" or a.startswith("--connector=") for a in sys.argv)
+        or "DYN_CONNECTOR" in os.environ
     )
     dynamo_config._connector_explicitly_set = _connector_explicitly_set  # type: ignore[attr-defined]
 
