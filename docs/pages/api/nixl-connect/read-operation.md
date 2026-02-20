@@ -4,8 +4,6 @@
 title: Read Operation
 ---
 
-# dynamo.nixl_connect.ReadOperation
-
 An operation which transfers data from a remote worker to the local worker.
 
 To create the operation, NIXL metadata ([RdmaMetadata](rdma-metadata.md)) from a remote worker's [`ReadableOperation`](readable-operation.md)

@@ -4,8 +4,6 @@
 title: Health Checks
 ---
 
-# Dynamo Health Checks
-
 ## Overview
 
 Dynamo provides health check and liveness HTTP endpoints for each component which

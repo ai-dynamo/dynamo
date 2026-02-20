@@ -4,8 +4,6 @@
 title: Writable Operation
 ---
 
-# dynamo.nixl_connect.WritableOperation
-
 An operation which enables a remote worker to write data to the local worker.
 
 To create the operation, a set of local [`Descriptor`](descriptor.md) objects must be provided which reference memory intended to receive data from a remote worker.

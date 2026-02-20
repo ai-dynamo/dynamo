@@ -4,8 +4,6 @@
 title: NVIDIA Request Extensions (nvext)
 ---
 
-# NVIDIA Request Extensions (`nvext`)
-
 `nvext` is a top-level JSON object on the request body that provides NVIDIA-specific extensions to the OpenAI-compatible API. `nvext` fields are consumed by the Dynamo frontend, preprocessor, router, and backend workers to control routing, preprocessing, response metadata, scheduling, and engine-level priority.
 
 ## Usage

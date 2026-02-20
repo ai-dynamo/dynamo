@@ -4,8 +4,6 @@
 title: Planner
 ---
 
-# Planner
-
 The Planner monitors system performance and automatically scales prefill/decode workers to meet latency SLAs. It runs as a component inside the Dynamo inference graph on Kubernetes.
 
 The SLA Planner supports two scaling modes:

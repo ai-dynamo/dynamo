@@ -4,8 +4,6 @@
 title: KV Cache Transfer
 ---
 
-# KV Cache Transfer in Disaggregated Serving
-
 In disaggregated serving architectures, KV cache must be transferred between prefill and decode workers. TensorRT-LLM supports two methods for this transfer:
 
 ## Using NIXL for KV Cache Transfer

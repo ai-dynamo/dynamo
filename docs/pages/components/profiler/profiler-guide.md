@@ -4,8 +4,6 @@
 title: Profiler Guide
 ---
 
-# Profiler Guide
-
 This guide covers deployment, configuration, integration, and troubleshooting for the Dynamo Profiler.
 
 ## What is a DynamoGraphDeploymentRequest (DGDR)?

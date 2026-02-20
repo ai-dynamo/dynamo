@@ -5,8 +5,6 @@ title: Agent Hints
 subtitle: Per-request hints for scheduling, load balancing, and KV cache optimization
 ---
 
-# Agent Hints
-
 Agent hints are optional per-request hints passed via the `nvext.agent_hints` field in the request body. They allow the calling agent or application to communicate request-level metadata that the router uses to improve scheduling, load balancing, and KV cache utilization.
 
 ```json

@@ -4,8 +4,6 @@
 title: Distributed Runtime
 ---
 
-# Dynamo Distributed Runtime
-
 ## Overview
 
 Dynamo's `DistributedRuntime` is the core infrastructure in the framework that enables distributed communication and coordination between different Dynamo components. It is implemented in Rust (`/lib/runtime`) and exposed to other programming languages via bindings (i.e., Python bindings can be found in `/lib/bindings/python`). The runtime supports multiple discovery backends (Kubernetes-native or etcd) and request planes (TCP, HTTP, or NATS). `DistributedRuntime` follows a hierarchical structure:

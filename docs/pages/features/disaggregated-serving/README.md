@@ -5,8 +5,6 @@ title: Disaggregated Serving
 subtitle: Find optimal prefill/decode configuration for disaggregated serving deployments
 ---
 
-# Disaggregated Serving Guide
-
 [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/tree/main) is a performance optimization tool that helps you find the optimal configuration for deploying LLMs with Dynamo. It automatically determines the best number of prefill and decode workers, parallelism settings, and deployment parameters to meet your SLA targets while maximizing throughput.
 
 ## Why Use AIConfigurator?

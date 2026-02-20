@@ -4,8 +4,6 @@
 title: Prometheus
 ---
 
-# SGLang Prometheus Metrics
-
 ## Overview
 
 When running SGLang through Dynamo, SGLang engine metrics are automatically passed through and exposed on Dynamo's `/metrics` endpoint (default port 8081). This allows you to access both SGLang engine metrics (prefixed with `sglang:`) and Dynamo runtime metrics (prefixed with `dynamo_*`) from a single worker backend endpoint.

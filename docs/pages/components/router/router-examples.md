@@ -4,8 +4,6 @@
 title: Router Examples
 ---
 
-# Router Examples
-
 For quick start instructions, see the [Router README](README.md). This document provides further examples for using the Dynamo Router, including Python API usage, Kubernetes deployments, and custom routing patterns.
 
 ## Table of Contents

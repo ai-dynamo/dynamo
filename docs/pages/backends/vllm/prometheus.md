@@ -4,8 +4,6 @@
 title: Prometheus
 ---
 
-# vLLM Prometheus Metrics
-
 ## Overview
 
 When running vLLM through Dynamo, vLLM engine metrics are automatically passed through and exposed on Dynamo's `/metrics` endpoint (default port 8081). This allows you to access both vLLM engine metrics (prefixed with `vllm:`) and Dynamo runtime metrics (prefixed with `dynamo_*`) from a single worker backend endpoint.
