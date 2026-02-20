@@ -272,7 +272,7 @@ def generate_dgd_config_with_planner(
 
     # Merge profiling-determined values into the --config JSON.
     # build_planner_args_from_namespace returns ["--config", "<json>"], so we
-    # parse the JSON, override the relevant keys, and re-serialize.
+    # parse the JSON once, apply all mutations, and re-serialize at the end.
     config_idx = planner_args.index("--config")
     planner_config_dict = json.loads(planner_args[config_idx + 1])
 
@@ -284,8 +284,6 @@ def generate_dgd_config_with_planner(
         planner_config_dict[
             "decode_engine_num_gpu"
         ] = best_decode_mapping.get_num_gpus()
-
-    planner_args[config_idx + 1] = json.dumps(planner_config_dict)
 
     cm_mount_path = f"{get_workspace_dir()}/profiling_results"
 
@@ -346,10 +344,7 @@ def generate_dgd_config_with_planner(
 
     if prefill_json is not None and decode_json is not None:
         # Only override planner profile directory when we actually have data to mount.
-        config_idx = planner_args.index("--config")
-        planner_config_dict = json.loads(planner_args[config_idx + 1])
         planner_config_dict["profile_results_dir"] = cm_mount_path
-        planner_args[config_idx + 1] = json.dumps(planner_config_dict)
 
         config_map_obj = {
             "apiVersion": "v1",
@@ -382,6 +377,9 @@ def generate_dgd_config_with_planner(
                 "readOnly": True,
             }
         )
+
+    # Serialize the --config JSON once after all mutations
+    planner_args[config_idx + 1] = json.dumps(planner_config_dict)
 
     # Attach planner args (always)
     mc_dict = planner_dict.setdefault("extraPodSpec", {}).setdefault(
