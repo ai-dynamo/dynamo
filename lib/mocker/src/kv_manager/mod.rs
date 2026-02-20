@@ -39,7 +39,9 @@ pub mod vllm_backend;
 
 pub use backend::KvBackend;
 
-use crate::common::protocols::{KvCacheEventSink, KvManagerBackend, MockerEvictionBackend, MoveBlock};
+use crate::common::protocols::{
+    KvCacheEventSink, KvManagerBackend, MockerEvictionBackend, MoveBlock,
+};
 use dynamo_tokens::PositionalLineageHash;
 use dynamo_tokens::blocks::UniqueBlock;
 use std::sync::Arc;
