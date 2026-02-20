@@ -31,9 +31,9 @@ jobs:
           args: >-
             --cache
             --no-progress
-            --max-retries 2
-            --retry-wait-time 2
-            --timeout 20
+            --max-retries 4
+            --retry-wait-time 3
+            --timeout 30
             --root-dir ${{ github.workspace }}
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"

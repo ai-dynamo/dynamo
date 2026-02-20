@@ -18,6 +18,7 @@ import json
 from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
+import torch
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
@@ -171,6 +172,7 @@ class MultiModalGroup(BaseModel):
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     serialized_request: Optional[TransferRequest] = None
+    loaded_embedding: Optional[torch.Tensor] = Field(default=None, exclude=True)
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):

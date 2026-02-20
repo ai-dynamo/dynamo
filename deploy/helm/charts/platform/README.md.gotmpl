@@ -37,6 +37,17 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 - Helm 3.8+
 - Sufficient cluster resources for your deployment scale
 - Container registry access (if using private images)
+- TLS certificate infrastructure for admission webhooks (auto-generated via Helm hooks by default, or [cert-manager](https://cert-manager.io/), or externally managed)
+
+## 🔄 Upgrading Notes
+
+### Webhooks are now mandatory (v1.0.0+)
+
+The `webhook.enabled` Helm value has been removed. Admission webhooks are now a required component of the operator and cannot be disabled. This change aligns with the upcoming addition of CRD conversion webhooks, which are mandatory for multi-version API support.
+
+No action is required for most upgrades — Helm hooks automatically generate TLS certificates and inject the CA bundle during `helm upgrade`. If you use cert-manager or externally managed certificates, ensure your existing configuration is correct before upgrading.
+
+---
 
 ## ⚠️ Important: Cluster-Wide vs Namespace-Scoped Deployment
 
