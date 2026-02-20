@@ -340,6 +340,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    mv /opt/nvidia/nvda_nixl /opt/nvidia/_nvda_nixl_hidden && \
+    mv /etc/ld.so.conf.d/nixl.conf /etc/ld.so.conf.d/nixl.conf.bak && \
+    ldconfig && \
     NIXL_PREFIX_SAVED=$NIXL_PREFIX && \
     unset NIXL_PREFIX NIXL_LIB_DIR NIXL_PLUGIN_DIR && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
@@ -347,6 +350,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
+    mv /opt/nvidia/_nvda_nixl_hidden /opt/nvidia/nvda_nixl && \
+    mv /etc/ld.so.conf.d/nixl.conf.bak /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig && \
     export NIXL_PREFIX=$NIXL_PREFIX_SAVED && \
     export NIXL_LIB_DIR=$NIXL_PREFIX/lib64 && \
     export NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins && \
