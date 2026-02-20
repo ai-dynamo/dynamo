@@ -74,7 +74,7 @@ prometheus = "0.14.0"
 
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dynamo-llm = { path = "../../llm" }
+dynamo-llm = { path = "../../llm", default-features = false }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dynamo-llm = { path = "../../llm", default-features = false }

@@ -26,7 +26,6 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "nixl==0.9.0",
     "pydantic>=2.10.6,<=2.13",
     "uvloop>=0.21.0",
 ]
@@ -51,13 +50,10 @@ module-name = "dynamo._core"
 manifest-path = "Cargo.toml"
 python-packages = ["dynamo"]
 python-source = "src"
-# Install .pth file into site-packages so nixl native libs are loaded
-# before dynamo._core is imported by any code path.
-data = "data"
-# Skip auditwheel here - we run it manually in the Dockerfile with --exclude
-# to prevent nixl/ffmpeg .so files from being bundled
-skip-auditwheel = true
 
 [build-system]
 requires = ["maturin>=1.0,<2.0", "patchelf"]
 build-backend = "maturin"
+
+[tool.uv]
+config-settings = { build-args = '--auditwheel repair --manylinux' }
