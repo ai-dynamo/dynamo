@@ -227,8 +227,3 @@ let factory = DistributedEventFactory::new(0x42.try_into().unwrap());
 let manager = factory.event_manager();
 // handles produced by this manager carry system_id = 0x42
 ```
-
-## Resources
-
-- [Design document (PDF)](https://drive.google.com/file/d/1s9M1I-dUbhqWLrMFB5ehPSM-qDQBGPZG)
-- [NotebookLM podcast overview](https://notebooklm.google.com/notebook/e99c3e2a-a04e-4200-a21e-3e69d8f2ba73/audio)
