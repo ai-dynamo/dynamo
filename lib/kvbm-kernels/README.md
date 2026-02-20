@@ -11,6 +11,7 @@ GPU kernels for converting KV cache blocks between three memory layouts used by 
 | `nh`   | Number of attention heads      | 32 or 64         |
 | `nt`   | Tokens per block               | 128 or 256       |
 | `hd`   | Head dimension                 | 128              |
+| `nb`   | Number of blocks in the batch  | 1–128            |
 
 ### Layouts
 
@@ -57,24 +58,6 @@ All kernels are batched: a single launch processes `nb` blocks from flat pointer
 
 Both accept `layout_value` (NHD=0, HND=1) and `dtype_value` (F16=0, BF16=1, F32=2, F64=3). Internally dispatched to C++ template kernels specialized on dtype and layout.
 
-#### Operational copy
-
-| C API                                        | Conversion                              |
-|----------------------------------------------|-----------------------------------------|
-| `kvbm_kernels_launch_operational_copy`       | Block stack ↔ Operational (either direction) |
-
-Since block-to-operational is a flat copy (no permutation), multiple backends are available:
-
-| Backend              | Value | Description                                                  |
-|----------------------|-------|--------------------------------------------------------------|
-| `Auto`               | 0     | Tries vectorized → memcpy batch → memcpy async               |
-| `VectorizedKernel`   | 1     | Custom kernel using `int64_t` loads; requires 8-byte alignment |
-| `KernelOnly`         | 2     | Dtype-specific CUDA kernel (256 threads/block)               |
-| `MemcpyAsync`        | 3     | Per-chunk `cudaMemcpyAsync` loop                             |
-| `MemcpyBatch`        | 4     | `cudaMemcpyBatchAsync` (CUDA 12.9+)                         |
-
-Direction is controlled by `direction_value` (BlockToOperational=0, OperationalToBlock=1).
-
 #### Standalone copy utilities
 
 | C API                                    | Description                                              |
@@ -84,41 +67,10 @@ Direction is controlled by `direction_value` (BlockToOperational=0, OperationalT
 | `kvbm_kernels_has_memcpy_batch_async`    | Returns `true` if `cudaMemcpyBatchAsync` is available    |
 | `kvbm_kernels_is_stub_build`             | Returns `true` if built without CUDA (stub mode)         |
 
-### Repository Structure
 
-```text
-.
-├── Cargo.toml              # Rust lib/bin targets
-├── build.rs                # NVCC build script (sm80+sm90 by default)
-├── cuda/
-│   ├── tensor_kernels.cu   # Batched CUDA kernels + memcpy fallback
-│   ├── vectorized_copy.cu  # Adaptive vectorized memory copy
-│   └── stubs.c             # Abort-on-call fallbacks when CUDA unavailable
-├── src/
-│   ├── lib.rs              # Rust facade for the kernels
-│   └── tensor_kernels.rs   # FFI wrappers + integration tests
-```
+### Python Bindings (Planned)
 
-### Python Bindings
-
-Python bindings live in `lib/bindings/kvbm/` and are built as the `kvbm` wheel via maturin.
-
-```python
-import torch
-from kvbm import kernels
-
-blocks = [...]         # list[list[torch.Tensor]] — nb x (nl*no)
-universals = [...]     # list[torch.Tensor] — nb
-operationals = [...]   # list[torch.Tensor] — nb
-
-kernels.block_to_universal(blocks, universals, layout="NHD")
-kernels.universal_to_block(universals, blocks, layout="NHD")
-
-kernels.block_to_operational(blocks, operationals, backend="auto")
-kernels.operational_to_block(operationals, blocks, backend="auto")
-```
-
-All tensors must be CUDA-resident and contiguous. The bindings validate shapes and dtypes, stage pointer tables on-device, and launch the appropriate kernel.
+Python kernel bindings are not yet implemented. The `lib/bindings/kvbm/` crate currently exposes block manager functionality only. Future work will add Python wrappers for the permute and copy kernels.
 
 ### Development
 
@@ -148,7 +100,7 @@ pytest tests/
 
 ### Benchmarking
 
-```
+```text
 root@9eb240f7ded8:/workspace/lib/kvbm-kernels# cargo run --release --example kvbench --features testing-cuda,kvbench -- --num-blocks=1,128 --tokens-per-block=16,64 --
 backend vectorized,batched --direction h2d
 ...

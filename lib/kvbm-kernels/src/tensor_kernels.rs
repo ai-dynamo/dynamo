@@ -12,7 +12,6 @@
 //! Host code calls these helpers with flattened pointer tables so a single
 //! launch can move many logical blocks in one go.
 
-#![allow(dead_code)]
 #![allow(clippy::missing_safety_doc)]
 use std::ffi::c_void;
 
@@ -39,6 +38,7 @@ pub enum BlockLayout {
 }
 
 #[cfg(feature = "permute_kernels")]
+#[allow(dead_code)]
 unsafe extern "C" {
     fn kvbm_kernels_launch_universal_from_block(
         universal_ptrs_device: *const *mut c_void,
@@ -81,6 +81,7 @@ pub enum MemcpyBatchMode {
     BatchWithoutFallback = 2,
 }
 
+#[allow(dead_code)]
 unsafe extern "C" {
     fn kvbm_kernels_launch_vectorized_copy(
         src_ptrs_device: *mut *mut c_void,
