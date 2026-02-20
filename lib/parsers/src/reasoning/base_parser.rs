@@ -856,4 +856,116 @@ mod tests {
         assert_eq!(r4.normal_text, "<tool_call>B</tool_call>");
         assert_eq!(r4.reasoning_text, "");
     }
+
+    // =========================================================================
+    // Batched/fused token partial tag tests
+    // These simulate backends that batch multiple forward-pass tokens into a
+    // single chunked response, where a <think> or </think> tag may be split
+    // mid-string (not at the start of the buffer).
+    // =========================================================================
+
+    #[test]
+    fn test_mid_string_partial_opening_tag_batched() {
+        // Backend batches 5 tokens: ["Hello", " world", " <th", "ink>", "reasoning"]
+        // Fused chunk 1: "Hello world <th"  — partial <think> after normal text
+        // Fused chunk 2: "ink>reasoning content</think> answer"
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("Hello world <th", &[]);
+        // Expected: "Hello world " emitted as normal, "<th" held in buffer
+        // If this fails, the partial "<th" is being emitted as normal text
+        assert_eq!(r1.normal_text, "Hello world ");
+        assert_eq!(r1.reasoning_text, "");
+
+        let r2 =
+            parser.parse_reasoning_streaming_incremental("ink>reasoning content</think> answer", &[]);
+        assert_eq!(r2.reasoning_text, "reasoning content");
+        assert_eq!(r2.normal_text, " answer");
+    }
+
+    #[test]
+    fn test_mid_string_partial_closing_tag_stream_reasoning_false() {
+        // With stream_reasoning=false, content stays buffered until </think>.
+        // Partial </think> split mid-string while in reasoning mode.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
+
+        let r1 =
+            parser.parse_reasoning_streaming_incremental("<think>reasoning content and </th", &[]);
+        assert_eq!(r1.normal_text, "");
+        assert_eq!(r1.reasoning_text, "");
+
+        let r2 = parser.parse_reasoning_streaming_incremental("ink> normal text", &[]);
+        assert_eq!(r2.reasoning_text, "reasoning content and ");
+        assert_eq!(r2.normal_text, " normal text");
+    }
+
+    #[test]
+    fn test_mid_string_partial_closing_tag_stream_reasoning_true() {
+        // With stream_reasoning=true, reasoning content is emitted incrementally.
+        // The partial "</th" at the end must NOT be emitted as reasoning text.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 =
+            parser.parse_reasoning_streaming_incremental("<think>reasoning content and </th", &[]);
+        // Expected: "reasoning content and " emitted as reasoning, "</th" held
+        assert_eq!(r1.reasoning_text, "reasoning content and ");
+        assert_eq!(r1.normal_text, "");
+
+        let r2 = parser.parse_reasoning_streaming_incremental("ink> normal text", &[]);
+        assert_eq!(r2.reasoning_text, "");
+        assert_eq!(r2.normal_text, " normal text");
+    }
+
+    #[test]
+    fn test_batched_tag_boundary_split() {
+        // Aggressive batching: <think> tag split with normal text prefix
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("The answer is <thi", &[]);
+        assert_eq!(r1.normal_text, "The answer is ");
+        assert_eq!(r1.reasoning_text, "");
+
+        let r2 =
+            parser.parse_reasoning_streaming_incremental("nk>let me think</think>42", &[]);
+        assert_eq!(r2.reasoning_text, "let me think");
+        assert_eq!(r2.normal_text, "42");
+    }
+
+    #[test]
+    fn test_partial_tag_false_positive() {
+        // "<th" looks like partial <think> but "thesis" is not <think>
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("value <thesis on", &[]);
+        // If the parser buffers "<th", then "esis on" arrives next and must be
+        // flushed as normal text once it's clear this isn't <think>
+        let r2 = parser.parse_reasoning_streaming_incremental(" AI> is great", &[]);
+
+        let combined_normal = format!("{}{}", r1.normal_text, r2.normal_text);
+        assert_eq!(combined_normal, "value <thesis on AI> is great");
+        assert_eq!(r1.reasoning_text, "");
+        assert_eq!(r2.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_batched_interleaved_with_mid_string_partial() {
+        // First block complete in chunk 1, second block's <think> split at boundary
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 =
+            parser.parse_reasoning_streaming_incremental("<think>thought1</think>answer1<thi", &[]);
+        assert_eq!(r1.reasoning_text, "thought1");
+        assert_eq!(r1.normal_text, "answer1");
+
+        let r2 =
+            parser.parse_reasoning_streaming_incremental("nk>thought2</think>answer2", &[]);
+        assert_eq!(r2.reasoning_text, "thought2");
+        assert_eq!(r2.normal_text, "answer2");
+    }
 }
