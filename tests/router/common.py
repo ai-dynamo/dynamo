@@ -1629,8 +1629,8 @@ def _test_router_indexers_sync(
             await asyncio.sleep(3)
 
             # Query the standalone indexer's tree via kv_indexer_query endpoint
-            runtime4 = get_runtime(store_backend, request_plane)
-            query_endpoint = runtime4.endpoint(
+            # Note: reuse runtime3 to keep the standalone indexer's component alive
+            query_endpoint = runtime3.endpoint(
                 f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
             )
             query_client = await query_endpoint.client()
