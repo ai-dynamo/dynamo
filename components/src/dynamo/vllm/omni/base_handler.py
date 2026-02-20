@@ -151,8 +151,6 @@ class BaseOmniHandler(BaseWorkerHandler):
             f"{self.__class__.__name__} must implement _generate_openai_mode"
         )
 
-
-
     def _extract_text_prompt(self, request: Dict[str, Any]) -> str | None:
         """Extract text prompt from OpenAI messages format.
 

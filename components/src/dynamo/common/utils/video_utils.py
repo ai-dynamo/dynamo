@@ -82,8 +82,6 @@ def normalize_video_frames(images) -> list:
     return list(frames)
 
 
-
-
 def frames_to_numpy(images: list) -> np.ndarray:
     """Convert a list of PIL Images to a numpy array suitable for video encoding.
 

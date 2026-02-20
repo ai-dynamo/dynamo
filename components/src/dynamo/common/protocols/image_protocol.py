@@ -10,8 +10,6 @@ from pydantic import BaseModel
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
 
 
-
-
 class ImageNvExt(BaseModel):
     """NVIDIA extensions for image generation requests.
 
