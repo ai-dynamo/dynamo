@@ -9,6 +9,10 @@
 //! * A “universal” tensor is `[nh, nl, no, nt, hd]` stored contiguously.
 //! * An “operational” tensor is `[nl, no, inner]` with `inner = nt * nh * hd`.
 //!
+//! All pointer-list parameters (e.g. `universal_ptrs`, `src_ptrs`) must be
+//! device-accessible: allocated via `cudaMalloc` (device memory) or
+//! `cudaMallocHost` / `cuMemHostRegister` (pinned/registered/page-locked host memory).
+//!
 //! Host code calls these helpers with flattened pointer tables so a single
 //! launch can move many logical blocks in one go.
 
@@ -41,8 +45,8 @@ pub enum BlockLayout {
 #[allow(dead_code)]
 unsafe extern "C" {
     fn kvbm_kernels_launch_universal_from_block(
-        universal_ptrs_device: *const *mut c_void,
-        block_ptrs_device: *const *const c_void,
+        universal_ptrs: *const *mut c_void,
+        block_ptrs: *const *const c_void,
         num_blocks: usize,
         nh: usize,
         nl: usize,
@@ -55,8 +59,8 @@ unsafe extern "C" {
     ) -> cudaError_t;
 
     fn kvbm_kernels_launch_block_from_universal(
-        universal_ptrs_device: *const *const c_void,
-        block_ptrs_device: *const *mut c_void,
+        universal_ptrs: *const *const c_void,
+        block_ptrs: *const *mut c_void,
         num_blocks: usize,
         nh: usize,
         nl: usize,
@@ -84,16 +88,16 @@ pub enum MemcpyBatchMode {
 #[allow(dead_code)]
 unsafe extern "C" {
     fn kvbm_kernels_launch_vectorized_copy(
-        src_ptrs_device: *mut *mut c_void,
-        dst_ptrs_device: *mut *mut c_void,
+        src_ptrs: *mut *mut c_void,
+        dst_ptrs: *mut *mut c_void,
         copy_size_bytes: usize,
         num_pairs: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
 
     fn kvbm_kernels_memcpy_batch(
-        src_ptrs_host: *const *const c_void,
-        dst_ptrs_host: *const *mut c_void,
+        src_ptrs: *const *const c_void,
+        dst_ptrs: *const *mut c_void,
         size_per_copy: usize,
         num_copies: usize,
         mode: i32,
@@ -143,13 +147,13 @@ pub fn is_using_stubs() -> bool {
 /// - [`MemcpyBatchMode::BatchWithoutFallback`]: try batch API, return error if unavailable
 ///
 /// # Safety
-/// - `src_ptrs_host` must point to a valid array of `num_copies` source pointers
-/// - `dst_ptrs_host` must point to a valid array of `num_copies` destination pointers
+/// - `src_ptrs` must point to a valid array of `num_copies` source pointers
+/// - `dst_ptrs` must point to a valid array of `num_copies` destination pointers
 /// - Each source/destination pointer pair must have at least `size_per_copy` bytes accessible
 /// - `stream` must be a valid CUDA stream handle
 pub unsafe fn memcpy_batch(
-    src_ptrs_host: *const *const c_void,
-    dst_ptrs_host: *const *mut c_void,
+    src_ptrs: *const *const c_void,
+    dst_ptrs: *const *mut c_void,
     size_per_copy: usize,
     num_copies: usize,
     mode: MemcpyBatchMode,
@@ -157,8 +161,8 @@ pub unsafe fn memcpy_batch(
 ) -> cudaError_t {
     unsafe {
         kvbm_kernels_memcpy_batch(
-            src_ptrs_host,
-            dst_ptrs_host,
+            src_ptrs,
+            dst_ptrs,
             size_per_copy,
             num_copies,
             mode as i32,
@@ -169,16 +173,16 @@ pub unsafe fn memcpy_batch(
 
 /// Copy `num_blocks` stacks of NHD/HND tensors into universal form.
 ///
-/// * `universal_device_ptrs` – device pointer to `num_blocks` universal bases.
-/// * `block_device_ptrs` – device pointer to a flattened `[num_blocks][nl*no]`
+/// * `universal_ptrs` – device-accessible pointer to `num_blocks` universal bases.
+/// * `block_ptrs` – device-accessible pointer to a flattened `[num_blocks][nl*no]`
 ///   table of chunk pointers.
 /// * `nh, nl, no, nt, hd` – logical dimensions of each universal tensor.
 /// * `stream` – CUDA stream used for the launch.
 #[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn universal_from_block(
-    universal_device_ptrs: *const *mut c_void,
-    block_device_ptrs: *const *const c_void,
+    universal_ptrs: *const *mut c_void,
+    block_ptrs: *const *const c_void,
     num_blocks: usize,
     nh: usize,
     nl: usize,
@@ -191,8 +195,8 @@ pub unsafe fn universal_from_block(
 ) -> cudaError_t {
     unsafe {
         kvbm_kernels_launch_universal_from_block(
-            universal_device_ptrs,
-            block_device_ptrs,
+            universal_ptrs,
+            block_ptrs,
             num_blocks,
             nh,
             nl,
@@ -210,8 +214,8 @@ pub unsafe fn universal_from_block(
 #[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn block_from_universal(
-    universal_device_ptrs: *const *const c_void,
-    block_device_ptrs: *const *mut c_void,
+    universal_ptrs: *const *const c_void,
+    block_ptrs: *const *mut c_void,
     num_blocks: usize,
     nh: usize,
     nl: usize,
@@ -224,8 +228,8 @@ pub unsafe fn block_from_universal(
 ) -> cudaError_t {
     unsafe {
         kvbm_kernels_launch_block_from_universal(
-            universal_device_ptrs,
-            block_device_ptrs,
+            universal_ptrs,
+            block_ptrs,
             num_blocks,
             nh,
             nl,
@@ -251,8 +255,8 @@ pub unsafe fn block_from_universal(
 /// actual location at runtime.
 ///
 /// # Arguments
-/// * `src_ptrs_device` - Device pointer to array of source pointers (each pointing to device-visible memory)
-/// * `dst_ptrs_device` - Device pointer to array of destination pointers (each pointing to device-visible memory)
+/// * `src_ptrs` - Device-accessible pointer to array of source pointers (each pointing to device-visible memory)
+/// * `dst_ptrs` - Device-accessible pointer to array of destination pointers (each pointing to device-visible memory)
 /// * `copy_size_bytes` - Size of each copy in bytes (same for all pairs)
 /// * `num_pairs` - Number of pointer pairs to copy
 /// * `stream` - CUDA stream for async execution
@@ -264,20 +268,14 @@ pub unsafe fn block_from_universal(
 /// - The pointer arrays themselves must be in device memory with at least `num_pairs` entries
 /// - `stream` must be a valid CUDA stream handle
 pub unsafe fn vectorized_copy(
-    src_ptrs_device: *mut *mut c_void,
-    dst_ptrs_device: *mut *mut c_void,
+    src_ptrs: *mut *mut c_void,
+    dst_ptrs: *mut *mut c_void,
     copy_size_bytes: usize,
     num_pairs: i32,
     stream: cudaStream_t,
 ) -> cudaError_t {
     unsafe {
-        kvbm_kernels_launch_vectorized_copy(
-            src_ptrs_device,
-            dst_ptrs_device,
-            copy_size_bytes,
-            num_pairs,
-            stream,
-        )
+        kvbm_kernels_launch_vectorized_copy(src_ptrs, dst_ptrs, copy_size_bytes, num_pairs, stream)
     }
 }
 
@@ -349,7 +347,7 @@ mod tests {
             host_block_chunks.push(host_chunks_for_block);
         }
 
-        let block_ptrs_device = stream.clone_htod(block_ptr_values.as_slice())?;
+        let block_ptrs = stream.clone_htod(block_ptr_values.as_slice())?;
 
         let mut universal_slices = Vec::with_capacity(num_blocks);
         let mut universal_ptr_values = Vec::with_capacity(num_blocks);
@@ -369,21 +367,19 @@ mod tests {
             }
             universal_slices.push(slice);
         }
-        let universal_ptrs_device = stream.clone_htod(universal_ptr_values.as_slice())?;
+        let universal_ptrs = stream.clone_htod(universal_ptr_values.as_slice())?;
 
         // Block -> Universal
         {
-            let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-            let block_ptrs_device_ptr = block_ptrs_device_raw as usize as *const *const c_void;
-            let (universal_ptrs_device_raw, _univ_guard) =
-                universal_ptrs_device.device_ptr(&stream);
-            let universal_ptrs_device_ptr =
-                universal_ptrs_device_raw as usize as *const *mut c_void;
+            let (block_ptrs_raw, _block_guard) = block_ptrs.device_ptr(&stream);
+            let block_ptrs_ptr = block_ptrs_raw as usize as *const *const c_void;
+            let (universal_ptrs_raw, _univ_guard) = universal_ptrs.device_ptr(&stream);
+            let universal_ptrs_ptr = universal_ptrs_raw as usize as *const *mut c_void;
 
             let status = unsafe {
                 super::universal_from_block(
-                    universal_ptrs_device_ptr,
-                    block_ptrs_device_ptr,
+                    universal_ptrs_ptr,
+                    block_ptrs_ptr,
                     num_blocks,
                     nh,
                     nl,
@@ -456,16 +452,14 @@ mod tests {
         stream.synchronize()?;
 
         {
-            let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-            let block_ptrs_device_mut = block_ptrs_device_raw as usize as *const *mut c_void;
-            let (universal_ptrs_device_raw, _univ_guard) =
-                universal_ptrs_device.device_ptr(&stream);
-            let universal_ptrs_device_const =
-                universal_ptrs_device_raw as usize as *const *const c_void;
+            let (block_ptrs_raw, _block_guard) = block_ptrs.device_ptr(&stream);
+            let block_ptrs_mut = block_ptrs_raw as usize as *const *mut c_void;
+            let (universal_ptrs_raw, _univ_guard) = universal_ptrs.device_ptr(&stream);
+            let universal_ptrs_const = universal_ptrs_raw as usize as *const *const c_void;
             let status = unsafe {
                 super::block_from_universal(
-                    universal_ptrs_device_const,
-                    block_ptrs_device_mut,
+                    universal_ptrs_const,
+                    block_ptrs_mut,
                     num_blocks,
                     nh,
                     nl,
@@ -553,13 +547,13 @@ mod tests {
         }
 
         // Upload pointer arrays to device
-        let src_ptrs_device = stream.clone_htod(&src_ptr_values)?;
-        let dst_ptrs_device = stream.clone_htod(&dst_ptr_values)?;
+        let src_ptrs = stream.clone_htod(&src_ptr_values)?;
+        let dst_ptrs = stream.clone_htod(&dst_ptr_values)?;
 
         // Launch vectorized copy
         {
-            let (src_ptrs_raw, _src_guard) = src_ptrs_device.device_ptr(&stream);
-            let (dst_ptrs_raw, _dst_guard) = dst_ptrs_device.device_ptr(&stream);
+            let (src_ptrs_raw, _src_guard) = src_ptrs.device_ptr(&stream);
+            let (dst_ptrs_raw, _dst_guard) = dst_ptrs.device_ptr(&stream);
 
             let status = unsafe {
                 super::vectorized_copy(

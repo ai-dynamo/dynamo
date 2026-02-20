@@ -266,16 +266,15 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) -> Result<
     let ref_blocks: Vec<Vec<Vec<T>>> = universals.iter().map(|u| make_blocks(u, layout)).collect();
 
     // Upload reference blocks to GPU.
-    let (mut block_slices, block_ptrs_device) = upload_blocks(&stream, &ref_blocks)?;
+    let (mut block_slices, block_ptrs) = upload_blocks(&stream, &ref_blocks)?;
 
     // Allocate universal output buffers on GPU.
-    let (universal_slices, universal_ptrs_device) =
-        alloc_buffers::<T>(&stream, nb, universal_volume)?;
+    let (universal_slices, universal_ptrs) = alloc_buffers::<T>(&stream, nb, universal_volume)?;
 
     // --- Forward: blocks -> universal ---
     {
-        let (bp, _g1) = block_ptrs_device.device_ptr(&stream);
-        let (up, _g2) = universal_ptrs_device.device_ptr(&stream);
+        let (bp, _g1) = block_ptrs.device_ptr(&stream);
+        let (up, _g2) = universal_ptrs.device_ptr(&stream);
         let status = unsafe {
             universal_from_block(
                 up as usize as *const *mut c_void,
@@ -307,8 +306,8 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) -> Result<
     stream.synchronize()?;
 
     {
-        let (bp, _g1) = block_ptrs_device.device_ptr(&stream);
-        let (up, _g2) = universal_ptrs_device.device_ptr(&stream);
+        let (bp, _g1) = block_ptrs.device_ptr(&stream);
+        let (up, _g2) = universal_ptrs.device_ptr(&stream);
         let status = unsafe {
             block_from_universal(
                 up as usize as *const *const c_void,

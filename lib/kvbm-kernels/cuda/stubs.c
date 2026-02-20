@@ -31,11 +31,11 @@ typedef void* cudaStream_t;
 
 cudaError_t
 kvbm_kernels_launch_universal_from_block(
-    void* const* universal_ptrs_device, const void* const* block_ptrs_device, size_t num_blocks, size_t nh, size_t nl,
+    void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl,
     size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
-  (void)universal_ptrs_device;
-  (void)block_ptrs_device;
+  (void)universal_ptrs;
+  (void)block_ptrs;
   (void)num_blocks;
   (void)nh;
   (void)nl;
@@ -51,11 +51,11 @@ kvbm_kernels_launch_universal_from_block(
 
 cudaError_t
 kvbm_kernels_launch_block_from_universal(
-    const void* const* universal_ptrs_device, void* const* block_ptrs_device, size_t num_blocks, size_t nh, size_t nl,
+    const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl,
     size_t no, size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
 {
-  (void)universal_ptrs_device;
-  (void)block_ptrs_device;
+  (void)universal_ptrs;
+  (void)block_ptrs;
   (void)num_blocks;
   (void)nh;
   (void)nl;
@@ -71,10 +71,10 @@ kvbm_kernels_launch_block_from_universal(
 
 cudaError_t
 kvbm_kernels_launch_vectorized_copy(
-    void** src_ptrs_device, void** dst_ptrs_device, size_t copy_size_bytes, int num_pairs, cudaStream_t stream)
+    void** src_ptrs, void** dst_ptrs, size_t copy_size_bytes, int num_pairs, cudaStream_t stream)
 {
-  (void)src_ptrs_device;
-  (void)dst_ptrs_device;
+  (void)src_ptrs;
+  (void)dst_ptrs;
   (void)copy_size_bytes;
   (void)num_pairs;
   (void)stream;
@@ -93,11 +93,11 @@ kvbm_kernels_has_memcpy_batch_async(void)
 // Stub for memcpy_batch - returns not supported since we can't do CUDA ops
 cudaError_t
 kvbm_kernels_memcpy_batch(
-    const void* const* src_ptrs_host, void* const* dst_ptrs_host, size_t size_per_copy, size_t num_copies, int mode,
+    const void* const* src_ptrs, void* const* dst_ptrs, size_t size_per_copy, size_t num_copies, int mode,
     cudaStream_t stream)
 {
-  (void)src_ptrs_host;
-  (void)dst_ptrs_host;
+  (void)src_ptrs;
+  (void)dst_ptrs;
   (void)size_per_copy;
   (void)num_copies;
   (void)mode;

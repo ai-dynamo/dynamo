@@ -68,6 +68,10 @@ These fuse layout permutation with copy for non-standard transfer paths:
 
 `nl` = layers, `no` = outer chunks (2: K and V), `nh` = attention heads, `nt` = tokens per block, `hd` = head dimension.
 
+### Pointer conventions
+
+All pointer-list parameters (e.g. `universal_ptrs`, `src_ptrs`) must be device-accessible: allocated via `cudaMalloc` (device memory) or `cudaMallocHost` / `cuMemHostRegister` (pinned/registered/page-locked host memory).
+
 ### Cargo features
 
 | Feature | Purpose |
