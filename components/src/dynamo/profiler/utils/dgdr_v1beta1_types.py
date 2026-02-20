@@ -160,7 +160,7 @@ class OverridesSpec(BaseModel):
     )
     dgd: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="DGD allows providing a full or partial DynamoGraphDeployment to use as the base for the generated deployment. Fields from profiling results are merged on top.",
+        description="DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment to use as the base for the generated deployment. Fields from profiling results are merged on top. Use this to override backend worker images.  The field is stored as a raw embedded resource rather than a typed *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already imports v1beta1 as the conversion hub and Go does not allow import cycles.  The EmbeddedResource marker tells the API server to validate that the value is a well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion, kind, and field schema) is performed by the controller during reconciliation. TODO(future MR): add webhook admission validation for the DGD field type.",
     )
 
 
@@ -188,10 +188,6 @@ class FeaturesSpec(BaseModel):
     planner: Optional[PlannerConfig] = Field(
         default=None,
         description="Planner configures the SLA planner for autoscaling in the generated DGD.",
-    )
-    kvRouter: Optional[KVRouterSpec] = Field(
-        default=None,
-        description="KVRouter configures KV-cache-aware routing in the generated DGD.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,
@@ -247,7 +243,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         description="Backend specifies the inference backend to use for profiling and deployment.",
     )
     image: str = Field(
-        description='Image is the container image reference for the deployment. Example: "nvcr.io/nvidia/dynamo-runtime:latest"',
+        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/dynamo-runtime:latest" TODO: In a future MR, the operator will derive the backend inference image from the backend type automatically; backend images can be overridden via overrides.dgd.',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
@@ -349,7 +345,13 @@ class DynamoGraphDeploymentRequestStatus(BaseModel):
 
 
 class DynamoGraphDeploymentRequest(BaseModel):
-    """1. Pending: Spec validated, preparing for profiling 2. Profiling: Profiling job is running to discover optimal configurations 3. Ready: Profiling complete, generated DGD spec available in status 4. Deploying: DGD is being created and rolled out (when autoApply=true) 5. Deployed: DGD is running and healthy 6. Failed: An unrecoverable error occurred"""
+    """DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API. It provides a simplified, SLA-driven interface for deploying inference models on Dynamo. Users specify a model and optional performance targets; the controller handles profiling, configuration selection, and deployment."""
 
-    spec: Optional[DynamoGraphDeploymentRequestSpec] = Field(default=None)
-    status: Optional[DynamoGraphDeploymentRequestStatus] = Field(default=None)
+    spec: Optional[DynamoGraphDeploymentRequestSpec] = Field(
+        default=None,
+        description="Spec defines the desired state for this deployment request.",
+    )
+    status: Optional[DynamoGraphDeploymentRequestStatus] = Field(
+        default=None,
+        description="Status reflects the current observed state of this deployment request.",
+    )
