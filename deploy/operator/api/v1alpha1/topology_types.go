@@ -18,13 +18,14 @@
 package v1alpha1
 
 import (
-	"fmt"
+	"sort"
+	"strings"
 )
 
 const (
-	// ConditionTypeTopologyConstraintsEnforced indicates whether topology constraints
-	// are being actively enforced by the underlying framework.
-	ConditionTypeTopologyConstraintsEnforced = "TopologyConstraintsEnforced"
+	// ConditionTypeTopologyLevelsAvailable indicates whether the topology levels
+	// referenced by the deployment's constraints are available in the cluster topology.
+	ConditionTypeTopologyLevelsAvailable = "TopologyLevelsAvailable"
 
 	// ConditionReasonAllTopologyLevelsAvailable indicates all required topology levels
 	// are available in the cluster topology.
@@ -87,17 +88,25 @@ func IsValidTopologyDomain(d TopologyDomain) bool {
 	return ok
 }
 
+// ValidTopologyDomainNames returns the valid domain names sorted by hierarchy (broadest first).
+func ValidTopologyDomainNames() string {
+	type entry struct {
+		name  string
+		order int
+	}
+	entries := make([]entry, 0, len(topologyDomainOrder))
+	for d, o := range topologyDomainOrder {
+		entries = append(entries, entry{name: string(d), order: o})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].order < entries[j].order })
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.name
+	}
+	return strings.Join(names, ", ")
+}
+
 // IsNarrowerOrEqual returns true if d is narrower than or equal to other in the topology hierarchy.
 func (d TopologyDomain) IsNarrowerOrEqual(other TopologyDomain) bool {
 	return topologyDomainOrder[d] >= topologyDomainOrder[other]
-}
-
-// ValidateHierarchy validates that child is narrower than or equal to parent.
-// Returns an error if the child domain is broader than the parent.
-func ValidateHierarchy(parent, child TopologyDomain, childPath string) error {
-	if !child.IsNarrowerOrEqual(parent) {
-		return fmt.Errorf("%s: topologyConstraint.packDomain %q is broader than spec-level %q; service constraints must be equal to or narrower than the deployment-level constraint",
-			childPath, child, parent)
-	}
-	return nil
 }

@@ -1187,17 +1187,6 @@ func GenerateBasePodSpec(
 	return &podSpec, nil
 }
 
-// toGroveTopologyConstraint converts a Dynamo TopologyConstraint to a Grove TopologyConstraint.
-// The domain names are the same strings in both APIs.
-func toGroveTopologyConstraint(tc *v1alpha1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
-	if tc == nil {
-		return nil
-	}
-	return &grovev1alpha1.TopologyConstraint{
-		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
-	}
-}
-
 func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) {
 	// Convert user-provided metrics annotation into controller-managed label
 	// By default (no annotation), metrics are enabled

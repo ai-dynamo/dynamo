@@ -422,7 +422,7 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 }
 
 // propagateTopologyCondition reads the PCS topology condition from Grove and maps it
-// to a TopologyConstraintsEnforced condition on the DGD. This is a no-op when no
+// to a TopologyLevelsAvailable condition on the DGD. This is a no-op when no
 // topology constraints are set or when the Grove pathway is not in use.
 func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 	if !dgd.HasAnyTopologyConstraint() || !r.isGrovePathway(dgd) {
@@ -452,7 +452,7 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	if groveTopoCond == nil {
 		// No topology condition from Grove yet — assume healthy.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1alpha1.ConditionTypeTopologyConstraintsEnforced,
+			Type:               nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable,
 			Status:             metav1.ConditionTrue,
 			Reason:             nvidiacomv1alpha1.ConditionReasonAllTopologyLevelsAvailable,
 			Message:            "All required topology levels are available in the cluster topology",
@@ -465,7 +465,7 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 			reason = nvidiacomv1alpha1.ConditionReasonTopologyDefinitionNotFound
 		}
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1alpha1.ConditionTypeTopologyConstraintsEnforced,
+			Type:               nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable,
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            groveTopoCond.Message,
@@ -476,7 +476,7 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	} else {
 		// Grove's TopologyLevelsUnavailable is False → all levels available.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1alpha1.ConditionTypeTopologyConstraintsEnforced,
+			Type:               nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable,
 			Status:             metav1.ConditionTrue,
 			Reason:             nvidiacomv1alpha1.ConditionReasonAllTopologyLevelsAvailable,
 			Message:            "All required topology levels are available in the cluster topology",

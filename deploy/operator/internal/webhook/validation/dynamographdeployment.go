@@ -69,10 +69,10 @@ func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.
 }
 
 // Validate performs validation on the DynamoGraphDeployment.
-// When isUpdate is true, the ClusterTopology CRD check is skipped because TAS
-// fields are immutable — domains were already validated at creation time and the
-// topology may have changed since.
-func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context, isUpdate bool) (admission.Warnings, error) {
+// The ClusterTopology CRD check only runs on CREATE (Generation == 1). On UPDATE
+// (Generation > 1) it is skipped because TAS fields are immutable — domains were
+// already validated at creation time and the topology may have changed since.
+func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	// Validate that at least one service is specified
 	if len(v.deployment.Spec.Services) == 0 {
 		return nil, fmt.Errorf("spec.services must have at least one service")
@@ -94,7 +94,7 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context, isUpdate 
 	}
 
 	// Validate topology constraints
-	if err := v.validateTopologyConstraints(ctx, isUpdate); err != nil {
+	if err := v.validateTopologyConstraints(ctx); err != nil {
 		return nil, err
 	}
 
@@ -461,7 +461,7 @@ func (v *DynamoGraphDeploymentValidator) validateAnnotations() error {
 // validateTopologyConstraints validates topology constraint configuration.
 // Topology constraints are independently optional at the spec and service levels.
 // When isUpdate is true the ClusterTopology CRD check is skipped (TAS is immutable).
-func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context.Context, isUpdate bool) error {
+func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context.Context) error {
 	specConstraint := v.deployment.Spec.TopologyConstraint
 	hasAnyConstraint := specConstraint != nil
 
@@ -471,7 +471,7 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 	if specConstraint != nil {
 		if !nvidiacomv1alpha1.IsValidTopologyDomain(specConstraint.PackDomain) {
 			errs = append(errs, fmt.Errorf("spec.topologyConstraint.packDomain %q is not a valid topology domain; "+
-				"must be one of: region, zone, datacenter, block, rack, host, numa", specConstraint.PackDomain))
+				"must be one of: %s", specConstraint.PackDomain, nvidiacomv1alpha1.ValidTopologyDomainNames()))
 		}
 	}
 
@@ -488,13 +488,13 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 		// Validate service packDomain
 		if !nvidiacomv1alpha1.IsValidTopologyDomain(svcDomain) {
 			errs = append(errs, fmt.Errorf("%s.topologyConstraint.packDomain %q is not a valid topology domain; "+
-				"must be one of: region, zone, datacenter, block, rack, host, numa", fieldPath, svcDomain))
+				"must be one of: %s", fieldPath, svcDomain, nvidiacomv1alpha1.ValidTopologyDomainNames()))
 			continue
 		}
 
 		// Validate hierarchy only when both spec-level and service-level are set
 		if specConstraint != nil && nvidiacomv1alpha1.IsValidTopologyDomain(specConstraint.PackDomain) {
-			if err := nvidiacomv1alpha1.ValidateHierarchy(specConstraint.PackDomain, svcDomain, fieldPath); err != nil {
+			if err := validateTopologyHierarchy(specConstraint.PackDomain, svcDomain, fieldPath); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -506,10 +506,11 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 	}
 
 	// Validate packDomain values against the framework's topology CRD (CREATE only).
-	// On UPDATE this is skipped because TAS fields are immutable — the domains were
-	// already validated at creation time and the ClusterTopology may have changed since.
-	if v.mgr != nil && v.isGrovePathway() && !isUpdate {
-		if err := v.validateTopologyDomainsAgainstCRD(ctx); err != nil {
+	// On UPDATE (Generation > 1) this is skipped because TAS fields are immutable —
+	// the domains were already validated at creation time and the ClusterTopology may
+	// have changed since.
+	if v.mgr != nil && v.isGrovePathway() && v.deployment.Generation == 1 {
+		if err := v.validateTopologyDomainsAgainstGroveClusterTopology(ctx); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -517,9 +518,19 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 	return errors.Join(errs...)
 }
 
-// validateTopologyDomainsAgainstCRD reads the Grove ClusterTopology CRD and validates
+// validateTopologyHierarchy validates that child is narrower than or equal to parent.
+func validateTopologyHierarchy(parent, child nvidiacomv1alpha1.TopologyDomain, childPath string) error {
+	if !child.IsNarrowerOrEqual(parent) {
+		return fmt.Errorf("%s: topologyConstraint.packDomain %q is broader than spec-level %q; "+
+			"service constraints must be equal to or narrower than the deployment-level constraint",
+			childPath, child, parent)
+	}
+	return nil
+}
+
+// validateTopologyDomainsAgainstGroveClusterTopology reads the Grove ClusterTopology and validates
 // that each packDomain used in the DGD exists as a level in the cluster's topology.
-func (v *DynamoGraphDeploymentValidator) validateTopologyDomainsAgainstCRD(ctx context.Context) error {
+func (v *DynamoGraphDeploymentValidator) validateTopologyDomainsAgainstGroveClusterTopology(ctx context.Context) error {
 	cl := v.mgr.GetClient()
 
 	ct := &grovev1alpha1.ClusterTopology{}

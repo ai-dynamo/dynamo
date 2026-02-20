@@ -207,7 +207,7 @@ To change topology constraints, **delete and recreate** the DGD. This matches th
 
 ## Monitoring Topology Enforcement
 
-When any topology constraint is set, the DGD status includes a `TopologyConstraintsEnforced` condition that reports whether topology placement is actively being enforced.
+When any topology constraint is set, the DGD status includes a `TopologyLevelsAvailable` condition that reports whether the topology levels referenced by your constraints still exist in the cluster topology.
 
 **Healthy state:**
 
@@ -216,7 +216,7 @@ status:
   conditions:
     - type: Ready
       status: "True"
-    - type: TopologyConstraintsEnforced
+    - type: TopologyLevelsAvailable
       status: "True"
       reason: AllTopologyLevelsAvailable
       message: "All required topology levels are available in the cluster topology"
@@ -229,13 +229,13 @@ status:
   conditions:
     - type: Ready
       status: "True"
-    - type: TopologyConstraintsEnforced
+    - type: TopologyLevelsAvailable
       status: "False"
       reason: TopologyLevelsUnavailable
       message: "Topology level 'rack' is no longer available in the cluster topology"
 ```
 
-When enforcement stops, Dynamo emits a **Warning** event on the DGD. The deployment may still appear `Ready` because the underlying framework keeps pods running, but topology placement is no longer guaranteed.
+When topology levels become unavailable, Dynamo emits a **Warning** event on the DGD. The deployment may still appear `Ready` because the underlying framework keeps pods running, but topology placement is no longer guaranteed.
 
 ## Troubleshooting
 
@@ -269,7 +269,7 @@ Inspect scheduler events for details:
 kubectl describe pod <pod-name> -n <namespace>
 ```
 
-### TopologyConstraintsEnforced is False
+### TopologyLevelsAvailable is False
 
 The DGD was deployed successfully, but the topology definition has since changed. The underlying framework detected that one or more required topology levels are no longer available.
 

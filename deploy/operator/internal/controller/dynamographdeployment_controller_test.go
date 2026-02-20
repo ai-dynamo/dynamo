@@ -2276,18 +2276,18 @@ func TestPropagateTopologyCondition(t *testing.T) {
 
 			var topoCond *metav1.Condition
 			for i := range tt.dgd.Status.Conditions {
-				if tt.dgd.Status.Conditions[i].Type == v1alpha1.ConditionTypeTopologyConstraintsEnforced {
+				if tt.dgd.Status.Conditions[i].Type == v1alpha1.ConditionTypeTopologyLevelsAvailable {
 					topoCond = &tt.dgd.Status.Conditions[i]
 					break
 				}
 			}
 
 			if !tt.wantCondition {
-				g.Expect(topoCond).To(gomega.BeNil(), "expected no TopologyConstraintsEnforced condition")
+				g.Expect(topoCond).To(gomega.BeNil(), "expected no TopologyLevelsAvailable condition")
 				return
 			}
 
-			g.Expect(topoCond).NotTo(gomega.BeNil(), "expected TopologyConstraintsEnforced condition to be set")
+			g.Expect(topoCond).NotTo(gomega.BeNil(), "expected TopologyLevelsAvailable condition to be set")
 			g.Expect(topoCond.Status).To(gomega.Equal(tt.wantStatus))
 			g.Expect(topoCond.Reason).To(gomega.Equal(tt.wantReason))
 
