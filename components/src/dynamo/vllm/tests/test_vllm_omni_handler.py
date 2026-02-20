@@ -8,11 +8,16 @@ import pytest
 from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
 from dynamo.common.utils.output_modalities import RequestType
-from dynamo.vllm.omni.omni_handler import (
-    EngineInputs,
-    OmniHandler,
-    prepare_image_output,
-)
+
+# TODO: Install vLLM omni dependencies in CI container so this skip is no longer needed.
+try:
+    from dynamo.vllm.omni.omni_handler import (
+        EngineInputs,
+        OmniHandler,
+        prepare_image_output,
+    )
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
