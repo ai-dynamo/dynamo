@@ -52,9 +52,9 @@ class SearchStrategy(str, Enum):
 
 class BackendType(str, Enum):
     Auto = "auto"
-    SGLang = "sglang"
-    TRTLLM = "trtllm"
-    VLLM = "vllm"
+    SgLang = "sglang"
+    Trtllm = "trtllm"
+    Vllm = "vllm"
 
 
 class WorkloadSpec(BaseModel):
