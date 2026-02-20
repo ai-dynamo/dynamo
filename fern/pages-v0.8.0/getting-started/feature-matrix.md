@@ -33,7 +33,7 @@ This document provides a comprehensive compatibility matrix for key Dynamo featu
 
 vLLM offers the broadest feature coverage in Dynamo, with full support for disaggregated serving, KV-aware routing, KV block management, LoRA adapters, and multimodal inference including video and audio.
 
-*Source: [docs/backends/vllm/README.md][vllm-readme]*
+*Source: [vLLM Backend][vllm-readme]*
 
 | Feature                   | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA  | Tool Calling | Speculative Decoding |
 | :------------------------ | :-------------------: | :--------------: | :---------------: | :--------------: | :--------: | :---------------: | :------------------: | :---: | :----------: | :------------------: |
@@ -59,7 +59,7 @@ vLLM offers the broadest feature coverage in Dynamo, with full support for disag
 
 SGLang is optimized for high-throughput serving with fast primitives, providing robust support for disaggregated serving, KV-aware routing, and request migration.
 
-*Source: [docs/backends/sglang/README.md][sglang-readme]*
+*Source: [SGLang Backend][sglang-readme]*
 
 | Feature                   | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA  | Tool Calling | Speculative Decoding |
 | :------------------------ | :-------------------: | :--------------: | :---------------: | :--------------: | :--------: | :---------------: | :------------------: | :---: | :----------: | :------------------: |
@@ -84,7 +84,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 
 TensorRT-LLM delivers maximum inference performance and optimization, with full KVBM integration and robust disaggregated serving support.
 
-*Source: [docs/backends/trtllm/README.md][trtllm-readme]*
+*Source: [TensorRT-LLM Backend][trtllm-readme]*
 
 | Feature                   | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA  | Tool Calling | Speculative Decoding |
 | :------------------------ | :-------------------: | :--------------: | :---------------: | :--------------: | :--------: | :---------------: | :------------------: | :---: | :----------: | :------------------: |
@@ -110,25 +110,25 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 ## Source References
 
 ### Backends
-[vllm-readme]: ../backends/vllm/README.md
-[sglang-readme]: ../backends/sglang/README.md
-[trtllm-readme]: ../backends/trtllm/README.md
+[vllm-readme]: /dynamo/v-0-8-0/components/backends/v-llm
+[sglang-readme]: /dynamo/v-0-8-0/components/backends/sg-lang
+[trtllm-readme]: /dynamo/v-0-8-0/components/backends/tensor-rt-llm
 
 ### Design Docs
-[disagg]: ../design-docs/disagg-serving.md
-[kv-routing]: ../router/kv-cache-routing.md
-[planner]: ../planner/planner-intro.md
-[kvbm]: ../kvbm/kvbm-intro.md
-[migration]: ../fault-tolerance/request-migration.md
-[tools]: ../agents/tool-calling.md
+[disagg]: /dynamo/v-0-8-0/design-docs/disaggregated-serving
+[kv-routing]: /dynamo/v-0-8-0/additional-resources/router-details/kv-cache-routing
+[planner]: /dynamo/v-0-8-0/components/planner/overview
+[kvbm]: /dynamo/v-0-8-0/components/kvbm/overview
+[migration]: /dynamo/v-0-8-0/additional-resources/fault-tolerance/request-migration
+[tools]: /dynamo/v-0-8-0/user-guides/tool-calling
 
 ### Multimodal
-[mm]: ../multimodal/index.md
-[mm-vllm]: ../multimodal/vllm.md
-[mm-trtllm]: ../multimodal/trtllm.md
-[mm-sglang]: ../multimodal/sglang.md
+[mm]: /dynamo/v-0-8-0/user-guides/multimodality-support
+[mm-vllm]: /dynamo/v-0-8-0/additional-resources/multimodal-details/v-llm
+[mm-trtllm]: /dynamo/v-0-8-0/additional-resources/multimodal-details/tensor-rt-llm
+[mm-sglang]: /dynamo/v-0-8-0/additional-resources/multimodal-details/sg-lang
 
 ### Feature-specific
-[lora]: ../kubernetes/deployment/dynamomodel-guide.md
-[vllm-spec]: ../backends/vllm/speculative-decoding.md
-[trtllm-eagle]: ../backends/trtllm/llama4-plus-eagle.md
+[lora]: /dynamo/v-0-8-0/kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
+[vllm-spec]: /dynamo/v-0-8-0/additional-resources/backend-details/v-llm/speculative-decoding
+[trtllm-eagle]: /dynamo/v-0-8-0/additional-resources/backend-details/tensor-rt-llm/llama-4-eagle
