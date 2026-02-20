@@ -164,7 +164,6 @@ impl StreamSender {
             .await?)
     }
 
-    #[allow(clippy::needless_update)]
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
         if self.prologue.take().is_some() {
             let prologue = ResponseStreamPrologue { error };

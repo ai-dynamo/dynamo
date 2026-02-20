@@ -650,6 +650,10 @@ impl OpenAIPreprocessor {
                             request_id = inner.context.id(),
                             "Cancellation issued last message; closing stream"
                         );
+                        #[allow(unused_assignments)]
+                        {
+                            inner.finished = true; // Mark as finished
+                        }
                         return None;
                     }
 
