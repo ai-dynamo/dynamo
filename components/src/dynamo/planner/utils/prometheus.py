@@ -102,13 +102,15 @@ class PrometheusAPIClient:
         self, base_name: str, interval: str, operation_name: str
     ) -> float:
         """Query router histogram average: sum(increase(base_name_sum[interval])) /
-        sum(increase(base_name_count[interval])), filtered by dynamo_namespace.
+        sum(increase(base_name_count[interval])).
+
+        No dynamo_namespace filter: router pods are already isolated by the
+        Kubernetes namespace via PodMonitor own_namespace=true.
         """
         try:
-            ns_filter = f'dynamo_namespace="{self.dynamo_namespace}"'
             query = (
-                f"sum(increase({base_name}_sum{{{ns_filter}}}[{interval}])) / "
-                f"sum(increase({base_name}_count{{{ns_filter}}}[{interval}]))"
+                f"sum(increase({base_name}_sum[{interval}])) / "
+                f"sum(increase({base_name}_count[{interval}]))"
             )
             result = self.prom.custom_query(query=query)
             if not result:
@@ -219,11 +221,8 @@ class PrometheusAPIClient:
     def get_avg_request_count(self, interval: str, model_name: str):
         if self.metrics_source == "router":
             try:
-                ns_filter = f'dynamo_namespace="{self.dynamo_namespace}"'
                 router_req_total = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
-                query = (
-                    f"sum(increase({router_req_total}" f"{{{ns_filter}}}[{interval}]))"
-                )
+                query = f"sum(increase({router_req_total}[{interval}]))"
                 result = self.prom.custom_query(query=query)
                 if not result:
                     logger.warning(

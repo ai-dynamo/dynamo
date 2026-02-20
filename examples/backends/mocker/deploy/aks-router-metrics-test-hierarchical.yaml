@@ -1,0 +1,300 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Three-DGD hierarchical mocker deployment for testing --throughput-metrics-source=router.
+#
+# Unlike the single-DGD tests (aks-router-metrics-test-selfpatch.yaml), this deployment
+# uses standalone LocalRouter pods (componentType: default) in each pool DGD.  Those
+# pods start a system_status_server on DYN_SYSTEM_PORT=9090 which exposes
+# dynamo_component_router_* metrics that Prometheus can scrape.
+#
+# Architecture:
+#   DGD 1 (mocker-hierarchical-frontend):      Frontend + GlobalRouter + Planner
+#   DGD 2 (mocker-hierarchical-prefill-pool):  LocalRouter (port 9090) + MockerPrefill
+#   DGD 3 (mocker-hierarchical-decode-pool):   LocalRouter (port 9090) + MockerDecode
+#
+# NOTE: The operator constructs Dynamo namespaces as "{k8s-namespace}-{dgd-metadata-name}".
+# The dynamoNamespace field in service specs is NOT used for DYN_NAMESPACE — it's for
+# operator-internal routing only.  Actual Dynamo namespaces for this deployment:
+#   darfeen-dynamo-cloud-mocker-hierarchical-frontend
+#   darfeen-dynamo-cloud-mocker-hierarchical-prefill-pool
+#   darfeen-dynamo-cloud-mocker-hierarchical-decode-pool
+#
+# Prerequisites (already deployed in darfeen-dynamo-cloud):
+#   kubectl apply -f standalone-prometheus.yaml -n darfeen-dynamo-cloud
+#
+# Deploy:
+#   kubectl apply -f aks-router-metrics-test-hierarchical.yaml -n darfeen-dynamo-cloud
+#
+# Verify LocalRouter pods expose metrics:
+#   for pod in $(kubectl get pods -n darfeen-dynamo-cloud | grep "default.*Running" | awk '{print $1}'); do
+#     echo "=== $pod ==="; kubectl exec -n darfeen-dynamo-cloud "$pod" -- \
+#       python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:9090/metrics').read().decode()[:500])"
+#   done
+#
+# Send load:
+#   ./send_load.sh darfeen-dynamo-cloud
+#
+# Watch planner observe router metrics:
+#   kubectl logs -n darfeen-dynamo-cloud -l nvidia.com/dynamo-component-type=planner -f \
+#     | grep -E "adjustment started|Observed|Predicted|scaling|replicas|router|throughput"
+#
+# Verify Prometheus is scraping router metrics:
+#   kubectl port-forward svc/prometheus 9090:9090 -n darfeen-dynamo-cloud &
+#   curl -sG 'http://localhost:9090/api/v1/query' \
+#     --data-urlencode 'query=dynamo_component_router_requests_total' | python3 -m json.tool
+#
+# Cleanup:
+#   kubectl delete -f aks-router-metrics-test-hierarchical.yaml -n darfeen-dynamo-cloud
+
+# =============================================================================
+# GlobalRouter ConfigMap (pool namespace routing)
+# Namespaces = "{k8s-namespace}-{dgd-name}" = "darfeen-dynamo-cloud-mocker-hierarchical-{pool}"
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mocker-hierarchical-global-router-config
+data:
+  global_router_config.json: |
+    {
+      "num_prefill_pools": 1,
+      "num_decode_pools": 1,
+      "prefill_pool_dynamo_namespaces": [
+        "darfeen-dynamo-cloud-mocker-hierarchical-prefill-pool"
+      ],
+      "decode_pool_dynamo_namespaces": [
+        "darfeen-dynamo-cloud-mocker-hierarchical-decode-pool"
+      ],
+      "prefill_pool_selection_strategy": {
+        "ttft_min": 10, "ttft_max": 3000, "ttft_resolution": 2,
+        "isl_min": 0,   "isl_max": 32000, "isl_resolution": 2,
+        "prefill_pool_mapping": [[0,0],[0,0]]
+      },
+      "decode_pool_selection_strategy": {
+        "itl_min": 10,  "itl_max": 500,   "itl_resolution": 2,
+        "context_length_min": 0, "context_length_max": 32000, "context_length_resolution": 2,
+        "decode_pool_mapping": [[0,0],[0,0]]
+      }
+    }
+---
+# =============================================================================
+# DGD 1: Frontend + GlobalRouter + Planner
+# Actual Dynamo namespace: darfeen-dynamo-cloud-mocker-hierarchical-frontend
+# =============================================================================
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: mocker-hierarchical-frontend
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --router-mode
+            - round-robin
+            - --namespace
+            - darfeen-dynamo-cloud-mocker-hierarchical-frontend
+            - --model-name
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+
+    GlobalRouter:
+      componentType: default
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        volumes:
+          - name: global-router-config
+            configMap:
+              name: mocker-hierarchical-global-router-config
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.global_router
+          args:
+            - --config
+            - /config/global_router_config.json
+            - --model-name
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --namespace
+            - darfeen-dynamo-cloud-mocker-hierarchical-frontend
+          volumeMounts:
+            - name: global-router-config
+              mountPath: /config
+              readOnly: true
+
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              SP=/opt/dynamo/venv/lib/python3.12/site-packages
+              echo "Cloning feat/throughput-metrics-source..."
+              git clone --depth=1 \
+                --branch feat/throughput-metrics-source \
+                https://github.com/ai-dynamo/dynamo /tmp/dynamo-pr 2>&1 | tail -3
+              SRC_LIB=/tmp/dynamo-pr/lib/bindings/python/src/dynamo
+              SRC_COMP=/tmp/dynamo-pr/components/src/dynamo
+              echo "Patching venv..."
+              cp $SRC_LIB/prometheus_names.py               $SP/dynamo/prometheus_names.py
+              cp $SRC_COMP/planner/utils/prometheus.py       $SP/dynamo/planner/utils/prometheus.py
+              cp $SRC_COMP/planner/utils/planner_argparse.py $SP/dynamo/planner/utils/planner_argparse.py
+              cp $SRC_COMP/planner/utils/planner_core.py     $SP/dynamo/planner/utils/planner_core.py
+              cp $SRC_COMP/planner/defaults.py               $SP/dynamo/planner/defaults.py
+              echo "Patches applied. Starting planner..."
+              exec python3 -m dynamo.planner.planner_sla \
+                --environment=kubernetes \
+                --backend=mocker \
+                --mode=disagg \
+                --adjustment-interval=30 \
+                --ttft=2000 \
+                --itl=200 \
+                --max-gpu-budget=-1 \
+                --prefill-engine-num-gpu=1 \
+                --decode-engine-num-gpu=1 \
+                --no-correction \
+                --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D \
+                --metric-pulling-prometheus-endpoint=http://prometheus:9090 \
+                --throughput-metrics-source=router \
+                --namespace=darfeen_dynamo_cloud_mocker_hierarchical_prefill_pool \
+                --model-name=nvidia/Llama-3.1-8B-Instruct-FP8 \
+                --no-operation
+---
+# =============================================================================
+# DGD 2: Prefill Pool
+# Actual Dynamo namespace: darfeen-dynamo-cloud-mocker-hierarchical-prefill-pool
+# LocalRouter exposes dynamo_component_router_* on DYN_SYSTEM_PORT=9090
+# =============================================================================
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: mocker-hierarchical-prefill-pool
+spec:
+  services:
+    LocalRouter:
+      componentType: default
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          workingDir: /workspace
+          env:
+            # Expose system_status_server so Prometheus can scrape router metrics
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+          command:
+            - python3
+            - -m
+            - dynamo.router
+          args:
+            - --endpoint
+            - darfeen-dynamo-cloud-mocker-hierarchical-prefill-pool.prefill.generate
+            - --no-router-kv-events
+
+    MockerPrefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.mocker
+          args:
+            - --model-path
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --model-name
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --speedup-ratio
+            - "5.0"
+            - --planner-profile-data
+            - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - --is-prefill-worker
+---
+# =============================================================================
+# DGD 3: Decode Pool
+# Actual Dynamo namespace: darfeen-dynamo-cloud-mocker-hierarchical-decode-pool
+# LocalRouter exposes dynamo_component_router_* on DYN_SYSTEM_PORT=9090
+# =============================================================================
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: mocker-hierarchical-decode-pool
+spec:
+  services:
+    LocalRouter:
+      componentType: default
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          workingDir: /workspace
+          env:
+            # Expose system_status_server so Prometheus can scrape router metrics
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+          command:
+            - python3
+            - -m
+            - dynamo.router
+          args:
+            - --endpoint
+            - darfeen-dynamo-cloud-mocker-hierarchical-decode-pool.backend.generate
+            - --no-router-kv-events
+            - --router-kv-overlap-score-weight=0
+
+    MockerDecode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: docker-imagepullsecret
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:451e3d9ea6b1a4bceb55f6a798fd857a59dfd319-vllm-cuda12-amd64
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.mocker
+          args:
+            - --model-path
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --model-name
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --speedup-ratio
+            - "5.0"
+            - --planner-profile-data
+            - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D

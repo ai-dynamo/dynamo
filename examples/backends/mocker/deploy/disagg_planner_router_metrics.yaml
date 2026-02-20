@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Minimal disaggregated mocker deployment for testing --throughput-metrics-source=router.
+# No GPUs required. Uses pre-bundled H200 profiling data from the container image.
+#
+# Prerequisites:
+#   1. kube-prometheus-stack installed (Prometheus reachable at the default endpoint)
+#   2. dynamo-router PodMonitor applied (see router-podmonitor.yaml, or install the
+#      updated operator Helm chart from this branch)
+#   3. A container image built from this repo
+#
+# Deploy:
+#   export NAMESPACE=<your-namespace>
+#   export IMAGE=<your-registry>/dynamo-runtime:<tag>
+#   envsubst < disagg_planner_router_metrics.yaml | kubectl apply -n $NAMESPACE -f -
+#
+# Watch planner observe router metrics and make scaling decisions:
+#   kubectl logs -n $NAMESPACE -l nvidia.com/dynamo-component-type=planner -f \
+#     | grep -E "Observed|scaling|replicas|throughput"
+#
+# Verify Prometheus is scraping the router:
+#   kubectl port-forward -n monitoring \
+#     svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+#   curl -s 'http://localhost:9090/api/v1/query' \
+#     --data-urlencode 'query=dynamo_component_router_requests_total' | python3 -m json.tool
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: mocker-router-metrics-test
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${IMAGE}
+
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${IMAGE}
+          workingDir: /workspace/components/src/dynamo/planner
+          command:
+            - python3
+            - -m
+            - planner_sla
+          args:
+            - --environment=kubernetes
+            - --backend=mocker
+            - --mode=disagg
+            # --- key flag being tested ---
+            - --throughput-metrics-source=router
+            # short interval for fast feedback during testing
+            - --adjustment-interval=30
+            # SLA targets (generous; mocker with speedup-ratio=5 easily meets them)
+            - --ttft=2000
+            - --itl=200
+            # disable GPU budget check: mocker workers have no GPU resources in the DGD
+            - --max-gpu-budget=-1
+            # profiling data bundled in the container image; same dataset mocker workers use
+            - --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            # disable correction factor to keep things simple for testing
+            - --no-correction
+
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${IMAGE}
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.mocker
+          args:
+            - --model-path
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --model-name
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            # run 5x faster than wall-clock so the planner sees meaningful traffic quickly
+            - --speedup-ratio
+            - "5.0"
+            - --planner-profile-data
+            - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - --is-prefill-worker
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${IMAGE}
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.mocker
+          args:
+            - --model-path
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --model-name
+            - nvidia/Llama-3.1-8B-Instruct-FP8
+            - --speedup-ratio
+            - "5.0"
+            - --planner-profile-data
+            - /workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - --is-decode-worker
