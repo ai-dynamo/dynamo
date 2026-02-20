@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Test that the ai-dynamo-runtime wheel does not bundle nixl shared libraries."""
+"""Test that the ai-dynamo-runtime wheel does not bundle shared libraries."""
 
 import importlib.metadata
 
@@ -27,15 +27,12 @@ pytestmark = [
 ]
 
 
-NIXL_LIBS = {"libnixl.so", "libnixl_build.so", "libnixl_common.so", "libstream.so", "libserdes.so"}
+def test_no_bundled_shared_libraries():
+    """Ensure ai-dynamo-runtime wheel does not bundle any shared libraries.
 
-
-def test_no_bundled_nixl_libraries():
-    """Ensure ai-dynamo-runtime wheel does not bundle nixl shared libraries.
-
-    Nixl .so files should come from pip install nixl, not be bundled inside
-    the wheel by auditwheel.  If this test fails, check the --exclude flags
-    in the auditwheel repair command in
+    All .so dependencies should come from system installs or pip packages,
+    not be bundled inside the wheel by auditwheel.  If this test fails,
+    add --exclude flags to the auditwheel repair command in
     container/templates/wheel_builder.Dockerfile.
     """
     dist = importlib.metadata.distribution("ai-dynamo-runtime")
@@ -43,15 +40,14 @@ def test_no_bundled_nixl_libraries():
     if files is None:
         pytest.skip("No RECORD available for ai-dynamo-runtime (editable install?)")
 
-    bundled_nixl = [
+    bundled_libs = [
         str(f)
         for f in files
-        if "ai_dynamo_runtime.libs" in str(f)
-        and any(name in str(f) for name in NIXL_LIBS)
+        if "ai_dynamo_runtime.libs" in str(f) and str(f).endswith(".so")
     ]
-    assert not bundled_nixl, (
-        "Nixl shared libraries should not be bundled in ai-dynamo-runtime wheel:\n"
-        + "\n".join(f"  {lib}" for lib in bundled_nixl)
-        + "\nCheck --exclude flags in auditwheel repair in "
+    assert not bundled_libs, (
+        "Unexpected shared libraries bundled in ai-dynamo-runtime wheel:\n"
+        + "\n".join(f"  {lib}" for lib in bundled_libs)
+        + "\nAdd --exclude flags to auditwheel repair in "
         "container/templates/wheel_builder.Dockerfile"
     )
