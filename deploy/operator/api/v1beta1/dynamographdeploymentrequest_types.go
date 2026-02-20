@@ -21,6 +21,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
@@ -280,19 +281,21 @@ type BackendType string
 
 const (
 	BackendTypeAuto   BackendType = "auto"
-	BackendTypeSGLang BackendType = "sglang"
-	BackendTypeTRTLLM BackendType = "trtllm"
-	BackendTypeVLLM   BackendType = "vllm"
+	BackendTypeSglang BackendType = "sglang"
+	BackendTypeTrtllm BackendType = "trtllm"
+	BackendTypeVllm   BackendType = "vllm"
 )
 
 // WorkloadSpec defines the workload characteristics for SLA-based profiling.
 type WorkloadSpec struct {
 	// ISL is the Input Sequence Length (number of tokens).
 	// +optional
+	// +kubebuilder:default=4000
 	ISL *int32 `json:"isl,omitempty"`
 
 	// OSL is the Output Sequence Length (number of tokens).
 	// +optional
+	// +kubebuilder:default=1000
 	OSL *int32 `json:"osl,omitempty"`
 
 	// Concurrency is the target concurrency level.
@@ -306,7 +309,8 @@ type WorkloadSpec struct {
 	RequestRate *float64 `json:"requestRate,omitempty"`
 }
 
-// SLASpec defines the service-level agreement targets.
+// SLASpec defines the service-level agreement targets for profiling optimization.
+// Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
 type SLASpec struct {
 	// OptimizationType controls the profiling optimization strategy.
 	// Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
@@ -316,10 +320,12 @@ type SLASpec struct {
 
 	// TTFT is the Time To First Token target in milliseconds.
 	// +optional
+	// +python-default=2000
 	TTFT *float64 `json:"ttft,omitempty"`
 
 	// ITL is the Inter-Token Latency target in milliseconds.
 	// +optional
+	// +python-default=30
 	ITL *float64 `json:"itl,omitempty"`
 
 	// E2ELatency is the target end-to-end request latency in milliseconds.
@@ -353,8 +359,19 @@ type OverridesSpec struct {
 	// +optional
 	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
 
-	// DGD allows providing a full or partial DynamoGraphDeployment to use as the base
-	// for the generated deployment. Fields from profiling results are merged on top.
+	// DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment
+	// to use as the base for the generated deployment. Fields from profiling results
+	// are merged on top. Use this to override backend worker images.
+	//
+	// The field is stored as a raw embedded resource rather than a typed
+	// *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already
+	// imports v1beta1 as the conversion hub and Go does not allow import cycles.
+	//
+	// The EmbeddedResource marker tells the API server to validate that the value is a
+	// well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it
+	// is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,
+	// kind, and field schema) is performed by the controller during reconciliation.
+	// TODO(future MR): add webhook admission validation for the DGD field type.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:EmbeddedResource
@@ -464,8 +481,10 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
 	Backend BackendType `json:"backend,omitempty"`
 
-	// Image is the container image reference for the deployment.
+	// Image is the container image reference for the profiling job (frontend image).
 	// Example: "nvcr.io/nvidia/dynamo-runtime:latest"
+	// TODO: In a future MR, the operator will derive the backend inference image from the
+	// backend type automatically; backend images can be overridden via overrides.dgd.
 	// +optional
 	Image string `json:"image,omitempty"`
 
@@ -684,8 +703,8 @@ func init() {
 }
 
 // SetPhase updates the Phase field in the DGDR status.
-func (s *DynamoGraphDeploymentRequest) SetPhase(phase DGDRPhase) {
-	s.Status.Phase = phase
+func (d *DynamoGraphDeploymentRequest) SetPhase(phase DGDRPhase) {
+	d.Status.Phase = phase
 }
 
 // GetPhase returns the current lifecycle phase.
@@ -704,16 +723,7 @@ func (d *DynamoGraphDeploymentRequest) ClearProfilingPhase() {
 }
 
 // AddStatusCondition adds or updates a condition in the status.
-// If a condition with the same type already exists, it replaces it.
-func (s *DynamoGraphDeploymentRequest) AddStatusCondition(condition metav1.Condition) {
-	if s.Status.Conditions == nil {
-		s.Status.Conditions = []metav1.Condition{}
-	}
-	for i, existing := range s.Status.Conditions {
-		if existing.Type == condition.Type {
-			s.Status.Conditions[i] = condition
-			return
-		}
-	}
-	s.Status.Conditions = append(s.Status.Conditions, condition)
+// Uses apimeta.SetStatusCondition to correctly preserve LastTransitionTime.
+func (d *DynamoGraphDeploymentRequest) AddStatusCondition(condition metav1.Condition) {
+	apimeta.SetStatusCondition(&d.Status.Conditions, condition)
 }

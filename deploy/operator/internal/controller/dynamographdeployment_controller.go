@@ -53,20 +53,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
-	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	rbacv1 "k8s.io/api/rbac/v1"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
-type State string
 type Reason string
 type Message string
-
-const (
-	DGDStateFailed  State = "failed"
-	DGDStateReady   State = "successful"
-	DGDStatePending State = "pending"
-)
 
 // rbacManager interface for managing RBAC resources
 type rbacManager interface {
@@ -108,7 +100,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	reason := Reason("undefined")
 	message := Message("")
-	state := DGDStatePending
+	state := nvidiacomv1alpha1.DGDStatePending
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
@@ -123,14 +115,14 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 
 		if err != nil {
-			state = DGDStateFailed
+			state = nvidiacomv1alpha1.DGDStateFailed
 			message = Message(err.Error())
 			logger.Error(err, "Reconciliation failed")
 		}
-		dynamoDeployment.SetState(string(state))
+		dynamoDeployment.SetState(state)
 
 		readyStatus := metav1.ConditionFalse
-		if state == DGDStateReady {
+		if state == nvidiacomv1alpha1.DGDStateSuccessful {
 			readyStatus = metav1.ConditionTrue
 		}
 
@@ -142,6 +134,12 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			Message:            string(message),
 			LastTransitionTime: metav1.Now(),
 		})
+
+		// Only set ObservedGeneration when reconciliation succeeded (no error),
+		// so it accurately reflects the last successfully processed generation.
+		if err == nil {
+			dynamoDeployment.Status.ObservedGeneration = dynamoDeployment.Generation
+		}
 
 		updateErr := r.Status().Update(ctx, dynamoDeployment)
 		if updateErr != nil {
@@ -165,28 +163,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Validate the DynamoGraphDeployment spec (defense in depth - only when webhooks are disabled)
-	if !r.Config.WebhooksEnabled {
-		validator := webhookvalidation.NewDynamoGraphDeploymentValidator(dynamoDeployment)
-		if _, validationErr := validator.Validate(ctx); validationErr != nil {
-			logger.Error(validationErr, "DynamoGraphDeployment validation failed, refusing to reconcile")
-
-			// Set validation error state and reason (defer will update status)
-			state = DGDStateFailed
-			reason = Reason("ValidationFailed")
-			message = Message(fmt.Sprintf("Validation failed: %v", validationErr))
-
-			// Record event for visibility
-			r.Recorder.Event(dynamoDeployment, corev1.EventTypeWarning, "ValidationFailed", validationErr.Error())
-
-			// Don't requeue - user must fix the spec
-			logger.Info("DynamoGraphDeployment is invalid, not reconciling until spec is fixed")
-
-			// Return without error so defer updates status but doesn't requeue
-			return ctrl.Result{}, nil
-		}
-	}
-
 	if r.supportsManagedRollingUpdate(dynamoDeployment) {
 		if err = r.initializeWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
 			logger.Error(err, "Failed to initialize worker hash")
@@ -197,7 +173,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if r.isRollingUpdateInProgress(dynamoDeployment) || r.shouldTriggerRollingUpdate(dynamoDeployment) {
 			if err = r.reconcileRollingUpdate(ctx, dynamoDeployment); err != nil {
 				logger.Error(err, "Failed to reconcile rolling update")
-				state = DGDStateFailed
+				state = nvidiacomv1alpha1.DGDStateFailed
 				reason = Reason("RollingUpdateFailed")
 				message = Message(err.Error())
 				return ctrl.Result{}, err
@@ -242,8 +218,8 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			// Keep the reconcileResult state (should be Ready if resources are ready)
 		case nvidiacomv1alpha1.RollingUpdatePhasePending, nvidiacomv1alpha1.RollingUpdatePhaseInProgress:
 			// Rolling update in progress - resources are being transitioned
-			if state != DGDStateFailed {
-				state = DGDStatePending
+			if state != nvidiacomv1alpha1.DGDStateFailed {
+				state = nvidiacomv1alpha1.DGDStatePending
 				reason = "rolling_update_in_progress"
 				message = "Rolling update in progress"
 			}
@@ -260,7 +236,7 @@ type Resource interface {
 }
 
 type ReconcileResult struct {
-	State         State
+	State         nvidiacomv1alpha1.DGDState
 	Reason        Reason
 	Message       Message
 	ServiceStatus map[string]nvidiacomv1alpha1.ServiceReplicaStatus
@@ -630,7 +606,18 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		// else, only create for the frontend component
 		isK8sDiscoveryEnabled := r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations)
 		if isK8sDiscoveryEnabled || component.ComponentType == consts.ComponentTypeFrontend {
-			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName, isK8sDiscoveryEnabled)
+			if component.DynamoNamespace == nil {
+				return ReconcileResult{}, fmt.Errorf("expected component %s to have a dynamoNamespace", componentName)
+			}
+			mainComponentService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+				ServiceName:     dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""),
+				Namespace:       dynamoDeployment.Namespace,
+				ComponentType:   component.ComponentType,
+				DynamoNamespace: *component.DynamoNamespace,
+				ComponentName:   componentName,
+				Labels:          component.Labels,
+				IsK8sDiscovery:  isK8sDiscoveryEnabled,
+			})
 			if err != nil {
 				logger.Error(err, "failed to generate the main component service")
 				return ReconcileResult{}, fmt.Errorf("failed to generate the main component service: %w", err)
@@ -1003,14 +990,14 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 
 	if len(notReadyResources) == 0 {
 		return ReconcileResult{
-			State:         DGDStateReady,
+			State:         nvidiacomv1alpha1.DGDStateSuccessful,
 			Reason:        "all_resources_are_ready",
 			Message:       Message("All resources are ready"),
 			ServiceStatus: serviceStatuses,
 		}
 	}
 	return ReconcileResult{
-		State:         DGDStatePending,
+		State:         nvidiacomv1alpha1.DGDStatePending,
 		Reason:        "some_resources_are_not_ready",
 		Message:       Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))),
 		ServiceStatus: serviceStatuses,

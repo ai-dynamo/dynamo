@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from io import BytesIO
 
 import pytest
 from pytest_httpserver import HTTPServer
@@ -15,6 +16,28 @@ MULTIMODAL_IMG_PATH = os.path.join(
     WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
 )
 MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
+
+
+# Git LFS pointer files start with "version "; serve a real PNG when the asset is not pulled.
+def get_multimodal_test_image_bytes() -> bytes:
+    """Return valid PNG bytes for /llm-graphic.png (file or minimal fallback)."""
+    if os.path.isfile(MULTIMODAL_IMG_PATH):
+        with open(MULTIMODAL_IMG_PATH, "rb") as f:
+            data = f.read()
+        if not data.startswith(b"version "):
+            # GitHub path
+            return data
+
+    # Local path where we cannot retrieve the above .png file
+
+    # Lazy import so conftest loads in environments that don't have Pillow (e.g. pre-commit).
+    from PIL import Image
+
+    buf = BytesIO()
+    # TODO: differerent models / tests may expect different colors. Need to reconcicle
+    # code to support all cases locally if needed.
+    Image.new("RGB", (2, 2), color="green").save(buf, format="PNG")
+    return buf.getvalue()
 
 
 @pytest.fixture(scope="session")
@@ -33,15 +56,14 @@ def image_server(httpserver: HTTPServer):
 
     Currently serves:
         - /llm-graphic.png - LLM diagram image for multimodal tests
+          (or a minimal PNG if the file is a Git LFS pointer / not pulled)
 
     Usage:
         def test_multimodal(image_server):
             url = "http://localhost:8765/llm-graphic.png"
             # ... use url in your test payload
     """
-    # Load LLM graphic image from shared test data
-    with open(MULTIMODAL_IMG_PATH, "rb") as f:
-        image_data = f.read()
+    image_data = get_multimodal_test_image_bytes()
 
     # Configure server endpoint
     httpserver.expect_request("/llm-graphic.png").respond_with_data(

@@ -80,7 +80,13 @@ def validate_args(args):
             "cuda_version": ["13.1"],
         },
         "sglang": {
-            "target": ["runtime", "dev", "local-dev", "wheel_builder", "base"],
+            "target": [
+                "runtime",
+                "dev",
+                "local-dev",
+                "wheel_builder",
+                "base",
+            ],
             "cuda_version": ["12.9", "13.0"],
         },
         "dynamo": {
@@ -102,15 +108,13 @@ def validate_args(args):
             and args.cuda_version in valid_inputs[args.framework]["cuda_version"]
         ):
             return
-        else:
-            raise ValueError(
-                f"Invalid input combination: [framework={args.framework},target={args.target},cuda_version={args.cuda_version}]"
-            )
+        raise ValueError(
+            f"Invalid input combination: [framework={args.framework},target={args.target},cuda_version={args.cuda_version}]"
+        )
 
     raise ValueError(
         f"Invalid input combination: [framework={args.framework},target={args.target},cuda_version={args.cuda_version}]"
     )
-    return
 
 
 def render(args, context, script_dir):

@@ -59,7 +59,7 @@ spec:
             specific performance and resource constraints, enabling SLA-driven deployments.
 
             Lifecycle:
-             1. Initial → Pending: Validates spec and prepares for profiling
+             1. Initializing → Pending: Validates spec and prepares for profiling
              2. Pending → Profiling: Creates and runs profiling job (online or AIC)
              3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
              4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
@@ -422,10 +422,18 @@ spec:
                       description: Namespace is the namespace of the created DynamoGraphDeployment.
                       type: string
                     state:
+                      default: initializing
                       description: |-
                         State is the current state of the DynamoGraphDeployment.
                         This value is mirrored from the DGD's status.state field.
+                      enum:
+                        - initializing
+                        - pending
+                        - successful
+                        - failed
                       type: string
+                  required:
+                    - state
                   type: object
                 generatedDeployment:
                   description: |-
@@ -449,11 +457,19 @@ spec:
                     Format: "configmap/\<name\>"
                   type: string
                 state:
-                  description: |-
-                    State is a high-level textual status of the deployment request lifecycle.
-                    Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"
-                    Empty string ("") represents the initial state before initialization.
+                  default: Initializing
+                  description: State is a high-level textual status of the deployment request lifecycle.
+                  enum:
+                    - Initializing
+                    - Pending
+                    - Profiling
+                    - Deploying
+                    - Ready
+                    - DeploymentDeleted
+                    - Failed
                   type: string
+              required:
+                - state
               type: object
           type: object
       served: true
@@ -626,8 +642,9 @@ spec:
                   type: object
                 image:
                   description: |-
-                    Image is the container image reference for the deployment.
+                    Image is the container image reference for the profiling job (frontend image).
                     Example: "nvcr.io/nvidia/dynamo-runtime:latest"
+                    backend type automatically; backend images can be overridden via overrides.dgd.
                   type: string
                 legacy:
                   description: |-
@@ -827,8 +844,18 @@ spec:
                   properties:
                     dgd:
                       description: |-
-                        DGD allows providing a full or partial DynamoGraphDeployment to use as the base
-                        for the generated deployment. Fields from profiling results are merged on top.
+                        DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment
+                        to use as the base for the generated deployment. Fields from profiling results
+                        are merged on top. Use this to override backend worker images.
+
+                        The field is stored as a raw embedded resource rather than a typed
+                        *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already
+                        imports v1beta1 as the conversion hub and Go does not allow import cycles.
+
+                        The EmbeddedResource marker tells the API server to validate that the value is a
+                        well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it
+                        is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,
+                        kind, and field schema) is performed by the controller during reconciliation.
                       type: object
                       x-kubernetes-embedded-resource: true
                       x-kubernetes-preserve-unknown-fields: true
@@ -9274,10 +9301,12 @@ spec:
                         Required (or RequestRate) when the planner is disabled.
                       type: number
                     isl:
+                      default: 4000
                       description: ISL is the Input Sequence Length (number of tokens).
                       format: int32
                       type: integer
                     osl:
+                      default: 1000
                       description: OSL is the Output Sequence Length (number of tokens).
                       format: int32
                       type: integer

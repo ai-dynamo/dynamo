@@ -145,7 +145,8 @@ generate: controller-gen generate-pydantic ## Generate code containing DeepCopy,
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
 
 .PHONY: generate-pydantic
-generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types
+generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (requires Python 3 + pydantic)
+	@python3 -c "import pydantic" 2>/dev/null || { echo "Error: pydantic not found. Install with: pip install pydantic"; exit 1; }
 	@echo "Generating Pydantic models from v1beta1 DGDR types..."
 	@python3 api/scripts/generate_pydantic_from_go.py
 	@echo "Running Pydantic validation tests..."
@@ -337,6 +338,9 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/pages/kubernetes/api-reference.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
+	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
+	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
+	python3 docs/fix-api-anchors.py ../../docs/pages/kubernetes/api-reference.md
 
 .PHONY: coverage
 coverage: test
