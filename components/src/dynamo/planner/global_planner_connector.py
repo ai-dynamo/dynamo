@@ -208,7 +208,7 @@ class GlobalPlannerConnector(PlannerConnector):
             "(GlobalPlanner manages deployment state)"
         )
 
-    def get_model_name(self) -> str:
+    def get_model_name(self, **kwargs) -> str:
         """
         Get model name.
 
