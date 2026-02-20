@@ -128,9 +128,11 @@ impl KvEventPublisher {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
-        // Use endpoint parameter (component parameter removed)
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::from_endpoint(
-            &endpoint.inner,
+        // Extract component from endpoint
+        let component = endpoint.inner.component().clone();
+
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
+            component,
             kv_block_size as u32,
             source_config,
             enable_local_indexer,
