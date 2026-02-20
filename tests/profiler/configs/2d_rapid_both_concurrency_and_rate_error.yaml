@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Case 2d: Both concurrency and requestRate specified — should fail validation
 model: "Qwen/Qwen3-32B"
 backend: trtllm

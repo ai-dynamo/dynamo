@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Case 4: AIC unsupported model, rapid, without planner
 # l40s + vllm has no disagg support in AIC
 model: "Qwen/Qwen3-32B"

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Case 8: Thorough mode with empty candidate list
 # DeepSeek-R1 (671B MoE) on 1 L40S GPU — far too small to fit,
 # enumerate_profiling_configs should return empty lists.

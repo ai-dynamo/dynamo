@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Case 2c: AIC supported model, rapid, without planner, e2eLatency instead of ttft/itl
 model: "Qwen/Qwen3-32B"
 backend: trtllm

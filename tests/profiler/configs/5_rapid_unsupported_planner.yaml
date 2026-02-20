@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Case 5: AIC unsupported model, rapid, with planner
 # Should raise error if throughput scaling is enabled (AIC unsupported).
 # This config uses load-based scaling only to test the non-error path.
