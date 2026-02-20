@@ -85,3 +85,13 @@ Instead of an explicit engine state enum, the same probe behavior can be achieve
 **Trade-off vs explicit state machine**: Covers Init, Standby, and Active implicitly through existing APIs. Does not cover the Waking state — a hung wake goes undetected by the probe. Mitigation: add a timeout inside the `wake_up()` handler that self-terminates the process on expiry.
 
 **Requires**: Exposing `set_health_status` to Python (not currently available in bindings).
+
+## Decision 3: Coordinatorless Weight Loading
+
+Both engines can start in shadow mode and race to init simultaneously without a dedicated coordinator. The GMS `RW_OR_RO` lock mode handles this automatically:
+
+- The first engine to connect gets the RW lock and loads weights normally.
+- The second engine's `RW_OR_RO` request sees RW is unavailable, falls back to waiting for RO. It blocks in `_acquire_lock` until the first engine calls `commit()`.
+- Once committed, the second engine gets an RO lock and imports the same weights (shared physical memory, separate VA mappings). No duplicate weight loading occurs.
+
+This is handled entirely by the existing GMS server lock FSM (`server/locking.py`) and `_acquire_lock` in `server/rpc.py` (lines 226-255). No additional coordination logic is needed for the weight init phase.
