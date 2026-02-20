@@ -54,3 +54,5 @@ spec:
             - --model
             - Qwen/Qwen3-0.6B
             - --is-prefill-worker
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'

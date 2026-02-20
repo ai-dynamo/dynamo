@@ -79,11 +79,7 @@ class GlobalRouterHandler:
         # Connect to prefill pool local routers
         for idx, namespace in enumerate(self.config.prefill_pool_dynamo_namespaces):
             try:
-                endpoint = (
-                    self.runtime.namespace(namespace)
-                    .component("router")
-                    .endpoint("generate")
-                )
+                endpoint = self.runtime.endpoint(f"{namespace}.router.generate")
                 client = await endpoint.client()
                 self.prefill_clients[namespace] = client
                 logger.info(
@@ -98,11 +94,7 @@ class GlobalRouterHandler:
         # Connect to decode pool local routers
         for idx, namespace in enumerate(self.config.decode_pool_dynamo_namespaces):
             try:
-                endpoint = (
-                    self.runtime.namespace(namespace)
-                    .component("router")
-                    .endpoint("generate")
-                )
+                endpoint = self.runtime.endpoint(f"{namespace}.router.generate")
                 client = await endpoint.client()
                 self.decode_clients[namespace] = client
                 logger.info(

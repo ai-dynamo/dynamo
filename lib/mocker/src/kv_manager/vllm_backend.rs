@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # KV Manager
+//! # KV Manager (vLLM Backend)
 //! A synchronous implementation of a block manager that handles MoveBlock signals for caching KV blocks.
+//!
+//! Uses [`HashCache`] for O(1) block lookups with active/inactive pool management.
 //!
 //! ## Block Operations
 //! The KV manager processes four types of MoveBlock signals:
@@ -32,11 +34,9 @@
 //! For simplicity (or non-simplicity), reference counting is tracked manually instead of using
 //! the more idiomatic built-in Arc reference counter. This can be considered a shadow / mirror
 //! implementation of the main block manager.
-
-use crate::evictor::LRUEvictor;
-use crate::protocols::{KvCacheEventSink, MoveBlock, PrefillCost};
-use crate::sequence::ActiveSequence;
-use derive_getters::Getters;
+use crate::cache::HashCache;
+use crate::common::protocols::{KvCacheEventSink, MoveBlock, PrefillCost};
+use crate::common::sequence::ActiveSequence;
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
@@ -56,23 +56,11 @@ static KV_CACHE_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
         .unwrap_or(false)
 });
 
-#[derive(Getters)]
 pub struct KvManager {
-    #[getter(copy)]
-    max_capacity: usize,
-
-    #[getter(copy)]
+    cache: HashCache,
     block_size: usize,
-
-    active_blocks: HashMap<UniqueBlock, usize>,
-
-    inactive_blocks: LRUEvictor<UniqueBlock>,
-
     kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
-
-    #[getter(copy)]
     dp_rank: u32,
-
     next_event_id: u64,
 }
 
@@ -87,9 +75,7 @@ impl KvManager {
         kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
         dp_rank: u32,
     ) -> Self {
-        let active_blocks = HashMap::new();
-        let inactive_blocks = LRUEvictor::default();
-
+        debug_assert!(max_capacity > 0, "max_capacity must be > 0");
         if kv_event_sink.is_some() {
             tracing::info!(
                 "KvManager initialized with event sink for DP rank {dp_rank} with block_size {block_size}"
@@ -97,10 +83,8 @@ impl KvManager {
         }
 
         KvManager {
-            max_capacity,
+            cache: HashCache::new(max_capacity),
             block_size,
-            active_blocks,
-            inactive_blocks,
             kv_event_sink,
             dp_rank,
             next_event_id: 0,
@@ -120,17 +104,18 @@ impl KvManager {
         }
 
         if *KV_CACHE_TRACE_ENABLED {
+            let active_len = self.cache.num_active();
+            let inactive_len = self.cache.num_inactive();
+            let free_blocks = self
+                .cache
+                .max_capacity()
+                .saturating_sub(active_len)
+                .saturating_sub(inactive_len);
+            let event = if is_store { "allocation" } else { "eviction" };
             let timestamp_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            let active_len = self.active_blocks.len();
-            let inactive_len = self.inactive_blocks.len();
-            let free_blocks = self
-                .max_capacity
-                .saturating_sub(active_len)
-                .saturating_sub(inactive_len);
-            let event = if is_store { "allocation" } else { "eviction" };
             tracing::info!(
                 event,
                 timestamp_ms,
@@ -139,7 +124,7 @@ impl KvManager {
                 free_blocks_after = free_blocks,
                 active_blocks = active_len,
                 inactive_blocks = inactive_len,
-                total_blocks = self.max_capacity,
+                total_blocks = self.cache.max_capacity(),
                 dp_rank = self.dp_rank,
                 "KV cache trace"
             );
@@ -176,8 +161,7 @@ impl KvManager {
                     .collect(),
             })
         };
-
-        // Use incremental event ID starting from 0
+        // Use incremental event ID starting from 0 and incrementing by 1 for each event.
         let event_id = self.next_event_id;
         self.next_event_id += 1;
 
@@ -201,28 +185,22 @@ impl KvManager {
                 let mut parent_block: Option<&UniqueBlock> = None;
                 for hash in hashes {
                     // First check if it already exists in active blocks
-                    if let Some(ref_count) = self.active_blocks.get_mut(hash) {
+                    if self.cache.contains_active(hash) {
                         // Block already active, just increment reference count
-                        *ref_count += 1;
+                        self.cache.increment_ref(hash);
                         parent_block = Some(hash);
                         continue;
                     }
 
                     // Then check if it exists in inactive and move it to active if found
-                    if self.inactive_blocks.remove(hash) {
-                        // Insert into active with reference count 1
-                        self.active_blocks.insert(hash.clone(), 1);
+                    if self.cache.reactivate(hash) {
                         parent_block = Some(hash);
                         continue;
                     }
 
-                    // Get counts for capacity check
-                    let active_count = self.active_blocks.len();
-                    let inactive_count = self.inactive_blocks.len();
-
                     // If at max capacity, evict the oldest entry from inactive blocks
-                    if active_count + inactive_count >= self.max_capacity {
-                        let Some(evicted) = self.inactive_blocks.evict() else {
+                    if self.cache.is_at_capacity() {
+                        let Some(evicted) = self.cache.evict_inactive() else {
                             return false;
                         };
                         tracing::trace!(
@@ -235,7 +213,7 @@ impl KvManager {
                     }
 
                     // Now insert the new block in active blocks with reference count 1
-                    self.active_blocks.insert(hash.clone(), 1);
+                    self.cache.insert_active(hash.clone(), 1);
                     // Track blocks for trace/event
                     if let UniqueBlock::FullBlock(stored_full_block) = hash {
                         blocks_stored.push(*stored_full_block);
@@ -252,11 +230,9 @@ impl KvManager {
 
             MoveBlock::Destroy(hashes) => {
                 let mut blocks_destroyed = Vec::<u64>::new();
-
                 // Process blocks in order (already reversed by caller if needed)
                 for hash in hashes.iter() {
-                    self.active_blocks.remove(hash).unwrap();
-
+                    self.cache.remove_active(hash).unwrap();
                     // Track blocks for batch sending
                     if let UniqueBlock::FullBlock(destroyed_full_block) = hash {
                         blocks_destroyed.push(*destroyed_full_block);
@@ -270,17 +246,16 @@ impl KvManager {
                 // Process blocks in order (already reversed by caller if needed)
                 for hash in hashes.iter() {
                     // Decrement reference count and check if we need to move to inactive
-                    if let Some(ref_count) = self.active_blocks.get_mut(hash) {
-                        if *ref_count == 0 {
+                    if let Some(ref_count) = self.cache.get_active_ref_count(hash) {
+                        if ref_count == 0 {
                             panic!("Negative reference count would be encountered after Deref.");
                         }
-                        *ref_count -= 1;
 
                         // If reference count reaches zero, remove from active and move to inactive
-                        if *ref_count == 0 {
-                            self.active_blocks.remove(hash);
-                            // Use the LRUEvictor's timing functionality
-                            self.inactive_blocks.insert(hash.clone());
+                        if ref_count == 1 {
+                            self.cache.deactivate(hash);
+                        } else {
+                            self.cache.decrement_ref(hash);
                         }
                     }
                 }
@@ -291,16 +266,21 @@ impl KvManager {
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
                 assert_eq!(
-                    self.active_blocks.remove(&uuid_block),
+                    self.cache.remove_active(&uuid_block),
                     Some(1),
                     "uuid_block {uuid_block:?} should exist and be unique with ref_count=1"
                 );
 
-                let hash_ref_count = self.active_blocks.get(&hash_block).copied();
-                let is_new = hash_ref_count.is_none() && !self.inactive_blocks.remove(&hash_block);
+                let hash_ref_count = self.cache.get_active_ref_count(&hash_block);
+                // Block is new if it's not in active and not in inactive
+                let is_new = if hash_ref_count.is_some() {
+                    false
+                } else {
+                    !self.cache.remove_inactive(&hash_block)
+                };
 
-                self.active_blocks
-                    .insert(hash_block.clone(), hash_ref_count.unwrap_or(0) + 1);
+                self.cache
+                    .insert_active(hash_block, hash_ref_count.unwrap_or(0) + 1);
 
                 if is_new {
                     self.publish_kv_event(vec![*hash], &[*local_hash], *parent_hash, true);
@@ -316,48 +296,60 @@ impl KvManager {
     pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         blocks
             .iter()
-            .filter(|&block| {
-                !self.active_blocks.contains_key(block) && !self.inactive_blocks.contains(block)
-            })
+            .filter(|&block| !self.cache.contains(block))
             .count()
     }
 
     /// Get the current capacity (active blocks + inactive blocks)
     pub fn current_capacity(&self) -> usize {
-        let active = self.active_blocks.len();
-        let inactive = self.inactive_blocks.len();
-        active + inactive
+        self.cache.current_capacity()
     }
 
     /// Get the current capacity as a percentage of the maximum capacity
     pub fn current_capacity_perc(&self) -> f64 {
-        let current = self.current_capacity() as f64;
-        current / self.max_capacity as f64
+        self.cache.current_capacity() as f64 / self.cache.max_capacity() as f64
     }
 
     /// Get the number of active blocks
     pub fn num_active_blocks(&self) -> usize {
-        self.active_blocks.len()
+        self.cache.num_active()
     }
 
     /// Get the percentage of active blocks relative to maximum capacity
     pub fn get_active_perc(&self) -> f64 {
-        self.active_blocks.len() as f64 / self.max_capacity as f64
+        self.cache.num_active() as f64 / self.cache.max_capacity() as f64
     }
 
     /// Get the number of inactive blocks
     pub fn num_inactive_blocks(&self) -> usize {
-        self.inactive_blocks.len()
+        self.cache.num_inactive()
     }
 
     /// Get the keys of inactive blocks
     pub fn get_inactive_blocks(&self) -> Vec<&UniqueBlock> {
-        self.inactive_blocks.keys().collect()
+        self.cache.inactive_keys().collect()
     }
 
     /// Get the keys of active blocks
     pub fn get_active_blocks(&self) -> Vec<&UniqueBlock> {
-        self.active_blocks.keys().collect()
+        self.cache.active_keys().collect()
+    }
+
+    pub fn max_capacity(&self) -> usize {
+        self.cache.max_capacity()
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    pub fn dp_rank(&self) -> u32 {
+        self.dp_rank
+    }
+
+    /// Direct access to active blocks map (for tests).
+    pub fn active_blocks(&self) -> &HashMap<UniqueBlock, usize> {
+        self.cache.active_blocks()
     }
 
     /// Check if a sequence can be scheduled and calculate cost if possible
@@ -368,7 +360,7 @@ impl KvManager {
         // We must stop at the first cache miss since KV states are computed sequentially
         let mut overlap_blocks = 0;
         for block in seq_blocks {
-            if !self.active_blocks.contains_key(block) && !self.inactive_blocks.contains(block) {
+            if !self.cache.contains(block) {
                 // First cache miss - can't use anything after this point
                 break;
             }
@@ -471,7 +463,7 @@ mod tests {
             expected_blocks: &[u64],
         ) {
             let inactive_blocks = manager.get_inactive_blocks();
-            let inactive_blocks_count = manager.inactive_blocks().len();
+            let inactive_blocks_count = manager.num_inactive_blocks();
 
             assert_eq!(
                 inactive_blocks_count, expected_size,

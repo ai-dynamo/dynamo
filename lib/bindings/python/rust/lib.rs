@@ -150,7 +150,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
-    m.add_class::<Namespace>()?;
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
@@ -463,13 +462,6 @@ struct CancellationToken {
 
 #[pyclass]
 #[derive(Clone)]
-struct Namespace {
-    inner: rs::component::Namespace,
-    event_loop: PyObject,
-}
-
-#[pyclass]
-#[derive(Clone)]
 struct Component {
     inner: rs::component::Component,
     event_loop: PyObject,
@@ -648,9 +640,34 @@ impl DistributedRuntime {
         })
     }
 
-    fn namespace(&self, name: String) -> PyResult<Namespace> {
-        Ok(Namespace {
-            inner: self.inner.namespace(name).map_err(to_pyerr)?,
+    /// Get an endpoint directly by path (e.g., "namespace.component.endpoint" or "dyn://...").
+    fn endpoint(&self, path: String) -> PyResult<Endpoint> {
+        let trimmed_path = path.trim_start_matches("dyn://");
+        let parts: Vec<&str> = trimmed_path.split('.').collect();
+
+        if parts.len() != 3 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid endpoint path '{}'. Expected format: 'namespace.component.endpoint' or 'dyn://namespace.component.endpoint'",
+                path
+            )));
+        }
+
+        let namespace_name = parts[0];
+        let component_name = parts[1];
+        let endpoint_name = parts[2];
+
+        // Get endpoint using existing chain
+        let namespace = self
+            .inner
+            .namespace(namespace_name.to_string())
+            .map_err(to_pyerr)?;
+        let component = namespace
+            .component(component_name.to_string())
+            .map_err(to_pyerr)?;
+        let endpoint = component.endpoint(endpoint_name.to_string());
+
+        Ok(Endpoint {
+            inner: endpoint,
             event_loop: self.event_loop.clone(),
         })
     }
@@ -910,16 +927,16 @@ impl Endpoint {
             Ok(())
         })
     }
-}
 
-#[pymethods]
-impl Namespace {
-    fn component(&self, name: String) -> PyResult<Component> {
-        let inner = self.inner.component(name).map_err(to_pyerr)?;
-        Ok(Component {
-            inner,
+    /// Get the parent Component.
+    ///
+    /// Note: To avoid duplicate metrics registries, reuse the returned Component for
+    /// multiple endpoints: `component.endpoint("ep1")`, `component.endpoint("ep2")`.
+    fn component(&self) -> Component {
+        Component {
+            inner: self.inner.component().clone(),
             event_loop: self.event_loop.clone(),
-        })
+        }
     }
 }
 

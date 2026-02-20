@@ -679,9 +679,9 @@ securityContext:
 ## Additional Resources
 
 - [ChReK Helm Chart Values](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/values.yaml)
-- [Smart Entrypoint Script](https://github.com/ai-dynamo/dynamo/tree/main/deploy/chrek/scripts/smart-entrypoint.sh)
+- [ChReK Dockerfile](https://github.com/ai-dynamo/dynamo/tree/main/deploy/chrek/Dockerfile)
 - [CRIU Documentation](https://criu.org/Main_Page)
-- [CUDA Checkpoint Plugin](https://docs.nvidia.com/cuda/cuda-checkpoint-plugin/)
+- [CUDA Checkpoint Utility](https://github.com/NVIDIA/cuda-checkpoint)
 
 ---
 

@@ -606,6 +606,7 @@ class TestCorrectionFactorAutoDisable:
 
 
 class TestWorkerCountReconciliation:
+    @pytest.mark.asyncio
     async def test_prefill_observe_gets_only_prefill_workers(self):
         """observe_engine_load_stats for prefill queries get_recent_and_averaged_metrics('prefill')."""
         config = _build_load_config()
@@ -638,6 +639,7 @@ class TestWorkerCountReconciliation:
         assert len(planner.cached_load_metrics.recent) == 1
         assert "w1" in planner.cached_load_metrics.recent
 
+    @pytest.mark.asyncio
     async def test_decode_observe_gets_only_decode_workers(self):
         """observe_engine_load_stats for decode queries get_recent_and_averaged_metrics('decode')."""
         config = _build_load_config()

@@ -71,8 +71,8 @@ async def main(runtime: DistributedRuntime, args):
 
     logger.info("=" * 60)
 
-    # Create the GlobalPlanner component
-    component = runtime.namespace(namespace).component("GlobalPlanner")
+    # Create the GlobalPlanner component (get from first endpoint)
+    component = runtime.endpoint(f"{namespace}.GlobalPlanner.scale_request").component()
 
     # Get K8s namespace (where GlobalPlanner pod is running)
     k8s_namespace = os.environ.get("POD_NAMESPACE", "default")

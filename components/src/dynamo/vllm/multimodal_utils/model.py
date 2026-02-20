@@ -39,6 +39,7 @@ class SupportedModels:
     QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
     QWEN_2_5_VL_32B = "Qwen/Qwen2.5-VL-32B-Instruct"
     QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+    QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
     LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
@@ -118,6 +119,7 @@ QWEN_VL_MODELS = [
     SupportedModels.QWEN_2_5_VL_7B,
     SupportedModels.QWEN_2_5_VL_32B,
     SupportedModels.QWEN_3_VL_30B_A3B_FP8,
+    SupportedModels.QWEN_3_VL_8B_FP8,
 ]
 
 
@@ -147,49 +149,18 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
                 "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
             }
         )
-        # [NOTE] For vLLM pre-0.15.0, see https://github.com/vllm-project/vllm/pull/32605 for enhancement after 0.15.0
-        #
+
         # Load only the vision model via vLLM on encoder workers to avoid loading the full LLM weights, significantly reducing memory usage.
-        # Uses native vLLM encoder only model loading added in https://github.com/vllm-project/vllm/pull/30242.
-        # Model needs the class method get_language_model_spec to be defined for this to work.
-
-        # TODO(gluo/dsocek): Remove this monkey patch once vLLM upstream adds
-        # get_language_model_spec to Qwen VL model classes.
-        # Monkey patch to vLLM's Qwen 2 VL and Qwen 2.5 VL classes to add get_language_model_spec
-        from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
-        from vllm.model_executor.models.qwen2_5_vl import (
-            Qwen2_5_VLForConditionalGeneration,
-        )
-        from vllm.model_executor.models.qwen2_vl import Qwen2VLForConditionalGeneration
-        from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
-        from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
-
-        @classmethod
-        def get_language_model_spec(cls):
-            return (Qwen2ForCausalLM, "language_model")
-
-        Qwen2_5_VLForConditionalGeneration.get_language_model_spec = (
-            get_language_model_spec
-        )
-        Qwen2VLForConditionalGeneration.get_language_model_spec = (
-            get_language_model_spec
-        )
-
-        @classmethod
-        def get_language_model_spec(cls):
-            return (Qwen3ForCausalLM, "language_model")
-
-        Qwen3VLForConditionalGeneration.get_language_model_spec = (
-            get_language_model_spec
-        )
-
+        # Uses native vLLM encoder only model loading added in https://github.com/vllm-project/vllm/pull/32605.
         # Load only the vision model via vLLM
         vllm_model = LLM(
             model=model_id,
             enforce_eager=True,
-            gpu_memory_utilization=0.4,
-            max_model_len=10,
-            convert="mm_encoder_only",
+            kv_cache_memory_bytes=1024
+            * 1024
+            * 8,  # 8MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
+            max_model_len=1,
+            mm_encoder_only=True,
             enable_prefix_caching=False,
         )
         return (

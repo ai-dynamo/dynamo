@@ -75,20 +75,6 @@ class DynamoSGLangArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--image-diffusion-fs-url",
-            env_var="DYN_SGL_IMAGE_DIFFUSION_FS_URL",
-            default=None,
-            help="Filesystem URL for storing generated images using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
-        )
-        add_argument(
-            g,
-            flag_name="--image-diffusion-base-url",
-            env_var="DYN_SGL_IMAGE_DIFFUSION_BASE_URL",
-            default="http://localhost:8008/",
-            help="Base URL for rewriting image URLs in responses (e.g., http://localhost:8008/). When set, generated image URLs will use this base instead of filesystem URLs.",
-        )
-        add_argument(
-            g,
             flag_name="--disagg-config",
             env_var="DYN_SGL_DISAGG_CONFIG",
             default=None,
@@ -108,13 +94,6 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=False,
             help="Run as video generation worker for video generation (T2V/I2V).",
         )
-        add_argument(
-            g,
-            flag_name="--video-generation-fs-url",
-            env_var="DYN_SGL_VIDEO_GENERATION_FS_URL",
-            default=None,
-            help="Filesystem URL for storing generated videos using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
-        )
 
 
 class DynamoSGLangConfig(ConfigBase):
@@ -126,14 +105,11 @@ class DynamoSGLangConfig(ConfigBase):
     multimodal_worker: bool
     embedding_worker: bool
     image_diffusion_worker: bool
-    image_diffusion_fs_url: Optional[str] = None
-    image_diffusion_base_url: Optional[str] = None
 
     disagg_config: Optional[str] = None
     disagg_config_key: Optional[str] = None
 
     video_generation_worker: bool
-    video_generation_fs_url: Optional[str] = None
 
     def validate(self) -> None:
         if (self.disagg_config is not None) ^ (self.disagg_config_key is not None):

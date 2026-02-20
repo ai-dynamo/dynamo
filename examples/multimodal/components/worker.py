@@ -233,12 +233,9 @@ class VllmPDWorker(VllmBaseWorker):
                 parsed_component_name,
                 parsed_endpoint_name,
             ) = parse_endpoint(self.downstream_endpoint)
-            self.decode_worker_client = (
-                await runtime.namespace(parsed_namespace)
-                .component(parsed_component_name)
-                .endpoint(parsed_endpoint_name)
-                .client()
-            )
+            self.decode_worker_client = await runtime.endpoint(
+                f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+            ).client()
 
         if "video" in self.engine_args.model.lower():
             self.EMBEDDINGS_DTYPE = torch.uint8
@@ -435,9 +432,10 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     Instantiate and serve
     """
 
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    component = generate_endpoint.component()
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
     if args.worker_type in ["prefill", "encode_prefill"]:

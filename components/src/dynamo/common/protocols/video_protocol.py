@@ -6,6 +6,7 @@
 These types match the Rust protocol types in lib/llm/src/protocols/openai/videos.rs
 to ensure compatibility with the Dynamo HTTP frontend.
 """
+# TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
 
 from typing import Optional
 

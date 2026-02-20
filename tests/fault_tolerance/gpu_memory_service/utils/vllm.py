@@ -3,6 +3,7 @@
 
 """vLLM-specific utilities for GPU Memory Service tests."""
 
+import json
 import logging
 import os
 import shutil
@@ -34,6 +35,14 @@ class VLLMWithGMSProcess(ManagedProcess):
         log_dir = f"{request.node.name}_{engine_id}"
         shutil.rmtree(log_dir, ignore_errors=True)
 
+        kv_events_cfg = json.dumps(
+            {
+                "publisher": "zmq",
+                "topic": "kv-events",
+                "endpoint": f"tcp://*:{kv_event_port}",
+                "enable_kv_cache_events": True,
+            }
+        )
         super().__init__(
             command=[
                 "python3",
@@ -46,12 +55,13 @@ class VLLMWithGMSProcess(ManagedProcess):
                 "--enable-sleep-mode",
                 "--gpu-memory-utilization",
                 "0.8",
+                "--kv-events-config",
+                kv_events_cfg,
             ],
             env={
                 **os.environ,
                 "DYN_LOG": "debug",
                 "DYN_SYSTEM_PORT": str(system_port),
-                "DYN_VLLM_KV_EVENT_PORT": str(kv_event_port),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
             },
             health_check_urls=[

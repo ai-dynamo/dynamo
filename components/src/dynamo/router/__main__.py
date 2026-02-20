@@ -59,12 +59,9 @@ class StandaloneRouterHandler:
             namespace, component, endpoint = parts
 
             # Get worker endpoint
-            worker_endpoint = (
-                self.runtime.namespace(namespace)
-                .component(component)
-                .endpoint(endpoint)
+            worker_endpoint = self.runtime.endpoint(
+                f"{namespace}.{component}.{endpoint}"
             )
-
             self.worker_client = await worker_endpoint.client()
 
             self.kv_router = KvRouter(
@@ -182,17 +179,15 @@ async def worker(runtime: DistributedRuntime):
 
     kv_router_config = build_kv_router_config(config)
 
-    # Create service component - use "router" as component name
-    component = runtime.namespace(config.namespace).component("router")
-
     # Create handler
     handler = StandaloneRouterHandler(
         runtime, config.endpoint, config.router_block_size, kv_router_config
     )
     await handler.initialize()
 
-    # Expose endpoints
-    generate_endpoint = component.endpoint("generate")
+    # Create endpoints (get component from first endpoint to avoid duplicate metrics registries)
+    generate_endpoint = runtime.endpoint(f"{config.namespace}.router.generate")
+    component = generate_endpoint.component()
     best_worker_endpoint = component.endpoint("best_worker_id")
 
     logger.debug("Starting to serve endpoints...")

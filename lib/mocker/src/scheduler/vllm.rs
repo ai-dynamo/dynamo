@@ -28,15 +28,15 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::evictor::LRUEvictor;
-use crate::kv_manager::KvManager;
-use crate::perf_model::PerfModel;
-use crate::protocols::{
+use crate::common::evictor::LRUEvictor;
+use crate::common::perf_model::PerfModel;
+use crate::common::protocols::{
     DirectRequest, KvCacheEventSink, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost,
     WorkerType,
 };
-use crate::running_mean::RunningMean;
-use crate::sequence::ActiveSequence;
+use crate::common::running_mean::RunningMean;
+use crate::common::sequence::ActiveSequence;
+use crate::kv_manager::KvManager;
 use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
 use std::collections::{HashMap, VecDeque};

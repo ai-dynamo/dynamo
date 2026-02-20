@@ -10,7 +10,7 @@ The examples below assume you build the latest image yourself from source. If us
 
 Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph.
 
-[View Hello World Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/runtime/hello_world)
+[View Hello World Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend/hello_world)
 
 ## vLLM
 

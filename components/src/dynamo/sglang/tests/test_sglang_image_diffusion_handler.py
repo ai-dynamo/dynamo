@@ -42,8 +42,8 @@ def mock_config():
     """Mock Config object."""
     config = MagicMock()
     config.dynamo_args = MagicMock()
-    config.dynamo_args.image_diffusion_fs_url = "file:///tmp/images"
-    config.dynamo_args.image_diffusion_base_url = "file:///tmp/images"
+    config.dynamo_args.media_output_fs_url = "file:///tmp/images"
+    config.dynamo_args.media_output_http_url = "file:///tmp/images"
     return config
 
 
@@ -96,8 +96,8 @@ class TestImageDiffusionWorkerHandler:
         """Test handler initialization with URL base."""
         config = MagicMock()
         config.dynamo_args = MagicMock()
-        config.dynamo_args.image_diffusion_fs_url = "s3://my-bucket/images"
-        config.dynamo_args.image_diffusion_base_url = "http://localhost:8008/images"
+        config.dynamo_args.media_output_fs_url = "s3://my-bucket/images"
+        config.dynamo_args.media_output_http_url = "http://localhost:8008/images"
 
         handler = ImageDiffusionWorkerHandler(
             component=mock_component,

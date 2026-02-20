@@ -225,10 +225,11 @@ pub async fn start_kv_router_background(
     component: Component,
     consumer_id: String,
     indexer: Indexer,
-    cancellation_token: CancellationToken,
-    router_snapshot_threshold: Option<u32>,
-    router_reset_states: bool,
+    kv_router_config: &KvRouterConfig,
 ) -> Result<()> {
+    let cancellation_token = component.drt().primary_token();
+    let router_snapshot_threshold = kv_router_config.router_snapshot_threshold;
+    let router_reset_states = kv_router_config.router_reset_states;
     // Set up NATS connections
     let stream_name = create_kv_stream_name(&component, KV_EVENT_SUBJECT);
     let nats_server = std::env::var(env_nats::NATS_SERVER)
@@ -449,9 +450,9 @@ pub async fn start_kv_router_background(
 pub async fn start_kv_router_background_event_plane(
     component: Component,
     indexer: Indexer,
-    cancellation_token: CancellationToken,
     transport_kind: EventTransportKind,
 ) -> Result<()> {
+    let cancellation_token = component.drt().primary_token();
     // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
     // No blocking wait — recovery happens asynchronously as endpoints are discovered.
     let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer.clone()).await?;
@@ -600,9 +601,7 @@ async fn cleanup_orphaned_consumers(
 pub async fn start_subscriber(
     component: Component,
     kv_router_config: &KvRouterConfig,
-    router_id: u64,
     indexer: Indexer,
-    cancellation_token: CancellationToken,
 ) -> Result<()> {
     let transport_kind = EventTransportKind::from_env_or_default();
 
@@ -617,16 +616,8 @@ pub async fn start_subscriber(
         }
         tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
 
-        let consumer_id = router_id.to_string();
-        start_kv_router_background(
-            component,
-            consumer_id,
-            indexer,
-            cancellation_token,
-            kv_router_config.router_snapshot_threshold,
-            kv_router_config.router_reset_states,
-        )
-        .await
+        let consumer_id = component.drt().discovery().instance_id().to_string();
+        start_kv_router_background(component, consumer_id, indexer, kv_router_config).await
     } else {
         if transport_kind == EventTransportKind::Zmq {
             if kv_router_config.router_snapshot_threshold.is_some()
@@ -641,12 +632,6 @@ pub async fn start_subscriber(
             tracing::info!("Using NATS Core subscription (local_indexer mode)");
         }
 
-        start_kv_router_background_event_plane(
-            component.clone(),
-            indexer,
-            cancellation_token,
-            transport_kind,
-        )
-        .await
+        start_kv_router_background_event_plane(component, indexer, transport_kind).await
     }
 }

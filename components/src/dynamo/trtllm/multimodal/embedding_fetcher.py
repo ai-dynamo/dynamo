@@ -15,6 +15,7 @@ import torch
 from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles
@@ -148,7 +149,7 @@ async def _fetch_embeddings_with_cache(
         cached = cache.get(url_hash)
         if cached is not None:
             logger.info(f"fetch_embeddings_with_cache: cache hit for URL: {url}")
-            embeddings_with_index.append((i, cached))
+            embeddings_with_index.append((i, cached.tensor))
         else:
             logger.info(f"fetch_embeddings_with_cache: cache miss for URL: {url}")
             uncached_urls.append(url)
@@ -189,7 +190,7 @@ async def _fetch_embeddings_with_cache(
 
     # Cache new tensors (reuse hashes computed during cache lookup)
     for url, url_hash, tensor in zip(uncached_urls, uncached_hashes, new_tensors):
-        cache.set(url_hash, tensor)
+        cache.set(url_hash, CachedEmbedding(tensor=tensor))
         logger.info(
             f"fetch_embeddings_with_cache: cached embedding for URL: {url}, shape: {tensor.shape}"
         )

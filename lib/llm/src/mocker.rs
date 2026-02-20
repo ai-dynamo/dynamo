@@ -33,12 +33,14 @@ use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest
 use dynamo_kv_router::protocols::KvCacheEvent;
 
 // Re-export from dynamo-mocker for convenience
-use dynamo_mocker::bootstrap::{BootstrapServer, connect_to_prefill};
-use dynamo_mocker::protocols::OutputSignal;
-pub use dynamo_mocker::{
-    DirectRequest, KvCacheEventSink, MockEngineArgs, MockEngineArgsBuilder, Scheduler, bootstrap,
-    evictor, kv_manager, perf_model, protocols, running_mean, scheduler, sequence,
+use dynamo_mocker::common::bootstrap::{BootstrapServer, connect_to_prefill};
+use dynamo_mocker::common::protocols::OutputSignal;
+pub use dynamo_mocker::common::protocols::{
+    DirectRequest, KvCacheEventSink, MockEngineArgs, MockEngineArgsBuilder,
 };
+pub use dynamo_mocker::common::{bootstrap, perf_model, protocols, running_mean, sequence};
+pub use dynamo_mocker::scheduler::Scheduler;
+pub use dynamo_mocker::{kv_manager, scheduler};
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 

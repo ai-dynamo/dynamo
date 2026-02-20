@@ -33,10 +33,8 @@ async def main():
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, "file", "nats")
 
-    # Create server component
-    component = runtime.namespace("demo").component("server")
-
-    endpoint = component.endpoint("generate")
+    # Create server endpoint
+    endpoint = runtime.endpoint("demo.server.generate")
     handler = DemoServer()
 
     print("Demo server started")

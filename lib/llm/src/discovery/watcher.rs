@@ -589,8 +589,65 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_embeddings_model(card.name(), checksum, engine)?;
+        }
+        // Case: Text + (Images, Audio, Videos)
+        // Must come before the plain Text+Chat / Text+Completions branches because
+        // diffusion models often set both Images and Chat flags. The branch below
+        // handles the chat registration internally when supports_chat() is true.
+        else if card.model_input == ModelInput::Text
+            && (card.model_type.supports_images()
+                || card.model_type.supports_audios()
+                || card.model_type.supports_videos())
+        {
+            // Image Models can support chat completions (vllm omni way)
+            // So register chat_completions model as well
+            if card.model_type.supports_chat() {
+                let chat_router = PushRouter::<
+                    NvCreateChatCompletionRequest,
+                    Annotated<NvCreateChatCompletionStreamResponse>,
+                >::from_client_with_threshold(
+                    client.clone(),
+                    self.router_config.router_mode,
+                    None,
+                    None,
+                )
+                .await?;
+                self.manager.add_chat_completions_model(
+                    card.name(),
+                    checksum,
+                    Arc::new(chat_router),
+                )?;
+            }
+
+            // This is ModelType::Images : registers /v1/images/* endpoints
+            if card.model_type.supports_images() {
+                let images_router = PushRouter::<
+                    NvCreateImageRequest,
+                    Annotated<NvImagesResponse>,
+                >::from_client_with_threshold(
+                    client.clone(), self.router_config.router_mode, None, None
+                )
+                .await?;
+                self.manager
+                    .add_images_model(card.name(), checksum, Arc::new(images_router))?;
+            }
+
+            // This is ModelType::Videos : registers /v1/videos/* endpoints
+            if card.model_type.supports_videos() {
+                let videos_router = PushRouter::<
+                    NvCreateVideoRequest,
+                    Annotated<NvVideosResponse>,
+                >::from_client_with_threshold(
+                    client.clone(), self.router_config.router_mode, None, None
+                )
+                .await?;
+                self.manager
+                    .add_videos_model(card.name(), checksum, Arc::new(videos_router))?;
+            }
+
+            // TODO: add audio models support
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
-            // Case 3: Text + Chat
+            // Case: Text + Chat (pure text-to-text, no diffusion)
             let push_router = PushRouter::<
                 NvCreateChatCompletionRequest,
                 Annotated<NvCreateChatCompletionStreamResponse>,
@@ -602,7 +659,7 @@ impl ModelWatcher {
             self.manager
                 .add_chat_completions_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
-            // Case 2: Text + Completions
+            // Case: Text + Completions
             let push_router = PushRouter::<
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
@@ -660,60 +717,6 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
-        }
-        // Case: Text + (Images, Audio, Videos)
-        else if card.model_input == ModelInput::Text
-            && (card.model_type.supports_images()
-                || card.model_type.supports_audios()
-                || card.model_type.supports_videos())
-        {
-            // Image Models can support chat completions (vllm omni way)
-            // So register chat_completions model as well
-            if card.model_type.supports_chat() {
-                let chat_router = PushRouter::<
-                    NvCreateChatCompletionRequest,
-                    Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_threshold(
-                    client.clone(),
-                    self.router_config.router_mode,
-                    None,
-                    None,
-                )
-                .await?;
-                self.manager.add_chat_completions_model(
-                    card.name(),
-                    checksum,
-                    Arc::new(chat_router),
-                )?;
-            }
-
-            // This is ModelType::Images : registers /v1/images/* endpoints
-            if card.model_type.supports_images() {
-                let images_router = PushRouter::<
-                    NvCreateImageRequest,
-                    Annotated<NvImagesResponse>,
-                >::from_client_with_threshold(
-                    client.clone(), self.router_config.router_mode, None, None
-                )
-                .await?;
-                self.manager
-                    .add_images_model(card.name(), checksum, Arc::new(images_router))?;
-            }
-
-            // This is ModelType::Videos : registers /v1/videos/* endpoints
-            if card.model_type.supports_videos() {
-                let videos_router = PushRouter::<
-                    NvCreateVideoRequest,
-                    Annotated<NvVideosResponse>,
-                >::from_client_with_threshold(
-                    client.clone(), self.router_config.router_mode, None, None
-                )
-                .await?;
-                self.manager
-                    .add_videos_model(card.name(), checksum, Arc::new(videos_router))?;
-            }
-
-            // TODO: add audio models support
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
             // Guardrail: Verify model_input is Tokens

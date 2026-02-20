@@ -6,7 +6,7 @@ domain: nvidia.com
 layout:
 - go.kubebuilder.io/v4
 projectName: dynamo-kubernetes-operator
-repo: github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1
+repo: github.com/ai-dynamo/dynamo/deploy/operator
 resources:
 - api:
     crdVersion: v1

@@ -109,11 +109,6 @@ dynamo:
 
   groveTerminationDelay: 15m
 
-  internalImages:
-    debugger: python:3.12-slim
-
-  enableRestrictedSecurityContext: false
-
   dockerRegistry:
     server: ''
     # set to true if you want to use the kubernetes secret for the registry credentials
@@ -213,10 +208,6 @@ checkpoint:
 
 # Webhook configuration
 webhook:
-  # Enable admission webhooks for validation
-  # Enabled by default for production-ready validation and better error reporting
-  enabled: true
-
   # Certificate configuration
   certificateSecret:
     # Name of the secret containing webhook TLS certificates

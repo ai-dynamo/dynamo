@@ -27,7 +27,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 - **Dynamo Operator**: Kubernetes operator for managing Dynamo deployments
 - **NATS**: High-performance messaging system for component communication
-- **etcd**: Distributed key-value store for operator state management
+- **etcd**: Distributed key-value store for service discovery (optional, disabled by default)
 - **Grove**: Multi-node inference orchestration (optional)
 - **Kai Scheduler**: Advanced workload scheduling (optional)
 
@@ -37,6 +37,17 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 - Helm 3.8+
 - Sufficient cluster resources for your deployment scale
 - Container registry access (if using private images)
+- TLS certificate infrastructure for admission webhooks (auto-generated via Helm hooks by default, or [cert-manager](https://cert-manager.io/), or externally managed)
+
+## 🔄 Upgrading Notes
+
+### Webhooks are now mandatory (v1.0.0+)
+
+The `webhook.enabled` Helm value has been removed. Admission webhooks are now a required component of the operator and cannot be disabled. This change aligns with the upcoming addition of CRD conversion webhooks, which are mandatory for multi-version API support.
+
+No action is required for most upgrades — Helm hooks automatically generate TLS certificates and inject the CA bundle during `helm upgrade`. If you use cert-manager or externally managed certificates, ensure your existing configuration is correct before upgrading.
+
+---
 
 ## ⚠️ Important: Cluster-Wide vs Namespace-Scoped Deployment
 
@@ -93,7 +104,24 @@ For detailed NATS configuration options beyond `nats.enabled`, please refer to t
 
 ### etcd Configuration
 
-For detailed etcd configuration options beyond `etcd.enabled`, please refer to the official Bitnami etcd Helm chart documentation:
+etcd is **no longer required** for the Dynamo platform. The operator uses Kubernetes-native service discovery by default, and the bundled etcd subchart is **disabled by default**.
+
+To enable the bundled etcd subchart (e.g., for etcd-based service discovery):
+
+```yaml
+global:
+  etcd:
+    install: true
+```
+
+To use an external etcd instance instead:
+
+```yaml
+dynamo-operator:
+  etcdAddr: "http://my-external-etcd:2379"
+```
+
+For detailed etcd configuration options, please refer to the official Bitnami etcd Helm chart documentation:
 **[etcd Helm Chart Documentation](https://github.com/bitnami/charts/tree/main/bitnami/etcd)**
 
 

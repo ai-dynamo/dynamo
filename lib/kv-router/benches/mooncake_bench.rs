@@ -18,8 +18,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
-use dynamo_mocker::Scheduler;
-use dynamo_mocker::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
+use dynamo_mocker::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
+use dynamo_mocker::scheduler::Scheduler;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Mutex;
 use tokio::task::JoinHandle;

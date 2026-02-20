@@ -30,7 +30,7 @@ async def init(runtime: DistributedRuntime, ns: str):
     Instantiate a `backend` client and call the `generate` endpoint
     """
     # get endpoint
-    endpoint = runtime.namespace(ns).component("backend").endpoint("generate")
+    endpoint = runtime.endpoint(f"{ns}.backend.generate")
 
     # create client
     client = await endpoint.client()
