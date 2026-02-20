@@ -168,11 +168,11 @@ fi
 echo "✓ vLLM installation completed"
 
 echo "\n=== Installing vLLM-Omni ==="
-if [ -n "$VLLM_OMNI_REF" ]; then
+if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
     uv pip install vllm-omni==${VLLM_OMNI_REF}
     echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed"
 else
-    echo "⚠ Skipping vLLM-Omni (no ref provided)"
+    echo "⚠ Skipping vLLM-Omni (no ref provided or ARM64 not supported)"
 fi
 
 echo "\n=== Installing DeepGEMM ==="
