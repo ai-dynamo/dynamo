@@ -43,6 +43,9 @@ use crate::{ParserResult, ReasoningParser};
 fn overlap(s: &str, delim: &str) -> usize {
     let max = delim.len().min(s.len());
     for i in (1..=max).rev() {
+        if !delim.is_char_boundary(i) {
+            continue; // Skip mid-codepoint positions (e.g., multi-byte `◁` in Kimi tags)
+        }
         if s.ends_with(&delim[..i]) {
             return i;
         }
@@ -1020,5 +1023,10 @@ mod tests {
         assert_eq!(overlap("no match", "<think>"), 0);
         assert_eq!(overlap("", "<think>"), 0);
         assert_eq!(overlap("Hello world <thi", "<think>"), 4);
+        // Multi-byte delimiters (Kimi parser uses ◁think▷ / ◁/think▷)
+        assert_eq!(overlap("text◁", "◁think▷"), 3); // ◁ is 3 bytes
+        assert_eq!(overlap("text◁th", "◁think▷"), 5);
+        assert_eq!(overlap("text◁/thi", "◁/think▷"), 7);
+        assert_eq!(overlap("no match", "◁think▷"), 0);
     }
 }
