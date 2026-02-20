@@ -88,7 +88,7 @@ kubectl get svc -n ${NAMESPACE} | grep minio
 ```
 
 Expected output:
-```
+```text
 minio-xxxx-xxxx   1/1     Running   0          1m
 ```
 
@@ -160,7 +160,7 @@ Edit `agg_qwen_lora.yaml` to use your container image:
 ```bash
 # Using yq to update the image
 export FRAMEWORK_RUNTIME_IMAGE=your-registry/your-image:tag
-yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' agg_qwen_lora.yaml > agg_qwen_lora_updated.yaml
+yq '.spec.services[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' agg_qwen_lora.yaml > agg_qwen_lora_updated.yaml
 ```
 
 ### Deploy the LoRA-enabled Multimodal Graph
