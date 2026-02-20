@@ -21,6 +21,7 @@ Validates that the generated Pydantic models can be imported and used correctly.
 
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 
@@ -49,6 +50,21 @@ def _repo_root() -> Path:
 # Add the components src to path so we can import the generated models
 sys.path.insert(0, str(_repo_root() / "components" / "src"))
 
+# ---------------------------------------------------------------------------
+# Stub dynamo.runtime.logging and bypass the heavy dynamo.planner.__init__
+# before importing any dynamo module. Same technique as generate_planner_schema.py.
+# ---------------------------------------------------------------------------
+_runtime_mod = types.ModuleType("dynamo.runtime")
+_logging_mod = types.ModuleType("dynamo.runtime.logging")
+_logging_mod.configure_dynamo_logging = lambda *args, **kwargs: None  # type: ignore[attr-defined]
+_planner_mod = types.ModuleType("dynamo.planner")
+_planner_mod.__path__ = [str(_repo_root() / "components" / "src" / "dynamo" / "planner")]  # type: ignore[attr-defined]
+_planner_mod.__package__ = "dynamo.planner"
+sys.modules.setdefault("dynamo", types.ModuleType("dynamo"))
+sys.modules.setdefault("dynamo.runtime", _runtime_mod)
+sys.modules["dynamo.runtime.logging"] = _logging_mod
+sys.modules["dynamo.planner"] = _planner_mod
+
 import pydantic  # noqa: E402
 
 from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
@@ -61,8 +77,8 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
     MockerSpec,
     ModelCacheSpec,
     OptimizationType,
+    PlannerConfig,
     PlannerPreDeploymentSweepMode,
-    PlannerSpec,
     ProfilingPhase,
     SearchStrategy,
     SLASpec,
@@ -105,7 +121,7 @@ def test_full_dgdr():
             pvcModelPath="llama-3.1-405b",
         ),
         features=FeaturesSpec(
-            planner=PlannerSpec(enabled=True),
+            planner=PlannerConfig(enable_load_scaling=False),
             mocker=MockerSpec(enabled=False),
         ),
         searchStrategy=SearchStrategy.Rapid,
@@ -120,7 +136,7 @@ def test_full_dgdr():
     assert spec.sla.itl == 10.0
     assert spec.modelCache.pvcName == "model-cache"
     assert spec.modelCache.pvcModelPath == "llama-3.1-405b"
-    assert spec.features.planner.enabled is True
+    assert isinstance(spec.features.planner, PlannerConfig)
     assert spec.features.mocker.enabled is False
     print("✓ Full DGDR spec validation passed")
 

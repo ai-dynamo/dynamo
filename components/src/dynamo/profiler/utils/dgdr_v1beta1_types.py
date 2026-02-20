@@ -182,7 +182,7 @@ class KVRouterSpec(BaseModel):
 class FeaturesSpec(BaseModel):
     """FeaturesSpec controls optional Dynamo platform features in the generated deployment."""
 
-    planner: Optional[Dict[str, Any]] = Field(
+    planner: Optional[PlannerConfig] = Field(
         default=None,
         description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig. Go treats this as opaque bytes; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
     )
