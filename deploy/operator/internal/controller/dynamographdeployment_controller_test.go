@@ -24,6 +24,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/onsi/gomega"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
@@ -2068,6 +2069,234 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
+		})
+	}
+}
+
+func TestPropagateTopologyCondition(t *testing.T) {
+	tests := []struct {
+		name           string
+		dgd            *v1alpha1.DynamoGraphDeployment
+		pcs            *grovev1alpha1.PodCliqueSet
+		groveEnabled   bool
+		wantCondition  bool
+		wantStatus     metav1.ConditionStatus
+		wantReason     string
+		wantEventCount int
+	}{
+		{
+			name: "no topology constraints - no condition added",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+				},
+			},
+			groveEnabled:  true,
+			wantCondition: false,
+		},
+		{
+			name: "topology set but Grove not enabled - no condition added",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test", Namespace: "default",
+					Annotations: map[string]string{commonconsts.KubeAnnotationEnableGrove: "false"},
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.TopologyConstraint{PackDomain: v1alpha1.TopologyDomainRack},
+				},
+			},
+			groveEnabled:  false,
+			wantCondition: false,
+		},
+		{
+			name: "topology set, PCS has no topology condition - assume healthy",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.TopologyConstraint{PackDomain: v1alpha1.TopologyDomainRack},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status:     grovev1alpha1.PodCliqueSetStatus{},
+			},
+			groveEnabled:  true,
+			wantCondition: true,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    v1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+		},
+		{
+			name: "PCS reports TopologyLevelsUnavailable=True with ClusterTopologyLevelsUnavailable",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.TopologyConstraint{PackDomain: v1alpha1.TopologyDomainRack},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:    groveconstants.ConditionTopologyLevelsUnavailable,
+							Status:  metav1.ConditionTrue,
+							Reason:  groveconstants.ConditionReasonTopologyLevelsUnavailable,
+							Message: "Topology level 'rack' is no longer available",
+						},
+					},
+				},
+			},
+			groveEnabled:   true,
+			wantCondition:  true,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     v1alpha1.ConditionReasonTopologyLevelsUnavailable,
+			wantEventCount: 1,
+		},
+		{
+			name: "PCS reports TopologyLevelsUnavailable=True with ClusterTopologyNotFound",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.TopologyConstraint{PackDomain: v1alpha1.TopologyDomainRack},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:    groveconstants.ConditionTopologyLevelsUnavailable,
+							Status:  metav1.ConditionTrue,
+							Reason:  groveconstants.ConditionReasonClusterTopologyNotFound,
+							Message: "ClusterTopology 'default' not found",
+						},
+					},
+				},
+			},
+			groveEnabled:   true,
+			wantCondition:  true,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     v1alpha1.ConditionReasonTopologyDefinitionNotFound,
+			wantEventCount: 1,
+		},
+		{
+			name: "PCS reports TopologyLevelsUnavailable=False - all levels available",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.TopologyConstraint{PackDomain: v1alpha1.TopologyDomainRack},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:    groveconstants.ConditionTopologyLevelsUnavailable,
+							Status:  metav1.ConditionFalse,
+							Reason:  groveconstants.ConditionReasonAllTopologyLevelsAvailable,
+							Message: "All topology levels available",
+						},
+					},
+				},
+			},
+			groveEnabled:  true,
+			wantCondition: true,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    v1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+		},
+		{
+			name: "service-only topology constraint triggers condition propagation",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							TopologyConstraint: &v1alpha1.TopologyConstraint{PackDomain: v1alpha1.TopologyDomainRack},
+						},
+					},
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status:     grovev1alpha1.PodCliqueSetStatus{},
+			},
+			groveEnabled:  true,
+			wantCondition: true,
+			wantStatus:    metav1.ConditionTrue,
+			wantReason:    v1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+		},
+		{
+			name: "PCS not found yet - no condition added",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.TopologyConstraint{PackDomain: v1alpha1.TopologyDomainRack},
+				},
+			},
+			pcs:           nil,
+			groveEnabled:  true,
+			wantCondition: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			s := scheme.Scheme
+			err := v1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = grovev1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			objs := []client.Object{}
+			if tt.pcs != nil {
+				objs = append(objs, tt.pcs)
+			}
+
+			fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
+			recorder := record.NewFakeRecorder(10)
+
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Client:   fakeClient,
+				Recorder: recorder,
+				Config: controller_common.Config{
+					Grove: controller_common.GroveConfig{
+						Enabled: tt.groveEnabled,
+					},
+				},
+			}
+
+			ctx := context.Background()
+			reconciler.propagateTopologyCondition(ctx, tt.dgd)
+
+			var topoCond *metav1.Condition
+			for i := range tt.dgd.Status.Conditions {
+				if tt.dgd.Status.Conditions[i].Type == v1alpha1.ConditionTypeTopologyLevelsAvailable {
+					topoCond = &tt.dgd.Status.Conditions[i]
+					break
+				}
+			}
+
+			if !tt.wantCondition {
+				g.Expect(topoCond).To(gomega.BeNil(), "expected no TopologyLevelsAvailable condition")
+				return
+			}
+
+			g.Expect(topoCond).NotTo(gomega.BeNil(), "expected TopologyLevelsAvailable condition to be set")
+			g.Expect(topoCond.Status).To(gomega.Equal(tt.wantStatus))
+			g.Expect(topoCond.Reason).To(gomega.Equal(tt.wantReason))
+
+			close(recorder.Events)
+			eventCount := 0
+			for range recorder.Events {
+				eventCount++
+			}
+			g.Expect(eventCount).To(gomega.Equal(tt.wantEventCount))
 		})
 	}
 }

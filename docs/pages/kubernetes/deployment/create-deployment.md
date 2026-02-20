@@ -189,6 +189,21 @@ Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MO
      - --is-prefill-worker  # For disaggregated prefill workers
 ```
 
+### Topology Aware Scheduling
+
+You can optionally pack related pods within a topology domain (e.g., rack or block) to reduce inter-node latency, which is especially beneficial for disaggregated serving workloads. Add a `topologyConstraint` at the deployment level, the service level, or both:
+
+```yaml
+spec:
+  topologyConstraint:
+    packDomain: rack
+  services:
+    VllmWorker:
+      # ...
+```
+
+This requires Grove and a `ClusterTopology` CR configured by your cluster admin. For full details, available domains, hierarchy rules, and examples, see **[Topology Aware Scheduling](../topology-aware-scheduling.md)**.
+
 ### Image Pull Secret Configuration
 
 #### Automatic Discovery and Injection
