@@ -21,12 +21,13 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 try:
-    from dynamo.profiler.profile_sla import ProfilerOperationalConfig, run_profile
+    from dynamo.profiler.profile_sla import run_profile
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         BackendType,
         DynamoGraphDeploymentRequestSpec,
         SearchStrategy,
     )
+    from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError as _e:
     pytest.skip(f"Skip testing (refactor in progress): {_e}", allow_module_level=True)
 
@@ -104,6 +105,32 @@ class TestRapidSupported:
         assert any(
             p.get("name") == "model-cache" for p in pvcs
         ), "PVC should be mounted"
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_e2e_latency_sla(self, tmp_path):
+        """Case 2c: e2eLatency SLA instead of ttft/itl."""
+        dgdr = _load_dgdr(CONFIGS_DIR / "2c_rapid_supported_e2e_latency.yaml")
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        config = yaml.safe_load(output.read_text())
+        assert config
+        # Verify ttft/itl were cleared by the validator
+        assert dgdr.sla.ttft is None
+        assert dgdr.sla.itl is None
+        assert dgdr.sla.e2eLatency == 35000.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_both_concurrency_and_rate_rejected(self):
+        """Case 2d: both concurrency and requestRate should fail validation."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="concurrency.*requestRate"):
+            _load_dgdr(CONFIGS_DIR / "2d_rapid_both_concurrency_and_rate_error.yaml")
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -219,3 +246,23 @@ class TestGateChecks:
         ops = _make_ops(tmp_path)
         with pytest.raises(ValueError, match="does not support 'auto' backend"):
             asyncio.run(run_profile(dgdr, ops))
+
+
+class TestThoroughEdgeCases:
+    """Edge cases for thorough mode."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_empty_candidates_due_to_small_gpu(self, tmp_path):
+        """Case 8: DeepSeek-R1 on 1 L40S GPU — model too large, no candidates."""
+        dgdr = _load_dgdr(CONFIGS_DIR / "8_thorough_empty_candidates.yaml")
+        ops = _make_ops(tmp_path, dry_run=True)
+        asyncio.run(run_profile(dgdr, ops))
+
+        # Dry-run with thorough should complete but produce empty config
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        status_file = tmp_path / "profiling_results" / "profiler_status.yaml"
+        if status_file.exists():
+            status = yaml.safe_load(status_file.read_text())
+            assert status.get("status") in ("success", "failed")

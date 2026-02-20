@@ -38,11 +38,6 @@ def make_parallel_label(tp: int, pp: int, dp: int, moe_tp: int, moe_ep: int) -> 
         return f"tp{tp}"
 
 
-def get_attention_dp_size(moe_ep: int) -> int:
-    """Return the attention-DP size implied by a parallelization config."""
-    return moe_ep if moe_ep > 1 else 1
-
-
 def build_prefill_row(
     *,
     model: str,

@@ -1,0 +1,17 @@
+# Case 2d: Both concurrency and requestRate specified — should fail validation
+model: "Qwen/Qwen3-32B"
+backend: trtllm
+image: "nvcr.io/nvidia/dynamo:latest"
+hardware:
+  gpuSku: h200_sxm
+  totalGpus: 64
+  numGpusPerNode: 8
+workload:
+  isl: 4000
+  osl: 1000
+  concurrency: 50
+  requestRate: 5.0
+sla:
+  ttft: 2000.0
+  itl: 50.0
+searchStrategy: rapid

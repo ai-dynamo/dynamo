@@ -16,6 +16,7 @@
 import copy
 import json
 import os
+import uuid
 from typing import Any, Optional
 
 import numpy as np
@@ -32,6 +33,15 @@ from dynamo.profiler.utils.config import (
 
 # Path to mocker disagg config relative to workspace
 MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
+
+# ConfigMap name prefixes (a 4-char UUID suffix is appended at runtime
+# so that multiple deployments in the same namespace don't collide)
+PLANNER_CONFIG_PREFIX = "planner-config"
+PLANNER_PROFILE_DATA_PREFIX = "planner-profile-data"
+
+
+def _make_cm_name(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:4]}"
 
 
 def generate_dgd_config_with_planner(
@@ -76,14 +86,14 @@ def generate_dgd_config_with_planner(
 
     # --- Add planner service to DGD ---
     planner_service = DgdPlannerServiceConfig()
-    frontend_service = config.spec.services["Frontend"]
-    if frontend_service.extraPodSpec and frontend_service.extraPodSpec.mainContainer:
-        frontend_image = frontend_service.extraPodSpec.mainContainer.image
-        if frontend_image and planner_service.extraPodSpec.mainContainer:
-            planner_service.extraPodSpec.mainContainer.image = frontend_image
+    if dgdr.image and planner_service.extraPodSpec.mainContainer:
+        planner_service.extraPodSpec.mainContainer.image = dgdr.image
 
     planner_dict = planner_service.model_dump(exclude_unset=False)
     config_dict = config.model_dump(exclude_unset=False)
+
+    planner_config_cm_name = _make_cm_name(PLANNER_CONFIG_PREFIX)
+    profile_data_cm_name = _make_cm_name(PLANNER_PROFILE_DATA_PREFIX)
 
     profile_data_mount = f"{get_workspace_dir()}/profiling_results"
     planner_config_mount = f"{get_workspace_dir()}/planner_config"
@@ -95,6 +105,7 @@ def generate_dgd_config_with_planner(
         planner_cfg.profile_results_dir = profile_data_mount
 
         profile_cm_data: dict[str, str] = {}
+        # TODO: use enums
         if profiling_data.get("prefill"):
             profile_cm_data["prefill_raw_data.json"] = json.dumps(
                 profiling_data["prefill"]
@@ -107,7 +118,7 @@ def generate_dgd_config_with_planner(
         profile_data_cm = {
             "apiVersion": "v1",
             "kind": "ConfigMap",
-            "metadata": {"name": "planner-profile-data"},
+            "metadata": {"name": profile_data_cm_name},
             "data": profile_cm_data,
         }
 
@@ -115,7 +126,7 @@ def generate_dgd_config_with_planner(
     planner_config_cm = {
         "apiVersion": "v1",
         "kind": "ConfigMap",
-        "metadata": {"name": "planner-config"},
+        "metadata": {"name": planner_config_cm_name},
         "data": {
             "planner_config.json": planner_cfg.model_dump_json(),
         },
@@ -133,13 +144,13 @@ def generate_dgd_config_with_planner(
     # Planner config volume
     planner_volumes.append(
         {
-            "name": "planner-config",
-            "configMap": {"name": "planner-config"},
+            "name": planner_config_cm_name,
+            "configMap": {"name": planner_config_cm_name},
         }
     )
     mc_mounts.append(
         {
-            "name": "planner-config",
+            "name": planner_config_cm_name,
             "mountPath": planner_config_mount,
             "readOnly": True,
         }
@@ -149,13 +160,13 @@ def generate_dgd_config_with_planner(
     if profile_data_cm is not None:
         planner_volumes.append(
             {
-                "name": "planner-profile-data",
-                "configMap": {"name": "planner-profile-data"},
+                "name": profile_data_cm_name,
+                "configMap": {"name": profile_data_cm_name},
             }
         )
         mc_mounts.append(
             {
-                "name": "planner-profile-data",
+                "name": profile_data_cm_name,
                 "mountPath": profile_data_mount,
                 "readOnly": True,
             }
@@ -299,6 +310,7 @@ def _generate_mocker_config_with_planner(
 
     # Mount profiling data ConfigMap into mocker workers
     if profile_data_cm is not None:
+        pd_cm_name = profile_data_cm["metadata"]["name"]
         for worker_name in mocker_worker_names:
             service_config = (
                 mocker_config.get("spec", {}).get("services", {}).get(worker_name)
@@ -308,15 +320,15 @@ def _generate_mocker_config_with_planner(
                 volumes = extra_pod_spec.setdefault("volumes", [])
                 volumes.append(
                     {
-                        "name": "planner-profile-data",
-                        "configMap": {"name": "planner-profile-data"},
+                        "name": pd_cm_name,
+                        "configMap": {"name": pd_cm_name},
                     }
                 )
                 main_container = extra_pod_spec.setdefault("mainContainer", {})
                 volume_mounts = main_container.setdefault("volumeMounts", [])
                 volume_mounts.append(
                     {
-                        "name": "planner-profile-data",
+                        "name": pd_cm_name,
                         "mountPath": profile_data_mount,
                         "readOnly": True,
                     }

@@ -13,7 +13,7 @@ DO NOT EDIT MANUALLY - regenerate using the script.
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from dynamo.planner.utils.planner_config import (
     PlannerConfig,
@@ -76,16 +76,13 @@ class WorkloadSpec(BaseModel):
         description="RequestRate is the target request rate (req/s). Required (or Concurrency) when the planner is disabled.",
     )
 
-    @field_validator("concurrency", "requestRate", mode="after")
-    def check_concurrency_or_requestrate(cls, v, info):
-        values = info.data
-        concurrency = values.get("concurrency")
-        request_rate = values.get("requestRate")
-        if concurrency is not None and request_rate is not None:
+    @model_validator(mode="after")
+    def check_concurrency_or_requestrate(self) -> "WorkloadSpec":
+        if self.concurrency is not None and self.requestRate is not None:
             raise ValueError(
                 "Only one of 'concurrency' or 'requestRate' can be provided, not both."
             )
-        return v
+        return self
 
 
 class SLASpec(BaseModel):
@@ -239,7 +236,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.'
     )
     backend: BackendType = Field(
-        default=BackendType.VLLM,
+        default=BackendType.Auto,
         description="Backend specifies the inference backend to use for profiling and deployment.",
     )
     image: str = Field(

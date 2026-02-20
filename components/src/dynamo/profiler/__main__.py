@@ -34,14 +34,14 @@ import yaml
 
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 
-from .profile_sla import (
+from .profile_sla import run_profile
+from .utils.profile_common import (
     DEFAULT_DECODE_INTERPOLATION_GRANULARITY,
     DEFAULT_DEPLOYMENT_TIMEOUT,
     DEFAULT_DRY_RUN,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PREFILL_INTERPOLATION_GRANULARITY,
     ProfilerOperationalConfig,
-    run_profile,
 )
 
 logger = logging.getLogger(__name__)
