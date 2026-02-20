@@ -140,6 +140,10 @@ For dependency-free local development, disable KV event publishing (avoids NATS)
 is expected and can be safely ignored.
 </Note>
 
+<Note>
+**Deprecation notice:** vLLM automatically enables KV event publishing when prefix caching is active. In a future release, this will change — KV events will be disabled by default for all backends. Start using `--kv-events-config` explicitly to prepare.
+</Note>
+
 ## Test Your Deployment
 
 ```bash

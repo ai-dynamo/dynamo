@@ -18,6 +18,7 @@ import json
 from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
+import torch
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
@@ -28,7 +29,7 @@ from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import RequestStateStats
 
-import dynamo.nixl_connect as connect
+from dynamo.common.multimodal.embedding_transfer import TransferRequest
 
 
 class Request(BaseModel):
@@ -170,11 +171,14 @@ class MultiModalGroup(BaseModel):
     embeddings_shape: Optional[
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
-    serialized_request: Optional[connect.RdmaMetadata | str] = None
+    serialized_request: Optional[TransferRequest] = None
+    loaded_embedding: Optional[torch.Tensor] = Field(default=None, exclude=True)
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    # LoRA adapter name (matches the name used in load_lora)
+    model: Optional[str] = None
     # Decode-only worker can have None for multimodal_inputs
     multimodal_inputs: Optional[List[MultiModalGroup]] = Field(default_factory=list)
     # Add these fields for Qwen VL (mRoPE) decode-only worker

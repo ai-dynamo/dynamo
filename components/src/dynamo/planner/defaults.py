@@ -17,7 +17,7 @@ import logging
 import os
 import shlex
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -35,11 +35,11 @@ logger = logging.getLogger(__name__)
 class BasePlannerDefaults:
     # Namespace from DYN_NAMESPACE env var (injected by operator as "{k8s_namespace}-{dgd_name}")
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-    environment = "kubernetes"
-    backend = "vllm"
+    environment: Literal["kubernetes", "virtual", "global-planner"] = "kubernetes"
+    backend: Literal["vllm", "sglang", "trtllm", "mocker"] = "vllm"
     no_operation = False
     log_dir = None
-    adjustment_interval = 180  # in seconds
+    throughput_adjustment_interval = 180  # in seconds
     max_gpu_budget = 8
     min_endpoint = 1  # applies to both decode and prefill
     decode_engine_num_gpu = 1
@@ -71,21 +71,21 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     kalman_min_points = 5
 
     no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
-    mode = "disagg"  # ["disagg", "prefill", "decode"]
+    mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
 
     # Scaling mode flags
     enable_throughput_scaling = True
-    enable_loadbased_scaling = False
+    enable_load_scaling = False
 
     # Load-based scaling settings
-    loadbased_router_metrics_url: Optional[
+    load_router_metrics_url: Optional[
         str
     ] = None  # will be auto-discovered from the DGD in kubernetes mode if not provided
-    loadbased_adjustment_interval = 5  # in seconds, must be < adjustment_interval
-    loadbased_learning_window = 50  # sliding window size for regression
-    loadbased_scaling_down_sensitivity = 80  # 0-100
-    loadbased_metric_samples = 10  # number of samples per interval
-    loadbased_min_observations = 5  # cold start threshold
+    load_adjustment_interval = 5  # in seconds, must be < throughput_adjustment_interval
+    load_learning_window = 50  # sliding window size for regression
+    load_scaling_down_sensitivity = 80  # 0-100
+    load_metric_samples = 10  # number of samples per interval
+    load_min_observations = 5  # cold start threshold
 
 
 class VllmComponentName:
