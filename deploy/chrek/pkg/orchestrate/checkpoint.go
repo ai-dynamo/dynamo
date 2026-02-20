@@ -66,7 +66,8 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 		return err
 	}
 
-	// Atomic rename: tmp/<hash> -> <hash> signals checkpoint completeness
+	// Remove any previous checkpoint with the same identity hash before finalizing
+	os.RemoveAll(finalDir)
 	if err := os.Rename(tmpDir, finalDir); err != nil {
 		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
 	}
@@ -191,6 +192,9 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		return 0, err
 	}
 
+	// Overlay rootfs diff capture is best-effort. Failures are logged but not
+	// propagated — a checkpoint without overlay diffs is still valid for restore
+	// (the base container image provides the filesystem).
 	if state.UpperDir != "" {
 		if _, err := common.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
 			log.Error(err, "Failed to capture rootfs diff")

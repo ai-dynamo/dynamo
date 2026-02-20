@@ -1413,7 +1413,20 @@ func generateLabels(
 	}
 	// Add base model label if modelRef is specified
 	AddBaseModelLabel(labels, component.ModelRef)
-	// Add checkpoint identity labels if checkpointing is enabled
+	// Merge user-supplied labels first so they cannot overwrite checkpoint labels.
+	setMetricsLabels(labels, dynamoDeployment)
+	if component.Labels != nil {
+		if err := mergo.Merge(&labels, component.Labels, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to merge labels: %w", err)
+		}
+	}
+	if component.ExtraPodMetadata != nil {
+		if err := mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
+		}
+	}
+
+	// Inject checkpoint labels AFTER user labels so they cannot be overridden.
 	var err error
 	labels, err = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
 	if err != nil {
@@ -1424,19 +1437,6 @@ func generateLabels(
 	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
 		labels[commonconsts.KubeLabelIsRestoreTarget] = "true"
 		labels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
-	}
-	setMetricsLabels(labels, dynamoDeployment)
-	if component.Labels != nil {
-		err = mergo.Merge(&labels, component.Labels, mergo.WithOverride)
-		if err != nil {
-			return nil, fmt.Errorf("failed to merge labels: %w", err)
-		}
-	}
-	if component.ExtraPodMetadata != nil {
-		err = mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
-		if err != nil {
-			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
-		}
 	}
 	return labels, nil
 }

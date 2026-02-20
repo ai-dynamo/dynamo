@@ -69,18 +69,17 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
 	if err := syscall.Unmount("/dev/shm", 0); err != nil {
-		log.Error(err, "Failed to unmount /dev/shm before restore")
+		return 0, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err)
 	}
 
 	if err := common.RemountProcSys(true); err != nil {
-		log.Error(err, "Failed to remount /proc/sys read-write for restore")
-	} else {
-		defer func() {
-			if err := common.RemountProcSys(false); err != nil {
-				log.Error(err, "Failed to remount /proc/sys read-only after restore")
-			}
-		}()
+		return 0, fmt.Errorf("failed to remount /proc/sys read-write for restore: %w", err)
 	}
+	defer func() {
+		if err := common.RemountProcSys(false); err != nil {
+			log.Error(err, "Failed to remount /proc/sys read-only after restore")
+		}
+	}()
 
 	// CRIU restore
 	restoredPID, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)

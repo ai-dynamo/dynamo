@@ -22,9 +22,10 @@ func TestParseManageCgroupsMode(t *testing.T) {
 		{raw: "IGNORE", wantMode: criurpc.CriuCgMode_IGNORE},
 		{raw: " Soft ", wantMode: criurpc.CriuCgMode_SOFT},
 		{raw: "  FULL  ", wantMode: criurpc.CriuCgMode_FULL},
+		// Empty string defaults to SOFT (matches Helm default)
+		{raw: "", wantMode: criurpc.CriuCgMode_SOFT},
 		// Invalid
 		{raw: "bogus", wantErr: true},
-		{raw: "", wantErr: true},
 	}
 
 	for _, tc := range tests {

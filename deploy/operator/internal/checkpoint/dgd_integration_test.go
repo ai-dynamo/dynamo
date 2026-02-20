@@ -417,7 +417,8 @@ func TestResolveCheckpointForService(t *testing.T) {
 
 	t.Run("identity lookup finds existing checkpoint by label", func(t *testing.T) {
 		identity := testIdentity()
-		hash, _ := ComputeIdentityHash(identity)
+		hash, err := ComputeIdentityHash(identity)
+		require.NoError(t, err)
 
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{

@@ -16,6 +16,9 @@ import (
 func parseManageCgroupsMode(raw string) (criurpc.CriuCgMode, string, error) {
 	mode := strings.ToLower(strings.TrimSpace(raw))
 	switch mode {
+	case "":
+		// Default to SOFT when unset (matches Helm default of "soft")
+		return criurpc.CriuCgMode_SOFT, "soft", nil
 	case "ignore":
 		return criurpc.CriuCgMode_IGNORE, "ignore", nil
 	case "soft":
@@ -59,6 +62,9 @@ func applyCommonSettings(opts *criurpc.CriuOpts, settings *types.CRIUSettings) e
 // openPathForCRIU opens a path (directory or file) and clears the CLOEXEC flag
 // so the FD can be inherited by CRIU child processes.
 // Returns the opened file and its FD. Caller must close the file when done.
+// The caller must also retain the *os.File reference for the entire lifetime the
+// raw FD is in use — if the *os.File is garbage collected, Go's finalizer will
+// close the underlying FD.
 func openPathForCRIU(path string) (*os.File, int32, error) {
 	dir, err := os.Open(path)
 	if err != nil {

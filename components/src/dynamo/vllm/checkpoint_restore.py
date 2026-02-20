@@ -36,7 +36,6 @@ class CheckpointConfig:
     """Parsed and validated checkpoint configuration from environment variables."""
 
     def __init__(self):
-        self.is_checkpoint_job = "DYN_CHECKPOINT_LOCATION" in os.environ
         self.ready_file = os.environ["DYN_READY_FOR_CHECKPOINT_FILE"]
         self.storage_type = os.environ.get("DYN_CHECKPOINT_STORAGE_TYPE", "pvc")
         self.location = os.environ.get("DYN_CHECKPOINT_LOCATION", "")
@@ -45,6 +44,7 @@ class CheckpointConfig:
             checkpoint_hash = os.environ.get("DYN_CHECKPOINT_HASH", "")
             if checkpoint_path and checkpoint_hash:
                 self.location = f"{checkpoint_path}/{checkpoint_hash}"
+        self.is_checkpoint_job = bool(self.location)
         self._checkpoint_done = asyncio.Event()
         self._restore_done = asyncio.Event()
         self._checkpoint_failed = asyncio.Event()
@@ -78,10 +78,14 @@ class CheckpointConfig:
         logger.info(f"Putting model to sleep (level={sleep_level})")
         await engine_client.sleep(level=sleep_level)
 
+        # Install signal handlers before writing the ready file so there is no
+        # window where the DaemonSet can send SIGUSR1/SIGUSR2/SIGCONT while the
+        # default signal disposition (terminate) is still in effect.
+        self._install_signal_handlers()
+
         # Signal readiness
         with open(self.ready_file, "w") as f:
             f.write("ready")
-        self._install_signal_handlers()
         logger.info(
             "Ready for checkpoint. Waiting for watcher signal "
             "(SIGUSR1=checkpoint complete, SIGCONT=restore complete, SIGUSR2=failure)"
@@ -102,10 +106,20 @@ class CheckpointConfig:
             raise RuntimeError("Checkpoint failed (received SIGUSR2 from watcher)")
         finally:
             self._remove_signal_handlers()
+            # Remove the ready file so that a restarting pod does not leave a
+            # stale marker that could trick the DaemonSet into acting on it.
+            try:
+                os.unlink(self.ready_file)
+            except OSError:
+                pass
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGUSR1, self._checkpoint_done.set)
+        # SIGCONT is used as the restore-complete signal because SIGUSR1 and
+        # SIGUSR2 are already taken (checkpoint-complete and checkpoint-failed
+        # respectively). The chrek DaemonSet watcher is the only sender, so
+        # there is no conflict with POSIX job-control semantics in practice.
         loop.add_signal_handler(signal.SIGCONT, self._restore_done.set)
         loop.add_signal_handler(signal.SIGUSR2, self._checkpoint_failed.set)
 
@@ -152,8 +166,9 @@ def get_checkpoint_config() -> tuple[bool, Optional[CheckpointConfig]]:
     if "DYN_READY_FOR_CHECKPOINT_FILE" not in os.environ:
         return False, None
 
-    # Validate checkpoint location: either a full location or path + hash must be set
-    if "DYN_CHECKPOINT_LOCATION" not in os.environ:
+    # Validate checkpoint location: either a full location or path + hash must be set.
+    # Check the value (not just presence) so an empty string is treated as unset.
+    if not os.environ.get("DYN_CHECKPOINT_LOCATION"):
         path = os.environ.get("DYN_CHECKPOINT_PATH", "")
         hash_ = os.environ.get("DYN_CHECKPOINT_HASH", "")
         if not path or not hash_:

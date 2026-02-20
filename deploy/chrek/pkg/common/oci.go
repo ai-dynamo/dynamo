@@ -5,7 +5,7 @@ package common
 import (
 	"context"
 	"fmt"
-	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/containerd/containerd"
@@ -62,18 +62,22 @@ func ResolveContainerByPod(ctx context.Context, client *containerd.Client, podNa
 		return 0, nil, fmt.Errorf("no container found for pod %s/%s container %s", podNamespace, podName, containerName)
 	}
 
-	container := containers[0]
-	task, err := container.Task(ctx, nil)
-	if err != nil {
-		return 0, nil, fmt.Errorf("failed to get task for container in pod %s/%s: %w", podNamespace, podName, err)
+	// During container restarts, containerd may transiently expose both the
+	// old and new container with the same CRI labels. Pick the one with a
+	// running task; fall back to the first container if none qualify.
+	for _, c := range containers {
+		task, err := c.Task(ctx, nil)
+		if err != nil {
+			continue
+		}
+		spec, err := c.Spec(ctx)
+		if err != nil {
+			continue
+		}
+		return int(task.Pid()), spec, nil
 	}
 
-	spec, err := container.Spec(ctx)
-	if err != nil {
-		return 0, nil, fmt.Errorf("failed to get spec for container in pod %s/%s: %w", podNamespace, podName, err)
-	}
-
-	return int(task.Pid()), spec, nil
+	return 0, nil, fmt.Errorf("no running container found for pod %s/%s container %s (%d candidates)", podNamespace, podName, containerName, len(containers))
 }
 
 func collectOCIManagedPaths(ociSpec *specs.Spec, rootFS string) map[string]struct{} {
@@ -101,19 +105,18 @@ func collectOCIManagedPaths(ociSpec *specs.Spec, rootFS string) map[string]struc
 // normalizeOCIPath resolves an OCI spec path relative to rootFS, following
 // symlinks within the rootfs boundary (matching runc's addCriuDumpMount pattern).
 func normalizeOCIPath(raw, rootFS string) string {
-	p := path.Clean(strings.TrimSpace(raw))
+	p := filepath.Clean(strings.TrimSpace(raw))
 	if p == "" || p == "." {
 		return ""
 	}
 	if rootFS == "" {
 		return p
 	}
-	// SecureJoin guarantees the result starts with rootFS, so just trim the prefix.
 	if resolved, err := securejoin.SecureJoin(rootFS, p); err == nil {
-		p = resolved[len(rootFS):]
+		p = strings.TrimPrefix(resolved, filepath.Clean(rootFS))
 	}
-	if p == "" {
-		return "/"
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
 	}
 	return p
 }

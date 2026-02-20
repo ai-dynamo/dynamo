@@ -51,7 +51,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -78,7 +77,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -1214,25 +1213,6 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(
-			&v1alpha1.DynamoCheckpoint{},
-			handler.EnqueueRequestsFromMapFunc(r.mapCheckpointToComponentRequests),
-			builder.WithPredicates(predicate.Funcs{
-				CreateFunc: func(event.CreateEvent) bool { return true },
-				DeleteFunc: func(event.DeleteEvent) bool { return false },
-				UpdateFunc: func(ue event.UpdateEvent) bool {
-					oldCkpt, okOld := ue.ObjectOld.(*v1alpha1.DynamoCheckpoint)
-					newCkpt, okNew := ue.ObjectNew.(*v1alpha1.DynamoCheckpoint)
-					if !okOld || !okNew {
-						return false
-					}
-					// Reconcile components when checkpoint lifecycle or identity changes.
-					return oldCkpt.Status.Phase != newCkpt.Status.Phase ||
-						oldCkpt.Status.IdentityHash != newCkpt.Status.IdentityHash
-				},
-				GenericFunc: func(event.GenericEvent) bool { return false },
-			}),
-		).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config))
 
 	if r.Config.LWS.Enabled {
@@ -1263,41 +1243,4 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 
 func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
-}
-
-// mapCheckpointToComponentRequests maps a DynamoCheckpoint update to all DCDs in the
-// same namespace sharing the checkpoint hash identity label.
-func (r *DynamoComponentDeploymentReconciler) mapCheckpointToComponentRequests(ctx context.Context, obj client.Object) []ctrl.Request {
-	ckpt, ok := obj.(*v1alpha1.DynamoCheckpoint)
-	if !ok {
-		return nil
-	}
-
-	hash := ckpt.Status.IdentityHash
-	if hash == "" {
-		hash = ckpt.GetLabels()[commonconsts.KubeLabelCheckpointHash]
-	}
-	if hash == "" {
-		return nil
-	}
-
-	var dcdList v1alpha1.DynamoComponentDeploymentList
-	if err := r.List(ctx, &dcdList,
-		client.InNamespace(ckpt.Namespace),
-		client.MatchingLabels{commonconsts.KubeLabelCheckpointHash: hash},
-	); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to list DCDs for checkpoint", "checkpoint", ckpt.Name, "hash", hash)
-		return nil
-	}
-
-	reqs := make([]ctrl.Request, 0, len(dcdList.Items))
-	for i := range dcdList.Items {
-		reqs = append(reqs, ctrl.Request{
-			NamespacedName: types.NamespacedName{
-				Name:      dcdList.Items[i].Name,
-				Namespace: dcdList.Items[i].Namespace,
-			},
-		})
-	}
-	return reqs
 }

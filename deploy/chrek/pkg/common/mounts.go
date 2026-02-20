@@ -113,7 +113,7 @@ func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []str
 
 // RemountProcSys remounts /proc/sys read-write or read-only.
 func RemountProcSys(rw bool) error {
-	flags := uintptr(syscall.MS_REMOUNT)
+	flags := uintptr(syscall.MS_BIND | syscall.MS_REMOUNT)
 	if !rw {
 		flags |= syscall.MS_RDONLY
 	}

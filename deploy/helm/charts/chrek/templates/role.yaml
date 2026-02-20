@@ -19,21 +19,7 @@ rules:
   # Emit operational events on pod/restore lifecycle updates
   - apiGroups: [""]
     resources: ["events"]
-    verbs: ["create", "patch", "update"]
-  # Update DynamoCheckpoint state only via status subresource
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocheckpoints"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocheckpoints/status"]
-    verbs: ["patch", "update"]
-  # Update DynamoComponentDeployment restore conditions only via status subresource
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocomponentdeployments"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocomponentdeployments/status"]
-    verbs: ["patch", "update"]
+    verbs: ["create"]
 {{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -50,20 +36,6 @@ rules:
   # Emit operational events on pod/restore lifecycle updates
   - apiGroups: [""]
     resources: ["events"]
-    verbs: ["create", "patch", "update"]
-  # Update DynamoCheckpoint state only via status subresource
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocheckpoints"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocheckpoints/status"]
-    verbs: ["patch", "update"]
-  # Update DynamoComponentDeployment restore conditions only via status subresource
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocomponentdeployments"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocomponentdeployments/status"]
-    verbs: ["patch", "update"]
+    verbs: ["create"]
 {{- end }}
 {{- end }}

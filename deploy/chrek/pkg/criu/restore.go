@@ -67,12 +67,8 @@ func ExecuteRestore(
 	defer netNsFile.Close()
 	c.AddInheritFd("extNetNs", netNsFile)
 
-	inheritedFiles, err := registerInheritFDs(c, m.K8s.StdioFDs, log)
-	if err != nil {
-		log.Error(err, "Failed to configure inherited FD resources")
-	} else {
-		defer closeFiles(inheritedFiles)
-	}
+	inheritedFiles := registerInheritFDs(c, m.K8s.StdioFDs, log)
+	defer closeFiles(inheritedFiles)
 
 	notify := &restoreNotify{log: log}
 	log.Info("Executing go-criu Restore call")
@@ -100,7 +96,9 @@ func BuildRestoreOpts(m *types.CheckpointManifest, cgroupRoot string, log logr.L
 		Root:    proto.String("/"),
 		ExtMnt:  extMounts,
 	}
-	applyCommonSettings(criuOpts, &settings)
+	if err := applyCommonSettings(criuOpts, &settings); err != nil {
+		return nil, err
+	}
 
 	// Restore-only options
 	criuOpts.RstSibling = proto.Bool(settings.RstSibling)
@@ -137,10 +135,10 @@ func buildRestoreExtMounts(m *types.CheckpointManifest) ([]*criurpc.ExtMountMap,
 	return toExtMountMaps(restoreMap), nil
 }
 
-func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) ([]*os.File, error) {
+func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*os.File {
 	if len(stdioFDs) == 0 {
 		log.Info("No stdio FD descriptors in manifest, skipping inherit-fd setup")
-		return nil, nil
+		return nil
 	}
 
 	var openFiles []*os.File
@@ -148,8 +146,13 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) ([]
 		if !strings.Contains(target, "pipe:") {
 			continue
 		}
+		// stdin (fd 0) is a read-end pipe; stdout/stderr (fd 1, 2) are write-end
+		openMode := os.O_WRONLY
+		if i == 0 {
+			openMode = os.O_RDONLY
+		}
 		fdPath := fmt.Sprintf("%s/%d", placeholderFDDir, i)
-		f, err := os.OpenFile(fdPath, os.O_WRONLY, 0)
+		f, err := os.OpenFile(fdPath, openMode, 0)
 		if err != nil {
 			log.V(1).Info("Failed to open placeholder stdio FD, skipping", "fd", i, "target", target, "error", err)
 			continue
@@ -159,7 +162,7 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) ([]
 	}
 
 	log.Info("Registered inherited stdio pipes", "count", len(openFiles))
-	return openFiles, nil
+	return openFiles
 }
 
 func closeFiles(files []*os.File) {

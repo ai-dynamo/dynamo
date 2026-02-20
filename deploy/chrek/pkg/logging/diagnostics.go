@@ -1,7 +1,6 @@
 package logging
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,7 +19,7 @@ func LogProcessDiagnostics(procRoot string, pid int, restoreLogPath string, log 
 	// Process status and cmdline
 	pidStr := strconv.Itoa(pid)
 	if data, err := os.ReadFile(filepath.Join(procRoot, pidStr, "status")); err == nil {
-		entry.Error(fmt.Errorf("%s", strings.TrimSpace(string(data))), "Process status")
+		entry.Info("Process status", "content", strings.TrimSpace(string(data)))
 	}
 	if data, err := os.ReadFile(filepath.Join(procRoot, pidStr, "cmdline")); err == nil {
 		cmdline := strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
@@ -89,7 +88,7 @@ func logRestoreLog(path string, log logr.Logger) {
 		}
 	}
 	if len(keyLines) > 0 {
-		log.Info("CRIU restore key lines", "path", path, "lines", strings.Join(keyLines, "\n"))
+		log.Info("CRIU restore key lines", "path", path, "lines", strings.Join(keyLines, " | "))
 	}
 
 	// Last 40 non-empty lines
@@ -101,6 +100,6 @@ func logRestoreLog(path string, log logr.Logger) {
 	}
 	slices.Reverse(tail)
 	if len(tail) > 0 {
-		log.Info("CRIU restore tail", "path", path, "lines", strings.Join(tail, "\n"))
+		log.Info("CRIU restore tail", "path", path, "lines", strings.Join(tail, " | "))
 	}
 }

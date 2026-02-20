@@ -44,11 +44,12 @@ func ConfigureLogger(output string) logr.Logger {
 		Level:            zap.NewAtomicLevelAt(zapLevel),
 		Development:      false,
 		Encoding:         "console",
-		EncoderConfig:    zap.NewDevelopmentEncoderConfig(),
+		EncoderConfig:    zap.NewProductionEncoderConfig(),
 		OutputPaths:      []string{output},
 		ErrorOutputPaths: []string{"stderr"},
 	}
 	zapCfg.EncoderConfig.EncodeTime = zapcore.RFC3339NanoTimeEncoder
+	zapCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	zapLog, err := zapCfg.Build()
 	if err != nil {
 		zapLog, _ = zap.NewDevelopment()

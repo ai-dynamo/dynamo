@@ -40,6 +40,15 @@ The ChReK DaemonSet handles the actual CRIU checkpoint/restore operations automa
 
 When using ChReK with the Dynamo operator, the operator automatically configures workload pods for checkpoint/restore. Without the operator, you must handle this configuration manually. This section documents what the operator normally injects and how to replicate it.
 
+### Container Naming
+
+The ChReK DaemonSet needs to identify which container in your pod is the model-serving workload (as opposed to sidecars like istio-proxy or log collectors). It resolves the target container by name:
+
+1. If a container is named `main`, it is selected
+2. Otherwise, the first container in the pod spec is selected
+
+When using the Dynamo operator, the model container is always named `main`. In standalone mode, you must either name your model container `main` or ensure it is the first container listed in your pod spec. All YAML examples in this guide use `name: main`.
+
 ### Seccomp Profile
 
 The operator sets a seccomp profile on all checkpoint/restore workload pods to block `io_uring` syscalls. The chrek DaemonSet deploys the profile file (`profiles/block-iouring.json`) to each node, but you must reference it in your pod specs:
