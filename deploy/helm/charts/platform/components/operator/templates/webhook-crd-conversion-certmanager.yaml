@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if and .Values.webhook.enabled .Values.webhook.certManager.enabled }}
+{{- if .Values.webhook.certManager.enabled }}
 ---
 # ServiceAccount for the CRD conversion patch job
 apiVersion: v1
