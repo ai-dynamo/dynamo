@@ -49,11 +49,15 @@ def test_no_bundled_shared_libraries():
     """
     whl_path = _find_runtime_wheel()
     if whl_path is None:
-        pytest.skip("ai-dynamo-runtime wheel not found in " + ", ".join(WHEEL_DIRS))
+        pytest.skip(
+            "ai-dynamo-runtime wheel not found in "
+            + ", ".join(WHEEL_DIRS)
+        )
 
     with zipfile.ZipFile(whl_path) as zf:
         bundled_libs = [
-            name for name in zf.namelist() if ".libs/" in name and ".so" in name
+            name for name in zf.namelist()
+            if ".libs/" in name and ".so" in name
         ]
 
     assert not bundled_libs, (
