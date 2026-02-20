@@ -181,6 +181,7 @@ impl KvManager {
         match event {
             MoveBlock::Use(hashes, local_hashes) => {
                 let mut blocks_stored = Vec::<u64>::new();
+                let mut blocks_evicted = Vec::<u64>::new();
 
                 let mut parent_block: Option<&UniqueBlock> = None;
                 for hash in hashes {
@@ -208,7 +209,7 @@ impl KvManager {
                             self.dp_rank
                         );
                         if let UniqueBlock::FullBlock(evicted_full_block) = evicted {
-                            self.publish_kv_event(vec![evicted_full_block], &[], None, false);
+                            blocks_evicted.push(evicted_full_block);
                         }
                     }
 
@@ -225,6 +226,7 @@ impl KvManager {
                     Some(UniqueBlock::FullBlock(block)) => Some(*block),
                     Some(UniqueBlock::PartialBlock(_)) => panic!("parent block cannot be partial"),
                 };
+                self.publish_kv_event(blocks_evicted, &[], None, false);
                 self.publish_kv_event(blocks_stored, local_hashes, parent_hash, true);
             }
 
