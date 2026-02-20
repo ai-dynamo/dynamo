@@ -35,6 +35,21 @@
 
 use crate::{ParserResult, ReasoningParser};
 
+/// Returns the length of the longest suffix of `s` that is also a prefix of `delim`.
+///
+/// Ported from ollama's `thinking/parser.go::overlap()`. Used to detect partial
+/// tags split across streaming chunk boundaries (e.g., `"Hello world <th"` where
+/// `<th` is a prefix of `<think>`).
+fn overlap(s: &str, delim: &str) -> usize {
+    let max = delim.len().min(s.len());
+    for i in (1..=max).rev() {
+        if s.ends_with(&delim[..i]) {
+            return i;
+        }
+    }
+    0
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct BasicReasoningParser {
     think_start_token: String,
@@ -144,27 +159,10 @@ impl ReasoningParser for BasicReasoningParser {
         loop {
             let current_text = self._buffer.clone();
 
-            // Buffer partial start token prefixes (only if >= 2 chars to avoid buffering
-            // lone `<`, which could be the start of tool call XML like `<invoke>`).
-            if !self.stripped_think_start
-                && current_text.len() >= 2
-                && self.think_start_token.starts_with(current_text.as_str())
-                && self.think_start_token.as_str() != current_text.as_str()
-            {
-                break; // Need more data to resolve ambiguity
-            }
-
-            // Buffer partial end token prefixes while inside a reasoning block.
-            if self._in_reasoning
-                && self.think_end_token.starts_with(current_text.as_str())
-                && self.think_end_token.as_str() != current_text.as_str()
-            {
-                break; // Need more data
-            }
-
-            // Strip <think> token if present at the start and enter reasoning mode.
-            // Only matches starts_with so that mid-text `<think>` (e.g. "answer <think>...")
-            // falls through to the find() branch below, preserving the normal-text prefix.
+            // Strip leading <think> tag if not yet stripped. Handles two cases:
+            // 1. force_reasoning=true where the model also emits <think> as text
+            // 2. First call where <think> arrives at buffer position 0
+            // Mid-text <think> (position > 0) falls through to the find() branch below.
             if !self.stripped_think_start
                 && current_text.starts_with(self.think_start_token.as_str())
             {
@@ -184,11 +182,23 @@ impl ReasoningParser for BasicReasoningParser {
                     self.stripped_think_start = false; // Allow detecting next <think> block
                     continue; // Process remainder — may contain further blocks
                 } else {
-                    // No end token yet — emit incremental content if streaming, else buffer.
+                    // No complete end token — check for partial at end of buffer
+                    // (e.g., "reasoning content</th" where "</th" is a prefix of "</think>").
                     if self.stream_reasoning {
-                        accumulated_reasoning.push_str(&current_text);
-                        self._buffer.clear();
+                        let ol = overlap(&current_text, &self.think_end_token);
+                        if ol >= 2 {
+                            let safe_end = current_text.len() - ol;
+                            if safe_end > 0 {
+                                accumulated_reasoning.push_str(&current_text[..safe_end]);
+                            }
+                            self._buffer = current_text[safe_end..].to_string();
+                        } else {
+                            accumulated_reasoning.push_str(&current_text);
+                            self._buffer.clear();
+                        }
                     }
+                    // When stream_reasoning=false, buffer retains all content until
+                    // </think> arrives — no overlap check needed.
                     break;
                 }
             } else {
@@ -201,9 +211,21 @@ impl ReasoningParser for BasicReasoningParser {
                     self.stripped_think_start = true;
                     continue; // Process reasoning content
                 } else {
-                    // No more reasoning blocks — rest is normal text.
-                    accumulated_normal.push_str(&current_text);
-                    self._buffer.clear();
+                    // No complete start token — check for partial at end of buffer
+                    // (e.g., "Hello world <th" where "<th" is a prefix of "<think>").
+                    // Require overlap >= 2 so a lone `<` passes through for tool call
+                    // XML tags like `<invoke>` or `<minimax:tool_call>`.
+                    let ol = overlap(&current_text, &self.think_start_token);
+                    if ol >= 2 {
+                        let safe_end = current_text.len() - ol;
+                        if safe_end > 0 {
+                            accumulated_normal.push_str(&current_text[..safe_end]);
+                        }
+                        self._buffer = current_text[safe_end..].to_string();
+                    } else {
+                        accumulated_normal.push_str(&current_text);
+                        self._buffer.clear();
+                    }
                     break;
                 }
             }
@@ -855,5 +877,148 @@ mod tests {
         let r4 = parser.parse_reasoning_streaming_incremental("<tool_call>B</tool_call>", &[]);
         assert_eq!(r4.normal_text, "<tool_call>B</tool_call>");
         assert_eq!(r4.reasoning_text, "");
+    }
+
+    // =========================================================================
+    // Mid-string partial tag tests (overlap-based buffering)
+    //
+    // These test scenarios where a <think> or </think> tag is split mid-string
+    // (not at the start of the buffer). Backends that batch multiple forward-pass
+    // tokens into a single chunked response can produce these patterns.
+    //
+    // Ported from PR #6448 (ryanolson) with additional fakeout tests.
+    // =========================================================================
+
+    #[test]
+    fn test_mid_string_partial_opening_tag_batched() {
+        // Backend batches tokens: "Hello world <th" arrives as one chunk
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("Hello world <th", &[]);
+        // "Hello world " emitted as normal, "<th" held in buffer
+        assert_eq!(r1.normal_text, "Hello world ");
+        assert_eq!(r1.reasoning_text, "");
+
+        let r2 = parser
+            .parse_reasoning_streaming_incremental("ink>reasoning content</think> answer", &[]);
+        assert_eq!(r2.reasoning_text, "reasoning content");
+        assert_eq!(r2.normal_text, " answer");
+    }
+
+    #[test]
+    fn test_batched_tag_boundary_split() {
+        // Aggressive batching: <think> tag split with normal text prefix
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("The answer is <thi", &[]);
+        assert_eq!(r1.normal_text, "The answer is ");
+        assert_eq!(r1.reasoning_text, "");
+
+        let r2 = parser.parse_reasoning_streaming_incremental("nk>let me think</think>42", &[]);
+        assert_eq!(r2.reasoning_text, "let me think");
+        assert_eq!(r2.normal_text, "42");
+    }
+
+    #[test]
+    fn test_mid_string_partial_closing_tag_stream_reasoning_false() {
+        // With stream_reasoning=false, content stays buffered until </think>.
+        // Partial </think> split mid-string while in reasoning mode.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
+
+        let r1 =
+            parser.parse_reasoning_streaming_incremental("<think>reasoning content and </th", &[]);
+        assert_eq!(r1.normal_text, "");
+        assert_eq!(r1.reasoning_text, "");
+
+        let r2 = parser.parse_reasoning_streaming_incremental("ink> normal text", &[]);
+        assert_eq!(r2.reasoning_text, "reasoning content and ");
+        assert_eq!(r2.normal_text, " normal text");
+    }
+
+    #[test]
+    fn test_mid_string_partial_closing_tag_stream_reasoning_true() {
+        // With stream_reasoning=true, reasoning content is emitted incrementally.
+        // The partial "</th" at the end must NOT be emitted as reasoning text.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 =
+            parser.parse_reasoning_streaming_incremental("<think>reasoning content and </th", &[]);
+        // "reasoning content and " emitted as reasoning, "</th" held
+        assert_eq!(r1.reasoning_text, "reasoning content and ");
+        assert_eq!(r1.normal_text, "");
+
+        let r2 = parser.parse_reasoning_streaming_incremental("ink> normal text", &[]);
+        assert_eq!(r2.reasoning_text, "");
+        assert_eq!(r2.normal_text, " normal text");
+    }
+
+    #[test]
+    fn test_batched_interleaved_with_mid_string_partial() {
+        // First block complete in chunk 1, second block's <think> split at boundary
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 =
+            parser.parse_reasoning_streaming_incremental("<think>thought1</think>answer1<thi", &[]);
+        assert_eq!(r1.reasoning_text, "thought1");
+        assert_eq!(r1.normal_text, "answer1");
+
+        let r2 = parser.parse_reasoning_streaming_incremental("nk>thought2</think>answer2", &[]);
+        assert_eq!(r2.reasoning_text, "thought2");
+        assert_eq!(r2.normal_text, "answer2");
+    }
+
+    #[test]
+    fn test_partial_tag_false_positive() {
+        // "<th" looks like partial <think> but "thesis" is not <think>
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("value <thesis on", &[]);
+        // No suffix of "value <thesis on" is a prefix of "<think>" — all emitted
+        let r2 = parser.parse_reasoning_streaming_incremental(" AI> is great", &[]);
+
+        let combined_normal = format!("{}{}", r1.normal_text, r2.normal_text);
+        assert_eq!(combined_normal, "value <thesis on AI> is great");
+        assert_eq!(r1.reasoning_text, "");
+        assert_eq!(r2.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_partial_closing_tag_fakeout() {
+        // Ollama-style fakeout: "</th" buffered, but "ing>" completes "</thing>" not "</think>"
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        let r1 = parser.parse_reasoning_streaming_incremental("<think>abc</th", &[]);
+        assert_eq!(r1.reasoning_text, "abc");
+        assert_eq!(r1.normal_text, "");
+
+        // "ing>def" completes the partial as "</thing>def" — not a closing tag
+        let r2 = parser.parse_reasoning_streaming_incremental("ing>def", &[]);
+        assert_eq!(r2.reasoning_text, "</thing>def");
+        assert_eq!(r2.normal_text, "");
+
+        // Real closing tag arrives
+        let r3 = parser.parse_reasoning_streaming_incremental("</think>done", &[]);
+        assert_eq!(r3.reasoning_text, "");
+        assert_eq!(r3.normal_text, "done");
+    }
+
+    #[test]
+    fn test_overlap_helper_function() {
+        // Direct tests for the overlap utility
+        assert_eq!(overlap("abc</th", "</think>"), 4);
+        assert_eq!(overlap("abc</thing>def", "</think>"), 0);
+        assert_eq!(overlap("<", "<think>"), 1);
+        assert_eq!(overlap("<th", "<think>"), 3);
+        assert_eq!(overlap("<think>", "<think>"), 7); // full match
+        assert_eq!(overlap("no match", "<think>"), 0);
+        assert_eq!(overlap("", "<think>"), 0);
+        assert_eq!(overlap("Hello world <thi", "<think>"), 4);
     }
 }
