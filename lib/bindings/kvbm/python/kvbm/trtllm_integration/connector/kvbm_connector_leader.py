@@ -42,11 +42,16 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
 
         mappings = self._llm_args.parallel_config.to_mapping()
 
-        world_size = mappings.world_size
+        # With attention DP, each rank is an independent DP domain with its
+        # own leader + worker pair, so num_workers=1 per leader.
+        if mappings.enable_attention_dp:
+            num_workers = 1
+        else:
+            num_workers = mappings.world_size
         self.block_size = self._llm_args.kv_cache_config.tokens_per_block
 
         # Set bytes_per_block to 0, because we will retrieve the actual value from the worker side.
-        leader = KvbmLeader(world_size, drt=self.drt)
+        leader = KvbmLeader(num_workers, drt=self.drt)
 
         # Check if consolidator is enabled first
         consolidator_enabled = is_truthy(
