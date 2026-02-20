@@ -56,6 +56,7 @@ import (
 
 	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -123,6 +124,7 @@ func init() {
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 
 	utilruntime.Must(gaiev1.Install(scheme))
+	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -741,6 +743,13 @@ func main() {
 		dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(isClusterWide, gpuDiscoveryEnabled)
 		if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
+			os.Exit(1)
+		}
+
+		if err = ctrl.NewWebhookManagedBy(mgr).
+			For(&nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to register conversion webhook", "webhook", "DynamoGraphDeploymentRequest-conversion")
 			os.Exit(1)
 		}
 
