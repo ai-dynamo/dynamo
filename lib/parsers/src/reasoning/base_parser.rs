@@ -878,8 +878,8 @@ mod tests {
         assert_eq!(r1.normal_text, "Hello world ");
         assert_eq!(r1.reasoning_text, "");
 
-        let r2 =
-            parser.parse_reasoning_streaming_incremental("ink>reasoning content</think> answer", &[]);
+        let r2 = parser
+            .parse_reasoning_streaming_incremental("ink>reasoning content</think> answer", &[]);
         assert_eq!(r2.reasoning_text, "reasoning content");
         assert_eq!(r2.normal_text, " answer");
     }
@@ -929,8 +929,7 @@ mod tests {
         assert_eq!(r1.normal_text, "The answer is ");
         assert_eq!(r1.reasoning_text, "");
 
-        let r2 =
-            parser.parse_reasoning_streaming_incremental("nk>let me think</think>42", &[]);
+        let r2 = parser.parse_reasoning_streaming_incremental("nk>let me think</think>42", &[]);
         assert_eq!(r2.reasoning_text, "let me think");
         assert_eq!(r2.normal_text, "42");
     }
@@ -963,8 +962,7 @@ mod tests {
         assert_eq!(r1.reasoning_text, "thought1");
         assert_eq!(r1.normal_text, "answer1");
 
-        let r2 =
-            parser.parse_reasoning_streaming_incremental("nk>thought2</think>answer2", &[]);
+        let r2 = parser.parse_reasoning_streaming_incremental("nk>thought2</think>answer2", &[]);
         assert_eq!(r2.reasoning_text, "thought2");
         assert_eq!(r2.normal_text, "answer2");
     }
