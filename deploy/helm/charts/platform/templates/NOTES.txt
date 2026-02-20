@@ -13,6 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{- $operatorValues := index .Values "dynamo-operator" }}
+{{- if and $operatorValues.namespaceRestriction.enabled $operatorValues.gpuDiscovery.enabled }}
+GPU Discovery: ENABLED — the operator will automatically detect GPU hardware from cluster nodes.
+{{- else if $operatorValues.namespaceRestriction.enabled }}
+GPU Discovery: DISABLED — DynamoGraphDeploymentRequests must include hardware configuration in
+spec.profilingConfig.config, or set dynamo-operator.gpuDiscovery.enabled=true and reinstall.
+{{- end }}
+
 {{- if (index .Values "dynamo-api-store").enabled }}
   {{- if (index .Values "dynamo-api-store").ingress.enabled }}
 Your service is available at:

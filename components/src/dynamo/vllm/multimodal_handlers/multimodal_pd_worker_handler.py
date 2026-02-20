@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import copy
 import logging
+import os
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -14,6 +16,10 @@ from vllm.v1.engine.async_llm import AsyncLLM
 import dynamo.nixl_connect as connect
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
+)
+from dynamo.common.multimodal.embedding_transfer import (
+    LocalEmbeddingReceiver,
+    NixlPersistentEmbeddingReceiver,
 )
 from dynamo.runtime import Client, Component, DistributedRuntime
 
@@ -35,6 +41,8 @@ from ..multimodal_utils.prefill_worker_utils import (
 
 logger = logging.getLogger(__name__)
 
+TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
+
 
 class MultimodalPDWorkerHandler(BaseWorkerHandler):
     """Prefill/Decode or Prefill-only worker for multimodal serving"""
@@ -48,6 +56,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         encode_worker_client: Client | None = None,
         decode_worker_client: Client | None = None,
         shutdown_event=None,
+        generate_endpoint=None,
     ):
         # Get default_sampling_params from config
         default_sampling_params = (
@@ -61,6 +70,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            config=config,
             shutdown_event=shutdown_event,
         )
 
@@ -92,6 +103,13 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Note: This is synchronous initialization, async initialization happens in async_init
         self._connector: connect.Connector | None = (
             None  # Will be initialized in async_init
+        )
+        # [gluo FIXME] can't use pre-registered tensor as NIXL requires descriptors
+        # to be at matching size, need to overwrite nixl connect library
+        self.embedding_receiver = (
+            LocalEmbeddingReceiver()
+            if TRANSFER_LOCAL
+            else NixlPersistentEmbeddingReceiver(max_items=0)
         )
 
         logger.info("Multimodal PD Worker has been initialized")
@@ -140,6 +158,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ),
             sampling_params=sampling_params,
             request_id=request_id,
+            model=raw_request.get("model"),
             multimodal_inputs=multimodal_groups,
         )
 
@@ -168,7 +187,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
 
     async def _load_multimodal_data(
         self, request: vLLMMultimodalRequest
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[int]]:
         """Load pre-computed embeddings into an engine-ready dict.
 
         Each ``MultiModalGroup`` carries embeddings from encode workers,
@@ -179,13 +198,21 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         multimodal_inputs: list[MultiModalGroup] = request.multimodal_inputs or []
         multi_modal_data: dict[str, Any] = defaultdict(list)
 
-        for mi in multimodal_inputs:
-            embeddings = await load_embeddings(
-                mi,
-                self.EMBEDDINGS_DTYPE,
-                self.EMBEDDINGS_DEVICE,
-                self._connector,
+        task_lists = [
+            asyncio.create_task(
+                load_embeddings(
+                    mi,
+                    self.EMBEDDINGS_DTYPE,
+                    self.EMBEDDINGS_DEVICE,
+                    self.embedding_receiver,
+                )
             )
+            for mi in multimodal_inputs
+        ]
+        receiver_tensor_ids: list[int] = []
+        for task, mi in zip(task_lists, multimodal_inputs):
+            tensor_id, embeddings = await task
+            receiver_tensor_ids.append(tensor_id)
             accumulate_embeddings(
                 multi_modal_data,
                 self.config.model,
@@ -194,7 +221,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 mi.image_grid_thw,
             )
 
-        return multi_modal_data
+        return multi_modal_data, receiver_tensor_ids
 
     # ── Request metadata finalization ────────────────────────────────
 
@@ -291,8 +318,10 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self,
         request: vLLMMultimodalRequest,
         multi_modal_data: dict[str, Any],
+        received_tensor_ids: list[int],
     ):
         """Run prefill and decode on this worker (aggregated mode)."""
+        lora_request = self._resolve_lora_request(request.model)
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=request.engine_prompt["prompt_token_ids"],
@@ -300,7 +329,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ),
             sampling_params=request.sampling_params,
             request_id=request.request_id,
+            lora_request=lora_request,
         )
+
+        for tensor_id in received_tensor_ids:
+            self.embedding_receiver.release_tensor(tensor_id)
 
         num_output_tokens_so_far = 0
         async for response in gen:
@@ -318,6 +351,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self,
         request: vLLMMultimodalRequest,
         multi_modal_data: dict[str, Any],
+        received_tensor_ids: list[int],
     ):
         """Prefill locally, then forward to a remote decode worker."""
         # Prepare prefill-only request
@@ -329,6 +363,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         prefill_only_request.sampling_params.min_tokens = 1
         logger.debug("Prefill request: %s", prefill_only_request)
 
+        lora_request = self._resolve_lora_request(request.model)
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=prefill_only_request.engine_prompt["prompt_token_ids"],
@@ -336,7 +371,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             ),
             sampling_params=prefill_only_request.sampling_params,
             request_id=prefill_only_request.request_id,
+            lora_request=lora_request,
         )
+
+        for tensor_id in received_tensor_ids:
+            self.embedding_receiver.release_tensor(tensor_id)
 
         # Drain prefill generator (max_tokens=1, expect a single response)
         async for prefill_response in gen:
@@ -368,6 +407,14 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # embeddings_shape).  Heavy multimodal data was consumed locally by
         # engine_client.generate() and multimodal_inputs was cleared by
         # `_finalize_request_metadata`.
+        #
+        # request.model (LoRA name) is preserved in the serialized request
+        # so the decode worker can resolve the same LoRA adapter.
+        if lora_request and request.model:
+            logger.debug(
+                f"Forwarding disaggregated decode with LoRA '{request.model}' "
+                f"— ensure the same adapter is loaded on the decode worker."
+            )
         async for (
             decode_response
         ) in await self.decode_worker_client.round_robin(  # type: ignore[union-attr]
@@ -385,7 +432,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         request = await self._parse_request(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        multi_modal_data = await self._load_multimodal_data(request)
+        multi_modal_data, received_tensor_ids = await self._load_multimodal_data(
+            request
+        )
         self._finalize_request_metadata(request, multi_modal_data)
 
         logger.info(
@@ -394,8 +443,12 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         logger.debug(f"{multi_modal_data}")
 
         if self.enable_disagg and self.decode_worker_client:
-            async for chunk in self._generate_disagg(request, multi_modal_data):
+            async for chunk in self._generate_disagg(
+                request, multi_modal_data, received_tensor_ids
+            ):
                 yield chunk
         else:
-            async for chunk in self._generate_agg(request, multi_modal_data):
+            async for chunk in self._generate_agg(
+                request, multi_modal_data, received_tensor_ids
+            ):
                 yield chunk
