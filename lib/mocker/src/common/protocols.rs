@@ -9,7 +9,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use validator::Validate;
 
-use crate::perf_model::PerfModel;
+use crate::common::perf_model::PerfModel;
 use dynamo_kv_router::protocols::KvCacheEvent;
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash, Token};
