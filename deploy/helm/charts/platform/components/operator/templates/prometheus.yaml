@@ -30,6 +30,9 @@ spec:
   - interval: 5s
     path: /metrics
     port: http
+    # honorLabels ensures dynamo_namespace and other labels set by the dynamo
+    # runtime (including router metrics embedded in the frontend) are preserved.
+    honorLabels: true
     relabelings:
     - action: replace
       sourceLabels:
@@ -103,9 +106,17 @@ spec:
   podMetricsEndpoints:
   - interval: 5s
     path: /metrics
-    targetPort: 9090
     honorLabels: true
     relabelings:
+    # Force port 9090 (DYN_SYSTEM_PORT) without requiring containerPort in the pod spec.
+    # targetPort: 9090 would generate a keep rule on __meta_kubernetes_pod_container_port_number
+    # that drops pods without an explicit containerPort: 9090 declaration.
+    - action: replace
+      sourceLabels:
+      - __address__
+      regex: '([^:]+)(?::\d+)?'
+      replacement: '${1}:9090'
+      targetLabel: __address__
     - action: replace
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
