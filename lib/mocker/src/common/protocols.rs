@@ -16,7 +16,7 @@ use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash, Token};
 
 /// Metadata type for kvbm-logical blocks in the mocker.
 #[derive(Clone, Debug)]
-pub struct MockMeta;
+pub struct G1;
 
 /// Which KV manager backend to use.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]

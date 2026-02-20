@@ -3,7 +3,7 @@
 
 //! KvbmLogical backend for the mocker's KV manager.
 //!
-//! Wraps kvbm-logical's `BlockManager<MockMeta>` and translates `MoveBlock` signals
+//! Wraps kvbm-logical's `BlockManager<G1>` and translates `MoveBlock` signals
 //! into the RAII block lifecycle (allocate → stage → register → drop).
 
 use std::collections::HashMap;
@@ -16,15 +16,15 @@ use kvbm_logical::tinylfu::TinyLFUTracker;
 use kvbm_logical::{BlockManager, ImmutableBlock, MutableBlock};
 use uuid::Uuid;
 
+use crate::common::protocols::{G1, KvCacheEventSink, MockerEvictionBackend, MoveBlock};
 use crate::kv_manager::KvBackend;
-use crate::common::protocols::{KvCacheEventSink, MockMeta, MockerEvictionBackend, MoveBlock};
 
 /// KV manager backend powered by kvbm-logical's production `BlockManager`.
 ///
 /// Translates the mocker's `MoveBlock` signal protocol into kvbm-logical's
 /// RAII block lifecycle: allocate → stage → register → drop.
 pub struct KvbmLogicalKvManager {
-    block_manager: BlockManager<MockMeta>,
+    block_manager: BlockManager<G1>,
     max_capacity: usize,
     block_size: usize,
     _dp_rank: u32,
@@ -32,11 +32,11 @@ pub struct KvbmLogicalKvManager {
     _kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
 
     /// Partial (generation) blocks held as MutableBlock — not yet registered.
-    active_partial: HashMap<Uuid, MutableBlock<MockMeta>>,
+    active_partial: HashMap<Uuid, MutableBlock<G1>>,
 
     /// Full blocks held as ImmutableBlock, keyed by SequenceHash.
     /// Vec tracks reference count — each Use adds one ImmutableBlock clone.
-    active_full: HashMap<u64, Vec<ImmutableBlock<MockMeta>>>,
+    active_full: HashMap<u64, Vec<ImmutableBlock<G1>>>,
 }
 
 impl KvbmLogicalKvManager {
@@ -231,9 +231,7 @@ impl KvBackend for KvbmLogicalKvManager {
         blocks
             .iter()
             .filter(|block| match block {
-                UniqueBlock::FullBlock(seq_hash) => {
-                    !self.active_full.contains_key(seq_hash)
-                }
+                UniqueBlock::FullBlock(seq_hash) => !self.active_full.contains_key(seq_hash),
                 UniqueBlock::PartialBlock(uuid) => !self.active_partial.contains_key(uuid),
             })
             .count()
@@ -249,7 +247,7 @@ impl KvBackend for KvbmLogicalKvManager {
             let presence = self
                 .block_manager
                 .block_registry()
-                .check_presence::<MockMeta>(&[plh]);
+                .check_presence::<G1>(&[plh]);
             if presence.first().is_some_and(|(_, present)| *present) {
                 return true;
             }
