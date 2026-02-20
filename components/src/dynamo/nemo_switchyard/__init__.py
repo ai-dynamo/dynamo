@@ -10,3 +10,4 @@ except Exception:
         __version__ = _pkg_version("ai-dynamo")
     except Exception:
         __version__ = "0.0.0+unknown"
+

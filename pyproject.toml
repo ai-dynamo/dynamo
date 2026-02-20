@@ -66,8 +66,7 @@ sglang = [
 
 routellm = [
     "routellm",
-    "httpx>=0.27.0",
-    "uvicorn>=0.30.0",
+    "transformers",
     "uvloop",
 ]
 
