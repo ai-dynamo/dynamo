@@ -33,6 +33,7 @@ helm-docs-install: $(HELM_DOCS) ## Download helm-docs locally if necessary
 $(HELM_DOCS): $(LOCALBIN)
 	@echo "Downloading helm-docs $(HELM_DOCS_VERSION)..."
 	@ARCH=$$(uname -m); \
+	case $$ARCH in aarch64) ARCH=arm64;; esac; \
 	OS=$$(uname -s); \
 	curl -fsSL "https://github.com/norwoodj/helm-docs/releases/download/v$(HELM_DOCS_VERSION)/helm-docs_$(HELM_DOCS_VERSION)_$${OS}_$${ARCH}.tar.gz" | \
 	tar xz -C $(LOCALBIN) helm-docs && \
