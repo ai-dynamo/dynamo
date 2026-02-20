@@ -199,6 +199,7 @@ spec:
               cp $SRC_COMP/planner/utils/planner_config.py          $SP/dynamo/planner/utils/planner_config.py
               cp $SRC_COMP/planner/utils/prometheus.py              $SP/dynamo/planner/utils/prometheus.py
               cp $SRC_COMP/planner/global_planner_connector.py      $SP/dynamo/planner/global_planner_connector.py
+              cp $SRC_COMP/planner/remote_planner_client.py         $SP/dynamo/planner/remote_planner_client.py
               echo "Patches applied. Starting SLA Planner global-planner mode..."
               exec python3 -m dynamo.planner --config \
                 '{"environment":"global-planner","global_planner_namespace":"darfeen-dynamo-cloud-gp-ctrl","backend":"mocker","mode":"disagg","throughput_metrics_source":"router","throughput_adjustment_interval":30,"ttft":2000,"itl":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","metric_pulling_prometheus_endpoint":"http://prometheus:9090","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8","enable_load_scaling":false}'
