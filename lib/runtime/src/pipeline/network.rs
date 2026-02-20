@@ -166,8 +166,12 @@ impl StreamSender {
 
     #[allow(clippy::needless_update)]
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
-        if let Some(prologue) = self.prologue.take() {
-            let prologue = ResponseStreamPrologue { error, ..prologue };
+        // leaving the original logic in place for now
+        // error overrides the dissolved prologue, but the only field on `ResponseStreamPrologue` is `error`
+        // so the second argument can never be used, and the value of error passed by the caller would always be used
+        if let Some(_prologue) = self.prologue.take() {
+            // let prologue = ResponseStreamPrologue { error, ..prologue };
+            let prologue = ResponseStreamPrologue { error };
             let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
                 Ok(b) => b.into(),
                 Err(err) => {
