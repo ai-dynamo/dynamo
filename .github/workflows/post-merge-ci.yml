@@ -92,11 +92,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          JOBS_JSON=$(curl -sSL \
+          JOBS_JSON=$(mktemp)
+          curl -sSL \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100"
-          )
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            >$JOBS_JSON
 
           FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "• " + .name' "$JOBS_JSON")
           echo "FAILED_JOBS=$FAILED_JOBS" >> $GITHUB_ENV
