@@ -208,18 +208,19 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    // If we already have a WorkerSet for this (model, namespace) and the
-                    // checksums don't match, reject the new worker. Different namespaces
-                    // may legitimately have different checksums.
-                    let ws_key = worker_set_key(&mcid.namespace, card.model_type);
+                    // If we already have a WorkerSet for this model and the checksums
+                    // don't match, reject the new worker. All WorkerSets of a model
+                    // must share the same checksum.
                     let can_add =
                         self.manager
-                            .is_valid_checksum(card.name(), &ws_key, card.mdcsum());
+                            .is_valid_checksum(card.name(), card.mdcsum());
                     if can_add.is_some_and(|is_valid| !is_valid) {
                         tracing::error!(
                             model_name = card.name(),
                             namespace = mcid.namespace,
-                            "Checksum for new worker does not match existing WorkerSet in same namespace."
+                            "Checksum for new worker does not match model's canonical checksum. \
+                             All WorkerSets must share the same checksum. \
+                             Drain all old workers before deploying a new version."
                         );
 
                         // TODO: mark that instance down in clients
@@ -719,7 +720,7 @@ impl ModelWatcher {
             // Prefill sets have no engines — we add the WorkerSet first for tracking,
             // then activate the prefill router.
             self.manager
-                .add_worker_set(card.name(), &ws_key, worker_set);
+                .add_worker_set(card.name(), &ws_key, worker_set)?;
 
             // Note: activate_prefill_router is keyed by deployment namespace (not ws_key)
             // because it coordinates between decode and prefill WorkerSets that share
@@ -753,7 +754,7 @@ impl ModelWatcher {
 
         // Add the completed WorkerSet to the Model
         self.manager
-            .add_worker_set(card.name(), &ws_key, worker_set);
+            .add_worker_set(card.name(), &ws_key, worker_set)?;
 
         Ok(())
     }
@@ -856,7 +857,8 @@ mod tests {
     fn test_is_model_type_list_empty_prefill_present() {
         let mm = ModelManager::new();
         // A WorkerSet with no engines is treated as a prefill set
-        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
+        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"))
+            .unwrap();
 
         assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
         // Other types should still be empty since the WorkerSet has no engines
@@ -871,7 +873,8 @@ mod tests {
     #[test]
     fn test_is_model_type_list_empty_after_removal() {
         let mm = ModelManager::new();
-        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
+        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"))
+            .unwrap();
         assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
 
         mm.remove_model("model-a");
@@ -881,8 +884,10 @@ mod tests {
     #[test]
     fn test_is_model_type_list_not_empty_when_other_model_remains() {
         let mm = ModelManager::new();
-        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
-        mm.add_worker_set("model-b", "ns1", make_worker_set("ns1"));
+        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"))
+            .unwrap();
+        mm.add_worker_set("model-b", "ns1", make_worker_set("ns1"))
+            .unwrap();
 
         // Remove one model — other still provides prefill
         mm.remove_model("model-a");
