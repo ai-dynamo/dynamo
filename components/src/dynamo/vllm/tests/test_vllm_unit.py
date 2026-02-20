@@ -219,8 +219,8 @@ def test_connector_nixl_emits_deprecation_warning(mock_vllm_cli):
     assert '"kv_connector":"NixlConnector"' in json_warning[0]
 
 
-def test_connector_none_emits_deprecation_warning(mock_vllm_cli):
-    """Test that --connector none emits a DeprecationWarning."""
+def test_connector_none_no_warning(mock_vllm_cli):
+    """Test that --connector none does NOT warn (it's the only way to opt out of the default)."""
     mock_vllm_cli(
         "--model", "Qwen/Qwen3-0.6B", "--connector", "none", "--enforce-eager"
     )
@@ -228,12 +228,15 @@ def test_connector_none_emits_deprecation_warning(mock_vllm_cli):
         warnings.simplefilter("always")
         parse_args()
 
-    dep_warnings = [x for x in w if issubclass(x.category, FutureWarning)]
-    assert len(dep_warnings) >= 1, "Expected DeprecationWarning for --connector none"
-
-    messages = [str(x.message) for x in dep_warnings]
-    none_warning = [m for m in messages if "--connector none" in m]
-    assert none_warning, f"Expected '--connector none' in warning, got: {messages}"
+    connector_warnings = [
+        x
+        for x in w
+        if issubclass(x.category, FutureWarning) and "--connector" in str(x.message)
+    ]
+    assert len(connector_warnings) == 0, (
+        f"Expected no --connector warnings for --connector none, got: "
+        f"{[str(x.message) for x in connector_warnings]}"
+    )
 
 
 def test_implicit_default_connector_emits_warning(mock_vllm_cli):

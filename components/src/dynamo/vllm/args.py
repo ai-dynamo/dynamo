@@ -223,14 +223,6 @@ def update_dynamo_config_with_engine(
             raise ValueError(
                 "'none' and 'null' cannot be combined with other connectors"
             )
-        # Warn if user explicitly passed --connector none/null
-        if normalized and getattr(dynamo_config, "_connector_explicitly_set", False):
-            warnings.warn(
-                "--connector none is deprecated. In the next release, no connector "
-                "will be the default. You can then simply omit --connector entirely.",
-                FutureWarning,
-                stacklevel=2,
-            )
         dynamo_config.connector = []  # type: ignore[assignment]
     else:
         if has_kv_transfer_config:
