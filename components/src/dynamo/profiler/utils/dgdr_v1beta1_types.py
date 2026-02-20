@@ -52,7 +52,7 @@ class SearchStrategy(str, Enum):
 
 class BackendType(str, Enum):
     Auto = "auto"
-    SgLang = "sglang"
+    Sglang = "sglang"
     Trtllm = "trtllm"
     Vllm = "vllm"
 
