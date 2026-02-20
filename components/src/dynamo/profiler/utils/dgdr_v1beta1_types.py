@@ -22,22 +22,22 @@ from dynamo.planner.utils.planner_config import (
 
 
 class DGDRPhase(str, Enum):
-    PENDING = "Pending"
-    PROFILING = "Profiling"
-    READY = "Ready"
-    DEPLOYING = "Deploying"
-    DEPLOYED = "Deployed"
-    FAILED = "Failed"
+    Pending = "Pending"
+    Profiling = "Profiling"
+    Ready = "Ready"
+    Deploying = "Deploying"
+    Deployed = "Deployed"
+    Failed = "Failed"
 
 
 class ProfilingPhase(str, Enum):
-    INITIALIZING = "Initializing"
-    SWEEPINGPREFILL = "SweepingPrefill"
-    SWEEPINGDECODE = "SweepingDecode"
-    SELECTINGCONFIG = "SelectingConfig"
-    BUILDINGCURVES = "BuildingCurves"
-    GENERATINGDGD = "GeneratingDGD"
-    DONE = "Done"
+    Initializing = "Initializing"
+    SweepingPrefill = "SweepingPrefill"
+    SweepingDecode = "SweepingDecode"
+    SelectingConfig = "SelectingConfig"
+    BuildingCurves = "BuildingCurves"
+    GeneratingDGD = "GeneratingDGD"
+    Done = "Done"
 
 
 class OptimizationType(str, Enum):
