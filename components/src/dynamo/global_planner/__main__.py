@@ -70,7 +70,9 @@ async def main(runtime: DistributedRuntime, args):
         logger.info("Authorization: DISABLED (accepting all namespaces)")
 
     if args.no_operation:
-        logger.info("No-operation mode: ENABLED (scale requests will be logged, not executed)")
+        logger.info(
+            "No-operation mode: ENABLED (scale requests will be logged, not executed)"
+        )
     else:
         logger.info("No-operation mode: DISABLED")
 
