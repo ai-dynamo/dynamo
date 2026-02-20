@@ -1,49 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # KV Manager (vLLM Backend)
-//! A synchronous implementation of a block manager that handles MoveBlock signals for caching KV blocks.
+//! Manual backend for the mocker's KV manager.
 //!
-//! Uses [`HashCache`] for O(1) block lookups with active/inactive pool management.
-//!
-//! ## Block Operations
-//! The KV manager processes four types of MoveBlock signals:
-//!
-//! ### Use
-//! - Checks if block exists in active pool → increment reference count
-//! - If in inactive pool → move to active pool
-//! - If neither → try evicting from inactive pool to make room
-//! - If inactive pool is empty → pre-empt the oldest running request
-//!
-//! ### Destroy
-//! - Removes the block from the active pool
-//!
-//! ### Deref
-//! - Decrements reference count of a block in active pool
-//! - If count reaches zero → move block to inactive pool
-//!
-//! ### Promote
-//! - Converts a partial block (uuid) into a full block (global block hash)
-//!
-//! ## Preemption
-//! If a Use operation fails (typically due to insufficient space), a false boolean signal
-//! is returned to the scheduler for preemption. Initial KV block allocations for new requests
-//! should not fail due to the watermark checking.
-//!
-//! ## NOTE
-//! For simplicity (or non-simplicity), reference counting is tracked manually instead of using
-//! the more idiomatic built-in Arc reference counter. This can be considered a shadow / mirror
-//! implementation of the main block manager.
+//! Uses [`HashCache`] for O(1) block lookups with active/inactive pool management
+//! and manual reference counting.
+
 use crate::cache::HashCache;
-use crate::common::protocols::{KvCacheEventSink, MoveBlock, PrefillCost};
-use crate::common::sequence::ActiveSequence;
+use crate::common::protocols::{KvCacheEventSink, MoveBlock};
+use crate::kv_manager::KvBackend;
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
 use dynamo_runtime::config::environment_names::mocker;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{BlockHash, SequenceHash};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash};
 use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, LazyLock};
@@ -56,7 +28,7 @@ static KV_CACHE_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
         .unwrap_or(false)
 });
 
-pub struct KvManager {
+pub struct ManualKvManager {
     cache: HashCache,
     block_size: usize,
     kv_event_sink: Option<Arc<dyn KvCacheEventSink>>,
@@ -64,7 +36,7 @@ pub struct KvManager {
     next_event_id: u64,
 }
 
-impl KvManager {
+impl ManualKvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
         Self::new_with_event_sink(max_capacity, block_size, None, 0)
     }
@@ -78,11 +50,11 @@ impl KvManager {
         debug_assert!(max_capacity > 0, "max_capacity must be > 0");
         if kv_event_sink.is_some() {
             tracing::info!(
-                "KvManager initialized with event sink for DP rank {dp_rank} with block_size {block_size}"
+                "ManualKvManager initialized with event sink for DP rank {dp_rank} with block_size {block_size}"
             );
         }
 
-        KvManager {
+        ManualKvManager {
             cache: HashCache::new(max_capacity),
             block_size,
             kv_event_sink,
@@ -161,7 +133,7 @@ impl KvManager {
                     .collect(),
             })
         };
-        // Use incremental event ID starting from 0 and incrementing by 1 for each event.
+
         let event_id = self.next_event_id;
         self.next_event_id += 1;
 
@@ -176,29 +148,41 @@ impl KvManager {
         }
     }
 
-    /// Process a MoveBlock instruction synchronously
-    pub fn process(&mut self, event: &MoveBlock) -> bool {
+    /// Get the keys of inactive blocks
+    pub fn get_inactive_blocks(&self) -> Vec<&UniqueBlock> {
+        self.cache.inactive_keys().collect()
+    }
+
+    /// Get the keys of active blocks
+    pub fn get_active_blocks(&self) -> Vec<&UniqueBlock> {
+        self.cache.active_keys().collect()
+    }
+
+    /// Direct access to active blocks map (for tests).
+    pub fn active_blocks(&self) -> &HashMap<UniqueBlock, usize> {
+        self.cache.active_blocks()
+    }
+}
+
+impl KvBackend for ManualKvManager {
+    fn process(&mut self, event: &MoveBlock) -> bool {
         match event {
-            MoveBlock::Use(hashes, local_hashes) => {
+            MoveBlock::Use(hashes, local_hashes, _plhs) => {
                 let mut blocks_stored = Vec::<u64>::new();
 
                 let mut parent_block: Option<&UniqueBlock> = None;
                 for hash in hashes {
-                    // First check if it already exists in active blocks
                     if self.cache.contains_active(hash) {
-                        // Block already active, just increment reference count
                         self.cache.increment_ref(hash);
                         parent_block = Some(hash);
                         continue;
                     }
 
-                    // Then check if it exists in inactive and move it to active if found
                     if self.cache.reactivate(hash) {
                         parent_block = Some(hash);
                         continue;
                     }
 
-                    // If at max capacity, evict the oldest entry from inactive blocks
                     if self.cache.is_at_capacity() {
                         let Some(evicted) = self.cache.evict_inactive() else {
                             return false;
@@ -212,9 +196,7 @@ impl KvManager {
                         }
                     }
 
-                    // Now insert the new block in active blocks with reference count 1
                     self.cache.insert_active(hash.clone(), 1);
-                    // Track blocks for trace/event
                     if let UniqueBlock::FullBlock(stored_full_block) = hash {
                         blocks_stored.push(*stored_full_block);
                     }
@@ -230,28 +212,21 @@ impl KvManager {
 
             MoveBlock::Destroy(hashes) => {
                 let mut blocks_destroyed = Vec::<u64>::new();
-                // Process blocks in order (already reversed by caller if needed)
                 for hash in hashes.iter() {
                     self.cache.remove_active(hash).unwrap();
-                    // Track blocks for batch sending
                     if let UniqueBlock::FullBlock(destroyed_full_block) = hash {
                         blocks_destroyed.push(*destroyed_full_block);
                     }
                 }
-
                 self.publish_kv_event(blocks_destroyed, &[], None, false);
             }
 
             MoveBlock::Deref(hashes) => {
-                // Process blocks in order (already reversed by caller if needed)
                 for hash in hashes.iter() {
-                    // Decrement reference count and check if we need to move to inactive
                     if let Some(ref_count) = self.cache.get_active_ref_count(hash) {
                         if ref_count == 0 {
                             panic!("Negative reference count would be encountered after Deref.");
                         }
-
-                        // If reference count reaches zero, remove from active and move to inactive
                         if ref_count == 1 {
                             self.cache.deactivate(hash);
                         } else {
@@ -261,7 +236,7 @@ impl KvManager {
                 }
             }
 
-            MoveBlock::Promote(uuid, hash, parent_hash, local_hash) => {
+            MoveBlock::Promote(uuid, hash, parent_hash, local_hash, _plh) => {
                 let uuid_block = UniqueBlock::PartialBlock(*uuid);
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
@@ -272,7 +247,6 @@ impl KvManager {
                 );
 
                 let hash_ref_count = self.cache.get_active_ref_count(&hash_block);
-                // Block is new if it's not in active and not in inactive
                 let is_new = if hash_ref_count.is_some() {
                     false
                 } else {
@@ -288,94 +262,39 @@ impl KvManager {
             }
         }
 
-        // Return true if we made it this far
         true
     }
 
-    /// Get the count of blocks that aren't in active or inactive pools
-    pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
+    fn max_capacity(&self) -> usize {
+        self.cache.max_capacity()
+    }
+
+    fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    fn num_active_blocks(&self) -> usize {
+        self.cache.num_active()
+    }
+
+    fn num_inactive_blocks(&self) -> usize {
+        self.cache.num_inactive()
+    }
+
+    fn current_capacity(&self) -> usize {
+        self.cache.current_capacity()
+    }
+
+    fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         blocks
             .iter()
             .filter(|&block| !self.cache.contains(block))
             .count()
     }
 
-    /// Get the current capacity (active blocks + inactive blocks)
-    pub fn current_capacity(&self) -> usize {
-        self.cache.current_capacity()
-    }
-
-    /// Get the current capacity as a percentage of the maximum capacity
-    pub fn current_capacity_perc(&self) -> f64 {
-        self.cache.current_capacity() as f64 / self.cache.max_capacity() as f64
-    }
-
-    /// Get the number of active blocks
-    pub fn num_active_blocks(&self) -> usize {
-        self.cache.num_active()
-    }
-
-    /// Get the percentage of active blocks relative to maximum capacity
-    pub fn get_active_perc(&self) -> f64 {
-        self.cache.num_active() as f64 / self.cache.max_capacity() as f64
-    }
-
-    /// Get the number of inactive blocks
-    pub fn num_inactive_blocks(&self) -> usize {
-        self.cache.num_inactive()
-    }
-
-    /// Get the keys of inactive blocks
-    pub fn get_inactive_blocks(&self) -> Vec<&UniqueBlock> {
-        self.cache.inactive_keys().collect()
-    }
-
-    /// Get the keys of active blocks
-    pub fn get_active_blocks(&self) -> Vec<&UniqueBlock> {
-        self.cache.active_keys().collect()
-    }
-
-    pub fn max_capacity(&self) -> usize {
-        self.cache.max_capacity()
-    }
-
-    pub fn block_size(&self) -> usize {
-        self.block_size
-    }
-
-    pub fn dp_rank(&self) -> u32 {
-        self.dp_rank
-    }
-
-    /// Direct access to active blocks map (for tests).
-    pub fn active_blocks(&self) -> &HashMap<UniqueBlock, usize> {
-        self.cache.active_blocks()
-    }
-
-    /// Check if a sequence can be scheduled and calculate cost if possible
-    pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
-        let seq_blocks = sequence.unique_blocks();
-
-        // Find the longest prefix that exists in cache
-        // We must stop at the first cache miss since KV states are computed sequentially
-        let mut overlap_blocks = 0;
-        for block in seq_blocks {
-            if !self.cache.contains(block) {
-                // First cache miss - can't use anything after this point
-                break;
-            }
-            overlap_blocks += 1;
-        }
-
-        let new_blocks = seq_blocks.len() - overlap_blocks;
-        // Clamp cached_tokens to handle partial blocks (last block may have < block_size tokens)
-        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.num_input_tokens());
-        let new_tokens = sequence.num_input_tokens() - cached_tokens;
-
-        PrefillCost {
-            new_blocks,
-            new_tokens,
-        }
+    fn is_block_cached(&self, seq_hash: u64, _plh: Option<PositionalLineageHash>) -> bool {
+        let block = UniqueBlock::FullBlock(seq_hash);
+        self.cache.contains(&block)
     }
 }
 
@@ -385,24 +304,18 @@ mod tests {
 
     #[test]
     fn test_failure_on_max_capacity() {
-        // Create a KvManager with 10 blocks capacity
-        let mut manager = KvManager::new(10, 16);
+        let mut manager = ManualKvManager::new(10, 16);
 
-        // Helper function to use multiple blocks that returns the response
-        fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> bool {
+        fn use_blocks(manager: &mut ManualKvManager, ids: Vec<u64>) -> bool {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes))
+            manager.process(&MoveBlock::Use(blocks, hashes, vec![]))
         }
 
-        // First use 10 blocks (0 to 9) in a batch
         let response = use_blocks(&mut manager, (0..10).collect());
         assert!(response, "Expected success response");
-
-        // Verify we are at capacity
         assert_eq!(manager.current_capacity(), 10);
 
-        // The 11th block should return false, not panic
         let response = use_blocks(&mut manager, vec![10]);
         assert!(
             !response,
@@ -412,36 +325,30 @@ mod tests {
 
     #[test]
     fn test_block_lifecycle_stringent() {
-        // Create a KvManager with 10 blocks capacity (no KV event publisher for tests)
-        let mut manager = KvManager::new(10, 16);
+        let mut manager = ManualKvManager::new(10, 16);
 
-        // Helper function to use multiple blocks
-        fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
+        fn use_blocks(manager: &mut ManualKvManager, ids: Vec<u64>) {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes));
+            manager.process(&MoveBlock::Use(blocks, hashes, vec![]));
         }
 
-        // Helper function to destroy multiple blocks
-        fn destroy_blocks(manager: &mut KvManager, ids: Vec<u64>) {
+        fn destroy_blocks(manager: &mut ManualKvManager, ids: Vec<u64>) {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
             manager.process(&MoveBlock::Destroy(blocks));
         }
 
-        // Helper function to deref multiple blocks
-        fn deref_blocks(manager: &mut KvManager, ids: Vec<u64>) {
+        fn deref_blocks(manager: &mut ManualKvManager, ids: Vec<u64>) {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
             manager.process(&MoveBlock::Deref(blocks));
         }
 
-        // Helper function to check if active blocks contain expected blocks with expected ref counts
-        fn assert_active_blocks(manager: &KvManager, expected_blocks: &[(u64, usize)]) {
+        fn assert_active_blocks(manager: &ManualKvManager, expected_blocks: &[(u64, usize)]) {
             assert_eq!(
                 manager.active_blocks().len(),
                 expected_blocks.len(),
                 "Active blocks count doesn't match expected"
             );
-
             for &(id, ref_count) in expected_blocks {
                 let block = UniqueBlock::FullBlock(id);
                 assert!(
@@ -456,20 +363,17 @@ mod tests {
             }
         }
 
-        // Helper function to check if inactive blocks contain expected blocks
         fn assert_inactive_blocks(
-            manager: &KvManager,
+            manager: &ManualKvManager,
             expected_size: usize,
             expected_blocks: &[u64],
         ) {
             let inactive_blocks = manager.get_inactive_blocks();
             let inactive_blocks_count = manager.num_inactive_blocks();
-
             assert_eq!(
                 inactive_blocks_count, expected_size,
                 "Inactive blocks count doesn't match expected"
             );
-
             for &id in expected_blocks {
                 let block = UniqueBlock::FullBlock(id);
                 assert!(
@@ -479,56 +383,34 @@ mod tests {
             }
         }
 
-        // First use blocks 0, 1, 2, 3, 4 in a batch
         use_blocks(&mut manager, (0..5).collect());
-
-        // Then use blocks 0, 1, 5, 6 in a batch
         use_blocks(&mut manager, vec![0, 1, 5, 6]);
-
-        // Check that the blocks 0 and 1 are in active blocks, both with reference counts of 2
         assert_active_blocks(
             &manager,
             &[(0, 2), (1, 2), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)],
         );
 
-        // Now destroy block 4
         destroy_blocks(&mut manager, vec![4]);
-
-        // And deref blocks 3, 2, 1, 0 in this order as a batch
         deref_blocks(&mut manager, vec![0, 1, 2, 3]);
-
-        // Check that the inactive_blocks is size 2 (via num_objects) and contains 3 and 2
         assert_inactive_blocks(&manager, 2, &[3, 2]);
         assert_active_blocks(&manager, &[(0, 1), (1, 1), (5, 1), (6, 1)]);
 
-        // Now destroy block 6
         destroy_blocks(&mut manager, vec![6]);
-
-        // And deref blocks 5, 1, 0 as a batch
         deref_blocks(&mut manager, vec![0, 1, 5]);
-
-        // Check that the inactive_blocks is size 5, and contains 0, 1, 2, 3, 5
         assert_inactive_blocks(&manager, 5, &[0, 1, 2, 3, 5]);
         assert_active_blocks(&manager, &[]);
 
-        // Now use 0, 1, 2, 7, 8, 9 as a batch
         use_blocks(&mut manager, vec![0, 1, 2, 7, 8, 9]);
-
-        // Check that the inactive_blocks is size 2, and contains 3 and 5
         assert_inactive_blocks(&manager, 2, &[3, 5]);
         assert_active_blocks(&manager, &[(0, 1), (1, 1), (2, 1), (7, 1), (8, 1), (9, 1)]);
 
-        // Test the new_blocks method - only block 4 should be new out of [0,1,2,3,4]
         let blocks_to_check: Vec<UniqueBlock> = vec![0, 1, 2, 3, 4]
             .into_iter()
             .map(UniqueBlock::FullBlock)
             .collect();
         assert_eq!(manager.probe_new_blocks(&blocks_to_check), 1);
 
-        // Now use blocks 10, 11, 12 as a batch
         use_blocks(&mut manager, vec![10, 11, 12]);
-
-        // Check that the inactive_blocks is size 1 and contains only 5
         assert_inactive_blocks(&manager, 1, &[5]);
 
         use_blocks(&mut manager, vec![13]);
