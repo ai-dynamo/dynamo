@@ -211,9 +211,7 @@ impl ModelWatcher {
                     // If we already have a WorkerSet for this model and the checksums
                     // don't match, reject the new worker. All WorkerSets of a model
                     // must share the same checksum.
-                    let can_add =
-                        self.manager
-                            .is_valid_checksum(card.name(), card.mdcsum());
+                    let can_add = self.manager.is_valid_checksum(card.name(), card.mdcsum());
                     if can_add.is_some_and(|is_valid| !is_valid) {
                         tracing::error!(
                             model_name = card.name(),
