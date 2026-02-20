@@ -56,7 +56,7 @@ use crate::protocols::{
         nvext::NvExtProvider,
     },
 };
-use crate::tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
+use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -151,7 +151,7 @@ pub struct OpenAIPreprocessor {
 impl OpenAIPreprocessor {
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
-        let tokenizer = mdc.tokenizer_hf()?;
+        let tokenizer = mdc.tokenizer()?;
         match formatter {
             PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
         }
@@ -160,10 +160,10 @@ impl OpenAIPreprocessor {
     pub fn new_with_parts(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
-        hf_tokenizer: tokenizers::Tokenizer,
+        tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
-        let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
+        let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
         let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
