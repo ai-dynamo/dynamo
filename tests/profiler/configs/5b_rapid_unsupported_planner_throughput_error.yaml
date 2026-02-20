@@ -1,0 +1,24 @@
+# Case 5b: AIC unsupported model, rapid, with planner + throughput scaling
+# This should FAIL with a ValueError because throughput-based planner
+# requires AIC support.
+model: "Qwen/Qwen3-32B"
+backend: vllm
+image: "nvcr.io/nvidia/dynamo:latest"
+hardware:
+  gpuSku: l40s
+  totalGpus: 4
+  numGpusPerNode: 4
+workload:
+  isl: 4000
+  osl: 1000
+sla:
+  ttft: 2000.0
+  itl: 50.0
+searchStrategy: rapid
+features:
+  planner:
+    pre_deployment_sweeping_mode: rapid
+    enable_throughput_scaling: true
+    enable_load_scaling: false
+    mode: disagg
+    backend: vllm

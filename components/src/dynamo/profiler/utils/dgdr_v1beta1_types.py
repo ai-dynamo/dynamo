@@ -15,7 +15,10 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from dynamo.planner.utils.planner_config import PlannerConfig
+from dynamo.planner.utils.planner_config import (
+    PlannerConfig,
+    PlannerPreDeploymentSweepMode,
+)
 
 
 class DGDRPhase(str, Enum):
@@ -52,12 +55,6 @@ class BackendType(str, Enum):
     SGLang = "sglang"
     TRTLLM = "trtllm"
     VLLM = "vllm"
-
-
-class PlannerPreDeploymentSweepMode(str, Enum):
-    None_ = "none"
-    Rapid = "rapid"
-    Thorough = "thorough"
 
 
 class WorkloadSpec(BaseModel):
@@ -225,27 +222,18 @@ class FeaturesSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
 
-    gpuSku: Optional[str] = Field(
-        default=None,
+    gpuSku: str = Field(
         description='GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").',
     )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."
     )
-    totalGpus: Optional[int] = Field(
+    totalGpus: int = Field(
         default=None,
         description="TotalGPUs is the total number of GPUs available in the cluster.",
     )
-    numGpusPerNode: Optional[int] = Field(
-        default=None, description="NumGPUsPerNode is the number of GPUs per node."
-    )
-    minNumGpusPerEngine: Optional[int] = Field(
-        default=None,
-        description="MinNumGPUsPerEngine is the minimum number of GPUs per engine for profiling search space.",
-    )
-    maxNumGpusPerEngine: Optional[int] = Field(
-        default=None,
-        description="MaxNumGPUsPerEngine is the maximum number of GPUs per engine for profiling search space.",
+    numGpusPerNode: int = Field(
+        description="NumGPUsPerNode is the number of GPUs per node."
     )
 
 
@@ -260,7 +248,6 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         description="Backend specifies the inference backend to use for profiling and deployment.",
     )
     image: str = Field(
-        required=True,
         description='Image is the container image reference for the deployment. Example: "nvcr.io/nvidia/dynamo-runtime:latest"',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
@@ -268,7 +255,6 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.",
     )
     hardware: HardwareSpec = Field(
-        required=True,
         description="Hardware describes the hardware resources available for profiling and deployment. Typically auto-filled by the operator from cluster discovery.",
     )
     workload: WorkloadSpec = Field(

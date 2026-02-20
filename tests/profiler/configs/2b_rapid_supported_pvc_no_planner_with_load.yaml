@@ -1,0 +1,20 @@
+# Case 2b: AIC supported model, rapid, without planner, input load, with PVC model cache
+model: "Qwen/Qwen3-32B"
+backend: trtllm
+image: "nvcr.io/nvidia/dynamo:latest"
+hardware:
+  gpuSku: h200_sxm
+  totalGpus: 64
+  numGpusPerNode: 8
+modelCache:
+  pvcName: model-cache
+  pvcModelPath: /model/Qwen3-32B
+  pvcMountPath: /opt/model-cache
+workload:
+  isl: 4000
+  osl: 1000
+  requestRate: 5.0
+sla:
+  ttft: 2000.0
+  itl: 50.0
+searchStrategy: rapid

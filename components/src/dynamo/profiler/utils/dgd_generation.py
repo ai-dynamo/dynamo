@@ -72,7 +72,6 @@ def generate_dgd_config_with_planner(
         dgdr,
         best_prefill_mapping,
         best_decode_mapping,
-        output_dir,
     )
 
     # --- Add planner service to DGD ---
@@ -192,7 +191,6 @@ def _build_planner_config(
     dgdr,
     best_prefill_mapping,
     best_decode_mapping,
-    output_dir: str | None,
 ) -> PlannerConfig:
     """Build a PlannerConfig from the DGDR spec and picked parallel configs."""
     if dgdr.features and dgdr.features.planner:
@@ -201,16 +199,10 @@ def _build_planner_config(
         planner_cfg = PlannerConfig()
 
     if best_prefill_mapping is not None:
-        num_gpus = getattr(best_prefill_mapping, "num_gpus", None)
-        if callable(num_gpus):
-            num_gpus = num_gpus()
-        planner_cfg.prefill_engine_num_gpu = num_gpus
+        planner_cfg.prefill_engine_num_gpu = best_prefill_mapping.num_gpus
 
     if best_decode_mapping is not None:
-        num_gpus = getattr(best_decode_mapping, "num_gpus", None)
-        if callable(num_gpus):
-            num_gpus = num_gpus()
-        planner_cfg.decode_engine_num_gpu = num_gpus
+        planner_cfg.decode_engine_num_gpu = best_decode_mapping.num_gpus
 
     return planner_cfg
 

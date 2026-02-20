@@ -52,7 +52,7 @@ def _make_ops(tmp_path, **overrides) -> ProfilerOperationalConfig:
     return ProfilerOperationalConfig(**defaults)
 
 
-CONFIGS_DIR = Path(__file__).parent.parent.parent / "dpp_test"
+CONFIGS_DIR = Path(__file__).parent / "configs"
 
 
 class TestRapidSupported:

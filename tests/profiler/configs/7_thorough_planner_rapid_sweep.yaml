@@ -1,0 +1,25 @@
+# Case 7: Thorough, with planner, rapid mode for planner pre-deployment sweeping
+# (test with --dry-run)
+# Gate check: if AIC unsupported, rapid pre-deployment sweeping falls back to none.
+# This uses a supported combo so rapid sweeping should work.
+model: "Qwen/Qwen3-32B"
+backend: trtllm
+image: "nvcr.io/nvidia/dynamo:latest"
+hardware:
+  gpuSku: h200_sxm
+  totalGpus: 8
+  numGpusPerNode: 8
+workload:
+  isl: 4000
+  osl: 1000
+sla:
+  ttft: 2000.0
+  itl: 50.0
+searchStrategy: thorough
+features:
+  planner:
+    pre_deployment_sweeping_mode: rapid
+    enable_throughput_scaling: true
+    enable_load_scaling: false
+    mode: disagg
+    backend: trtllm

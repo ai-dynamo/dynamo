@@ -128,13 +128,17 @@ def _parse_args() -> tuple[DynamoGraphDeploymentRequestSpec, ProfilerOperational
 
 
 def main():
-    dgdr, ops = _parse_args()
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    try:
+        dgdr, ops = _parse_args()
+    except (ValueError, Exception) as e:
+        logger.error("Failed to parse profiler config: %s", e)
+        raise SystemExit(1) from e
 
     os.makedirs(ops.output_dir, exist_ok=True)
     log_file_handler = logging.FileHandler(f"{ops.output_dir}/profile_sla.log")

@@ -1083,15 +1083,30 @@ async def run_profile(
             else:
                 final_config = real_config
         else:
-            final_config = dgd_config or {}
+            final_config = dgd_config
 
         output_file = f"{ops.output_dir}/final_config.yaml"
-        with open(output_file, "w") as f:
-            if isinstance(final_config, list):
-                yaml.safe_dump_all(final_config, f, sort_keys=False)
+        if not final_config:
+            if ops.dry_run:
+                logger.warning("Dry run mode — no DGD config produced (expected).")
+                yaml.safe_dump({}, open(output_file, "w"), sort_keys=False)
             else:
-                yaml.safe_dump(final_config, f, sort_keys=False)
-        logger.info("Final DGD config saved to %s", output_file)
+                error_msg = "Profiler did not produce a DGD config."
+                logger.error(error_msg)
+                write_profiler_status(
+                    ops.output_dir,
+                    status=ProfilerStatus.FAILED,
+                    error=error_msg,
+                    message=error_msg,
+                )
+                return
+        else:
+            with open(output_file, "w") as f:
+                if isinstance(final_config, list):
+                    yaml.safe_dump_all(final_config, f, sort_keys=False)
+                else:
+                    yaml.safe_dump(final_config, f, sort_keys=False)
+            logger.info("Final DGD config saved to %s", output_file)
 
         write_profiler_status(
             ops.output_dir,
