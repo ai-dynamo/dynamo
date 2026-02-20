@@ -534,7 +534,7 @@ class FrontendArgGroup(ArgGroup):
             default=False,
             dest="debug_perf",
             help=(
-                "Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
+                "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
                 "Logs per-function timing, request concurrency, and hot-path section durations. "
                 "'--dyn-chat-processor vllm' only."
             ),
@@ -547,7 +547,7 @@ class FrontendArgGroup(ArgGroup):
             default=0,
             dest="preprocess_workers",
             help=(
-                "Number of worker processes for preprocessing and output processing. "
+                "[EXPERIMENTAL] Number of worker processes for preprocessing and output processing. "
                 "When > 0, offloads CPU-bound work (tokenization, template rendering, "
                 "detokenization) to a ProcessPoolExecutor with N workers, each with its "
                 "own GIL. 0 (default) keeps all processing on the main event loop. '--dyn-chat-processor vllm' only."
