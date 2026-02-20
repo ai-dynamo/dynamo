@@ -236,8 +236,8 @@ class LLMServerManager:
             prefill_config_path,
             "--disaggregation-mode",
             "prefill",
-            "--kv-transfer-config",
-            '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
+            "--connector",
+            "kvbm",
         ]
 
         self.decoder_cmd = cmd_root + [
