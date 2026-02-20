@@ -21,9 +21,7 @@ class MiddleServer:
     async def initialize(self):
         """Initialize connection to backend servers"""
         # Connect to backend servers
-        endpoint = (
-            self.runtime.namespace("demo").component("server").endpoint("generate")
-        )
+        endpoint = self.runtime.endpoint("demo.server.generate")
         self.backend_client = await endpoint.client()
         await self.backend_client.wait_for_instances()
         print("Middle server: Connected to backend servers")
@@ -56,10 +54,8 @@ async def main():
     handler = MiddleServer(runtime)
     await handler.initialize()
 
-    # Create middle server component
-    component = runtime.namespace("demo").component("middle")
-
-    endpoint = component.endpoint("generate")
+    # Create middle server endpoint
+    endpoint = runtime.endpoint("demo.middle.generate")
 
     print("Middle server started")
     print("Forwarding requests to backend servers...")

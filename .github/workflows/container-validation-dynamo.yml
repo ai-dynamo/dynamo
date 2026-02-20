@@ -213,14 +213,3 @@ jobs:
           enable_mypy: 'false'
           parallel_mode: 'none'
           dind_as_sidecar: 'false'
-
-  event_file:
-    name: "Event File"
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
-    steps:
-      - name: Upload
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
-        with:
-          name: Event File
-          path: ${{ github.event_path }}

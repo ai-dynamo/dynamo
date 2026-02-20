@@ -129,14 +129,9 @@ async def init_llm_worker(
         parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
             config.encode_endpoint
         )
-        encode_client = (
-            await runtime.namespace(parsed_namespace)
-            .component(parsed_component_name)
-            .endpoint(parsed_endpoint_name)
-            .client()
-        )
-
-    component = runtime.namespace(config.namespace).component(config.component)
+        encode_client = await runtime.endpoint(
+            f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+        ).client()
 
     # Convert model path to Path object if it's a local path, otherwise keep as string
     model_path = str(config.model)
@@ -334,7 +329,10 @@ async def init_llm_worker(
         config.disaggregation_mode,
         component_gauges=component_gauges,
     ) as engine:
-        endpoint = component.endpoint(config.endpoint)
+        endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        component = endpoint.component()
 
         # should ideally call get_engine_runtime_config
         # this is because we don't have a good way to
@@ -451,9 +449,7 @@ async def init_llm_worker(
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
-            kv_listener = runtime.namespace(config.namespace).component(
-                config.component
-            )
+            kv_listener = endpoint.component()
             # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [

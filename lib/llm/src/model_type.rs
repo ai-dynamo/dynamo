@@ -154,7 +154,6 @@ impl ModelType {
         if self.contains(Self::Embedding) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Embedding);
         }
-        // Images models support both chat and completions endpoints
         if self.contains(Self::Images) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Images);
         }
