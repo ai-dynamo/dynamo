@@ -69,7 +69,11 @@ jobs:
         with:
           github-token: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           script: |
-            const sha = context.payload.pull_request?.head?.sha || context.sha;
+            const sha = context.payload.pull_request?.head?.sha;
+            if (!sha) {
+              core.setFailed("Could not determine PR head SHA; aborting /ok to test comment.");
+              return;
+            }
             const body = `/ok to test ${sha}`;
 
             const { owner, repo } = context.repo;
