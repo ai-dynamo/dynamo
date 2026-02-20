@@ -482,12 +482,17 @@ pub struct ChatCompletionRequestAssistantMessage {
     /// When `reasoning_segments` is present, prefer that for accurate context reconstruction.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
-    /// Interleaved reasoning segments from a previous assistant turn.
-    /// Each entry is one <think>...</think> segment in the order it appeared.
-    /// `reasoning_segments[i]` is the reasoning that preceded `tool_calls[i]`.
-    /// When present, the chat template should reconstruct:
-    ///   <think>segments[0]</think><call>tool_calls[0]</call><think>segments[1]</think>...
-    /// rather than lumping all reasoning into a single <think> block.
+    /// Interleaved reasoning segments from a previous assistant turn, preserving the exact
+    /// per-position order needed for KV cache–correct context reconstruction.
+    ///
+    /// When set, `segments.len() == tool_calls.len() + 1`:
+    ///   - `segments[i]` is the reasoning that preceded `tool_calls[i]`
+    ///   - `segments[tool_calls.len()]` is any trailing reasoning after the last tool call
+    ///   - Individual entries may be empty (no reasoning at that position)
+    ///
+    /// A chat template should reconstruct:
+    ///   `<think>seg[0]</think><call>tc[0]</call>…<think>seg[N-1]</think><call>tc[N-1]</call><think>seg[N]</think>`
+    /// (skipping empty segments) rather than lumping all reasoning into a single <think> block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_segments: Option<Vec<String>>,
     /// The refusal message by the assistant.
