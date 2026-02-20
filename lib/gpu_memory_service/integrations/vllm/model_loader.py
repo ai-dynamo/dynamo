@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING
 import torch
 from gpu_memory_service import get_or_create_gms_client_memory_manager
 from gpu_memory_service.client.torch.module import materialize_module_from_gms
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.types import GrantedLockType
+from gpu_memory_service.common.utils import get_socket_path, resolve_client_id
 from gpu_memory_service.integrations.common.utils import (
     finalize_gms_write,
     get_gms_lock_mode,
@@ -70,6 +70,7 @@ def register_gms_loader(load_format: str = "gms") -> None:
                 device,
                 mode=mode,
                 tag="weights",
+                client_id=resolve_client_id(),
             )
 
             if gms_client.granted_lock_type == GrantedLockType.RO:

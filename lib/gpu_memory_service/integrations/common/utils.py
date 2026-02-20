@@ -12,6 +12,7 @@ import torch
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+    from gpu_memory_service.common.types import RequestedLockType
 
 logger = logging.getLogger(__name__)
 

@@ -48,6 +48,7 @@ from gpu_memory_service.common.types import (
     StateEvent,
 )
 
+from .global_lock import LeaderFollowerLock
 from .handler import RequestHandler
 from .locking import Connection, GMSLocalFSM
 
@@ -66,6 +67,7 @@ class GMSRPCServer:
         self,
         socket_path: str,
         device: int = 0,
+        leader_lock: Optional[LeaderFollowerLock] = None,
     ):
         self.socket_path = socket_path
         self.device = device
@@ -75,11 +77,11 @@ class GMSRPCServer:
 
         # State machine - handles all state transitions and permission checks
         self._sm = GMSLocalFSM(on_rw_abort=self._handler.on_rw_abort)
-        self._waiting_writers: int = 0
 
         # Async waiting for lock acquisition
         self._condition = asyncio.Condition()
         self._shutdown = False
+        self._leader_lock = leader_lock
 
         # Session ID generation
         self._next_session_id: int = 0
@@ -158,7 +160,12 @@ class GMSRPCServer:
 
         # Acquire lock (blocks until available or timeout)
         # Returns the actual granted mode (may differ from requested for rw_or_ro)
-        granted_mode = await self._acquire_lock(msg.lock_type, msg.timeout_ms)
+        granted_mode = await self._acquire_lock(
+            msg.lock_type,
+            msg.timeout_ms,
+            session_id=session_id,
+            client_id=msg.client_id,
+        )
         if granted_mode is None:
             await send_message(
                 writer, HandshakeResponse(success=False, committed=self._sm.committed)
@@ -172,15 +179,24 @@ class GMSRPCServer:
             mode=granted_mode,
             session_id=session_id,
             recv_buffer=recv_buffer,
+            client_id=msg.client_id,
         )
 
-        # State transition: connect
+        # INVARIANT: No `await` between _acquire_lock returning and this transition.
+        # Both coroutines check can_acquire_rw/ro under the condition lock, but the
+        # FSM transition happens outside it. Inserting an await here would let another
+        # coroutine also pass the predicate before either transitions, causing a
+        # spurious InvalidTransition on the second one.
         event = (
             StateEvent.RW_CONNECT
             if granted_mode == GrantedLockType.RW
             else StateEvent.RO_CONNECT
         )
         self._sm.transition(event, conn)
+
+        # Leader: record the grant in shared state file so followers can see it
+        if self._leader_lock and self._leader_lock.is_leader and conn.client_id:
+            await self._leader_lock.on_connect(conn.client_id, granted_mode.value)
 
         await send_message(
             writer,
@@ -196,38 +212,64 @@ class GMSRPCServer:
         self,
         mode: RequestedLockType,
         timeout_ms: Optional[int],
+        *,
+        session_id: str,
+        client_id: Optional[str],
     ) -> Optional[GrantedLockType]:
         """Wait until lock can be acquired (uses state machine predicates).
 
         Returns the granted lock type, or None if failed/timeout.
-        For rw_or_ro mode, returns RW if available immediately, else waits for RO.
+
+        RW_OR_RO semantics (leader decides, follower follows):
+          EMPTY     → RW         (first writer loads weights)
+          RW        → block until committed, then RO
+          COMMITTED → RO         (import existing weights)
+          RO        → RO         (join existing readers)
         """
         timeout = timeout_ms / 1000 if timeout_ms is not None else None
 
+        # Follower: wait for leader to grant this engine before local FSM
+        if self._leader_lock and not self._leader_lock.is_leader:
+            if not client_id:
+                raise RuntimeError("leader-follower coordination requires client_id")
+            granted = await self._leader_lock.wait_for_leader_grant(
+                client_id, mode.value, timeout_ms
+            )
+            if granted is None:
+                logger.warning(
+                    "Follower timed out waiting for leader grant: session=%s mode=%s",
+                    session_id,
+                    mode.value,
+                )
+                return None
+            # Follower follows whatever the leader decided
+            mode = RequestedLockType(granted.value)
+
+            # If the leader granted RO, it has already validated that weights are
+            # committed. Sync the follower's local FSM so can_acquire_ro() doesn't
+            # block on a stale _committed=False (e.g., after follower restart).
+            if granted == GrantedLockType.RO:
+                self._sm.sync_committed(True)
+
         if mode == RequestedLockType.RW:
-            self._waiting_writers += 1
-            try:
-                async with self._condition:
-                    try:
-                        await asyncio.wait_for(
-                            self._condition.wait_for(
-                                lambda: self._shutdown or self._sm.can_acquire_rw()
-                            ),
-                            timeout=timeout,
-                        )
-                        return None if self._shutdown else GrantedLockType.RW
-                    except asyncio.TimeoutError:
-                        return None
-            finally:
-                self._waiting_writers -= 1
+            async with self._condition:
+                try:
+                    await asyncio.wait_for(
+                        self._condition.wait_for(
+                            lambda: self._shutdown or self._sm.can_acquire_rw()
+                        ),
+                        timeout=timeout,
+                    )
+                    return None if self._shutdown else GrantedLockType.RW
+                except asyncio.TimeoutError:
+                    return None
 
         elif mode == RequestedLockType.RO:
             async with self._condition:
                 try:
                     await asyncio.wait_for(
                         self._condition.wait_for(
-                            lambda: self._shutdown
-                            or self._sm.can_acquire_ro(self._waiting_writers)
+                            lambda: self._shutdown or self._sm.can_acquire_ro()
                         ),
                         timeout=timeout,
                     )
@@ -236,35 +278,23 @@ class GMSRPCServer:
                     return None
 
         elif mode == RequestedLockType.RW_OR_RO:
-            # Auto mode: try RW if available immediately AND no committed weights,
-            # otherwise wait for RO (to import existing weights)
             async with self._condition:
-                # Check if RW is available AND no committed weights exist
-                # If weights are already committed, prefer RO to import them
+                # EMPTY → RW (first writer loads weights)
                 if self._sm.can_acquire_rw() and not self._sm.committed:
                     return GrantedLockType.RW
 
-                # Either RW not available OR weights already committed - wait for RO
-                if self._sm.committed:
-                    logger.info(
-                        "RW_OR_RO: Weights already committed, preferring RO to import"
-                    )
-                else:
-                    logger.info(
-                        "RW_OR_RO: RW not available (another writer active), "
-                        "falling back to RO"
-                    )
+                # COMMITTED or RO → RO immediately, RW → wait for commit then RO
                 try:
                     await asyncio.wait_for(
                         self._condition.wait_for(
-                            lambda: self._shutdown
-                            or self._sm.can_acquire_ro(self._waiting_writers)
+                            lambda: self._shutdown or self._sm.can_acquire_ro()
                         ),
                         timeout=timeout,
                     )
                     return None if self._shutdown else GrantedLockType.RO
                 except asyncio.TimeoutError:
                     return None
+
         return None
 
     async def _cleanup_connection(self, conn: Optional[Connection]) -> None:
@@ -272,17 +302,34 @@ class GMSRPCServer:
         if conn is None:
             return
 
+        aborted = False
+        needs_cleanup = True
+
         # State transition: disconnect
         if conn.mode == GrantedLockType.RW:
             if self._sm.rw_conn is conn and not self._sm.committed:
                 # RW abort - state machine callback handles cleanup
                 self._sm.transition(StateEvent.RW_ABORT, conn)
+                aborted = True
             elif self._sm.rw_conn is conn:
-                # Already committed, no transition needed (commit already did it)
+                # Still active but committed — shouldn't happen (commit clears rw_conn)
                 pass
+            else:
+                # rw_conn already cleared by commit — conn.close() and notify
+                # already happened in _handle_commit, nothing left to do
+                needs_cleanup = False
         else:
             if conn in self._sm.ro_conns:
                 self._sm.transition(StateEvent.RO_DISCONNECT, conn)
+
+        if not needs_cleanup:
+            return
+
+        # Leader: record disconnect in shared state file
+        if self._leader_lock and self._leader_lock.is_leader and conn.client_id:
+            await self._leader_lock.on_disconnect(
+                conn.client_id, conn.mode.value, aborted
+            )
 
         await conn.close()
         async with self._condition:
@@ -350,7 +397,6 @@ class GMSRPCServer:
                 self._handler.handle_get_lock_state(
                     self._sm.rw_conn is not None,
                     self._sm.ro_count,
-                    self._waiting_writers,
                     self._sm.committed,
                 ),
                 -1,
@@ -383,11 +429,17 @@ class GMSRPCServer:
         self._handler.on_commit()
         self._sm.transition(StateEvent.RW_COMMIT, conn)
 
-        await send_message(conn.writer, CommitResponse(success=True))
-        await conn.close()
-
+        # Notify waiters immediately after FSM transition so RO waiters unblock
+        # even if the post-commit I/O (state file write, send response) fails.
         async with self._condition:
             self._condition.notify_all()
+
+        # Leader: record commit in shared state file (removes RW, sets committed)
+        if self._leader_lock and self._leader_lock.is_leader and conn.client_id:
+            await self._leader_lock.on_commit(conn.client_id)
+
+        await send_message(conn.writer, CommitResponse(success=True))
+        await conn.close()
 
         return None, -1, True
 

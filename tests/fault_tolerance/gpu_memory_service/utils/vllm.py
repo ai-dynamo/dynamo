@@ -23,16 +23,18 @@ class VLLMWithGMSProcess(ManagedProcess):
     def __init__(
         self,
         request,
-        engine_id: str,
+        client_id: str,
         system_port: int,
         kv_event_port: int,
         nixl_port: int,
         frontend_port: int,
+        *,
+        tensor_parallel_size: int = 1,
     ):
-        self.engine_id = engine_id
+        self.client_id = client_id
         self.system_port = system_port
 
-        log_dir = f"{request.node.name}_{engine_id}"
+        log_dir = f"{request.node.name}_{client_id}"
         shutil.rmtree(log_dir, ignore_errors=True)
 
         kv_events_cfg = json.dumps(
@@ -43,27 +45,36 @@ class VLLMWithGMSProcess(ManagedProcess):
                 "enable_kv_cache_events": True,
             }
         )
+
+        env = {
+            **os.environ,
+            "DYN_LOG": "debug",
+            "DYN_SYSTEM_PORT": str(system_port),
+            "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
+            "DYN_GMS_CLIENT_ID": client_id,
+            "DYN_GMS_LOCK_SCOPE": "weights",
+        }
+
+        command = [
+            "python3",
+            "-m",
+            "dynamo.vllm",
+            "--model",
+            FAULT_TOLERANCE_MODEL_NAME,
+            "--load-format",
+            "gms",
+            "--enable-sleep-mode",
+            "--gpu-memory-utilization",
+            "0.9",
+            "--kv-events-config",
+            kv_events_cfg,
+        ]
+        if tensor_parallel_size > 1:
+            command.extend(["--tensor-parallel-size", str(tensor_parallel_size)])
+
         super().__init__(
-            command=[
-                "python3",
-                "-m",
-                "dynamo.vllm",
-                "--model",
-                FAULT_TOLERANCE_MODEL_NAME,
-                "--load-format",
-                "gms",
-                "--enable-sleep-mode",
-                "--gpu-memory-utilization",
-                "0.9",
-                "--kv-events-config",
-                kv_events_cfg,
-            ],
-            env={
-                **os.environ,
-                "DYN_LOG": "debug",
-                "DYN_SYSTEM_PORT": str(system_port),
-                "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
-            },
+            command=command,
+            env=env,
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", self._is_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
@@ -90,7 +101,7 @@ class VLLMWithGMSProcess(ManagedProcess):
             timeout=30,
         )
         r.raise_for_status()
-        logger.info(f"{self.engine_id} sleep: {r.json()}")
+        logger.info(f"{self.client_id} sleep: {r.json()}")
         return r.json()
 
     def wake(self) -> dict:
@@ -99,5 +110,5 @@ class VLLMWithGMSProcess(ManagedProcess):
             f"http://localhost:{self.system_port}/engine/wake_up", json={}, timeout=30
         )
         r.raise_for_status()
-        logger.info(f"{self.engine_id} wake: {r.json()}")
+        logger.info(f"{self.client_id} wake: {r.json()}")
         return r.json()

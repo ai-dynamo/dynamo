@@ -8,12 +8,13 @@ This module provides process managers and helper functions that are
 backend-agnostic and can be used by vLLM, SGLang, or other backends.
 """
 
+import contextlib
 import logging
 import os
 import shutil
 import signal
 import time
-from typing import Callable
+from typing import Callable, Optional
 
 import pynvml
 import requests
@@ -123,18 +124,44 @@ def send_completion(
 class GMSServerProcess(ManagedProcess):
     """Manages GMS server lifecycle for tests."""
 
-    def __init__(self, request, device: int):
+    def __init__(
+        self,
+        request,
+        device: int,
+        *,
+        socket_path: Optional[str] = None,
+        state_file: Optional[str] = None,
+        is_follower: bool = False,
+        follower_poll_ms: int = 100,
+        lock_timeout_s: float = 5.0,
+    ):
         self.device = device
-        self.socket_path = get_socket_path(device)
+        self.socket_path = socket_path or get_socket_path(device)
 
         if os.path.exists(self.socket_path):
             os.unlink(self.socket_path)
+
+        command = [
+            "python3",
+            "-m",
+            "gpu_memory_service",
+            "--device",
+            str(device),
+            "--socket-path",
+            self.socket_path,
+        ]
+        if state_file:
+            command.extend(["--state-file", state_file])
+            if is_follower:
+                command.append("--follower")
+            command.extend(["--follower-poll-ms", str(follower_poll_ms)])
+            command.extend(["--lock-timeout-s", str(lock_timeout_s)])
 
         log_dir = f"{request.node.name}_gms_{device}"
         shutil.rmtree(log_dir, ignore_errors=True)
 
         super().__init__(
-            command=["python3", "-m", "gpu_memory_service", "--device", str(device)],
+            command=command,
             env={**os.environ, "DYN_LOG": "debug"},
             timeout=60,
             display_output=True,
@@ -164,18 +191,33 @@ def run_shadow_failover_test(
     ports: dict,
     make_shadow: Callable[[], ManagedProcess],
     make_primary: Callable[[], ManagedProcess],
+    tp_size: int = 1,
 ) -> None:
     """Shared shadow-engine failover flow for both vLLM and SGLang.
 
-    1. Start shadow -> verify inference
-    2. Sleep shadow -> log memory freed
-    3. Start primary -> verify inference
-    4. kill -9 primary -> wait for GPU memory reclamation
-    5. Wake shadow -> verify inference x 3
+    1. Start GMS servers (one per TP device, with leader-follower for TP>1)
+    2. Start shadow -> verify inference
+    3. Sleep shadow -> log memory freed
+    4. Start primary -> verify inference
+    5. kill -9 primary -> wait for GPU memory reclamation
+    6. Wake shadow -> verify inference x 3
     """
     frontend_port = ports["frontend"]
 
-    with GMSServerProcess(request, device=0):
+    # For TP>1, use leader-follower coordination: device 0 = leader, rest = followers
+    state_file = "/tmp/gms_leader_state.json" if tp_size > 1 else None
+
+    with contextlib.ExitStack() as gms_stack:
+        for device in range(tp_size):
+            gms_stack.enter_context(
+                GMSServerProcess(
+                    request,
+                    device=device,
+                    state_file=state_file,
+                    is_follower=(device != 0),
+                )
+            )
+
         with DynamoFrontendProcess(request, frontend_port=frontend_port):
             with make_shadow() as shadow:
                 # Shadow inference

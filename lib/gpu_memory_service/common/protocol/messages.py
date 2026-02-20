@@ -27,6 +27,7 @@ class GrantedLockType(str, Enum):
 class HandshakeRequest(msgspec.Struct, tag="handshake_request"):
     lock_type: RequestedLockType
     timeout_ms: Optional[int] = None
+    client_id: Optional[str] = None
 
 
 class HandshakeResponse(msgspec.Struct, tag="handshake_response"):
@@ -51,7 +52,6 @@ class GetLockStateResponse(msgspec.Struct, tag="get_lock_state_response"):
     state: str  # "EMPTY", "RW", "COMMITTED", "RO"
     has_rw_session: bool
     ro_session_count: int
-    waiting_writers: int
     committed: bool
     is_ready: bool
 

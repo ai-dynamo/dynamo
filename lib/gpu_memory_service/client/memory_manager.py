@@ -130,9 +130,11 @@ class GMSClientMemoryManager:
         socket_path: str,
         *,
         device: int = 0,
+        client_id: Optional[str] = None,
     ) -> None:
         self.socket_path = socket_path
         self.device = device
+        self._client_id = client_id
 
         self._client: Optional[GMSRPCClient] = None
         self._mappings: Dict[int, LocalMapping] = {}  # va -> mapping
@@ -184,6 +186,7 @@ class GMSClientMemoryManager:
             self.socket_path,
             lock_type=lock_type,
             timeout_ms=timeout_ms,
+            client_id=self._client_id,
         )
         self._granted_lock_type = self._client.lock_type
         # Save layout hash for stale detection on future remap

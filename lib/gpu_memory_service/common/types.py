@@ -65,7 +65,6 @@ class StateSnapshot:
     state: ServerState
     has_rw: bool
     ro_count: int
-    waiting_writers: int
     committed: bool
 
     @property

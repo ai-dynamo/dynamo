@@ -22,37 +22,75 @@ class SGLangWithGMSProcess(ManagedProcess):
     def __init__(
         self,
         request,
-        engine_id: str,
+        client_id: str,
         system_port: int,
         sglang_port: int,
         frontend_port: int,
+        *,
+        tensor_parallel_size: int = 1,
     ):
-        self.engine_id = engine_id
+        self.client_id = client_id
         self.system_port = system_port
 
-        log_dir = f"{request.node.name}_{engine_id}"
+        log_dir = f"{request.node.name}_{client_id}"
         shutil.rmtree(log_dir, ignore_errors=True)
 
+        # SGLang's TP workers need CUDA libs on LD_LIBRARY_PATH
+        nvidia_base = os.path.join(
+            os.path.dirname(os.path.dirname(shutil.which("python3") or "")),
+            "lib",
+            "python3.12",
+            "site-packages",
+            "nvidia",
+        )
+        cuda_lib_dirs = ":".join(
+            os.path.join(nvidia_base, pkg, "lib")
+            for pkg in [
+                "cuda_runtime",
+                "nccl",
+                "nvjitlink",
+                "cublas",
+                "cudnn",
+                "cufft",
+                "cusparse",
+                "cusolver",
+            ]
+            if os.path.isdir(os.path.join(nvidia_base, pkg, "lib"))
+        )
+        existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
+        ld_library_path = (
+            f"{cuda_lib_dirs}:{existing_ld}" if existing_ld else cuda_lib_dirs
+        )
+
+        env = {
+            **os.environ,
+            "DYN_LOG": "debug",
+            "DYN_SYSTEM_PORT": str(system_port),
+            "DYN_GMS_CLIENT_ID": client_id,
+            "DYN_GMS_LOCK_SCOPE": "weights",
+            "LD_LIBRARY_PATH": ld_library_path,
+        }
+
+        command = [
+            "python3",
+            "-m",
+            "dynamo.sglang",
+            "--model-path",
+            FAULT_TOLERANCE_MODEL_NAME,
+            "--load-format",
+            "gms",
+            "--enable-memory-saver",
+            "--mem-fraction-static",
+            "0.9",
+            "--port",
+            str(sglang_port),
+        ]
+        if tensor_parallel_size > 1:
+            command.extend(["--tp", str(tensor_parallel_size)])
+
         super().__init__(
-            command=[
-                "python3",
-                "-m",
-                "dynamo.sglang",
-                "--model-path",
-                FAULT_TOLERANCE_MODEL_NAME,
-                "--load-format",
-                "gms",
-                "--enable-memory-saver",
-                "--mem-fraction-static",
-                "0.9",
-                "--port",
-                str(sglang_port),
-            ],
-            env={
-                **os.environ,
-                "DYN_LOG": "debug",
-                "DYN_SYSTEM_PORT": str(system_port),
-            },
+            command=command,
+            env=env,
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", self._is_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
@@ -79,7 +117,7 @@ class SGLangWithGMSProcess(ManagedProcess):
             timeout=30,
         )
         r.raise_for_status()
-        logger.info(f"{self.engine_id} release_memory_occupation: {r.json()}")
+        logger.info(f"{self.client_id} release_memory_occupation: {r.json()}")
         return r.json()
 
     def wake(self) -> dict:
@@ -90,5 +128,5 @@ class SGLangWithGMSProcess(ManagedProcess):
             timeout=30,
         )
         r.raise_for_status()
-        logger.info(f"{self.engine_id} resume_memory_occupation: {r.json()}")
+        logger.info(f"{self.client_id} resume_memory_occupation: {r.json()}")
         return r.json()

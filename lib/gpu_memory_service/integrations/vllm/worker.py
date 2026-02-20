@@ -6,6 +6,9 @@
 This module provides a custom Worker class that properly integrates with
 GPU Memory Service for VA-stable weight sharing and unmap/remap functionality.
 
+KV cache is managed by vLLM's CuMemAllocator — on process death the kernel
+cleans up all CUDA handles, so no cross-process memory reclamation is needed.
+
 Usage:
     Set --worker-cls=gpu_memory_service.integrations.vllm.worker:GMSWorker
 """
@@ -22,7 +25,7 @@ from gpu_memory_service import (
     get_or_create_gms_client_memory_manager,
 )
 from gpu_memory_service.common.types import RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.utils import get_socket_path, resolve_client_id
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import get_gms_lock_mode
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
@@ -59,13 +62,16 @@ class GMSWorker(Worker):
         current_platform.set_device(torch.device(f"cuda:{device}"))
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes)
-        extra = getattr(self.vllm_config.load_config, "model_loader_extra_config", {}) or {}
+        extra = (
+            getattr(self.vllm_config.load_config, "model_loader_extra_config", {}) or {}
+        )
         socket_path = get_socket_path(device)
         get_or_create_gms_client_memory_manager(
             socket_path,
             device,
             mode=get_gms_lock_mode(extra),
             tag="weights",
+            client_id=resolve_client_id(),
         )
 
         # Parent will set device again (harmless) and do memory checks
@@ -119,7 +125,7 @@ class GMSWorker(Worker):
         manager.unmap_all_vas()
         manager.disconnect()
 
-        # Sleep KV cache via CuMemAllocator
+        # Free KV cache physical pages via CuMemAllocator (no CPU offload)
         from vllm.device_allocator.cumem import CuMemAllocator
 
         allocator = CuMemAllocator.get_instance()
@@ -159,11 +165,7 @@ class GMSWorker(Worker):
                 self.model_runner.init_fp8_kv_scales()
 
     def _maybe_get_memory_pool_context(self, tag: str):
-        """Skip CuMemAllocator for weights when using GMS.
-
-        GMS manages its own memory pool for weights, so we don't want vLLM's
-        CuMemAllocator to interfere.
-        """
+        """Skip CuMemAllocator for weights — GMS manages its own memory pool."""
         if tag == "weights":
             logger.debug("[GMS] Skipping CuMemAllocator for weights")
             return nullcontext()

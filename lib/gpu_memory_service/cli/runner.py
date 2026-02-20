@@ -17,6 +17,8 @@ import signal
 
 import uvloop
 from gpu_memory_service.server import GMSRPCServer
+from gpu_memory_service.server.global_lock import LeaderFollowerLock
+from gpu_memory_service.server.leader_state import LeaderStateFile
 
 from .args import parse_args
 
@@ -39,7 +41,27 @@ async def worker() -> None:
     logger.info(f"Starting GPU Memory Service Server for device {config.device}")
     logger.info(f"Socket path: {config.socket_path}")
 
-    server = GMSRPCServer(config.socket_path, device=config.device)
+    leader_lock = None
+    if config.state_file:
+        state_file = LeaderStateFile(
+            config.state_file, lock_timeout_s=config.lock_timeout_s
+        )
+        if config.is_leader:
+            state_file.reset_on_startup()
+        leader_lock = LeaderFollowerLock(
+            state_file,
+            is_leader=config.is_leader,
+            poll_interval_ms=config.follower_poll_ms,
+        )
+        logger.info(
+            "Leader-follower coordination enabled: state_file=%s is_leader=%s",
+            config.state_file,
+            config.is_leader,
+        )
+
+    server = GMSRPCServer(
+        config.socket_path, device=config.device, leader_lock=leader_lock
+    )
 
     # Set up shutdown handling
     shutdown_event = asyncio.Event()

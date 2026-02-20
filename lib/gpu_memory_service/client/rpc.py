@@ -100,6 +100,7 @@ class GMSRPCClient:
         socket_path: str,
         lock_type: RequestedLockType = RequestedLockType.RO,
         timeout_ms: Optional[int] = None,
+        client_id: Optional[str] = None,
     ):
         """Connect to Allocation Server and acquire lock.
 
@@ -108,6 +109,7 @@ class GMSRPCClient:
             lock_type: Requested lock type (RW, RO, or RW_OR_RO)
             timeout_ms: Timeout in milliseconds for lock acquisition.
                         None means wait indefinitely.
+            client_id: Identity of this client, used by leader-follower coordination.
 
         Raises:
             ConnectionError: If connection fails
@@ -119,6 +121,7 @@ class GMSRPCClient:
         self._recv_buffer = bytearray()
         self._committed = False
         self._granted_lock_type: Optional[GrantedLockType] = None
+        self._client_id = client_id
 
         # Connect and acquire lock
         self._connect(timeout_ms=timeout_ms)
@@ -142,6 +145,7 @@ class GMSRPCClient:
             request = HandshakeRequest(
                 lock_type=self._requested_lock_type,
                 timeout_ms=timeout_ms,
+                client_id=self._client_id,
             )
             send_message_sync(self._socket, request)
 

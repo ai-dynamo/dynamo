@@ -4,6 +4,7 @@
 """Shared utilities for GPU Memory Service."""
 
 import os
+import socket
 import tempfile
 
 import pynvml
@@ -28,3 +29,14 @@ def get_socket_path(device: int) -> str:
     finally:
         pynvml.nvmlShutdown()
     return os.path.join(tempfile.gettempdir(), f"gms_{uuid}.sock")
+
+
+def resolve_client_id() -> str:
+    """Resolve client_id from environment.
+
+    Uses DYN_GMS_CLIENT_ID if set, otherwise falls back to hostname:pid.
+    """
+    client_id = os.getenv("DYN_GMS_CLIENT_ID")
+    if not client_id:
+        client_id = f"{socket.gethostname()}:{os.getpid()}"
+    return client_id

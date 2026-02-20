@@ -100,7 +100,6 @@ class RequestHandler:
         self,
         has_rw: bool,
         ro_count: int,
-        waiting_writers: int,
         committed: bool,
     ) -> GetLockStateResponse:
         """Get lock/session state."""
@@ -109,7 +108,6 @@ class RequestHandler:
             state=state.value,
             has_rw_session=has_rw,
             ro_session_count=ro_count,
-            waiting_writers=waiting_writers,
             committed=committed,
             is_ready=committed and not has_rw,
         )

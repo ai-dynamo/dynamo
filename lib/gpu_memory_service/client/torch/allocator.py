@@ -74,6 +74,7 @@ def get_or_create_gms_client_memory_manager(
     *,
     tag: str = "weights",
     timeout_ms: Optional[int] = None,
+    client_id: Optional[str] = None,
 ) -> Tuple["GMSClientMemoryManager", Optional["MemPool"]]:
     """Get existing memory manager, or create a new one.
 
@@ -83,6 +84,7 @@ def get_or_create_gms_client_memory_manager(
         mode: RW for cold start, RO for import-only, RW_OR_RO for auto.
         tag: Allocation tag for RW mode.
         timeout_ms: Lock acquisition timeout (None = wait indefinitely).
+        client_id: Identity of this client for leader-follower coordination.
 
     Returns:
         (gms_client_memory_manager, pool) - pool is None for RO mode.
@@ -94,7 +96,11 @@ def get_or_create_gms_client_memory_manager(
     if _manager is not None:
         return _get_existing(mode)
 
-    manager = GMSClientMemoryManager(socket_path, device=device)
+    manager = GMSClientMemoryManager(
+        socket_path,
+        device=device,
+        client_id=client_id,
+    )
     manager.connect(mode, timeout_ms=timeout_ms)
 
     if manager.granted_lock_type == GrantedLockType.RW:

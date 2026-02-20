@@ -9,7 +9,9 @@ from gpu_memory_service.common.types import (
     ServerState,
     StateSnapshot,
 )
+from gpu_memory_service.server.global_lock import LeaderFollowerLock
 from gpu_memory_service.server.handler import MetadataEntry, RequestHandler
+from gpu_memory_service.server.leader_state import LeaderStateFile
 from gpu_memory_service.server.locking import Connection, GMSLocalFSM
 from gpu_memory_service.server.memory_manager import (
     AllocationInfo,
@@ -31,4 +33,6 @@ __all__ = [
     "ServerState",
     "GMSLocalFSM",
     "StateSnapshot",
+    "LeaderFollowerLock",
+    "LeaderStateFile",
 ]

@@ -62,6 +62,7 @@ class Connection:
     mode: GrantedLockType
     session_id: str
     recv_buffer: bytearray = field(default_factory=bytearray)
+    client_id: Optional[str] = None
 
     def __hash__(self) -> int:
         """Hash based on session_id (immutable identifier)."""
@@ -172,6 +173,7 @@ class TransitionRecord:
     event: StateEvent
     to_state: ServerState
     session_id: Optional[str] = None
+    client_id: Optional[str] = None
 
 
 class GMSLocalFSM:
@@ -234,6 +236,17 @@ class GMSLocalFSM:
     def committed(self) -> bool:
         """Whether allocations have been committed."""
         return self._committed
+
+    def sync_committed(self, value: bool) -> None:
+        """Sync committed flag from an external authority (leader state file).
+
+        Used by followers to initialize committed state on startup when the
+        leader has already committed weights but this follower's FSM doesn't
+        know about it (e.g., after follower restart).
+        """
+        if self._committed != value:
+            logger.info("Synced committed=%s from leader", value)
+            self._committed = value
 
     @property
     def transition_log(self) -> list[TransitionRecord]:
@@ -309,6 +322,7 @@ class GMSLocalFSM:
         """
         from_state = self.state
         session_id = conn.session_id if conn else None
+        client_id = conn.client_id if conn else None
 
         # Find valid transition
         trans = self._find_transition(from_state, event, conn)
@@ -335,12 +349,13 @@ class GMSLocalFSM:
             event,
             to_state,
             session_id=session_id,
+            client_id=client_id,
         )
         self._transition_log.append(record)
 
         logger.info(
             f"State transition: {from_state.name} --{event.name}--> {to_state.name} "
-            f"(session={session_id})"
+            f"(session={session_id}, client_id={client_id})"
         )
 
         return to_state
@@ -393,10 +408,6 @@ class GMSLocalFSM:
         """
         return self._rw_conn is None and len(self._ro_conns) == 0
 
-    def can_acquire_ro(self, waiting_writers: int) -> bool:
-        """Check if RO lock can be acquired now.
-
-        Args:
-            waiting_writers: Number of writers waiting for the lock
-        """
-        return self._rw_conn is None and waiting_writers == 0 and self._committed
+    def can_acquire_ro(self) -> bool:
+        """Check if RO lock can be acquired now."""
+        return self._rw_conn is None and self._committed

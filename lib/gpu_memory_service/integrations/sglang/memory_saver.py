@@ -22,6 +22,7 @@ import torch
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+    from gpu_memory_service.common.types import RequestedLockType
     from torch.cuda.memory import MemPool
     from torch_memory_saver.entrypoint import _TorchMemorySaverImpl
 
@@ -78,6 +79,7 @@ class GMSMemorySaverImpl:
         """Create allocator with mode from config (default: RW_OR_RO)."""
         from gpu_memory_service import get_or_create_gms_client_memory_manager
         from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+        from gpu_memory_service.common.utils import resolve_client_id
 
         mode = self._requested_mode or RequestedLockType.RW_OR_RO
         allocator, mem_pool = get_or_create_gms_client_memory_manager(
@@ -85,6 +87,7 @@ class GMSMemorySaverImpl:
             self._device_index,
             mode=mode,
             tag="weights",
+            client_id=resolve_client_id(),
         )
         granted_mode = allocator.granted_lock_type
         if granted_mode == GrantedLockType.RW:
