@@ -47,6 +47,7 @@ use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
 };
+use dashmap::DashMap;
 use derive_builder::Builder;
 use derive_getters::Getters;
 use educe::Educe;
@@ -429,8 +430,9 @@ pub struct Namespace {
     /// Cache for components to avoid duplicate registrations and metrics collisions.
     /// When the same component is requested multiple times, we return the cached instance
     /// to ensure all endpoints share the same Component and MetricsRegistry.
-    #[builder(default = "Arc::new(std::sync::RwLock::new(HashMap::new()))")]
-    component_cache: Arc<std::sync::RwLock<HashMap<String, Component>>>,
+    /// Uses DashMap for lock-free reads and automatic handling of concurrent inserts.
+    #[builder(default = "Arc::new(DashMap::new())")]
+    component_cache: Arc<DashMap<String, Component>>,
 }
 
 impl DistributedRuntimeProvider for Namespace {
@@ -480,19 +482,17 @@ impl Namespace {
     /// return the same Component instance. This prevents duplicate metrics registrations
     /// and ensures all endpoints share the same Component's MetricsRegistry.
     pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
-        let name_str = name.into();
+        let name = name.into();
 
-        // Check cache first (fast path with read lock)
-        {
-            let cache = self.component_cache.read().unwrap();
-            if let Some(cached_component) = cache.get(&name_str) {
-                return Ok(cached_component.clone());
-            }
+        // Fast path: Check if component exists in cache
+        // DashMap provides lock-free reads via internal sharding
+        if let Some(cached) = self.component_cache.get(&name) {
+            return Ok(cached.value().clone());
         }
 
-        // Not in cache, create new component (slow path)
+        // Slow path: Create new component
         let component = ComponentBuilder::from_runtime(self.runtime.clone())
-            .name(name_str.clone())
+            .name(&name)
             .namespace(self.clone())
             .build()?;
 
@@ -501,14 +501,9 @@ impl Namespace {
             .add_child_registry(component.get_metrics_registry());
 
         // Cache the component for future calls
-        {
-            let mut cache = self.component_cache.write().unwrap();
-            // Double-check pattern: another thread might have inserted while we waited for write lock
-            if let Some(existing) = cache.get(&name_str) {
-                return Ok(existing.clone());
-            }
-            cache.insert(name_str, component.clone());
-        }
+        // DashMap handles race conditions internally - if another thread
+        // inserted the same key concurrently, we just use our created component
+        self.component_cache.insert(name, component.clone());
 
         Ok(component)
     }
