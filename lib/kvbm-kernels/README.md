@@ -6,12 +6,12 @@ GPU kernels for converting KV cache blocks between three memory layouts used by 
 
 | Symbol | Meaning                        | Example          |
 |--------|--------------------------------|------------------|
+| `nb`   | Number of blocks in the batch  | 1–128            |
 | `nl`   | Number of layers               | 32 (Llama-70B)   |
 | `no`   | Outer chunks (K and V)         | 2                |
 | `nh`   | Number of attention heads      | 32 or 64         |
 | `nt`   | Tokens per block               | 128 or 256       |
 | `hd`   | Head dimension                 | 128              |
-| `nb`   | Number of blocks in the batch  | 1–128            |
 
 ### Layouts
 
