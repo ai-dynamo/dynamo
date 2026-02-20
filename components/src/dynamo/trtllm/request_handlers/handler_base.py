@@ -520,7 +520,16 @@ class HandlerBase(BaseGenerativeHandler):
             if processed_input:
                 return processed_input
 
-        # Fallback: text-only flow
+            # If multimodal processing returned None but request has multimodal data,
+            # this is an error (not a text-only request). Raise instead of falling back.
+            if request.get("multi_modal_data"):
+                raise RuntimeError(
+                    "Failed to process multimodal request. Check server logs for details. "
+                    "Common issues: missing allowed_local_media_path configuration, "
+                    "file not found, or file outside allowed directory."
+                )
+
+        # Fallback: text-only flow (no multimodal processor or no multimodal data)
         return request.get("token_ids")
 
     def _normalize_request_format(self, request: dict) -> None:

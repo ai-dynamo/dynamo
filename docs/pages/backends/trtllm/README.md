@@ -238,7 +238,7 @@ The pipeline type is **auto-detected** from the model's `model_index.json` — n
 python -m dynamo.trtllm \
   --modality video_diffusion \
   --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-  --output-dir /tmp/videos
+  --media-output-fs-url file:///tmp/dynamo_media
 ```
 
 ### API Endpoint
@@ -263,7 +263,7 @@ curl -X POST http://localhost:8000/v1/videos \
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--output-dir` | Directory for generated videos | `/tmp/dynamo_videos` |
+| `--media-output-fs-url` | Filesystem URL for storing generated media | `file:///tmp/dynamo_media` |
 | `--default-height` | Default video height | `480` |
 | `--default-width` | Default video width | `832` |
 | `--default-num-frames` | Default frame count | `81` |
@@ -364,7 +364,7 @@ The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size`
 
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance-sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 

@@ -445,9 +445,7 @@ def test_router_decisions_vllm_multiple_workers(
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(vllm_workers.namespace)
-        component = namespace.component("backend")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{vllm_workers.namespace}.backend.generate")
 
         _test_router_decisions(
             vllm_workers,
@@ -494,9 +492,9 @@ def test_router_decisions_vllm_dp(
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the vLLM workers
-        namespace = runtime.namespace(vllm_workers.namespace)
-        component = namespace.component("backend")  # endpoint is backend.generate
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(
+            f"{vllm_workers.namespace}.backend.generate"
+        )  # endpoint is backend.generate
 
         _test_router_decisions(
             vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
