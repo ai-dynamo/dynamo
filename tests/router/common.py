@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiohttp
 import nats
 
-from dynamo._core import DistributedRuntime, KvRouter, KvRouterConfig
+from dynamo._core import (
+    DistributedRuntime,
+    KvRouter,
+    KvRouterConfig,
+    start_standalone_indexer,
+)
 from tests.utils.managed_process import ManagedProcess
 
 if TYPE_CHECKING:
@@ -1619,6 +1624,80 @@ def _test_router_indexers_sync(
             assert False, error_msg
 
         logger.info("Successfully verified that both router states are equal")
+
+        # Verify standalone indexer builds the same tree (only for non-durable/NATS Core)
+        if not durable_kv_events:
+            logger.info("Starting standalone indexer and verifying tree state")
+            runtime3 = get_runtime(store_backend, request_plane)
+            endpoint3 = runtime3.endpoint(
+                f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+            )
+            await start_standalone_indexer(endpoint3, block_size, kv_router_config)
+
+            # Wait for the standalone indexer to sync events from workers
+            await asyncio.sleep(3)
+
+            # Query the standalone indexer's tree via kv_indexer_query endpoint
+            runtime4 = get_runtime(store_backend, request_plane)
+            query_endpoint = runtime4.endpoint(
+                f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
+            )
+            query_client = await query_endpoint.client()
+            await query_client.wait_for_instances()
+            stream = await query_client.generate("DumpTree", annotated=False)
+            response = await stream.__anext__()
+            standalone_state = response["TreeDump"]
+
+            # Sort and compare against router 1's state
+            sorted_standalone = sorted(standalone_state, key=sort_key)
+
+            logger.info(f"Standalone indexer has {len(sorted_standalone)} events")
+
+            assert len(sorted_state1) == len(sorted_standalone), (
+                f"Router 1 has {len(sorted_state1)} events, "
+                f"standalone indexer has {len(sorted_standalone)} events"
+            )
+
+            standalone_differences = []
+            for i, (r1_item, sa_item) in enumerate(
+                zip(sorted_state1, sorted_standalone)
+            ):
+                r1_compare = r1_item.copy()
+                sa_compare = sa_item.copy()
+                if "event" in r1_compare and "event_id" in r1_compare["event"]:
+                    del r1_compare["event"]["event_id"]
+                if "event" in sa_compare and "event_id" in sa_compare["event"]:
+                    del sa_compare["event"]["event_id"]
+                if r1_compare != sa_compare:
+                    standalone_differences.append(
+                        {
+                            "index": i,
+                            "router1_state": r1_item,
+                            "standalone_state": sa_item,
+                        }
+                    )
+
+            if standalone_differences:
+                error_msg = (
+                    f"Standalone indexer state differs from router 1. "
+                    f"Found {len(standalone_differences)} differences:\n"
+                )
+                for diff in standalone_differences:
+                    error_msg += f"\nDifference at index {diff['index']}:\n"
+                    error_msg += (
+                        f"Router 1:   {json.dumps(diff['router1_state'], indent=2)}\n"
+                    )
+                    error_msg += f"Standalone: {json.dumps(diff['standalone_state'], indent=2)}\n"
+                    error_msg += "-" * 80 + "\n"
+                assert False, error_msg
+
+            logger.info(
+                "Successfully verified standalone indexer state matches router states"
+            )
+        else:
+            logger.info(
+                "Skipping standalone indexer verification (not supported with durable_kv_events)"
+            )
 
         # Verify NATS consumers are created (while routers are still alive)
         # Skip this for NATS interruption test since it uses local indexer (NATS Core, not JetStream)

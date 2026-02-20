@@ -1032,6 +1032,12 @@ class KvRouterConfig:
         """
         ...
 
+async def start_standalone_indexer(
+    endpoint: Endpoint,
+    block_size: int,
+    kv_router_config: KvRouterConfig,
+) -> None: ...
+
 async def register_model(
     model_input: ModelInput,
     model_type: ModelType,
