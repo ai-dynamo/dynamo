@@ -17,6 +17,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.prometheus import (
@@ -907,13 +908,17 @@ async def init_omni(
     Supports text-to-text, text-to-image, and text-to-video generation
     through a single unified OmniHandler.
     """
-    # Lazy import to avoid loading vllm-omni unless explicitly needed
     from dynamo.vllm.omni import OmniHandler
 
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
     component = generate_endpoint.component()
+
+    # Initialize media filesystem for storing generated images/videos
+    media_fs = (
+        get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
+    )
 
     # Initialize unified OmniHandler
     handler = OmniHandler(
@@ -922,6 +927,8 @@ async def init_omni(
         config=config,
         default_sampling_params={},
         shutdown_event=shutdown_event,
+        media_output_fs=media_fs,
+        media_output_http_url=config.media_output_http_url,
     )
 
     logger.info(f"Omni worker initialized for model: {config.model}")

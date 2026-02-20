@@ -238,7 +238,7 @@ The pipeline type is **auto-detected** from the model's `model_index.json` — n
 python -m dynamo.trtllm \
   --modality video_diffusion \
   --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-  --output-dir /tmp/videos
+  --media-output-fs-url file:///tmp/dynamo_media
 ```
 
 ### API Endpoint
@@ -263,7 +263,7 @@ curl -X POST http://localhost:8000/v1/videos \
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--output-dir` | Directory for generated videos | `/tmp/dynamo_videos` |
+| `--media-output-fs-url` | Filesystem URL for storing generated media | `file:///tmp/dynamo_media` |
 | `--default-height` | Default video height | `480` |
 | `--default-width` | Default video width | `832` |
 | `--default-num-frames` | Default frame count | `81` |

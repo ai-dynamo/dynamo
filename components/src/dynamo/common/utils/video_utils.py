@@ -51,7 +51,7 @@ def compute_num_frames(
 ) -> int:
     """Compute the number of video frames.
 
-    Priority: num_frames > seconds × fps > default_num_frames.
+    Priority: num_frames > seconds x fps > default_num_frames.
     """
     if num_frames is not None:
         return num_frames
