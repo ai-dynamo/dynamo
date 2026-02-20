@@ -239,7 +239,9 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt or "" if nvext else "",
+            negative_prompt=nvext.negative_prompt
+            if nvext and nvext.negative_prompt
+            else None,
         )
 
         sp = OmniDiffusionSamplingParams(
@@ -281,7 +283,9 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt or "" if nvext else "",
+            negative_prompt=nvext.negative_prompt
+            if nvext and nvext.negative_prompt
+            else None,
         )
 
         sp = OmniDiffusionSamplingParams(

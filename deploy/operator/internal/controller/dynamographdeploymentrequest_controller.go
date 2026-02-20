@@ -49,7 +49,6 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
-	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 )
 
 const (
@@ -890,24 +889,6 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
-	// Use the validator for simple validation (defense in depth - only when webhooks are disabled)
-	if !r.Config.WebhooksEnabled {
-		isClusterWide := r.Config.RestrictedNamespace == ""
-		validator := webhookvalidation.NewDynamoGraphDeploymentRequestValidator(dgdr, isClusterWide, r.Config.GPUDiscoveryEnabled)
-		warnings, err := validator.Validate()
-		if err != nil {
-			return err
-		}
-
-		// Log warnings if any
-		if len(warnings) > 0 {
-			logger := log.FromContext(ctx)
-			for _, warning := range warnings {
-				logger.Info("Validation warning", "warning", warning)
-			}
-		}
-	}
-
 	// Validate ConfigMap if provided (for the DGD base config)
 	// This requires cluster access and cannot be done in the stateless validator
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {

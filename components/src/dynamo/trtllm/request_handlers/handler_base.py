@@ -72,6 +72,7 @@ class RequestHandlerConfig:
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
+    disable_request_abort: bool = True
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -101,6 +102,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
+        self.disable_request_abort = config.disable_request_abort
 
     def check_error(self, result: dict):
         """
@@ -208,13 +210,15 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Abort the generation
-            # Temporary:
-            #   Disable calling abort() on the engine, which may get stuck if a
-            #   sufficiently large number of concurrent requests is cancelled.
-            # Note to restore:
-            #   call `generation_result.abort()`; and then
-            #   log `logging.debug(f"Aborted Request ID: {context.id()}")`
+            # Abort the generation unless disabled
+            if self.disable_request_abort:
+                logging.debug(
+                    f"Request ID {context.id()} cancelled but abort() skipped "
+                    "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
+                )
+            else:
+                generation_result.abort()
+                logging.debug(f"Aborted Request ID: {context.id()}")
 
             # Clean up any remaining background task
             for task in pending:
