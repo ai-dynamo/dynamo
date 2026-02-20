@@ -3,9 +3,9 @@
 
 # Type stubs - re-export from _core
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
-from dynamo._core import start_standalone_indexer as start_standalone_indexer
+from dynamo._core import start_kv_block_indexer as start_kv_block_indexer
 
 __all__ = [
     "ModelDeploymentCard",
-    "start_standalone_indexer",
+    "start_kv_block_indexer",
 ]

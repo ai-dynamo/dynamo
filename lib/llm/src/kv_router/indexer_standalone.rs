@@ -133,7 +133,7 @@ async fn start_indexer_query_endpoint(
     Ok(())
 }
 
-pub async fn start_standalone_indexer(
+pub async fn start_kv_block_indexer(
     component: &Component,
     kv_router_config: &KvRouterConfig,
     block_size: u32,

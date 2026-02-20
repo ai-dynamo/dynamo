@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiohttp
 import nats
 
-from dynamo._internal import start_standalone_indexer
+from dynamo._internal import start_kv_block_indexer
 from dynamo.llm import KvRouter, KvRouterConfig
 from dynamo.runtime import DistributedRuntime
 from tests.utils.managed_process import ManagedProcess
@@ -1623,7 +1623,7 @@ def _test_router_indexers_sync(
             endpoint3 = runtime3.endpoint(
                 f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
             )
-            await start_standalone_indexer(endpoint3, block_size, kv_router_config)
+            await start_kv_block_indexer(endpoint3, block_size, kv_router_config)
 
             # Wait for the standalone indexer to sync events from workers
             await asyncio.sleep(3)

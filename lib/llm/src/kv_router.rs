@@ -42,7 +42,7 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use config::{KvRouterConfig, RouterConfigOverride};
-pub use indexer_standalone::start_standalone_indexer;
+pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 

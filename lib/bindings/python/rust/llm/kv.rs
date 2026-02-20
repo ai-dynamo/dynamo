@@ -27,8 +27,8 @@ fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Blo
 }
 
 #[pyfunction]
-#[pyo3(name = "start_standalone_indexer", signature = (endpoint, block_size, kv_router_config))]
-pub fn start_standalone_indexer_py<'p>(
+#[pyo3(name = "start_kv_block_indexer", signature = (endpoint, block_size, kv_router_config))]
+pub fn start_kv_block_indexer_py<'p>(
     py: Python<'p>,
     endpoint: &Endpoint,
     block_size: u32,
@@ -37,7 +37,7 @@ pub fn start_standalone_indexer_py<'p>(
     let component = endpoint.inner.component().clone();
     let config = kv_router_config.inner();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        llm_rs::kv_router::indexer_standalone::start_standalone_indexer(
+        llm_rs::kv_router::indexer_standalone::start_kv_block_indexer(
             &component, &config, block_size,
         )
         .await
