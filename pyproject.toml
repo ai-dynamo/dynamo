@@ -64,6 +64,13 @@ sglang = [
     "sglang[all]==0.5.3.post2",
 ]
 
+routellm = [
+    "routellm",
+    "httpx>=0.27.0",
+    "uvicorn>=0.30.0",
+    "uvloop",
+]
+
 [dependency-groups]
 docs = [
     # Core Sphinx
