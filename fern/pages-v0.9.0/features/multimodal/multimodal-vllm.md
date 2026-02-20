@@ -7,9 +7,10 @@
 
 This document provides a comprehensive guide for multimodal inference using vLLM backend in Dynamo.
 
-> [!IMPORTANT]
-> **Security Requirement**: All multimodal workers require the `--enable-multimodal` flag to be explicitly set at startup. This is a security feature to prevent unintended processing of multimodal data from untrusted sources. Workers will fail at startup if multimodal flags (e.g., `--multimodal-worker`, `--multimodal-processor`) are used without `--enable-multimodal`.
-> This flag is analogous to `--enable-mm-embeds` in vllm serve but also extends it to all multimodal content (url, embeddings, b64).
+<Info>
+**Security Requirement**: All multimodal workers require the `--enable-multimodal` flag to be explicitly set at startup. This is a security feature to prevent unintended processing of multimodal data from untrusted sources. Workers will fail at startup if multimodal flags (e.g., `--multimodal-worker`, `--multimodal-processor`) are used without `--enable-multimodal`.
+This flag is analogous to `--enable-mm-embeds` in vllm serve but also extends it to all multimodal content (url, embeddings, b64).
+</Info>
 
 ## Support Matrix
 
@@ -160,7 +161,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/disagg_multimodal_epd.sh --model llava-hf/llava-1.5-7b-hf
 ```
 
-> [!NOTE] Disaggregation is currently only confirmed to work with LLaVA. Qwen2.5-VL is not confirmed to be supported.
+<Note>Disaggregation is currently only confirmed to work with LLaVA. Qwen2.5-VL is not confirmed to be supported.</Note>
 
 ## ECConnector Serving
 

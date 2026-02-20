@@ -43,8 +43,9 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 | GQA+MoE (Qwen3MoeForCausalLM) | TP, TEP, DEP | TP, TEP, DEP |
 | Other Models | TP | TP |
 
-> [!NOTE]
-> Exact model x parallelization mapping support is dependent on the backend. The profiler does not guarantee that the recommended P/D engine configuration is supported and bug-free by the backend.
+<Note>
+Exact model x parallelization mapping support is dependent on the backend. The profiler does not guarantee that the recommended P/D engine configuration is supported and bug-free by the backend.
+</Note>
 
 ## Deployment
 
@@ -140,8 +141,9 @@ kubectl port-forward svc/<deployment>-frontend 8000:8000 -n $NAMESPACE
 curl http://localhost:8000/v1/models
 ```
 
-> [!NOTE]
-> DGDRs are **immutable**. To update SLAs or configuration, delete the existing DGDR and create a new one.
+<Note>
+DGDRs are **immutable**. To update SLAs or configuration, delete the existing DGDR and create a new one.
+</Note>
 
 ### Direct Script Execution
 
@@ -214,8 +216,9 @@ profilingConfig:
       aicBackendVersion: "0.20.0"      # TRT-LLM version simulated by AIC
 ```
 
-> [!NOTE]
-> `aicBackendVersion` specifies the TensorRT-LLM version that AI Configurator simulates. See the [AI Configurator supported features](https://github.com/ai-dynamo/aiconfigurator#supported-features) for available versions.
+<Note>
+`aicBackendVersion` specifies the TensorRT-LLM version that AI Configurator simulates. See the [AI Configurator supported features](https://github.com/ai-dynamo/aiconfigurator#supported-features) for available versions.
+</Note>
 
 **Currently supports:**
 - **Backends**: TensorRT-LLM (versions 0.20.0, 1.0.0rc3, 1.0.0rc6)
@@ -296,8 +299,9 @@ hardware:
 - **numGpusPerNode**: Determine the upper bound of GPUs per node for dense models and configure Grove for multi-node MoE engines
 - **gpuType**: Informational only, auto-detected by the controller. For AI Configurator, use `aicSystem` in the [sweep configuration](#ai-configurator-configuration) instead
 
-> [!TIP]
-> If you don't specify hardware constraints, the controller auto-detects based on your model size and available cluster resources.
+<Tip>
+If you don't specify hardware constraints, the controller auto-detects based on your model size and available cluster resources.
+</Tip>
 
 ### Sweep Configuration (Optional)
 
@@ -335,8 +339,9 @@ planner:
   planner_load_predictor: linear             # Load prediction method
 ```
 
-> [!NOTE]
-> Planner arguments use `planner_` prefix. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
+<Note>
+Planner arguments use `planner_` prefix. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
+</Note>
 
 ### Model Cache PVC (Advanced)
 
@@ -413,8 +418,9 @@ The profiler uses the DGD config as a **base template**, then optimizes it based
 | `--pick-with-webui` | flag | false | Launch interactive WebUI |
 | `--webui-port` | int | 8000 | Port for WebUI |
 
-> [!NOTE]
-> CLI arguments map to DGDR config fields: `--min-num-gpus` = `hardware.minNumGpusPerEngine`, `--max-num-gpus` = `hardware.maxNumGpusPerEngine`, `--use-ai-configurator` = `sweep.useAiConfigurator`. See [DGDR Configuration Structure](#dgdr-configuration-structure) for all field mappings.
+<Note>
+CLI arguments map to DGDR config fields: `--min-num-gpus` = `hardware.minNumGpusPerEngine`, `--max-num-gpus` = `hardware.maxNumGpusPerEngine`, `--use-ai-configurator` = `sweep.useAiConfigurator`. See [DGDR Configuration Structure](#dgdr-configuration-structure) for all field mappings.
+</Note>
 
 ## Integration
 
@@ -604,8 +610,7 @@ hardware:
 
 **Calculate Max TP**: `max_tp = num_attention_heads / 4`
 
-> [!NOTE]
-> This is an AI Configurator limitation. Online profiling doesn't have this constraint.
+<Note>This is an AI Configurator limitation. Online profiling doesn't have this constraint.</Note>
 
 ### Image Pull Errors
 
