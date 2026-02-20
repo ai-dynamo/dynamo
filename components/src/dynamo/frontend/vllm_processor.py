@@ -24,11 +24,11 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
+from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import (
     KvRouter,
     ModelCardInstanceId,
-    ModelDeploymentCard,
     PythonAsyncEngine,
     RouterConfig,
     RouterMode,
@@ -438,10 +438,8 @@ class EngineFactory:
             reasoning_parser_class = None
 
         (namespace_name, component_name, endpoint_name) = instance_id.triple()
-        generate_endpoint = (
-            self.runtime.namespace(namespace_name)
-            .component(component_name)
-            .endpoint(endpoint_name)
+        generate_endpoint = self.runtime.endpoint(
+            f"{namespace_name}.{component_name}.{endpoint_name}"
         )
 
         if self.router_config.router_mode == RouterMode.KV:

@@ -50,6 +50,10 @@ pub struct RoutingHints {
     /// ahead in the scheduler queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_jump: Option<f64>,
+
+    /// Backend engine scheduling priority forwarded to the generate call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -200,6 +204,19 @@ impl PreprocessedRequest {
     /// Get mutable access to routing hints, creating default if None
     pub fn routing_mut(&mut self) -> &mut RoutingHints {
         self.routing.get_or_insert_with(RoutingHints::default)
+    }
+
+    /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
+    /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
+    pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
+        let Some(mm) = self.mm_routing_info.as_ref() else {
+            return (&self.token_ids, None);
+        };
+        let tokens = mm.routing_token_ids.as_slice();
+        if tokens.is_empty() {
+            return (&self.token_ids, None);
+        }
+        (tokens, Some(mm.block_mm_infos.as_slice()))
     }
 }
 

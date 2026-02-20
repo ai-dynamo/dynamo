@@ -42,4 +42,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen2.5-1.5B-Instruct
+            - python3 -m dynamo.vllm --model Qwen/Qwen2.5-1.5B-Instruct --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'

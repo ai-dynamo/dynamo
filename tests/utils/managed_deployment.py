@@ -18,6 +18,8 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.utils.test_output import resolve_test_output_path
+
 
 def _get_workspace_dir() -> str:
     """Get workspace directory without depending on dynamo.common package.
@@ -508,6 +510,7 @@ class ManagedDeployment:
 
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
+        self.log_dir = resolve_test_output_path(self.log_dir)
 
     async def _init_kubernetes(self):
         """Initialize kubernetes client.
