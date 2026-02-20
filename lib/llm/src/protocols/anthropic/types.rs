@@ -562,6 +562,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                                 content.clone(),
                             )),
                             reasoning_content: None,
+                            reasoning_segments: None,
                             refusal: None,
                             name: None,
                             audio: None,
@@ -685,15 +686,29 @@ fn convert_user_blocks(
 }
 
 /// Convert assistant-role content blocks into chat completion messages.
-/// Text blocks become an assistant message; tool_use blocks become tool_calls on an assistant message.
-/// Thinking blocks are passed through as `reasoning_content`.
+///
+/// Text blocks become an assistant message; tool_use blocks become tool_calls on an assistant
+/// message. Thinking blocks are preserved in two ways:
+///
+/// - `reasoning_content`: flat concatenation of all thinking blocks (backward-compatible).
+/// - `reasoning_segments`: one entry per tool call, capturing the thinking that immediately
+///   preceded each tool call. Only set when there are tool calls, enabling chat templates to
+///   reconstruct the interleaved token sequence:
+///   `<think>segments[0]</think><call>tc[0]</call><think>segments[1]</think><call>tc[1]</call>…`
+///
+/// Preserving the original interleaved order is required for KV cache correctness: a prompt
+/// reconstructed from a flattened `reasoning_content` will differ token-by-token from the
+/// original assistant turn, causing a cache miss on every multi-tool exchange.
 fn convert_assistant_blocks(
     blocks: &[AnthropicContentBlock],
     messages: &mut Vec<ChatCompletionRequestMessage>,
 ) {
     let mut text_content = String::new();
-    let mut thinking_content = String::new();
     let mut tool_calls = Vec::new();
+    // One reasoning segment per tool call — segments[i] precedes tool_calls[i].
+    let mut segments: Vec<String> = Vec::new();
+    // Accumulates thinking text until the next tool_use block (or end of blocks).
+    let mut pending_reasoning = String::new();
 
     for block in blocks {
         match block {
@@ -701,12 +716,14 @@ fn convert_assistant_blocks(
                 text_content.push_str(text);
             }
             AnthropicContentBlock::Thinking { thinking, .. } => {
-                if !thinking_content.is_empty() {
-                    thinking_content.push('\n');
+                if !pending_reasoning.is_empty() {
+                    pending_reasoning.push('\n');
                 }
-                thinking_content.push_str(thinking);
+                pending_reasoning.push_str(thinking);
             }
             AnthropicContentBlock::ToolUse { id, name, input } => {
+                // Snapshot the reasoning that preceded this tool call.
+                segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: id.clone(),
                     r#type: ChatCompletionToolType::Function,
@@ -720,6 +737,18 @@ fn convert_assistant_blocks(
         }
     }
 
+    // Flat reasoning_content: join all non-empty segments plus any trailing reasoning.
+    // Kept for backward compatibility with chat templates that read reasoning_content.
+    let mut flat_parts: Vec<&str> = segments.iter().map(String::as_str).collect();
+    if !pending_reasoning.is_empty() {
+        flat_parts.push(&pending_reasoning);
+    }
+    let flat_reasoning: String = flat_parts
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
     let content = if text_content.is_empty() {
         None
     } else {
@@ -728,10 +757,18 @@ fn convert_assistant_blocks(
         ))
     };
 
-    let reasoning = if thinking_content.is_empty() {
+    let reasoning_content = if flat_reasoning.is_empty() {
         None
     } else {
-        Some(thinking_content)
+        Some(flat_reasoning)
+    };
+
+    // Only populate reasoning_segments when there are tool calls and at least one segment
+    // carries reasoning — i.e., genuine interleaving is present.
+    let reasoning_segments = if tool_calls.is_empty() || !segments.iter().any(|s| !s.is_empty()) {
+        None
+    } else {
+        Some(segments)
     };
 
     let tc = if tool_calls.is_empty() {
@@ -743,11 +780,12 @@ fn convert_assistant_blocks(
     messages.push(ChatCompletionRequestMessage::Assistant(
         ChatCompletionRequestAssistantMessage {
             content,
-            reasoning_content: reasoning,
+            reasoning_content,
             refusal: None,
             name: None,
             audio: None,
             tool_calls: tc,
+            reasoning_segments,
             #[allow(deprecated)]
             function_call: None,
         },
