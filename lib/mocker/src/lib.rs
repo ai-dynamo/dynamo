@@ -7,15 +7,7 @@
 //! KV cache management, request scheduling, and token generation timing without
 //! requiring actual GPU resources or a full distributed runtime.
 
-pub mod bootstrap;
-pub mod evictor;
+pub mod cache;
+pub mod common;
 pub mod kv_manager;
-pub mod perf_model;
-pub mod protocols;
-pub mod running_mean;
 pub mod scheduler;
-pub mod sequence;
-
-// Re-export commonly used types
-pub use protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs, MockEngineArgsBuilder};
-pub use scheduler::Scheduler;
