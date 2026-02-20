@@ -21,7 +21,7 @@ use crate::protocols::maybe_error::MaybeError;
 use anyhow::{Error, Result};
 use serde::Deserialize;
 use serde::Serialize;
-use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
+use tokio_stream::{Stream, StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +96,6 @@ where
         let (addressed_request, context) = request.transfer(());
         let (request, address) = addressed_request.into_parts();
         let engine_ctx = context.context();
-        let engine_ctx_ = engine_ctx.clone();
 
         // registration options for the data plane in a singe in / many out configuration
         let options = StreamOptions::builder()
@@ -179,59 +178,77 @@ where
             .map_err(|_| PipelineError::DetachedStreamReceiver)?
             .map_err(PipelineError::ConnectionFailed)?;
 
-        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
-        let mut is_complete_final = false;
-        let stream = tokio_stream::StreamNotifyClose::new(
-            tokio_stream::wrappers::ReceiverStream::new(response_stream.rx),
-        )
-        .filter_map(move |res| {
-            if let Some(res_bytes) = res {
-                if is_complete_final {
-                    return Some(U::from_err(
-                        Error::msg(
-                            "Response received after generation ended - this should never happen",
-                        )
-                        .into(),
-                    ));
-                }
-                match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
-                    Ok(item) => {
-                        is_complete_final = item.complete_final;
-                        if let Some(data) = item.data {
-                            Some(data)
-                        } else if is_complete_final {
-                            None
-                        } else {
-                            Some(U::from_err(
-                                Error::msg("Empty response received - this should never happen")
-                                    .into(),
-                            ))
-                        }
-                    }
-                    Err(err) => {
-                        // legacy log print
-                        let json_str = String::from_utf8_lossy(&res_bytes);
-                        tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
-
-                        Some(U::from_err(Error::new(err).into()))
-                    }
-                }
-            } else if is_complete_final {
-                // end of stream
-                None
-            } else if engine_ctx_.is_stopped() {
-                // Gracefully end the stream if 'stop_generating()' was called. Do NOT check for
-                // 'is_killed()' here because it implies the stream ended abnormally which should be
-                // handled by the error branch below.
-                tracing::debug!("Request cancelled and then trying to read a response");
-                None
-            } else {
-                // stream ended unexpectedly
-                tracing::debug!("{STREAM_ERR_MSG}");
-                Some(U::from_err(Error::msg(STREAM_ERR_MSG).into()))
-            }
-        });
+        let rx_stream = ReceiverStream::new(response_stream.rx);
+        let stream = Self::parse_response_stream::<U, _>(rx_stream, engine_ctx.clone());
 
         Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+    }
+}
+
+impl AddressedPushRouter {
+    fn parse_response_stream<U, S>(
+        rx_stream: S,
+        engine_ctx: Arc<dyn AsyncEngineContext>,
+    ) -> impl Stream<Item = U>
+    where
+        U: for<'de> Deserialize<'de> + MaybeError + 'static,
+        S: Stream<Item = Bytes> + 'static,
+    {
+        let res_stream = async_stream::try_stream!({
+            tokio::pin!(rx_stream);
+            let mut is_complete_final = false;
+
+            'evt: loop {
+                let res = tokio::select! {
+                    _ = engine_ctx.stopped() => {
+                        // Gracefully end the stream if 'stop_generating()' was called. Do NOT check for
+                        // 'is_killed()' here because it implies the stream ended abnormally which should be
+                        // handled by the "stream ended unexpectedly" branch below.
+                        tracing::debug!("Request cancelled while waiting for response");
+                        break 'evt Ok(());
+                    }
+                    res = rx_stream.next() => res
+                };
+
+                let Some(res_bytes) = res else {
+                    // stream ended, received confirmation
+                    if is_complete_final {
+                        break 'evt Ok(());
+                    }
+                    // stream ended unexpectedly, have not received confirmation
+                    tracing::debug!("{STREAM_ERR_MSG}");
+                    break 'evt Err(Error::msg(STREAM_ERR_MSG));
+                };
+
+                if is_complete_final {
+                    break 'evt Err(Error::msg(
+                        "Response received after generation ended - this should never happen",
+                    ));
+                }
+
+                let item = match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
+                    Ok(item) => item,
+                    Err(err) => {
+                        let json_str = String::from_utf8_lossy(&res_bytes);
+                        tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
+                        break 'evt Err(Error::new(err));
+                    }
+                };
+
+                is_complete_final = item.complete_final;
+
+                if let Some(data) = item.data {
+                    yield data;
+                } else if !is_complete_final {
+                    break 'evt Err(Error::msg(
+                        "Empty response received - this should never happen",
+                    ));
+                }
+                // If complete_final with no data, loop continues and will exit on next iteration
+            }?;
+        });
+
+        // convert errors to <U>
+        res_stream.map(|r: Result<U, Error>| r.unwrap_or_else(|e| U::from_err(e.into())))
     }
 }
