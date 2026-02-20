@@ -81,6 +81,11 @@ on:
         required: false
         type: number
         default: 5
+      make_efa:
+        description: 'Enable AWS EFA support in the built image'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -129,4 +134,5 @@ jobs:
       test_gpu_timeout_minutes: ${{ inputs.test_gpu_timeout_minutes }}
       test_cpu_timeout_minutes: ${{ inputs.test_cpu_timeout_minutes }}
       copy_timeout_minutes: ${{ inputs.copy_timeout_minutes }}
+      make_efa: ${{ inputs.make_efa }}
     secrets: inherit

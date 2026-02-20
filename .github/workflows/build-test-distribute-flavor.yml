@@ -91,6 +91,11 @@ on:
         required: false
         type: number
         default: 5
+      make_efa:
+        description: 'Enable AWS EFA support in the built image'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -169,7 +174,8 @@ jobs:
         run: |
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}"
+          EFA_SUFFIX="${{ inputs.make_efa && '-efa' || '' }}"
+          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}${EFA_SUFFIX}"
           DEFAULT_TARGET_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ inputs.platform }}"
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
@@ -202,6 +208,7 @@ jobs:
               --framework=${{ inputs.framework }} \
               --platform=${{ inputs.platform }} \
               --cuda-version=${{ inputs.cuda_version }} \
+              ${{ inputs.make_efa && '--make-efa' || '' }} \
               --show-result \
               --output-short-filename
       - name: Build Container
