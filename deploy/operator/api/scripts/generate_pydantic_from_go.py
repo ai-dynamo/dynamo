@@ -78,6 +78,14 @@ _STRUCT_EXTRAS: dict = {
 """,
 }
 
+# Per-field Python type overrides.  Maps (StructName, json_field_name) → Python type string.
+# Used when the Go type (e.g. *runtime.RawExtension) should map to a richer Python type
+# rather than the generic Dict[str, Any].
+_FIELD_TYPE_OVERRIDES: dict[tuple[str, str], str] = {
+    # FeaturesSpec.planner is opaque in Go but strongly typed in Python.
+    ("FeaturesSpec", "planner"): "Optional[PlannerConfig]",
+}
+
 _SPDX_HEADER = """\
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -531,9 +539,13 @@ class GoToPydanticConverter:
                 effective_optional = go_field.is_optional and (
                     go_field.is_pointer or go_field.default is None
                 )
-                python_type = self._go_type_to_python(
-                    go_field.go_type, go_field.is_pointer, effective_optional
-                )
+                override_key = (struct.name, go_field.name)
+                if override_key in _FIELD_TYPE_OVERRIDES:
+                    python_type = _FIELD_TYPE_OVERRIDES[override_key]
+                else:
+                    python_type = self._go_type_to_python(
+                        go_field.go_type, go_field.is_pointer, effective_optional
+                    )
 
                 field_def = f"    {go_field.name}: {python_type}"
 
