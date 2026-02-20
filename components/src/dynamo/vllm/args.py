@@ -228,7 +228,7 @@ def update_dynamo_config_with_engine(
         if has_kv_transfer_config:
             raise ValueError(
                 "Cannot specify both --kv-transfer-config and --connector flags. "
-                "Note: --connector is deprecated for vLLM; use --kv-transfer-config instead."
+                "Note: --connector is deprecated for the Dynamo vLLM backend; use --kv-transfer-config instead."
             )
         dynamo_config.connector = normalized  # type: ignore[assignment]
 
@@ -426,7 +426,7 @@ def create_kv_transfer_config(
     explicitly_set = getattr(dynamo_config, "_connector_explicitly_set", True)
     if explicitly_set:
         warnings.warn(
-            f"--connector is deprecated for the vLLM backend and will be removed "
+            f"--connector is deprecated for the Dynamo vLLM backend and will be removed "
             f"in a future release. Use instead: --kv-transfer-config '{kv_json}'",
             FutureWarning,
             stacklevel=2,
