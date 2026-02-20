@@ -86,7 +86,7 @@ extraPodSpec:
 - `--enable-prompt-embeds`: Enable prompt embeddings feature
 - `--enable-multimodal`: Enable multimodal (vision) support
 - `--is-prefill-worker`: Prefill-only mode for disaggregated serving
-- `--connector [nixl|lmcache|kvbm|none]`: KV transfer backend selection
+- `--kv-transfer-config '<JSON>'`: KV transfer configuration (see vLLM docs). Note: `--connector` is deprecated.
 
 ## Prerequisites
 

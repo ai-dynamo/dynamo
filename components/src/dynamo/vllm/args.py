@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import logging
 import os
 import socket
-from typing import Any, Dict, Optional
+import sys
+import warnings
+from typing import Any, Dict, List, Optional
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
@@ -106,6 +109,13 @@ def parse_args() -> Config:
 
     args, unknown = parser.parse_known_args()
     dynamo_config = Config.from_cli_args(args)
+
+    # Detect whether --connector was explicitly set (CLI or env var)
+    _connector_explicitly_set = (
+        any(a == "--connector" or a.startswith("--connector=") for a in sys.argv)
+        or "DYN_CONNECTOR" in os.environ
+    )
+    dynamo_config._connector_explicitly_set = _connector_explicitly_set  # type: ignore[attr-defined]
 
     # Validate arguments
     dynamo_config.validate()
@@ -218,7 +228,8 @@ def update_dynamo_config_with_engine(
     else:
         if has_kv_transfer_config:
             raise ValueError(
-                "Cannot specify both --kv-transfer-config and --connector flags"
+                "Cannot specify both --kv-transfer-config and --connector flags. "
+                "Note: --connector is deprecated for the Dynamo vLLM backend; use --kv-transfer-config instead."
             )
         dynamo_config.connector = normalized  # type: ignore[assignment]
 
@@ -355,6 +366,44 @@ def create_kv_events_config(
     )
 
 
+def _connector_to_kv_transfer_json(connector_list: List[str]) -> str:
+    """Map a connector list to the equivalent --kv-transfer-config JSON string.
+
+    This is used to generate actionable deprecation messages that tell
+    the user exactly what to pass instead of ``--connector``.
+    """
+    multi_connectors = []
+    for conn in connector_list:
+        if conn == "lmcache":
+            multi_connectors.append(
+                {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+            )
+        elif conn == "nixl":
+            multi_connectors.append(
+                {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+            )
+        elif conn == "kvbm":
+            multi_connectors.append(
+                {
+                    "kv_connector": "DynamoConnector",
+                    "kv_connector_module_path": "kvbm.vllm_integration.connector",
+                    "kv_role": "kv_both",
+                }
+            )
+        # skip unknown connectors (none/null are handled before calling this)
+
+    if len(multi_connectors) == 1:
+        return json.dumps(multi_connectors[0], separators=(",", ":"))
+
+    pd_cfg = {
+        "kv_connector": "PdConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": "kvbm.vllm_integration.connector",
+        "kv_connector_extra_config": {"connectors": multi_connectors},
+    }
+    return json.dumps(pd_cfg, separators=(",", ":"))
+
+
 def create_kv_transfer_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> Optional[KVTransferConfig]:
@@ -372,8 +421,28 @@ def create_kv_transfer_config(
     if not dynamo_config.connector:
         logger.info("Using vLLM defaults for kv_transfer_config")
         return None
+
+    # Emit actionable warning with the exact replacement command
+    kv_json = _connector_to_kv_transfer_json(dynamo_config.connector)
+    explicitly_set = getattr(dynamo_config, "_connector_explicitly_set", True)
+    if explicitly_set:
+        warnings.warn(
+            f"--connector is deprecated for the Dynamo vLLM backend and will be removed "
+            f"in a future release. Use instead: --kv-transfer-config '{kv_json}'",
+            FutureWarning,
+            stacklevel=2,
+        )
+    else:
+        warnings.warn(
+            f"The default --connector nixl is deprecated. In the next release, "
+            f"no connector will be configured by default. To preserve current "
+            f"behavior, pass: --kv-transfer-config '{kv_json}'",
+            FutureWarning,
+            stacklevel=2,
+        )
     logger.info(
-        f"Creating kv_transfer_config from --connector {dynamo_config.connector}"
+        f"Creating kv_transfer_config from deprecated --connector {dynamo_config.connector}. "
+        f"Migrate to: --kv-transfer-config '{kv_json}'"
     )
     multi_connectors = []
     for conn in dynamo_config.connector:

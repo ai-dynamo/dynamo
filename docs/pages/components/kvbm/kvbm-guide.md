@@ -288,7 +288,7 @@ DYN_KVBM_CPU_CACHE_GB=20 \
 python -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
-    --connector kvbm
+    --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}'
 ```
 
 ### Enable Metrics for TensorRT-LLM

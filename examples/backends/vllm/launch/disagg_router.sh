@@ -24,6 +24,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     --is-decode-worker &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
@@ -31,6 +32,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     --is-decode-worker &
 
 # two prefill workers
@@ -41,6 +43,7 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     --is-prefill-worker \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082","enable_kv_cache_events":true}'&
 
@@ -49,5 +52,6 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     --is-prefill-worker \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20083","enable_kv_cache_events":true}'

@@ -210,7 +210,7 @@ pub struct KvBlockManagerConfig {
     ///
     /// If provided, KVBM will create a KV Event Consolidator that deduplicates
     /// KV cache events from vLLM (G1) and KVBM (G2/G3) before sending to the router.
-    /// This is used when `--connector kvbm` is enabled with prefix caching.
+    /// This is used when KVBM is enabled with prefix caching.
     #[builder(default, setter(custom))]
     pub consolidator_config:
         Option<crate::block_manager::kv_consolidator::KvEventConsolidatorConfig>,
