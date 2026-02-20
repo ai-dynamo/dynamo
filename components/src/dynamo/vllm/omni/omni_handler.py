@@ -3,14 +3,15 @@
 import asyncio
 import base64
 import logging
-import os
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any, AsyncGenerator, Dict, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 from diffusers.utils import export_to_video
+from fsspec.implementations.dirfs import DirFileSystem
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.protocols.image_protocol import (
@@ -23,6 +24,7 @@ from dynamo.common.protocols.video_protocol import (
     NvVideosResponse,
     VideoData,
 )
+from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import (
     compute_num_frames,
@@ -33,9 +35,7 @@ from dynamo.vllm.omni.base_handler import BaseOmniHandler
 
 logger = logging.getLogger(__name__)
 
-# TODO: Migrate to fs_url based approach in another PR
 DEFAULT_VIDEO_FPS = 16
-DEFAULT_VIDEO_OUTPUT_DIR = "/tmp/dynamo_videos"  # noqa: S108
 
 
 @dataclass
@@ -58,40 +58,8 @@ class EngineInputs:
     fps: int = 0
     response_format: str | None = None
 
-
-def prepare_image_output(images: list, response_format: str | None = None):
-    """Prepare image output for response.
-
-    Args:
-        images: List of PIL Image objects.
-        response_format: Response format.
-
-    Returns:
-        List of image URLs or base64 strings.
-    """
-    ## This is a temporary function to prepare image output for response.
-    ## Right now, there are different utilities across components that uploads image/video outputs to urls or b64_json.
-    ## (ayushag) TODO: follow up, move all the utilities to common
-    outlist = []
-
-    for img in images:
-        if response_format == "url":
-            output_dir = "/tmp/dynamo_images"  # noqa: S108
-            os.makedirs(output_dir, exist_ok=True)
-            img_path = os.path.join(output_dir, f"{uuid.uuid4()}.png")
-            img.save(img_path)
-            outlist.append(img_path)
-        elif response_format == "b64_json" or response_format is None:
-            # convert image to base64
-            buffer = BytesIO()
-            img.save(buffer, format="PNG")
-            img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            data_url = f"data:image/png;base64,{img_base64}"
-            outlist.append(data_url)
-        else:
-            raise ValueError(f"Invalid response format: {response_format}")
-    return outlist
-
+class OmniHandler(BaseOmniHandler):
+    """Unified handler for multi-stage pipelines using vLLM-Omni.
 
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
@@ -106,6 +74,8 @@ class OmniHandler(BaseOmniHandler):
         config,
         default_sampling_params: Dict[str, Any],
         shutdown_event: asyncio.Event | None = None,
+        media_output_fs: Optional[DirFileSystem] = None,
+        media_output_http_url: Optional[str] = None,
     ):
         """Initialize the unified Omni handler.
 
@@ -115,6 +85,8 @@ class OmniHandler(BaseOmniHandler):
             config: Parsed Config object from args.py.
             default_sampling_params: Default sampling parameters dict.
             shutdown_event: Optional asyncio event for graceful shutdown.
+            media_output_fs: Filesystem for storing generated images/videos.
+            media_output_http_url: Base URL for rewriting media paths in responses.
         """
         super().__init__(
             runtime=runtime,
@@ -123,6 +95,8 @@ class OmniHandler(BaseOmniHandler):
             default_sampling_params=default_sampling_params,
             shutdown_event=shutdown_event,
         )
+        self.media_output_fs = media_output_fs
+        self.media_output_http_url = media_output_http_url
 
     async def generate(
         self, request: Dict[str, Any], context
@@ -194,7 +168,7 @@ class OmniHandler(BaseOmniHandler):
                                 fps=inputs.fps,
                             )
                         else:
-                            chunk = self._format_image_chunk(
+                            chunk = await self._format_image_chunk(
                                 stage_output.images,
                                 request_id,
                                 response_format=inputs.response_format,
@@ -339,14 +313,51 @@ class OmniHandler(BaseOmniHandler):
             fps=fps,
         )
 
-    def _format_image_chunk(
+    async def _prepare_image_output(
+        self, images: list, request_id: str, response_format: str | None = None
+    ) -> list:
+        """Prepare image output for response.
+
+        Args:
+            images: List of PIL Image objects.
+            request_id: Unique request identifier.
+            response_format: Response format ("url" or "b64_json").
+
+        Returns:
+            List of image URLs or base64 data-URL strings.
+        """
+        outlist = []
+
+        for img in images:
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            image_bytes = buffer.getvalue()
+
+            if response_format == "url":
+                storage_path = f"images/{request_id}/{uuid.uuid4()}.png"
+                url = await upload_to_fs(
+                    self.media_output_fs,
+                    storage_path,
+                    image_bytes,
+                    self.media_output_http_url,
+                )
+                outlist.append(url)
+            elif response_format == "b64_json" or response_format is None:
+                img_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                data_url = f"data:image/png;base64,{img_base64}"
+                outlist.append(data_url)
+            else:
+                raise ValueError(f"Invalid response format: {response_format}")
+        return outlist
+
+    async def _format_image_chunk(
         self,
         images: list,
         request_id: str,
         response_format: str | None = None,
         request_type: RequestType = RequestType.IMAGE_GENERATION,
     ) -> Dict[str, Any] | None:
-        """Format image output as OpenAI chat completion chunk with base64 data URLs.
+        """Format image output for the appropriate endpoint response.
 
         Args:
             images: List of PIL Image objects generated by AsyncOmni engine.
@@ -355,17 +366,16 @@ class OmniHandler(BaseOmniHandler):
             request_type: Request type (chat completion, image generation).
 
         Returns:
-            Dict[str, Any] | None: Formatted chunk, or None if no images generated.
+            Formatted response dict, or None if no images generated.
         """
-
         if not images:
             return self._error_chunk(request_id, "No images generated")
 
-        data_urls = prepare_image_output(images, response_format)
+        data_urls = await self._prepare_image_output(
+            images, request_id, response_format
+        )
 
         if request_type == RequestType.CHAT_COMPLETION:
-            # This branch is used when user send request via /v1/chat/completions endpoint.
-            # We need to return chat completion chunk with image_url content part.
             chunk = {
                 "id": request_id,
                 "created": int(time.time()),
@@ -387,14 +397,11 @@ class OmniHandler(BaseOmniHandler):
             }
             return chunk
         elif request_type == RequestType.IMAGE_GENERATION:
-            # This branch is used when user send request via /v1/images/generations endpoint.
-            # This will return NvImagesResponse with list of ImageData objects.
             image_data_list = []
             for data_url in data_urls:
                 if response_format == "url":
                     image_data_list.append(ImageData(url=data_url))
                 elif response_format == "b64_json" or response_format is None:
-                    # strip explicit prefix if present
                     if data_url.startswith("data:image"):
                         _, b64_part = data_url.split(",", 1)
                         image_data_list.append(ImageData(b64_json=b64_part))
@@ -435,19 +442,21 @@ class OmniHandler(BaseOmniHandler):
                 f"(fps={fps})"
             )
 
-            os.makedirs(DEFAULT_VIDEO_OUTPUT_DIR, exist_ok=True)
-            video_path = os.path.join(DEFAULT_VIDEO_OUTPUT_DIR, f"{request_id}.mp4")
+            # Encode frames to MP4 via temp file, then read bytes for upload
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
+                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
+                video_bytes = tmp.read()
 
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                export_to_video,
-                frame_list,
-                video_path,
-                fps,
+            # Upload via filesystem
+            storage_path = f"videos/{request_id}.mp4"
+            video_url = await upload_to_fs(
+                self.media_output_fs,
+                storage_path,
+                video_bytes,
+                self.media_output_http_url,
             )
 
-            logger.info(f"Video saved to {video_path} for request {request_id}")
+            logger.info(f"Video uploaded to {video_url} for request {request_id}")
 
             inference_time = time.time() - start_time
 
@@ -458,7 +467,7 @@ class OmniHandler(BaseOmniHandler):
                 status="completed",
                 progress=100,
                 created=int(time.time()),
-                data=[VideoData(url=video_path)],
+                data=[VideoData(url=video_url)],
                 inference_time_s=inference_time,
             )
             return response.model_dump()

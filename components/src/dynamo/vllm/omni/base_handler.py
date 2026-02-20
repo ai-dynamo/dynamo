@@ -131,7 +131,6 @@ class BaseOmniHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict, None]:
         """Generate outputs using AsyncOmni orchestrator with OpenAI-compatible format.
 
-        Routes to OpenAI mode (detokenized text) or token mode based on config.
         Subclasses should override ``_generate_openai_mode`` for custom output handling.
         """
         request_id = context.id()

@@ -42,4 +42,5 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --omni \
     --connector none \
     --output-modalities video \
+    --media-output-fs-url file:///tmp/dynamo_media \
     "${EXTRA_ARGS[@]}"
