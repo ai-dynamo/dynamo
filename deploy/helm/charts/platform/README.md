@@ -149,7 +149,6 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
 | dynamo-operator.checkpoint.storage.type | string | `"pvc"` | Storage backend type: pvc, s3, or oci |
-| dynamo-operator.checkpoint.storage.signalHostPath | string | `"/var/lib/chrek/signals"` | Host path for signal files (communication between checkpoint pod and DaemonSet) |
 | dynamo-operator.checkpoint.storage.pvc.pvcName | string | `"chrek-pvc"` | Name of the PVC created by the chrek chart |
 | dynamo-operator.checkpoint.storage.pvc.basePath | string | `"/checkpoints"` | Base path within the PVC for storing checkpoints |
 | dynamo-operator.checkpoint.storage.s3.uri | string | `""` | S3 URI in format: s3://[endpoint/]bucket/prefix |

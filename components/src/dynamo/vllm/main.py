@@ -48,7 +48,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from .args import Config, parse_args
-from .chrek import get_checkpoint_config
+from .checkpoint_restore import get_checkpoint_config
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
     VllmHealthCheckPayload,
@@ -99,8 +99,8 @@ async def worker():
         config.served_model_name = config.engine_args.served_model_name = config.model
 
     # Check checkpoint mode and validate env vars EARLY (fail fast if misconfigured)
-    checkpoint_cfg = get_checkpoint_config()
-    if checkpoint_cfg and checkpoint_cfg.checkpoint_exists():
+    early_exit, checkpoint_cfg = get_checkpoint_config()
+    if early_exit:
         return
 
     # Download the model if necessary using modelexpress.
@@ -119,9 +119,7 @@ async def worker():
     # This allows checkpointing GPU state before runtime connections are established
     pre_created_engine = None
     if checkpoint_cfg is not None:
-        logger.info(
-            f"Checkpoint mode enabled (signal_file={checkpoint_cfg.signal_file})"
-        )
+        logger.info("Checkpoint mode enabled (watcher-driven signals)")
 
         # Checkpoint mode requires sleep mode — enable before engine init
         config.engine_args.enable_sleep_mode = True

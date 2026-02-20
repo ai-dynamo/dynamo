@@ -109,13 +109,8 @@ type CheckpointConfig struct {
 	Enabled bool
 	// Storage holds storage backend configuration
 	Storage CheckpointStorageConfig
-	// InitContainerImage is the image used for init containers (e.g., signal file cleanup)
-	// Defaults to "busybox:latest" if not specified
-	InitContainerImage string
 	// ReadyForCheckpointFilePath is the file path used to signal model readiness for checkpoint jobs
 	ReadyForCheckpointFilePath string
-	// RestoreMarkerFilePath is the marker file path written after successful restore
-	RestoreMarkerFilePath string
 }
 
 // Checkpoint storage type constants
@@ -129,8 +124,6 @@ const (
 type CheckpointStorageConfig struct {
 	// Type is the storage backend type: pvc, s3, or oci
 	Type string
-	// SignalHostPath is the host path for signal files (used for checkpoint job coordination)
-	SignalHostPath string
 	// PVC configuration (used when Type=pvc)
 	PVC CheckpointPVCConfig
 	// S3 configuration (used when Type=s3)

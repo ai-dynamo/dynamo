@@ -1338,7 +1338,7 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName, checkpointInfo)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1392,7 +1392,12 @@ func GenerateGrovePodCliqueSet(
 	return gangSet, nil
 }
 
-func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
+func generateLabels(
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+	componentName string,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
@@ -1408,11 +1413,17 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	}
 	// Add base model label if modelRef is specified
 	AddBaseModelLabel(labels, component.ModelRef)
-	// Add checkpoint labels if checkpointing is enabled
+	// Add checkpoint identity labels if checkpointing is enabled
 	var err error
 	labels, err = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to inject checkpoint labels: %w", err)
+	}
+
+	// Only mark pods as restore targets when a concrete checkpoint is ready.
+	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
+		labels[commonconsts.KubeLabelIsRestoreTarget] = "true"
+		labels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
 	}
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
