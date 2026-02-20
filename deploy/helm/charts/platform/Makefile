@@ -48,6 +48,7 @@ generate-helm-docs: helm-docs-install ## Generate README.md from values.yaml and
 		--sort-values-order=file \
 		--chart-to-generate=. \
 		--ignore-non-descriptions
+	@rm -rf $(LOCALBIN)
 	@echo "Generated README.md"
 
 .PHONY: helm-docs-clean
