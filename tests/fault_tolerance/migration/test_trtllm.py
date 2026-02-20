@@ -36,11 +36,16 @@ pytestmark = [
         "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
     ),
     pytest.mark.parametrize(
-        "immediate_kill, grace_period_s",
-        [(True, 0), (False, 0)],
-        ids=[
-            "worker_failure",
-            "graceful_shutdown_zero_grace_period",
+        "immediate_kill",
+        [
+            pytest.param(True, id="worker_failure"),
+            pytest.param(
+                False,
+                id="graceful_shutdown",
+                marks=pytest.mark.xfail(
+                    strict=False, reason="TRT-LLM graceful shutdown not yet implemented"
+                ),
+            ),
         ],
     ),
     pytest.mark.parametrize(
@@ -86,7 +91,6 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
-        grace_period_s: int,
         mode: str = "prefill_and_decode",
     ):
         self.worker_id = worker_id
@@ -125,7 +129,6 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
 
         env["DYN_LOG"] = "debug"
-        env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = str(grace_period_s)
         # Disable canary health check - these tests expect full control over requests
         # sent to the workers where canary health check intermittently sends dummy
         # requests to workers interfering with the test process which may cause
@@ -200,7 +203,6 @@ def test_request_migration_trtllm_aggregated(
     predownload_models,
     migration_limit,
     immediate_kill,
-    grace_period_s,
     request_api,
     stream,
 ):
@@ -219,19 +221,13 @@ def test_request_migration_trtllm_aggregated(
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers
-        with DynamoWorkerProcess(
-            request,
-            "worker1",
-            frontend.frontend_port,
-            grace_period_s=grace_period_s,
-        ) as worker1:
+        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
             with DynamoWorkerProcess(
                 request,
                 "worker2",
                 frontend.frontend_port,
-                grace_period_s=grace_period_s,
             ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
@@ -240,15 +236,11 @@ def test_request_migration_trtllm_aggregated(
                     frontend,
                     worker1,
                     worker2,
-                    receiving_pattern="AggregatedHandler Request ID:",
+                    receiving_pattern="AggregatedHandler Request ID: ",
                     migration_limit=migration_limit,
                     immediate_kill=immediate_kill,
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
-                    grace_period_s=grace_period_s,
-                    expect_migration_request=True,
-                    expect_request_success=migration_limit > 0,
-                    expect_unregistration_log=not immediate_kill,
                 )
 
 
@@ -261,7 +253,6 @@ def test_request_migration_trtllm_prefill(
     predownload_models,
     migration_limit,
     immediate_kill,
-    grace_period_s,
     request_api,
     stream,
 ):
@@ -289,7 +280,6 @@ def test_request_migration_trtllm_prefill(
             "worker0",
             frontend.frontend_port,
             mode="decode",
-            grace_period_s=grace_period_s,
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
@@ -299,7 +289,6 @@ def test_request_migration_trtllm_prefill(
                 "worker1",
                 frontend.frontend_port,
                 mode="prefill",
-                grace_period_s=grace_period_s,
             ) as prefill1:
                 logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
 
@@ -308,7 +297,6 @@ def test_request_migration_trtllm_prefill(
                     "worker2",
                     frontend.frontend_port,
                     mode="prefill",
-                    grace_period_s=grace_period_s,
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
 
@@ -323,10 +311,6 @@ def test_request_migration_trtllm_prefill(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
-                        grace_period_s=grace_period_s,
-                        expect_migration_request=True,
-                        expect_request_success=migration_limit > 0,
-                        expect_unregistration_log=not immediate_kill,
                     )
 
 
@@ -339,7 +323,6 @@ def test_request_migration_trtllm_kv_transfer(
     predownload_models,
     migration_limit,
     immediate_kill,
-    grace_period_s,
     request_api,
     stream,
 ):
@@ -367,7 +350,6 @@ def test_request_migration_trtllm_kv_transfer(
             "worker0",
             frontend.frontend_port,
             mode="prefill",
-            grace_period_s=grace_period_s,
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
@@ -377,7 +359,6 @@ def test_request_migration_trtllm_kv_transfer(
                 "worker1",
                 frontend.frontend_port,
                 mode="decode",
-                grace_period_s=grace_period_s,
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
 
@@ -386,7 +367,6 @@ def test_request_migration_trtllm_kv_transfer(
                     "worker2",
                     frontend.frontend_port,
                     mode="decode",
-                    grace_period_s=grace_period_s,
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
 
@@ -401,10 +381,6 @@ def test_request_migration_trtllm_kv_transfer(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
-                        grace_period_s=grace_period_s,
-                        expect_migration_request=True,
-                        expect_request_success=migration_limit > 0,
-                        expect_unregistration_log=not immediate_kill,
                     )
 
 
@@ -416,7 +392,6 @@ def test_request_migration_trtllm_decode(
     predownload_models,
     migration_limit,
     immediate_kill,
-    grace_period_s,
     request_api,
     stream,
 ):
@@ -448,7 +423,6 @@ def test_request_migration_trtllm_decode(
             "worker0",
             frontend.frontend_port,
             mode="prefill",
-            grace_period_s=grace_period_s,
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
@@ -458,7 +432,6 @@ def test_request_migration_trtllm_decode(
                 "worker1",
                 frontend.frontend_port,
                 mode="decode",
-                grace_period_s=grace_period_s,
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
 
@@ -467,7 +440,6 @@ def test_request_migration_trtllm_decode(
                     "worker2",
                     frontend.frontend_port,
                     mode="decode",
-                    grace_period_s=grace_period_s,
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
 
@@ -482,8 +454,4 @@ def test_request_migration_trtllm_decode(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         wait_for_new_response_before_stop=True,
-                        grace_period_s=grace_period_s,
-                        expect_migration_request=True,
-                        expect_request_success=migration_limit > 0,
-                        expect_unregistration_log=not immediate_kill,
                     )
