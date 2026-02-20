@@ -1,11 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: "Dynamo Benchmarking Guide"
 subtitle: Benchmark and compare performance across Dynamo deployment configurations
 ---
-
-
-# Dynamo Benchmarking Guide
 
 This benchmarking framework lets you compare performance across any combination of:
 - **DynamoGraphDeployments**
