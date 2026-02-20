@@ -34,10 +34,8 @@ class RemotePlannerClient:
     async def _ensure_client(self):
         """Lazy initialization of endpoint client with retry mechanism"""
         if self._client is None:
-            endpoint = (
-                self.runtime.namespace(self.central_namespace)
-                .component(self.central_component)
-                .endpoint("scale_request")
+            endpoint = self.runtime.endpoint(
+                f"{self.central_namespace}.{self.central_component}.scale_request"
             )
 
             # Retry logic with exponential backoff
