@@ -6,7 +6,7 @@
 //!
 //! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use rand::Rng;
@@ -29,6 +29,10 @@ use crate::types::{
 pub struct Model {
     name: String,
     worker_sets: DashMap<String, Arc<WorkerSet>>,
+    /// The canonical MDC checksum for this model. Set by the first WorkerSet registered;
+    /// all subsequent WorkerSets must match. Naturally cleared when the Model is dropped
+    /// (last WorkerSet removed), allowing a new version to register.
+    canonical_checksum: OnceLock<String>,
 }
 
 impl Model {
@@ -36,6 +40,7 @@ impl Model {
         Self {
             name,
             worker_sets: DashMap::new(),
+            canonical_checksum: OnceLock::new(),
         }
     }
 
@@ -43,13 +48,21 @@ impl Model {
         &self.name
     }
 
-    pub fn add_worker_set(&self, namespace: String, worker_set: Arc<WorkerSet>) {
+    /// Add a WorkerSet to this model. Returns `Err` if the WorkerSet's checksum
+    /// doesn't match the model's canonical checksum (set by the first WorkerSet).
+    pub fn add_worker_set(
+        &self,
+        namespace: String,
+        worker_set: Arc<WorkerSet>,
+    ) -> Result<(), ModelManagerError> {
+        self.set_canonical_checksum(worker_set.mdcsum())?;
         tracing::info!(
             model = %self.name,
             namespace = %namespace,
             "Adding worker set to model"
         );
         self.worker_sets.insert(namespace, worker_set);
+        Ok(())
     }
 
     pub fn remove_worker_set(&self, namespace: &str) -> Option<Arc<WorkerSet>> {
@@ -139,12 +152,34 @@ impl Model {
             .any(|entry| entry.value().has_videos_engine())
     }
 
-    /// Get the MDC checksum for a specific namespace's WorkerSet, if it exists.
-    /// Returns None if no WorkerSet exists for this namespace (new namespace is OK).
-    pub fn checksum_for_namespace(&self, namespace: &str) -> Option<String> {
-        self.worker_sets
-            .get(namespace)
-            .map(|entry| entry.value().mdcsum().to_string())
+    /// Check if a candidate checksum is valid for this model.
+    /// Returns `Some(true)` if it matches the canonical checksum, `Some(false)` if it
+    /// doesn't match, or `None` if no canonical checksum has been set yet (no WorkerSets).
+    pub fn is_valid_checksum(&self, candidate: &str) -> Option<bool> {
+        let canonical = self.canonical_checksum.get()?;
+        Some(canonical == candidate)
+    }
+
+    /// Set the canonical checksum for this model. The first caller wins (OnceLock).
+    /// Returns `Err` if a different checksum was already set.
+    fn set_canonical_checksum(&self, checksum: &str) -> Result<(), ModelManagerError> {
+        // Try to set; if already set, verify it matches.
+        match self.canonical_checksum.set(checksum.to_string()) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // OnceLock was already set — check if the value matches
+                let canonical = self.canonical_checksum.get().unwrap();
+                if canonical == checksum {
+                    Ok(())
+                } else {
+                    Err(ModelManagerError::ChecksumMismatch {
+                        model: self.name.clone(),
+                        expected: canonical.clone(),
+                        got: checksum.to_string(),
+                    })
+                }
+            }
+        }
     }
 
     // -- Engine accessors: select a WorkerSet, return its engine --
@@ -350,7 +385,7 @@ mod tests {
         let model = Model::new("llama".to_string());
         let ws = make_worker_set("ns1", "abc");
 
-        model.add_worker_set("ns1".to_string(), ws);
+        model.add_worker_set("ns1".to_string(), ws).unwrap();
         assert!(!model.is_empty());
         assert_eq!(model.worker_set_count(), 1);
         assert!(model.has_worker_set("ns1"));
@@ -368,7 +403,7 @@ mod tests {
     fn test_get_worker_set() {
         let model = Model::new("llama".to_string());
         let ws = make_worker_set("ns1", "abc");
-        model.add_worker_set("ns1".to_string(), ws);
+        model.add_worker_set("ns1".to_string(), ws).unwrap();
 
         let retrieved = model.get_worker_set("ns1");
         assert!(retrieved.is_some());
@@ -378,10 +413,14 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_worker_sets() {
+    fn test_multiple_worker_sets_same_checksum() {
         let model = Model::new("llama".to_string());
-        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
-        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
+        model
+            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
+            .unwrap();
+        model
+            .add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"))
+            .unwrap();
 
         assert_eq!(model.worker_set_count(), 2);
         assert!(model.has_worker_set("ns1"));
@@ -394,26 +433,41 @@ mod tests {
     }
 
     #[test]
-    fn test_checksum_for_namespace() {
+    fn test_add_worker_set_rejects_checksum_mismatch() {
         let model = Model::new("llama".to_string());
-        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc123"));
-        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def456"));
+        model
+            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
+            .unwrap();
 
-        assert_eq!(
-            model.checksum_for_namespace("ns1"),
-            Some("abc123".to_string())
-        );
-        assert_eq!(
-            model.checksum_for_namespace("ns2"),
-            Some("def456".to_string())
-        );
-        assert_eq!(model.checksum_for_namespace("ns3"), None);
+        // Different checksum from a different namespace should be rejected
+        let result = model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
+        assert!(result.is_err());
+        assert_eq!(model.worker_set_count(), 1); // ns2 was not added
+    }
+
+    #[test]
+    fn test_is_valid_checksum() {
+        let model = Model::new("llama".to_string());
+
+        // No canonical set yet
+        assert_eq!(model.is_valid_checksum("abc123"), None);
+
+        model
+            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc123"))
+            .unwrap();
+
+        // Matches canonical
+        assert_eq!(model.is_valid_checksum("abc123"), Some(true));
+        // Does not match canonical
+        assert_eq!(model.is_valid_checksum("wrong"), Some(false));
     }
 
     #[test]
     fn test_no_engines_means_prefill() {
         let model = Model::new("llama".to_string());
-        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        model
+            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
+            .unwrap();
 
         // WorkerSets with no engines are treated as prefill sets
         assert!(model.has_prefill());
@@ -428,7 +482,9 @@ mod tests {
     #[test]
     fn test_get_engine_returns_error_without_engines() {
         let model = Model::new("llama".to_string());
-        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        model
+            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
+            .unwrap();
 
         assert!(model.get_chat_engine().is_err());
         assert!(model.get_completions_engine().is_err());
@@ -449,11 +505,15 @@ mod tests {
         assert!(model.get_chat_engine().is_err());
 
         // Single set (fast path)
-        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        model
+            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
+            .unwrap();
         assert!(model.get_chat_engine().is_err()); // No engine → filtered out
 
         // Multiple sets (weighted path)
-        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
+        model
+            .add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"))
+            .unwrap();
         assert!(model.get_chat_engine().is_err()); // Still no engines → all filtered out
     }
 
@@ -463,10 +523,14 @@ mod tests {
         let model = Model::new("llama".to_string());
         assert_eq!(model.total_workers(), 0); // empty model
 
-        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        model
+            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
+            .unwrap();
         assert_eq!(model.total_workers(), 1);
 
-        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
+        model
+            .add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"))
+            .unwrap();
         assert_eq!(model.total_workers(), 2);
     }
 
@@ -475,9 +539,9 @@ mod tests {
         let model = Model::new("llama".to_string());
 
         let (ws1, _tx1) = make_worker_set_with_count("ns1", "abc", vec![1, 2, 3]);
-        let (ws2, _tx2) = make_worker_set_with_count("ns2", "def", vec![10, 20]);
-        model.add_worker_set("ns1".to_string(), ws1);
-        model.add_worker_set("ns2".to_string(), ws2);
+        let (ws2, _tx2) = make_worker_set_with_count("ns2", "abc", vec![10, 20]);
+        model.add_worker_set("ns1".to_string(), ws1).unwrap();
+        model.add_worker_set("ns2".to_string(), ws2).unwrap();
 
         assert_eq!(model.total_workers(), 5); // 3 + 2
     }
@@ -487,7 +551,7 @@ mod tests {
         let model = Model::new("llama".to_string());
 
         let (ws1, tx1) = make_worker_set_with_count("ns1", "abc", vec![1, 2]);
-        model.add_worker_set("ns1".to_string(), ws1);
+        model.add_worker_set("ns1".to_string(), ws1).unwrap();
         assert_eq!(model.total_workers(), 2);
 
         // Workers leave
@@ -508,7 +572,7 @@ mod tests {
         let model = Model::new("llama".to_string());
 
         let (ws, _tx) = make_worker_set_with_count("ns1", "abc", vec![]);
-        model.add_worker_set("ns1".to_string(), ws);
+        model.add_worker_set("ns1".to_string(), ws).unwrap();
 
         // WorkerSet exists but has 0 workers → selection filtered out → Err
         assert!(model.get_chat_engine().is_err());
@@ -521,9 +585,9 @@ mod tests {
         let model = Model::new("llama".to_string());
 
         let (ws1, _tx1) = make_worker_set_with_count("ns1", "abc", vec![]);
-        let (ws2, _tx2) = make_worker_set_with_count("ns2", "def", vec![]);
-        model.add_worker_set("ns1".to_string(), ws1);
-        model.add_worker_set("ns2".to_string(), ws2);
+        let (ws2, _tx2) = make_worker_set_with_count("ns2", "abc", vec![]);
+        model.add_worker_set("ns1".to_string(), ws1).unwrap();
+        model.add_worker_set("ns2".to_string(), ws2).unwrap();
 
         // Both have 0 workers → all filtered → Err
         assert!(model.get_chat_engine().is_err());
