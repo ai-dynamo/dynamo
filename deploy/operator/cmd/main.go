@@ -56,6 +56,7 @@ import (
 
 	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -123,6 +124,7 @@ func init() {
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 
 	utilruntime.Must(gaiev1.Install(scheme))
+	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -155,7 +157,7 @@ func main() {
 	var namespaceScopeLeaseRenewInterval time.Duration
 	var operatorVersion string
 	var discoveryBackend string
-	var enableWebhooks bool
+	var gpuDiscoveryEnabled bool
 	// Checkpoint configuration
 	var checkpointEnabled bool
 	var checkpointStorageType string
@@ -178,9 +180,9 @@ func main() {
 		"If set the metrics endpoint is served securely")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
-		"Enable admission webhooks for validation. When enabled, controllers skip validation "+
-			"(webhooks handle it). When disabled, controllers perform validation.")
+	flag.BoolVar(&gpuDiscoveryEnabled, "gpu-discovery-enabled", true,
+		"Whether GPU discovery is enabled for namespace-scoped operators. When true (default), "+
+			"the Helm chart has provisioned a ClusterRole granting node read access for GPU hardware discovery.")
 	flag.StringVar(&restrictedNamespace, "restrictedNamespace", "",
 		"Enable resources filtering, only the resources belonging to the given namespace will be handled.")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "", "Leader election id"+
@@ -686,72 +688,68 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set webhooks enabled flag in config
-	ctrlConfig.WebhooksEnabled = enableWebhooks
+	ctrlConfig.GPUDiscoveryEnabled = gpuDiscoveryEnabled
 
-	if enableWebhooks {
-		setupLog.Info("Webhooks are enabled - webhooks will validate, controllers will skip validation")
-	} else {
-		setupLog.Info("Webhooks are disabled - controllers will validate (defense in depth)")
-	}
-
-	// Configure webhooks with lease-based namespace exclusion (only if enabled)
+	// Configure webhooks with lease-based namespace exclusion
 	// In cluster-wide mode, inject ctrlConfig.ExcludedNamespaces (leaseWatcher) so webhooks can defer
 	// to namespace-restricted operators. In namespace-restricted mode, webhooks validate without checking
 	// leases (ExcludedNamespaces is nil). The webhooks use LeaseAwareValidator wrapper to add coordination.
-	if enableWebhooks {
-		if ctrlConfig.RestrictedNamespace == "" {
-			// Cluster-wide mode: inject the same ExcludedNamespaces used by controllers
-			setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
-			internalwebhook.SetExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
-		} else {
-			// Namespace-restricted mode: no exclusion checking needed (validators not wrapped)
-			setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
-				"restrictedNamespace", ctrlConfig.RestrictedNamespace)
-			internalwebhook.SetExcludedNamespaces(nil)
-		}
-
-		// Register validation webhook handlers
-		setupLog.Info("Registering validation webhooks")
-
-		dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
-		if err = dcdHandler.RegisterWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoComponentDeployment")
-			os.Exit(1)
-		}
-
-		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
-		if err = dgdHandler.RegisterWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
-			os.Exit(1)
-		}
-
-		dmHandler := webhookvalidation.NewDynamoModelHandler()
-		if err = dmHandler.RegisterWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoModel")
-			os.Exit(1)
-		}
-
-		isClusterWide := ctrlConfig.RestrictedNamespace == ""
-		dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(isClusterWide)
-		if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
-			os.Exit(1)
-		}
-
-		setupLog.Info("Validation webhooks registered successfully")
-
-		// Register defaulting (mutating) webhook handlers
-		setupLog.Info("Registering defaulting webhooks")
-
-		dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
-		if err = dgdDefaulter.RegisterWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment-defaulting")
-			os.Exit(1)
-		}
-
-		setupLog.Info("Defaulting webhooks registered successfully")
+	isClusterWide := ctrlConfig.RestrictedNamespace == ""
+	if isClusterWide {
+		setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
+		internalwebhook.SetExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
+	} else {
+		setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
+			"restrictedNamespace", ctrlConfig.RestrictedNamespace)
+		internalwebhook.SetExcludedNamespaces(nil)
 	}
+
+	// Register validation webhook handlers
+	setupLog.Info("Registering validation webhooks")
+
+	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
+	if err = dcdHandler.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoComponentDeployment")
+		os.Exit(1)
+	}
+
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
+	if err = dgdHandler.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
+		os.Exit(1)
+	}
+
+	dmHandler := webhookvalidation.NewDynamoModelHandler()
+	if err = dmHandler.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoModel")
+		os.Exit(1)
+	}
+
+	dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(isClusterWide, gpuDiscoveryEnabled)
+	if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
+		os.Exit(1)
+	}
+
+	if err = ctrl.NewWebhookManagedBy(mgr).
+		For(&nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}).
+		Complete(); err != nil {
+		setupLog.Error(err, "unable to register conversion webhook", "webhook", "DynamoGraphDeploymentRequest-conversion")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Validation webhooks registered successfully")
+
+	// Register defaulting (mutating) webhook handlers
+	setupLog.Info("Registering defaulting webhooks")
+
+	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
+	if err = dgdDefaulter.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment-defaulting")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Defaulting webhooks registered successfully")
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

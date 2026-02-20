@@ -18,6 +18,7 @@ if not torch.cuda.is_available():
 from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
@@ -76,7 +77,10 @@ class TestFetchEmbeddingsFromEncoder:
         url1, url2 = "http://example.com/img1.jpg", "http://example.com/img2.jpg"
         embedding1, embedding2 = torch.ones(10, 256), torch.ones(10, 256) * 2
 
-        encoder_cache.set(MultimodalHasher.hash_bytes(url1.encode()), embedding1)
+        encoder_cache.set(
+            MultimodalHasher.hash_bytes(url1.encode()),
+            CachedEmbedding(tensor=embedding1),
+        )
         request: dict[str, Any] = {"messages": []}
 
         mock_client = create_mock_encode_client([embedding2])
@@ -98,8 +102,14 @@ class TestFetchEmbeddingsFromEncoder:
         url1, url2 = "http://example.com/img1.jpg", "http://example.com/img2.jpg"
         embedding1, embedding2 = torch.ones(10, 256), torch.ones(10, 256) * 2
 
-        encoder_cache.set(MultimodalHasher.hash_bytes(url1.encode()), embedding1)
-        encoder_cache.set(MultimodalHasher.hash_bytes(url2.encode()), embedding2)
+        encoder_cache.set(
+            MultimodalHasher.hash_bytes(url1.encode()),
+            CachedEmbedding(tensor=embedding1),
+        )
+        encoder_cache.set(
+            MultimodalHasher.hash_bytes(url2.encode()),
+            CachedEmbedding(tensor=embedding2),
+        )
 
         async def should_not_call(req: dict[str, Any]) -> None:
             raise AssertionError("Should not be called")

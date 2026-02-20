@@ -18,8 +18,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
-use dynamo_mocker::Scheduler;
-use dynamo_mocker::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
+use dynamo_mocker::common::protocols::{DirectRequest, KvCacheEventSink, MockEngineArgs};
+use dynamo_mocker::scheduler::Scheduler;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -215,7 +215,7 @@ struct Args {
     sweep_steps: usize,
 
     /// Output path for the sweep plot PNG.
-    #[clap(long, default_value = "sweep_plot.png")]
+    #[clap(long, default_value = "sweep_plot.svg")]
     sweep_output: String,
 
     /// Comma-separated list of indexer names to benchmark and compare on the
@@ -882,7 +882,7 @@ fn plot_sweep(
     let axis_min = global_min * 0.9;
     let axis_max = global_max * 1.1;
 
-    let root = BitMapBackend::new(output_path, (800, 600)).into_drawing_area();
+    let root = SVGBackend::new(output_path, (800, 600)).into_drawing_area();
     root.fill(&WHITE)?;
 
     let mut chart = ChartBuilder::on(&root)

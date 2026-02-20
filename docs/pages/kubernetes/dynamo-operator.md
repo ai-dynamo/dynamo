@@ -122,7 +122,7 @@ For a user-focused guide on deploying and managing models with DynamoModel, see:
 
 ## Webhooks
 
-The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validation of custom resources before they are persisted to the cluster. Webhooks are **enabled by default** and ensure that invalid configurations are rejected immediately at the API server level.
+The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validation and mutation of custom resources before they are persisted to the cluster. Webhooks are a required component of the operator and ensure that invalid configurations are rejected immediately at the API server level.
 
 **Key Features:**
 - ✅ Shared certificate infrastructure across all webhook types
@@ -201,7 +201,6 @@ helm install dynamo-platform ./platform/ \
   --create-namespace \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set etcd.enabled=false \
   --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 ```
 

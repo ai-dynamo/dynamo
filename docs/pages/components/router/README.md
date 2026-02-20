@@ -32,8 +32,8 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
 | `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
-| `--kv-events` / `--no-kv-events` | `--kv-events` | Enable/disable real-time KV event tracking |
-| `--kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
+| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
+| `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT). |
 
 For all available options: `python -m dynamo.frontend --help`
 
@@ -71,8 +71,8 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round_robin` |
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` |
 | `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | Backend-specific |
-| `--no-kv-events` | `DYN_KV_EVENTS=false` | `true` |
-| `--kv-overlap-score-weight` | `DYN_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
+| `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS=false` | `true` |
+| `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
 
 For complete K8s examples and advanced configuration, see [K8s Examples](router-examples.md#k8s-examples).
 
