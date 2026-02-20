@@ -139,7 +139,7 @@ The response returns a video URL or base64 data depending on `response_format`:
   "object": "video",
   "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
   "status": "completed",
-  "data": [{"url": "/tmp/generated_video.mp4"}]
+  "data": [{"url": "file:///tmp/dynamo_media/videos/req-abc123.mp4"}]
 }
 ```
 
@@ -162,6 +162,24 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 | `--output-modalities <modality>` | Output modality: `text`, `image`, or `video` |
 | `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
 | `--connector none` | Disable KV connector (recommended for omni workers) |
+| `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
+| `--media-output-http-url <url>` | Base URL for rewriting media paths in responses (optional) |
+
+## Storage Configuration
+
+Generated images and videos are stored via [fsspec](https://filesystem-spec.readthedocs.io/), which supports local filesystems, S3, GCS, and Azure Blob.
+
+By default, media is written to the local filesystem at `file:///tmp/dynamo_media`. To use cloud storage:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_video.sh \
+  --media-output-fs-url s3://my-bucket/media \
+  --media-output-http-url https://cdn.example.com/media
+```
+
+When `--media-output-http-url` is set, response URLs are rewritten as `{base-url}/{storage-path}` (e.g., `https://cdn.example.com/media/videos/req-id.mp4`). When unset, the raw filesystem path is returned.
+
+For S3 credential configuration, set the standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) or use IAM roles. See the [fsspec S3 docs](https://s3fs.readthedocs.io/en/latest/#credentials) for details.
 
 ## Stage Configuration
 
