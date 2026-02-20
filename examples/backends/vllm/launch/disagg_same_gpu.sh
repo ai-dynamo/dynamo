@@ -55,6 +55,7 @@ CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --enforce-eager \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --is-decode-worker \
   --gpu-memory-utilization ${GPU_MEM_FRACTION} &
 DECODE_PID=$!
@@ -76,6 +77,7 @@ CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --enforce-eager \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --is-prefill-worker \
   --gpu-memory-utilization ${GPU_MEM_FRACTION}
 

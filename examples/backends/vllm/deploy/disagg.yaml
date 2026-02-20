@@ -33,6 +33,8 @@ spec:
             - --model
             - Qwen/Qwen3-0.6B
             - --is-decode-worker
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -53,3 +55,5 @@ spec:
             - --model
             - Qwen/Qwen3-0.6B
             - --is-prefill-worker
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'

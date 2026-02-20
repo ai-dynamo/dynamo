@@ -24,7 +24,6 @@ python -m dynamo.frontend &
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
     python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager  \
-    --connector none  \
     --enable-lora  \
     --max-lora-rank 64
 

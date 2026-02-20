@@ -9,7 +9,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 python -m dynamo.frontend --router-mode kv &
 
 # run decode worker on GPU 0, without enabling LMCache
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # wait for decode worker to initialize
 sleep 20
@@ -21,4 +21,4 @@ CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --is-prefill-worker \
-    --connector lmcache nixl
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_connector_extra_config":{"connectors":[{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]}}'

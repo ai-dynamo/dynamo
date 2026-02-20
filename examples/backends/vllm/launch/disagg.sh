@@ -10,7 +10,7 @@ python -m dynamo.frontend &
 
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
  DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
- CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --is-decode-worker &
+ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --is-decode-worker &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 DYN_VLLM_KV_EVENT_PORT=20081 \
@@ -18,4 +18,5 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     --is-prefill-worker

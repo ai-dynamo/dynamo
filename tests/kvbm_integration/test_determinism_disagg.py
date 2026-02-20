@@ -143,8 +143,8 @@ class LLMServerManager:
             "16",
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
-            "--connector",
-            "nixl",
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
         ]
 
         # Construct prefiller command
@@ -159,9 +159,8 @@ class LLMServerManager:
             "16",
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
-            "--connector",
-            "kvbm",
-            "nixl",
+            "--kv-transfer-config",
+            '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]}}',
         ]
 
         # GPU blocks override
@@ -237,8 +236,8 @@ class LLMServerManager:
             prefill_config_path,
             "--disaggregation-mode",
             "prefill",
-            "--connector",
-            "kvbm",
+            "--kv-transfer-config",
+            '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
         ]
 
         self.decoder_cmd = cmd_root + [

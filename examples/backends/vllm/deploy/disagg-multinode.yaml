@@ -43,6 +43,8 @@ spec:
             - Qwen/Qwen3-0.6B
             - --tensor-parallel-size
             - "2"
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
     prefill:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -66,3 +68,5 @@ spec:
             - --is-prefill-worker
             - --tensor-parallel-size
             - "2"
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'

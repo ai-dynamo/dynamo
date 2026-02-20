@@ -20,10 +20,10 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 
 ### Configuration
 
-LMCache is enabled using the `--connector lmcache` flag:
+LMCache is enabled using the `--kv-transfer-config` flag:
 
 ```bash
-python -m dynamo.vllm --model <model_name> --connector lmcache
+python -m dynamo.vllm --model <model_name> --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 ```
 
 ### Customization
@@ -157,11 +157,11 @@ kv_transfer_config = KVTransferConfig(
 
 ## Metrics and Monitoring
 
-When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+When LMCache is enabled with `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
 
 **Requirements to access LMCache metrics:**
 
-- `--connector lmcache` - Enables LMCache
+- `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` - Enables LMCache
 - `DYN_SYSTEM_PORT=8081` - Enables metrics HTTP endpoint
 - `PROMETHEUS_MULTIPROC_DIR` (optional) - If not set, Dynamo manages it internally
 
