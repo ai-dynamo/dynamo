@@ -9,6 +9,8 @@ for importing, mapping, and unmapping GPU memory.
 
 from __future__ import annotations
 
+import os
+
 from cuda.bindings import driver as cuda
 from gpu_memory_service.common.cuda_vmm_utils import check_cuda_result
 from gpu_memory_service.common.types import GrantedLockType
@@ -16,6 +18,10 @@ from gpu_memory_service.common.types import GrantedLockType
 
 def import_handle_from_fd(fd: int) -> int:
     """Import a CUDA memory handle from a file descriptor.
+
+    Closes the FD after import — the imported handle holds its own reference
+    to the physical allocation. Leaving the FD open leaks a DMA-buf ref that
+    prevents cuMemRelease from freeing GPU memory.
 
     Args:
         fd: POSIX file descriptor received via SCM_RIGHTS.
@@ -28,6 +34,7 @@ def import_handle_from_fd(fd: int) -> int:
         cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
     )
     check_cuda_result(result, "cuMemImportFromShareableHandle")
+    os.close(fd)
     return int(handle)
 
 
