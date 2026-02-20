@@ -140,7 +140,9 @@ COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/nvidia ${SIT
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_jit_cache ${SITE_PACKAGES}/flashinfer_jit_cache
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/torch ${SITE_PACKAGES}/torch
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm ${SITE_PACKAGES}/vllm
+{% if platform == "amd64" -%}
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm_omni ${SITE_PACKAGES}/vllm_omni
+{% endif -%}
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/triton ${SITE_PACKAGES}/triton
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_cubin ${SITE_PACKAGES}/flashinfer_cubin
 # Remaining packages and venv structure (bin/, include/, share/, etc.)
@@ -149,7 +151,9 @@ COPY --chmod=775 --chown=dynamo:0 --from=framework \
     --exclude=lib/python*/site-packages/flashinfer_jit_cache \
     --exclude=lib/python*/site-packages/torch \
     --exclude=lib/python*/site-packages/vllm \
+{%- if platform == "amd64" %}
     --exclude=lib/python*/site-packages/vllm_omni \
+{%- endif %}
     --exclude=lib/python*/site-packages/triton \
     --exclude=lib/python*/site-packages/flashinfer_cubin \
     ${VIRTUAL_ENV} ${VIRTUAL_ENV}

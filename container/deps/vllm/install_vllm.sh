@@ -169,8 +169,13 @@ echo "✓ vLLM installation completed"
 
 echo "\n=== Installing vLLM-Omni ==="
 if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
+    # Save original vllm entrypoint before vllm-omni overwrites it
+    VLLM_BIN=$(which vllm)
+    cp "$VLLM_BIN" /tmp/vllm-entrypoint-backup
     uv pip install vllm-omni==${VLLM_OMNI_REF}
-    echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed"
+    # Restore original vllm CLI entrypoint (vllm-omni replaces it with its own)
+    cp /tmp/vllm-entrypoint-backup "$VLLM_BIN"
+    echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed (original vllm entrypoint preserved)"
 else
     echo "⚠ Skipping vLLM-Omni (no ref provided or ARM64 not supported)"
 fi
