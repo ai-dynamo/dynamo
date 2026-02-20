@@ -1720,4 +1720,63 @@ mod tests {
             "reason"
         );
     }
+
+    // Regression test for the KV-cache flattening bug.
+    //
+    // OLD CODE: `convert_assistant_blocks` concatenated all thinking blocks into a
+    // single flat string — `reasoning_content = Text("A\nB")`.  A chat template
+    // given only that string can only reconstruct:
+    //
+    //     <think>A\nB</think> <call>t1</call> <call>t2</call>
+    //
+    // That token sequence diverges from what the model originally generated at the
+    // very first `</think>`, so the KV cache misses on every multi-tool exchange.
+    //
+    // NEW CODE: `convert_assistant_blocks` produces `Segments(["A", "B", ""])` so a
+    // template that understands segments can reconstruct byte-for-byte:
+    //
+    //     <think>A</think> <call>t1</call> <think>B</think> <call>t2</call>
+    //
+    // This test fails on the old code because the old code returns `Text("A\nB")` and
+    // `.segments()` returns `None`, causing the `expect` below to panic.
+    #[test]
+    fn test_interleaved_reasoning_not_flattened_regression() {
+        let msg = make_req(vec![
+            thinking("A"),
+            tool_use("t1"),
+            thinking("B"),
+            tool_use("t2"),
+        ]);
+
+        // Must be Segments, not Text.  Text("A\nB") is the old (broken) behaviour:
+        // it loses which reasoning block preceded which tool call.
+        assert!(
+            !matches!(
+                msg.reasoning_content,
+                Some(ReasoningContent::Text(_))
+            ),
+            "reasoning_content must NOT be flat Text when tool calls are interleaved; \
+             Text loses positional info and forces a KV cache miss on every multi-tool turn"
+        );
+
+        let segs = msg
+            .reasoning_content
+            .as_ref()
+            .expect("reasoning_content should be set")
+            .segments()
+            .expect(
+                "must be Segments so a chat template can reconstruct \
+                 <think>A</think><call>t1</call><think>B</think><call>t2</call> \
+                 rather than front-loading all reasoning before all calls",
+            );
+
+        // segs[i] precedes tool_calls[i] — the invariant a template relies on
+        assert_eq!(segs[0], "A", "reasoning before t1");
+        assert_eq!(segs[1], "B", "reasoning before t2");
+        assert_eq!(segs[2], "", "no trailing reasoning");
+
+        let tools = msg.tool_calls.as_ref().unwrap();
+        assert_eq!(tools[0].id, "t1");
+        assert_eq!(tools[1].id, "t2");
+    }
 }
