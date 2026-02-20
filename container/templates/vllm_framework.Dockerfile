@@ -68,6 +68,7 @@ ARG VLLM_GIT_URL
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
 ARG LMCACHE_REF
+ARG VLLM_OMNI_REF
 ARG CUDA_VERSION
 
 ARG MAX_JOBS
@@ -88,6 +89,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} \
         ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} \
         ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} \
+        ${VLLM_OMNI_REF:+--vllm-omni-ref "$VLLM_OMNI_REF"} \
         --cuda-version $CUDA_VERSION
 
 ENV LD_LIBRARY_PATH=\
