@@ -180,7 +180,9 @@ class EncodeWorkerHandler:
                 )
 
             if loaded_images:
-                img_rng = nvtx.start_range("encode_worker_image_processing")
+                img_rng = nvtx.start_range(
+                    "encode_worker_image_processing", color="green"
+                )
                 image_embeds = await asyncio.to_thread(
                     self.image_processor, images=loaded_images, return_tensors="pt"
                 )
@@ -241,6 +243,7 @@ class EncodeWorkerHandler:
             before_transfer_time = time.perf_counter()
 
             # Prepare transfer
+            transfer_rng = nvtx.start_range("encode_worker_sending", color="yellow")
             send_tasks = [
                 asyncio.create_task(
                     self.embedding_sender.send_embeddings(
@@ -250,6 +253,7 @@ class EncodeWorkerHandler:
                 for embedding_item in embedding_lists
             ]
             transfer_requests = await asyncio.gather(*send_tasks)
+            nvtx.end_range(transfer_rng)
 
             after_transfer_time = time.perf_counter()
 

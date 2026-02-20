@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
 import asyncio
 import base64
 import binascii
@@ -15,6 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, Final
 
+import nvtx
 import torch
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
@@ -1315,6 +1315,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
 
+        nvtx_range = nvtx.start_range("worker_generate", color="blue")
+
         if self.use_vllm_tokenizer:
             # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
             async for chunk in self._generate_text_mode(request, context, request_id):
@@ -1323,6 +1325,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Token-in-token-out mode: internal protocol format
             async for chunk in self._generate_token_mode(request, context, request_id):
                 yield chunk
+        nvtx.end_range(nvtx_range)
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
@@ -1429,6 +1432,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         async with self._abort_monitor(context, request_id):
             try:
+                nvtx_range = nvtx.start_range("put request", color="red")
                 gen = self.engine_client.generate(
                     prompt,
                     sampling_params,
@@ -1437,6 +1441,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     trace_headers=trace_headers,
                     priority=priority,
                 )
+                nvtx.end_range(nvtx_range)
 
                 async for res in gen:
                     if not res.outputs:
@@ -1524,10 +1529,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
+        nvtx_range = nvtx.start_range("worker_generate", color="blue")
 
         # Token-in-token-out mode: internal protocol format
         async for chunk in self._generate_token_mode(request, context, request_id):
             yield chunk
+        nvtx.end_range(nvtx_range)
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""

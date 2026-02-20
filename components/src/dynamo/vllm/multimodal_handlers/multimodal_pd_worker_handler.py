@@ -143,11 +143,17 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
 
         multimodal_groups: list[MultiModalGroup] = []
         if self.encode_worker_client and image_urls:
+            logger.info(
+                f"Routing {len(image_urls)} image URLs to encode workers: {image_urls}"
+            )
             multimodal_groups = await fetch_embeddings_from_encode_workers(
                 self.encode_worker_client,
                 image_urls,
                 request_id,
             )
+        logger.info(
+            f"Received {len(multimodal_groups)} multimodal groups from encode workers."
+        )
 
         sampling_params = build_sampling_params(
             raw_request, self.default_sampling_params
@@ -211,9 +217,13 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             )
             for mi in multimodal_inputs
         ]
+        logger.info(f"Created {len(task_lists)} tasks to load multimodal embeddings.")
         receiver_tensor_ids: list[int] = []
         for task, mi in zip(task_lists, multimodal_inputs):
             tensor_id, embeddings = await task
+            logger.info(
+                "embedding shape: %s, dtype: %s", embeddings.shape, embeddings.dtype
+            )
             receiver_tensor_ids.append(tensor_id)
             accumulate_embeddings(
                 multi_modal_data,
