@@ -902,11 +902,10 @@ def get_engine_cache_info(engine: AsyncLLM):
 async def init_omni(
     runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
 ):
-    """
-    Initialize Omni worker for text-to-text generation using vLLM-Omni orchestrator.
+    """Initialize Omni worker for multi-stage pipeline generation using vLLM-Omni.
 
-    Uses vLLM-Omni's Omni class for single-stage text generation pipeline.
-    For now, supports text-to-text only (no multimodal).
+    Supports text-to-text, text-to-image, and text-to-video generation
+    through a single unified OmniHandler.
     """
     # Lazy import to avoid loading vllm-omni unless explicitly needed
     from dynamo.vllm.omni import OmniHandler
@@ -916,7 +915,7 @@ async def init_omni(
     )
     component = generate_endpoint.component()
 
-    # Initialize OmniHandler with Omni orchestrator
+    # Initialize unified OmniHandler
     handler = OmniHandler(
         runtime=runtime,
         component=component,

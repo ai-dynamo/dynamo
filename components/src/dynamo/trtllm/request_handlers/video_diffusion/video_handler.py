@@ -14,19 +14,16 @@ import uuid
 from typing import Any, AsyncGenerator, Optional
 
 from dynamo._core import Component, Context
-from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
-from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
-from dynamo.trtllm.protocols.video_protocol import (
+from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
     VideoData,
     VideoNvExt,
 )
+from dynamo.common.utils.video_utils import encode_to_mp4, encode_to_mp4_bytes
+from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
+from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
-from dynamo.trtllm.request_handlers.video_diffusion.video_utils import (
-    encode_to_mp4,
-    encode_to_mp4_bytes,
-)
 
 logger = logging.getLogger(__name__)
 
