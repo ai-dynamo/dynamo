@@ -23,7 +23,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
-	"net/url"
+	"fmt"
 	"os"
 	"time"
 
@@ -42,7 +42,8 @@ import (
 	k8sCache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
-	"k8s.io/apimachinery/pkg/runtime"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -55,9 +56,10 @@ import (
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
 	semver "github.com/Masterminds/semver/v3"
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
@@ -76,9 +78,32 @@ import (
 )
 
 var (
-	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
+	crdScheme    = k8sruntime.NewScheme()
+	setupLog     = ctrl.Log.WithName("setup")
+	configScheme = k8sruntime.NewScheme()
 )
+
+// LoadAndValidateOperatorConfig loads the operator configuration from a file,
+// applies defaults via the scheme, and validates it.
+func LoadAndValidateOperatorConfig(path string) (*configv1alpha1.OperatorConfiguration, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
+	}
+
+	codecFactory := serializer.NewCodecFactory(configScheme)
+	cfg := &configv1alpha1.OperatorConfiguration{}
+	if err := k8sruntime.DecodeInto(codecFactory.UniversalDecoder(), data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode config file %s: %w", path, err)
+	}
+
+	// Validate the configuration
+	if errs := configvalidation.ValidateOperatorConfiguration(cfg); len(errs) > 0 {
+		return nil, fmt.Errorf("config validation failed: %s", errs.ToAggregate().Error())
+	}
+
+	return cfg, nil
+}
 
 func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
 	config := mgr.GetConfig()
@@ -108,141 +133,41 @@ func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
 	return scalesGetter, nil
 }
 
-func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+func initCRDSchemes() {
+	utilruntime.Must(clientgoscheme.AddToScheme(crdScheme))
 
-	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(crdScheme))
 
-	utilruntime.Must(lwsscheme.AddToScheme(scheme))
+	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
 
-	utilruntime.Must(volcanoscheme.AddToScheme(scheme))
+	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
 
-	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
 
-	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
+	utilruntime.Must(grovev1alpha1.AddToScheme(crdScheme))
 
-	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
+	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
 
-	utilruntime.Must(gaiev1.Install(scheme))
-	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
+	utilruntime.Must(istioclientsetscheme.AddToScheme(crdScheme))
+
+	utilruntime.Must(gaiev1.Install(crdScheme))
 	//+kubebuilder:scaffold:scheme
+}
+
+func initConfigScheme() {
+	utilruntime.Must(configv1alpha1.AddToScheme(configScheme))
 }
 
 //nolint:gocyclo
 func main() {
-	var metricsAddr string
-	var enableLeaderElection bool
-	var probeAddr string
-	var secureMetrics bool
-	var enableHTTP2 bool
-	var restrictedNamespace string
-	var leaderElectionID string
-	var leaderElectionNamespace string
-	var natsAddr string
-	var etcdAddr string
-	var istioVirtualServiceGateway string
-	var virtualServiceSupportsHTTPS bool
-	var ingressControllerClassName string
-	var ingressControllerTLSSecretName string
-	var ingressHostSuffix string
-	var groveTerminationDelay time.Duration
-	var modelExpressURL string
-	var prometheusEndpoint string
-	var mpiRunSecretName string
-	var mpiRunSecretNamespace string
-	var plannerClusterRoleName string
-	var dgdrProfilingClusterRoleName string
-	var eppClusterRoleName string
-	var namespaceScopeLeaseDuration time.Duration
-	var namespaceScopeLeaseRenewInterval time.Duration
+	initCRDSchemes()
+	initConfigScheme()
+
+	var configFile string
 	var operatorVersion string
-	var discoveryBackend string
-	var gpuDiscoveryEnabled bool
-	// Checkpoint configuration
-	var checkpointEnabled bool
-	var checkpointStorageType string
-	var checkpointPVCName string
-	var checkpointPVCBasePath string
-	var checkpointS3URI string
-	var checkpointS3CredentialsSecret string
-	var checkpointOCIURI string
-	var checkpointOCICredentialsSecret string
-	var checkpointReadyForCheckpointFilePath string
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election for controller manager. "+
-			"Enabling this will ensure there is only one active controller manager.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", false,
-		"If set the metrics endpoint is served securely")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false,
-		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.BoolVar(&gpuDiscoveryEnabled, "gpu-discovery-enabled", true,
-		"Whether GPU discovery is enabled for namespace-scoped operators. When true (default), "+
-			"the Helm chart has provisioned a ClusterRole granting node read access for GPU hardware discovery.")
-	flag.StringVar(&restrictedNamespace, "restrictedNamespace", "",
-		"Enable resources filtering, only the resources belonging to the given namespace will be handled.")
-	flag.StringVar(&leaderElectionID, "leader-election-id", "", "Leader election id"+
-		"Id to use for the leader election.")
-	flag.StringVar(&leaderElectionNamespace,
-		"leader-election-namespace", "",
-		"Namespace where the leader election resource will be created (default: same as operator namespace)")
-	flag.StringVar(&natsAddr, "natsAddr", "", "address of the NATS server")
-	flag.StringVar(&etcdAddr, "etcdAddr", "", "address of the etcd server")
-	flag.StringVar(&istioVirtualServiceGateway, "istio-virtual-service-gateway", "",
-		"The name of the istio virtual service gateway to use")
-	flag.BoolVar(&virtualServiceSupportsHTTPS, "virtual-service-supports-https", false,
-		"If set, assume VirtualService endpoints are HTTPS")
-	flag.StringVar(&ingressControllerClassName, "ingress-controller-class-name", "",
-		"The name of the ingress controller class to use")
-	flag.StringVar(&ingressControllerTLSSecretName, "ingress-controller-tls-secret-name", "",
-		"The name of the ingress controller TLS secret to use")
-	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
-		"The suffix to use for the ingress host")
-	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
-		"The termination delay for Grove PodCliqueSets")
-	flag.StringVar(&modelExpressURL, "model-express-url", "",
-		"URL of the Model Express server to inject into all pods")
-	flag.StringVar(&prometheusEndpoint, "prometheus-endpoint", "",
-		"URL of the Prometheus endpoint to use for metrics")
-	flag.StringVar(&mpiRunSecretName, "mpi-run-ssh-secret-name", "",
-		"Name of the secret containing the SSH key for MPI Run (required)")
-	flag.StringVar(&mpiRunSecretNamespace, "mpi-run-ssh-secret-namespace", "",
-		"Namespace where the MPI SSH secret is located (required)")
-	flag.StringVar(&plannerClusterRoleName, "planner-cluster-role-name", "",
-		"Name of the ClusterRole for planner (cluster-wide mode only)")
-	flag.StringVar(&dgdrProfilingClusterRoleName, "dgdr-profiling-cluster-role-name", "",
-		"Name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)")
-	flag.StringVar(&eppClusterRoleName, "epp-cluster-role-name", "",
-		"Name of the ClusterRole for EPP (cluster-wide mode only)")
-	flag.DurationVar(&namespaceScopeLeaseDuration, "namespace-scope-lease-duration", 30*time.Second,
-		"Duration of namespace scope marker lease before expiration (namespace-restricted mode only)")
-	flag.DurationVar(&namespaceScopeLeaseRenewInterval, "namespace-scope-lease-renew-interval", 10*time.Second,
-		"Interval for renewing namespace scope marker lease (namespace-restricted mode only)")
+	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
-	flag.StringVar(&discoveryBackend, "discovery-backend", "kubernetes",
-		"Discovery backend to use: 'kubernetes' (default, uses Kubernetes API) or 'etcd' (uses ETCD)")
-	// Checkpoint flags
-	flag.BoolVar(&checkpointEnabled, "checkpoint-enabled", false,
-		"Enable checkpoint/restore functionality")
-	flag.StringVar(&checkpointStorageType, "checkpoint-storage-type", commonController.CheckpointStorageTypePVC,
-		"Checkpoint storage backend type: pvc, s3, or oci")
-	flag.StringVar(&checkpointPVCName, "checkpoint-pvc-name", "chrek-pvc",
-		"Name of the PVC for checkpoint storage (used when storage-type=pvc)")
-	flag.StringVar(&checkpointPVCBasePath, "checkpoint-pvc-base-path", "/checkpoints",
-		"Base path within the PVC for storing checkpoints (used when storage-type=pvc)")
-	flag.StringVar(&checkpointS3URI, "checkpoint-s3-uri", "",
-		"S3 URI for checkpoint storage: s3://[endpoint/]bucket/prefix (used when storage-type=s3)")
-	flag.StringVar(&checkpointS3CredentialsSecret, "checkpoint-s3-credentials-secret", "",
-		"Secret name containing AWS credentials (used when storage-type=s3)")
-	flag.StringVar(&checkpointOCIURI, "checkpoint-oci-uri", "",
-		"OCI URI for checkpoint storage: oci://registry/repository (used when storage-type=oci)")
-	flag.StringVar(&checkpointOCICredentialsSecret, "checkpoint-oci-credentials-secret", "",
-		"Docker config secret name for OCI registry auth (used when storage-type=oci)")
-	flag.StringVar(&checkpointReadyForCheckpointFilePath,
-		"checkpoint-ready-for-checkpoint-file-path", "/tmp/ready-for-checkpoint",
-		"Path written by the worker container when the model is loaded and ready for checkpointing")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -250,10 +175,18 @@ func main() {
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	if restrictedNamespace == "" && plannerClusterRoleName == "" {
-		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
+	if configFile == "" {
+		setupLog.Error(nil, "--config flag is required")
 		os.Exit(1)
 	}
+
+	// Load, default, and validate operator configuration
+	operatorCfg, err := LoadAndValidateOperatorConfig(configFile)
+	if err != nil {
+		setupLog.Error(err, "failed to load operator configuration", "configFile", configFile)
+		os.Exit(1)
+	}
+	setupLog.Info("Operator configuration loaded successfully", "configFile", configFile)
 
 	// Validate and normalize operator version to semver
 	if _, err := semver.NewVersion(operatorVersion); err != nil {
@@ -263,83 +196,8 @@ func main() {
 	}
 	setupLog.Info("Operator version configured", "version", operatorVersion)
 
-	// Validate discoveryBackend value
-	if discoveryBackend != "kubernetes" && discoveryBackend != "etcd" {
-		setupLog.Error(nil, "invalid discovery-backend value, must be 'kubernetes' or 'etcd'", "value", discoveryBackend)
-		os.Exit(1)
-	}
-	setupLog.Info("Discovery backend configured", "backend", discoveryBackend)
-
-	// Validate modelExpressURL if provided
-	if modelExpressURL != "" {
-		if _, err := url.Parse(modelExpressURL); err != nil {
-			setupLog.Error(err, "invalid model-express-url provided", "url", modelExpressURL)
-			os.Exit(1)
-		}
-		setupLog.Info("Model Express URL configured", "url", modelExpressURL)
-	}
-
-	if mpiRunSecretName == "" {
-		setupLog.Error(nil, "mpi-run-ssh-secret-name is required")
-		os.Exit(1)
-	}
-
-	if mpiRunSecretNamespace == "" {
-		setupLog.Error(nil, "mpi-run-ssh-secret-namespace is required")
-		os.Exit(1)
-	}
-
-	ctrlConfig := commonController.Config{
-		RestrictedNamespace: restrictedNamespace,
-		Grove: commonController.GroveConfig{
-			Enabled:          false, // Will be set after Grove discovery
-			TerminationDelay: groveTerminationDelay,
-		},
-		LWS: commonController.LWSConfig{
-			Enabled: false, // Will be set after LWS discovery
-		},
-		KaiScheduler: commonController.KaiSchedulerConfig{
-			Enabled: false, // Will be set after Kai-scheduler discovery
-		},
-		EtcdAddress: etcdAddr,
-		NatsAddress: natsAddr,
-		IngressConfig: commonController.IngressConfig{
-			VirtualServiceGateway:      istioVirtualServiceGateway,
-			IngressControllerClassName: ingressControllerClassName,
-			IngressControllerTLSSecret: ingressControllerTLSSecretName,
-			IngressHostSuffix:          ingressHostSuffix,
-		},
-		ModelExpressURL:    modelExpressURL,
-		PrometheusEndpoint: prometheusEndpoint,
-		MpiRun: commonController.MpiRunConfig{
-			SecretName: mpiRunSecretName,
-		},
-		RBAC: commonController.RBACConfig{
-			PlannerClusterRoleName:       plannerClusterRoleName,
-			DGDRProfilingClusterRoleName: dgdrProfilingClusterRoleName,
-			EPPClusterRoleName:           eppClusterRoleName,
-		},
-		DiscoveryBackend: discoveryBackend,
-		Checkpoint: commonController.CheckpointConfig{
-			Enabled:                    checkpointEnabled,
-			ReadyForCheckpointFilePath: checkpointReadyForCheckpointFilePath,
-			Storage: commonController.CheckpointStorageConfig{
-				Type: checkpointStorageType,
-				PVC: commonController.CheckpointPVCConfig{
-					PVCName:  checkpointPVCName,
-					BasePath: checkpointPVCBasePath,
-				},
-				S3: commonController.CheckpointS3Config{
-					URI:                  checkpointS3URI,
-					CredentialsSecretRef: checkpointS3CredentialsSecret,
-				},
-				OCI: commonController.CheckpointOCIConfig{
-					URI:                  checkpointOCIURI,
-					CredentialsSecretRef: checkpointOCICredentialsSecret,
-				},
-			},
-		},
-	}
+	// Initialize runtime config (will be populated after detection)
+	runtimeConfig := &commonController.RuntimeConfig{}
 
 	mainCtx := ctrl.SetupSignalHandler()
 
@@ -355,44 +213,37 @@ func main() {
 	}
 
 	tlsOpts := []func(*tls.Config){}
-	if !enableHTTP2 {
+	if !operatorCfg.Security.EnableHTTP2 {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
 	webhookServer := webhook.NewServer(webhook.Options{
-		// Bind to all interfaces so the Service can reach the webhook server
-		Host: "0.0.0.0",
-		// Must match the port exposed by the manager container and targeted by the Service.
-		Port: 9443,
-		// Must match the mountPath of the webhook certificate secret in the Deployment.
-		CertDir: "/tmp/k8s-webhook-server/serving-certs",
+		Host:    operatorCfg.Server.Webhook.Host,
+		Port:    operatorCfg.Server.Webhook.Port,
+		CertDir: operatorCfg.Server.Webhook.CertDir,
 		TLSOpts: tlsOpts,
 	})
 
+	metricsBindAddr := fmt.Sprintf("%s:%d", operatorCfg.Server.Metrics.BindAddress, operatorCfg.Server.Metrics.Port)
+	healthProbeAddr := fmt.Sprintf(
+		"%s:%d", operatorCfg.Server.HealthProbe.BindAddress, operatorCfg.Server.HealthProbe.Port,
+	)
+
 	mgrOpts := ctrl.Options{
-		Scheme: scheme,
+		Scheme: crdScheme,
 		Metrics: metricsserver.Options{
-			BindAddress:   metricsAddr,
-			SecureServing: secureMetrics,
+			BindAddress:   metricsBindAddr,
+			SecureServing: operatorCfg.Server.Metrics.Secure,
 			TLSOpts:       tlsOpts,
 		},
 		WebhookServer:           webhookServer,
-		HealthProbeBindAddress:  probeAddr,
-		LeaderElection:          enableLeaderElection,
-		LeaderElectionID:        leaderElectionID,
-		LeaderElectionNamespace: leaderElectionNamespace,
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		HealthProbeBindAddress:  healthProbeAddr,
+		LeaderElection:          operatorCfg.LeaderElection.Enabled,
+		LeaderElectionID:        operatorCfg.LeaderElection.ID,
+		LeaderElectionNamespace: operatorCfg.LeaderElection.Namespace,
 	}
+
+	restrictedNamespace := operatorCfg.Namespace.Restricted
 	if restrictedNamespace != "" {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
@@ -419,15 +270,15 @@ func main() {
 		// Namespace-restricted mode: Create and maintain namespace scope marker lease
 		setupLog.Info("Creating namespace scope marker lease manager",
 			"namespace", restrictedNamespace,
-			"leaseDuration", namespaceScopeLeaseDuration,
-			"renewInterval", namespaceScopeLeaseRenewInterval)
+			"leaseDuration", operatorCfg.Namespace.Scope.LeaseDuration.Duration,
+			"renewInterval", operatorCfg.Namespace.Scope.LeaseRenewInterval.Duration)
 
 		leaseManager, err = namespace_scope.NewLeaseManager(
 			mgr.GetConfig(),
 			restrictedNamespace,
 			operatorVersion,
-			namespaceScopeLeaseDuration,
-			namespaceScopeLeaseRenewInterval,
+			operatorCfg.Namespace.Scope.LeaseDuration.Duration,
+			operatorCfg.Namespace.Scope.LeaseRenewInterval.Duration,
 		)
 		if err != nil {
 			setupLog.Error(err, "unable to create namespace scope marker lease manager")
@@ -481,34 +332,80 @@ func main() {
 
 		setupLog.Info("Namespace scope marker lease watcher started successfully")
 
-		// Pass leaseWatcher to controller config for namespace exclusion filtering
-		ctrlConfig.ExcludedNamespaces = leaseWatcher
+		// Pass leaseWatcher to runtime config for namespace exclusion filtering
+		runtimeConfig.ExcludedNamespaces = leaseWatcher
 	}
 
 	// Start resource counter background goroutine (after ExcludedNamespaces is set)
 	setupLog.Info("Starting resource counter")
-	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), ctrlConfig.ExcludedNamespaces)
+	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), runtimeConfig.ExcludedNamespaces)
 
-	// Detect orchestrators availability using discovery client
+	// Detect orchestrators availability using discovery client.
+	// Config overrides (*bool) take precedence over auto-detection:
+	//   nil   = auto-detect (backward compatible default)
+	//   false = forcibly disabled regardless of API availability
+	//   true  = forcibly enabled; hard exit if API is not available (misconfiguration)
 	setupLog.Info("Detecting Grove availability...")
-	groveEnabled := commonController.DetectGroveAvailability(mainCtx, mgr)
-	ctrlConfig.Grove.Enabled = groveEnabled
+	groveDetected := commonController.DetectGroveAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.Orchestrators.Grove.Enabled == nil:
+		runtimeConfig.GroveEnabled = groveDetected
+	case *operatorCfg.Orchestrators.Grove.Enabled:
+		if !groveDetected {
+			setupLog.Error(nil, "Grove is explicitly enabled in config but the Grove API group was not detected in the cluster")
+			os.Exit(1)
+		}
+		runtimeConfig.GroveEnabled = true
+	default:
+		setupLog.Info("Grove is explicitly disabled via config override")
+		runtimeConfig.GroveEnabled = false
+	}
+
 	setupLog.Info("Detecting LWS availability...")
-	lwsEnabled := commonController.DetectLWSAvailability(mainCtx, mgr)
+	lwsDetected := commonController.DetectLWSAvailability(mainCtx, mgr)
 	setupLog.Info("Detecting Volcano availability...")
-	volcanoEnabled := commonController.DetectVolcanoAvailability(mainCtx, mgr)
+	volcanoDetected := commonController.DetectVolcanoAvailability(mainCtx, mgr)
 	// LWS for multinode deployment usage depends on both LWS and Volcano availability
-	ctrlConfig.LWS.Enabled = lwsEnabled && volcanoEnabled
+	switch {
+	case operatorCfg.Orchestrators.LWS.Enabled == nil:
+		runtimeConfig.LWSEnabled = lwsDetected && volcanoDetected
+	case *operatorCfg.Orchestrators.LWS.Enabled:
+		if !lwsDetected {
+			setupLog.Error(nil, "LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")
+			os.Exit(1)
+		}
+		if !volcanoDetected {
+			setupLog.Error(nil, "LWS is explicitly enabled in config but the Volcano API group was not detected in the cluster")
+			os.Exit(1)
+		}
+		runtimeConfig.LWSEnabled = true
+	default:
+		setupLog.Info("LWS is explicitly disabled via config override")
+		runtimeConfig.LWSEnabled = false
+	}
+
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
-	kaiSchedulerEnabled := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
-	ctrlConfig.KaiScheduler.Enabled = kaiSchedulerEnabled
+	kaiSchedulerDetected := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.Orchestrators.KaiScheduler.Enabled == nil:
+		runtimeConfig.KaiSchedulerEnabled = kaiSchedulerDetected
+	case *operatorCfg.Orchestrators.KaiScheduler.Enabled:
+		if !kaiSchedulerDetected {
+			setupLog.Error(nil, "Kai-scheduler is explicitly enabled in config but the scheduling.run.ai API group was not detected in the cluster")
+			os.Exit(1)
+		}
+		runtimeConfig.KaiSchedulerEnabled = true
+	default:
+		setupLog.Info("Kai-scheduler is explicitly disabled via config override")
+		runtimeConfig.KaiSchedulerEnabled = false
+	}
 
 	setupLog.Info("Detected orchestrators availability",
-		"grove", groveEnabled,
-		"lws", lwsEnabled,
-		"volcano", volcanoEnabled,
-		"kai-scheduler", kaiSchedulerEnabled,
+		"grove", runtimeConfig.GroveEnabled,
+		"lws", runtimeConfig.LWSEnabled,
+		"volcano", volcanoDetected,
+		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
 	)
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetClient())
@@ -601,14 +498,15 @@ func main() {
 	// Create MPI SSH SecretReplicator for cross-namespace secret replication
 	mpiSecretReplicator := secret.NewSecretReplicator(
 		mgr.GetClient(),
-		mpiRunSecretNamespace,
-		mpiRunSecretName,
+		operatorCfg.MPI.SSHSecretNamespace,
+		operatorCfg.MPI.SSHSecretName,
 	)
 
 	if err = (&controller.DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
-		Config:                ctrlConfig,
+		Config:                operatorCfg,
+		RuntimeConfig:         runtimeConfig,
 		DockerSecretRetriever: dockerSecretRetriever,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
@@ -627,7 +525,8 @@ func main() {
 	if err = (&controller.DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
-		Config:                ctrlConfig,
+		Config:                operatorCfg,
+		RuntimeConfig:         runtimeConfig,
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
 		MPISecretReplicator:   mpiSecretReplicator,
@@ -638,20 +537,22 @@ func main() {
 	}
 
 	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("dgdscalingadapter"),
-		Config:   ctrlConfig,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Recorder:      mgr.GetEventRecorderFor("dgdscalingadapter"),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DGDScalingAdapter")
 		os.Exit(1)
 	}
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:      mgr.GetClient(),
-		Recorder:    mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		Config:      ctrlConfig,
-		RBACManager: rbacManager,
+		Client:        mgr.GetClient(),
+		Recorder:      mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+		RBACManager:   rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
 		os.Exit(1)
@@ -661,34 +562,31 @@ func main() {
 		Client:         mgr.GetClient(),
 		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
 		EndpointClient: modelendpoint.NewClient(),
-		Config:         ctrlConfig,
+		Config:         operatorCfg,
+		RuntimeConfig:  runtimeConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
 		os.Exit(1)
 	}
 
 	if err = (&controller.CheckpointReconciler{
-		Client:   mgr.GetClient(),
-		Config:   ctrlConfig,
-		Recorder: mgr.GetEventRecorderFor("checkpoint"),
+		Client:        mgr.GetClient(),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+		Recorder:      mgr.GetEventRecorderFor("checkpoint"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoCheckpoint")
 		os.Exit(1)
 	}
 
-	ctrlConfig.GPUDiscoveryEnabled = gpuDiscoveryEnabled
-
 	// Configure webhooks with lease-based namespace exclusion
-	// In cluster-wide mode, inject ctrlConfig.ExcludedNamespaces (leaseWatcher) so webhooks can defer
-	// to namespace-restricted operators. In namespace-restricted mode, webhooks validate without checking
-	// leases (ExcludedNamespaces is nil). The webhooks use LeaseAwareValidator wrapper to add coordination.
-	isClusterWide := ctrlConfig.RestrictedNamespace == ""
+	isClusterWide := operatorCfg.Namespace.Restricted == ""
 	if isClusterWide {
 		setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
-		internalwebhook.SetExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
+		internalwebhook.SetExcludedNamespaces(runtimeConfig.ExcludedNamespaces)
 	} else {
 		setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
-			"restrictedNamespace", ctrlConfig.RestrictedNamespace)
+			"restrictedNamespace", operatorCfg.Namespace.Restricted)
 		internalwebhook.SetExcludedNamespaces(nil)
 	}
 
@@ -713,7 +611,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(isClusterWide, gpuDiscoveryEnabled)
+	dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(
+		isClusterWide, operatorCfg.GPU.DiscoveryEnabled,
+	)
 	if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
 		os.Exit(1)

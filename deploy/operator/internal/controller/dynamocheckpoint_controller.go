@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -44,8 +45,9 @@ import (
 // CheckpointReconciler reconciles a DynamoCheckpoint object
 type CheckpointReconciler struct {
 	client.Client
-	Config   commonController.Config
-	Recorder record.EventRecorder
+	Config        *configv1alpha1.OperatorConfiguration
+	RuntimeConfig *commonController.RuntimeConfig
+	Recorder      record.EventRecorder
 }
 
 // Helper function to compute checkpoint location from operator config
@@ -56,7 +58,7 @@ func (r *CheckpointReconciler) getCheckpointLocation(identityHash string) string
 
 // Helper function to get checkpoint storage type from operator config
 func (r *CheckpointReconciler) getCheckpointStorageType() nvidiacomv1alpha1.DynamoCheckpointStorageType {
-	return nvidiacomv1alpha1.DynamoCheckpointStorageType(commonController.CheckpointStorageTypePVC)
+	return nvidiacomv1alpha1.DynamoCheckpointStorageType(configv1alpha1.CheckpointStorageTypePVC)
 }
 
 // GetRecorder returns the event recorder (implements controller_common.Reconciler interface)
@@ -385,6 +387,6 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)).
+		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(r)
 }
