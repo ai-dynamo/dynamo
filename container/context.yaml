@@ -45,6 +45,7 @@ vllm:
   vllm_ref: v0.15.1
   flashinf_ref: v0.6.1
   lmcache_ref: 0.3.13
+  vllm_omni_ref: "0.14.0"
   max_jobs: "10"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
