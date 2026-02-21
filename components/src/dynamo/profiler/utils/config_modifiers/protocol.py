@@ -401,18 +401,9 @@ class BaseConfigModifier:
 
         cls._ensure_spec_pvc(cfg, pvc_name)
 
-        # Mount to Frontend + prefill + decode services if present.
-        if "Frontend" in cfg.spec.services:
-            cls._ensure_service_volume_mount(
-                cfg.spec.services["Frontend"], pvc_name, pvc_mount_path
-            )
-
-        for sct in (SubComponentType.PREFILL, SubComponentType.DECODE):
-            svc_name = get_service_name_by_type(cfg, cls.BACKEND, sct)
-            if svc_name in cfg.spec.services:
-                cls._ensure_service_volume_mount(
-                    cfg.spec.services[svc_name], pvc_name, pvc_mount_path
-                )
+        # Mount PVC to all services (Frontend + workers)
+        for svc_name, svc in cfg.spec.services.items():
+            cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
 
         # Patch workers + frontend with PVC model path.
         cls._apply_model_update_to_cfg(
@@ -515,12 +506,16 @@ class BaseConfigModifier:
         # Update model (handles worker args + frontend patching)
         effective_model_path = model_path or model_name
         if pvc_name and pvc_mount_path:
+            # Derive pvc_path from effective_model_path by stripping the mount prefix
+            pvc_path = ""
+            if effective_model_path and effective_model_path.startswith(pvc_mount_path):
+                pvc_path = effective_model_path[len(pvc_mount_path) :].strip("/")
             result = cls.update_model_from_pvc(
                 cfg.model_dump(),
                 model_name=model_name,
                 pvc_name=pvc_name,
                 pvc_mount_path=pvc_mount_path,
-                pvc_path="",
+                pvc_path=pvc_path,
             )
         else:
             result = cls.update_model(
