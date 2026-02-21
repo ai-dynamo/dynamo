@@ -15,6 +15,7 @@ repository.workspace = true
 dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-kv-router = { workspace = true }
+kvbm-logical = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
