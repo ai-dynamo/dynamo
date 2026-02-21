@@ -46,7 +46,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
-from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -290,7 +290,7 @@ async def init_llm_worker(
         # This overrides the skip_tokenizer_init=True set earlier
         engine_args["skip_tokenizer_init"] = False
 
-    if modality == "multimodal":
+    if modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
         model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
         multimodal_processor = MultimodalRequestProcessor(
