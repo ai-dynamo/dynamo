@@ -18,7 +18,7 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-crd-apply-sa
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-crd-apply-sa
   namespace: {{ .Release.Namespace }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -28,7 +28,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-crd-apply-role
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-crd-apply-role
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
@@ -49,18 +49,18 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-crd-apply-binding
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-crd-apply-binding
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
     helm.sh/hook-weight: "0"
 subjects:
   - kind: ServiceAccount
-    name: {{ include "dynamo-operator.fullname" . }}-crd-apply-sa
+    name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-crd-apply-sa
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: {{ include "dynamo-operator.fullname" . }}-crd-apply-role
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-crd-apply-role
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: batch/v1
@@ -83,7 +83,7 @@ spec:
         {{- include "dynamo-operator.labels" . | nindent 8 }}
         app.kubernetes.io/component: crd-apply
     spec:
-      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-crd-apply-sa
+      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-crd-apply-sa
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
