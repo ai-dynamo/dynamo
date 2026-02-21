@@ -49,10 +49,13 @@ class BasePlannerDefaults:
 
 
 class SLAPlannerDefaults(BasePlannerDefaults):
+    # URL scheme for internal service communication (configurable for TLS support)
+    _url_scheme = os.environ.get("DYN_URL_SCHEME", "http")
+
     # Prometheus endpoint URL for pulling/querying metrics
     metric_pulling_prometheus_endpoint = os.environ.get(
         "PROMETHEUS_ENDPOINT",
-        "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
+        f"{_url_scheme}://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
     )
     profile_results_dir = "profiling_results"
 

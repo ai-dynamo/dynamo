@@ -18,6 +18,9 @@ from typing import Dict, List, Optional
 
 import requests
 
+# URL scheme for internal service communication (configurable for TLS support)
+DYN_URL_SCHEME = os.environ.get("DYN_URL_SCHEME", "http")
+
 
 def get_inference_endpoint(
     deployment_name: str, namespace: str, local_port: int = 8000
@@ -37,9 +40,7 @@ def get_inference_endpoint(
 
     if in_cluster:
         # Use cluster-internal service DNS
-        return (
-            f"http://{deployment_name}.{namespace}.svc.cluster.local:80/v1/completions"
-        )
+        return f"{DYN_URL_SCHEME}://{deployment_name}.{namespace}.svc.cluster.local/v1/completions"
     else:
         # Use port-forwarded localhost
         return f"http://localhost:{local_port}/v1/completions"

@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from pathlib import Path
 from typing import Dict, List
 
 from benchmarks.utils.aiperf import run_concurrency_sweep
 from deploy.utils.kubernetes import is_running_in_cluster
+
+# URL scheme for internal service communication (configurable for TLS support)
+DYN_URL_SCHEME = os.environ.get("DYN_URL_SCHEME", "http")
 
 
 def has_http_scheme(url: str) -> bool:
@@ -18,7 +22,7 @@ def normalize_service_url(endpoint: str) -> str:
     if has_http_scheme(e):
         return e
     if is_running_in_cluster():
-        return f"http://{e}"
+        return f"{DYN_URL_SCHEME}://{e}"
     return e  # Outside cluster, validation will have ensured scheme is present
 
 
