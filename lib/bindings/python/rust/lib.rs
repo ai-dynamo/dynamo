@@ -140,6 +140,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::kv::start_kv_block_indexer_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;

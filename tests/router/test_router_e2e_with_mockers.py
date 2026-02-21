@@ -537,7 +537,7 @@ def test_kv_router_bindings(
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
-@pytest.mark.timeout(180)  # bumped for xdist contention (was 90s; up to 33s under load)
+@pytest.mark.timeout(180)
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
