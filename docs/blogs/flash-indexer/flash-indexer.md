@@ -23,7 +23,7 @@ Every cached block carries three identifiers:
 
 - **Sequence block hash** (`u64`): Rolling hash of the entire prefix up to this block. Position-dependent—identical tokens at different positions produce different hashes.
 
-```
+```text
 seq_hash[0] = local_hash[0]
 seq_hash[i] = hash(seq_hash[i-1] || local_hash[i])
 ```
