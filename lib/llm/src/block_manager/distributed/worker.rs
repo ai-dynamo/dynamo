@@ -179,6 +179,15 @@ async fn perform_allocation_and_build_handler(
         None
     };
 
+    // Log block allocation summary
+    tracing::info!(
+        "KVBM Block Summary for worker {}: G1 (GPU)={} blocks, G2 (Host)={} blocks, G3 (Disk)={} blocks",
+        worker_id,
+        worker_config.num_device_blocks,
+        leader_meta.num_host_blocks,
+        leader_meta.num_disk_blocks
+    );
+
     let handler = BlockTransferHandler::new(
         device_blocks,
         host_blocks,
