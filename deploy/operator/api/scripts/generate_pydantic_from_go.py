@@ -176,6 +176,8 @@ class GoToPydanticConverter:
         "runtime.RawExtension": "Dict[str, Any]",
         "batchv1.JobSpec": "Dict[str, Any]",
         "corev1.ResourceRequirements": "Dict[str, Any]",
+        "corev1.Toleration": "Dict[str, Any]",
+        "apiextensionsv1.JSON": "Any",
     }
 
     def __init__(self):
