@@ -665,6 +665,21 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "multi_node_tp_headless": VLLMConfig(
+        name="multi_node_tp_headless",
+        directory=os.path.join(WORKSPACE_DIR, "tests/serve"),
+        script_name="multi_node_tp_headless.sh",
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "guided_decoding": VLLMConfig(
         name="guided_decoding",
         directory=vllm_dir,
