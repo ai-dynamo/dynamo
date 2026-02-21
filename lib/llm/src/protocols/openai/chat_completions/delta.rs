@@ -420,7 +420,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         };
 
         // Create the streaming response.
-        let index = 0;
+        let index = delta.index.unwrap_or(0);
         let mut stream_response = self.create_choice(
             index,
             delta.text,
