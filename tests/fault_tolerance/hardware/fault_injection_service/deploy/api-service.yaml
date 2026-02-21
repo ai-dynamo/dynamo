@@ -74,20 +74,15 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
-              # Require GPU nodes (A100 pools)
+              # Require GPU nodes
               - key: nvidia.com/gpu.present
                 operator: In
                 values:
                 - "true"
-              # Prefer stable instance types
-              - key: node.kubernetes.io/instance-type
-                operator: In
-                values:
-                - Standard_ND96amsr_A100_v4
       containers:
       - name: api
-        # Replace with your Azure Container Registry (ACR)
-        image: dynamoci.azurecr.io/fault-injection-api:latest
+        # GHCR image (public)
+        image: ghcr.io/ai-dynamo/fault-injection-api:latest
         imagePullPolicy: Always
         ports:
         - name: http
