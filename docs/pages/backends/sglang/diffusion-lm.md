@@ -47,7 +47,7 @@ python -m dynamo.sglang \
 
 The diffusion worker uses the **LowConfidence** algorithm for the iterative refinement process. This algorithm refines tokens with low confidence scores, progressively replacing masked tokens with the model's predictions until confidence thresholds are met.
 
-For more details on diffusion algorithms and configuration options, refer to the [SGLang Diffusion Language Models documentation](https://github.com/sgl-project/sglang/blob/main/docs/supported_models/diffusion_language_models.md).
+For more details on diffusion algorithms and configuration options, refer to the [SGLang Diffusion Language Models documentation](https://github.com/sgl-project/sglang/blob/main/docs/supported_models/text_generation/diffusion_language_models.md).
 
 
 ## Testing the Deployment

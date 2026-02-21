@@ -612,15 +612,23 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string, isK8sDiscoveryEnabled bool) (*corev1.Service, error) {
-	if component.DynamoNamespace == nil {
-		return nil, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", componentName)
-	}
-	// DNS-safe service resource name: "{dgd-name}-{lowercase(componentName)}"
-	kubeServiceName := GetDCDResourceName(dynamoDeployment, componentName, "")
+// ComponentServiceParams contains all the fields needed to generate a Kubernetes
+// Service for a Dynamo component, independent of whether the caller is the DGD
+// (Grove) or DCD controller.
+type ComponentServiceParams struct {
+	ServiceName     string
+	Namespace       string
+	ComponentType   string
+	DynamoNamespace string
+	ComponentName   string // original user-provided name, used in selector
+	Labels          map[string]string
+	Annotations     map[string]string
+	IsK8sDiscovery  bool
+}
 
+func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, error) {
 	var servicePort corev1.ServicePort
-	switch component.ComponentType {
+	switch params.ComponentType {
 	case commonconsts.ComponentTypeFrontend:
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoServicePortName,
@@ -629,7 +637,6 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 			Protocol:   corev1.ProtocolTCP,
 		}
 	case commonconsts.ComponentTypeEPP:
-		// EPP only exposes the gRPC endpoint for InferencePool communication
 		servicePort = corev1.ServicePort{
 			Name:        commonconsts.EPPGRPCPortName,
 			Port:        commonconsts.EPPGRPCPort,
@@ -646,33 +653,36 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 		}
 	}
 
-	// Start with user-defined labels from component.Labels
 	labels := make(map[string]string)
-	for k, v := range component.Labels {
+	for k, v := range params.Labels {
 		labels[k] = v
 	}
-
-	// Add k8s discovery labels (these take precedence over user labels)
-	if isK8sDiscoveryEnabled {
+	if params.IsK8sDiscovery {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
+	selector := map[string]string{
+		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
+		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
+		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
+	}
+
+	annotations := make(map[string]string)
+	for k, v := range params.Annotations {
+		annotations[k] = v
+	}
+
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      kubeServiceName,
-			Namespace: dynamoDeployment.Namespace,
-			Labels:    labels,
+			Name:        params.ServiceName,
+			Namespace:   params.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,    // e.g "worker"
-				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace, // result of ComputeDynamoNamespace(k8sNamespace, dgdName)
-				// The original user provided component name (the service map key, e.g. "VllmDecodeWorker" in the DGD).
-				// Needed to disambiguate amongst distinct components with the same component type within a DGD (e.g prefill/decode workers).
-				commonconsts.KubeLabelDynamoComponent: componentName,
-			},
-			Ports: []corev1.ServicePort{servicePort},
+			Selector: selector,
+			Ports:    []corev1.ServicePort{servicePort},
 		},
 	}
 	return service, nil
@@ -1328,7 +1338,7 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName, checkpointInfo)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1382,7 +1392,12 @@ func GenerateGrovePodCliqueSet(
 	return gangSet, nil
 }
 
-func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
+func generateLabels(
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+	componentName string,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
@@ -1398,24 +1413,30 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	}
 	// Add base model label if modelRef is specified
 	AddBaseModelLabel(labels, component.ModelRef)
-	// Add checkpoint labels if checkpointing is enabled
+	// Merge user-supplied labels first so they cannot overwrite checkpoint labels.
+	setMetricsLabels(labels, dynamoDeployment)
+	if component.Labels != nil {
+		if err := mergo.Merge(&labels, component.Labels, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to merge labels: %w", err)
+		}
+	}
+	if component.ExtraPodMetadata != nil {
+		if err := mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
+		}
+	}
+
+	// Inject checkpoint labels AFTER user labels so they cannot be overridden.
 	var err error
 	labels, err = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to inject checkpoint labels: %w", err)
 	}
-	setMetricsLabels(labels, dynamoDeployment)
-	if component.Labels != nil {
-		err = mergo.Merge(&labels, component.Labels, mergo.WithOverride)
-		if err != nil {
-			return nil, fmt.Errorf("failed to merge labels: %w", err)
-		}
-	}
-	if component.ExtraPodMetadata != nil {
-		err = mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
-		if err != nil {
-			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
-		}
+
+	// Only mark pods as restore targets when a concrete checkpoint is ready.
+	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
+		labels[commonconsts.KubeLabelIsRestoreTarget] = "true"
+		labels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
 	}
 	return labels, nil
 }

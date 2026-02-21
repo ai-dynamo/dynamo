@@ -820,7 +820,7 @@ jobs:
   fault-tolerance-tests:
     name: ${{ matrix.framework.name }}-ft-k8s
     needs: [build-amd64]
-    if: always()
+    if: always() && inputs.pipeline_type == 'nightly'
     runs-on: prod-builder-amd-v1
     timeout-minutes: 60
     strategy:
