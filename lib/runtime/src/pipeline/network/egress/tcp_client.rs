@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedRead;
 
@@ -354,9 +354,90 @@ impl TcpConnection {
     }
 }
 
-/// Connection pool with health checking for TCP connections
+/// Shared connection set for a single host.
+/// Connections are held in Arc and shared across concurrent requests via round-robin.
+/// Each connection supports multiplexing through its internal mpsc channel.
+struct SharedConnectionSet {
+    connections: tokio::sync::RwLock<Vec<Arc<TcpConnection>>>,
+    counter: AtomicU64,
+    max_connections: usize,
+    connect_timeout: Duration,
+    channel_buffer: usize,
+    addr: SocketAddr,
+}
+
+impl SharedConnectionSet {
+    fn new(
+        addr: SocketAddr,
+        max_connections: usize,
+        connect_timeout: Duration,
+        channel_buffer: usize,
+    ) -> Self {
+        Self {
+            connections: tokio::sync::RwLock::new(Vec::with_capacity(max_connections)),
+            counter: AtomicU64::new(0),
+            max_connections,
+            connect_timeout,
+            channel_buffer,
+            addr,
+        }
+    }
+
+    /// Get a healthy connection via round-robin selection, creating one if needed.
+    ///
+    /// Fast path acquires a read lock and scans existing connections.
+    /// Slow path acquires a write lock to prune unhealthy connections and create new ones.
+    async fn get_connection(&self) -> Result<Arc<TcpConnection>> {
+        // Fast path: round-robin over existing healthy connections (read lock only)
+        {
+            let conns = self.connections.read().await;
+            if !conns.is_empty() {
+                let len = conns.len();
+                let start = self.counter.fetch_add(1, Ordering::Relaxed) as usize;
+                // Try each connection starting from the round-robin index
+                for i in 0..len {
+                    let idx = (start + i) % len;
+                    if conns[idx].is_healthy() {
+                        return Ok(conns[idx].clone());
+                    }
+                }
+            }
+        }
+
+        // Slow path: need to create or replace connections (write lock)
+        let mut conns = self.connections.write().await;
+
+        // Remove unhealthy connections
+        conns.retain(|c| c.is_healthy());
+
+        // Re-check after cleanup — another task may have added one
+        if !conns.is_empty() {
+            let idx = self.counter.fetch_add(1, Ordering::Relaxed) as usize % conns.len();
+            return Ok(conns[idx].clone());
+        }
+
+        // Create a new connection
+        tracing::debug!(
+            addr = %self.addr,
+            pool_size = conns.len() + 1,
+            "Creating new shared TCP connection"
+        );
+        let conn = Arc::new(
+            TcpConnection::connect(self.addr, self.connect_timeout, self.channel_buffer)
+                .await?,
+        );
+        conns.push(conn.clone());
+        Ok(conn)
+    }
+}
+
+/// Connection pool that shares connections across concurrent requests.
+///
+/// Connections are wrapped in `Arc` and selected via round-robin. Each connection
+/// supports multiplexing through its internal mpsc channel, so thousands of
+/// requests can share a small number of TCP connections.
 struct TcpConnectionPool {
-    pools: DashMap<SocketAddr, Arc<Mutex<Vec<TcpConnection>>>>,
+    pools: DashMap<SocketAddr, Arc<SharedConnectionSet>>,
     config: TcpRequestConfig,
 }
 
@@ -368,58 +449,23 @@ impl TcpConnectionPool {
         }
     }
 
-    /// Get a connection from the pool or create a new one
-    /// Automatically filters out unhealthy connections
-    async fn get_connection(&self, addr: SocketAddr) -> Result<TcpConnection> {
-        // Try to get from pool (lock-free read with DashMap)
-        if let Some(pool) = self.pools.get(&addr) {
-            let mut pool = pool.lock().await;
-
-            // Try to get a healthy connection, discard unhealthy ones
-            while let Some(conn) = pool.pop() {
-                if conn.is_healthy() {
-                    return Ok(conn);
-                } else {
-                    tracing::debug!("Discarding unhealthy connection for {}", addr);
-                    // Connection will be dropped here, cleaning up tasks
-                }
-            }
-        }
-
-        // Create new connection with configured channel buffer
-        tracing::debug!("Creating new TCP connection to {}", addr);
-        TcpConnection::connect(
-            addr,
-            self.config.connect_timeout,
-            self.config.channel_buffer,
-        )
-        .await
-    }
-
-    /// Return a connection to the pool if it's healthy and there's space
-    async fn return_connection(&self, conn: TcpConnection) {
-        // Only return healthy connections
-        if !conn.is_healthy() {
-            tracing::debug!("Not returning unhealthy connection to pool");
-            return;
-        }
-
-        let addr = conn.addr;
-
-        // Get or create pool for this address (lock-free with DashMap)
-        let pool = self
+    /// Get a shared connection for the given address.
+    /// Connections are reused across concurrent requests via round-robin selection.
+    async fn get_connection(&self, addr: SocketAddr) -> Result<Arc<TcpConnection>> {
+        let set = self
             .pools
             .entry(addr)
-            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+            .or_insert_with(|| {
+                Arc::new(SharedConnectionSet::new(
+                    addr,
+                    self.config.pool_size,
+                    self.config.connect_timeout,
+                    self.config.channel_buffer,
+                ))
+            })
             .clone();
 
-        let mut pool = pool.lock().await;
-        if pool.len() < self.config.pool_size {
-            pool.push(conn);
-        } else {
-            tracing::debug!("Connection pool full for {}, dropping connection", addr);
-            // Otherwise drop the connection (tasks will be cleaned up)
-        }
+        set.get_connection().await
     }
 }
 
@@ -516,11 +562,9 @@ impl RequestPlaneClient for TcpRequestClient {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
 
-        // Get connection from pool (automatically filters unhealthy connections)
         let conn = self.pool.get_connection(addr).await?;
 
-        // Send request with timeout
-        // Note: The connection's send_request now handles all the async I/O via tasks
+        // The connection's internal mpsc channel provides backpressure
         let result = tokio::time::timeout(
             self.config.request_timeout,
             conn.send_request(payload, &headers),
@@ -536,21 +580,16 @@ impl RequestPlaneClient for TcpRequestClient {
                     .bytes_received
                     .fetch_add(response.len() as u64, Ordering::Relaxed);
 
-                // Return connection to pool (health check happens inside)
-                self.pool.return_connection(conn).await;
-
                 Ok(response)
             }
             Ok(Err(e)) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
-                // Don't return unhealthy connection to pool, let it drop
                 Err(e)
             }
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!("TCP request timeout to {}", addr);
-                // Don't return timed-out connection to pool
                 Err(anyhow::anyhow!("TCP request timeout to {}", addr))
             }
         }
@@ -889,22 +928,25 @@ mod tests {
 
         let pool = TcpConnectionPool::new(config);
 
-        // Get connection twice from pool
+        // Shared connections: getting twice returns the same Arc
         let conn1 = pool.get_connection(addr).await.unwrap();
-        pool.return_connection(conn1).await;
-
-        // Small delay to ensure connection is returned
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
         let conn2 = pool.get_connection(addr).await.unwrap();
-        pool.return_connection(conn2).await;
 
-        // Should have created only 1 TCP connection since we reused
+        // Send a request to ensure the server has accepted the connection
+        let result = conn1
+            .send_request(Bytes::from("ping"), &test_headers())
+            .await;
+        assert!(result.is_ok(), "Request through shared connection should succeed");
+
+        // Should have created only 1 TCP connection since shared pool reuses it
         assert_eq!(
             connection_count.load(Ordering::SeqCst),
             1,
-            "Should reuse connection from pool"
+            "Should reuse connection from shared pool"
         );
+
+        drop(conn1);
+        drop(conn2);
     }
 
     #[tokio::test]
@@ -926,25 +968,384 @@ mod tests {
             channel_buffer: 10,
         };
 
-        let pool = TcpConnectionPool::new(config.clone());
+        let pool = TcpConnectionPool::new(config);
 
-        // Try to get a connection - it will become unhealthy quickly
-        let result =
-            TcpConnection::connect(addr, config.connect_timeout, config.channel_buffer).await;
-
-        if let Ok(conn) = result {
-            // Mark as unhealthy by trying to use it
+        // Get a connection — it may become unhealthy quickly after server closes
+        let conn = pool.get_connection(addr).await;
+        if let Ok(conn) = conn {
             let mut headers = Headers::new();
             headers.insert("x-endpoint-path".to_string(), "test".to_string());
             let _ = conn.send_request(Bytes::from("test"), &headers).await;
 
-            // Return to pool
-            pool.return_connection(conn).await;
-
-            // Try to get from pool again - should get a new connection attempt
+            // Get again — shared pool should handle unhealthy connections gracefully
             let result2 = pool.get_connection(addr).await;
-            // This might fail or succeed depending on timing, but should not panic
             let _ = result2;
         }
+    }
+
+    // ==================== Adversarial Tests ====================
+
+    /// Spawn a mock TCP echo server that handles requests indefinitely.
+    /// Returns the server address and a connection counter.
+    async fn spawn_echo_server() -> (SocketAddr, Arc<AtomicUsize>) {
+        use crate::pipeline::network::codec::TcpResponseMessage;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let conn_count = Arc::new(AtomicUsize::new(0));
+        let conn_count_clone = conn_count.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                conn_count_clone.fetch_add(1, Ordering::SeqCst);
+
+                tokio::spawn(async move {
+                    let (mut read_half, mut write_half) = tokio::io::split(stream);
+                    loop {
+                        let mut len_buf = [0u8; 2];
+                        if read_half.read_exact(&mut len_buf).await.is_err() {
+                            break;
+                        }
+                        let path_len = u16::from_be_bytes(len_buf) as usize;
+                        let mut path_buf = vec![0u8; path_len];
+                        if read_half.read_exact(&mut path_buf).await.is_err() {
+                            break;
+                        }
+                        let mut headers_len_buf = [0u8; 2];
+                        if read_half.read_exact(&mut headers_len_buf).await.is_err() {
+                            break;
+                        }
+                        let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+                        let mut headers_buf = vec![0u8; headers_len];
+                        if read_half.read_exact(&mut headers_buf).await.is_err() {
+                            break;
+                        }
+                        let mut len_buf = [0u8; 4];
+                        if read_half.read_exact(&mut len_buf).await.is_err() {
+                            break;
+                        }
+                        let payload_len = u32::from_be_bytes(len_buf) as usize;
+                        let mut payload_buf = vec![0u8; payload_len];
+                        if read_half.read_exact(&mut payload_buf).await.is_err() {
+                            break;
+                        }
+                        let response =
+                            TcpResponseMessage::new(Bytes::from(payload_buf));
+                        let encoded = response.encode().unwrap();
+                        if write_half.write_all(&encoded).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        (addr, conn_count)
+    }
+
+    /// Build minimal headers required by `TcpConnection::send_request`.
+    fn test_headers() -> Headers {
+        let mut h = Headers::new();
+        h.insert("x-endpoint-path".to_string(), "test".to_string());
+        h
+    }
+
+    /// Hammer the shared pool with 500 concurrent requests through a pool of size 2.
+    /// Verifies connections are reused and total TCP connections stay within pool_size.
+    #[tokio::test]
+    async fn test_high_concurrency_bounded_connections() {
+        let (addr, conn_count) = spawn_echo_server().await;
+
+        let config = TcpRequestConfig {
+            request_timeout: Duration::from_secs(10),
+            connect_timeout: Duration::from_secs(5),
+            pool_size: 2,
+            channel_buffer: 100,
+        };
+
+        let pool = Arc::new(TcpConnectionPool::new(config));
+
+        let mut handles = vec![];
+        for i in 0..500 {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(async move {
+                let conn = pool.get_connection(addr).await.unwrap();
+                let payload = format!("req-{i}");
+                conn.send_request(Bytes::from(payload), &test_headers())
+                    .await
+            }));
+        }
+
+        let mut success = 0;
+        for handle in handles {
+            if handle.await.unwrap().is_ok() {
+                success += 1;
+            }
+        }
+
+        assert_eq!(success, 500, "All 500 requests should succeed");
+        assert!(
+            conn_count.load(Ordering::SeqCst) <= 2,
+            "Should create at most 2 TCP connections, got {}",
+            conn_count.load(Ordering::SeqCst)
+        );
+    }
+
+    /// Race 100 tasks all calling get_connection simultaneously on a cold pool.
+    /// Ensures no duplicate connections are created beyond pool_size.
+    #[tokio::test]
+    async fn test_thundering_herd_cold_start() {
+        let (addr, conn_count) = spawn_echo_server().await;
+
+        let config = TcpRequestConfig {
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+            pool_size: 3,
+            channel_buffer: 50,
+        };
+
+        let pool = Arc::new(TcpConnectionPool::new(config));
+        let barrier = Arc::new(tokio::sync::Barrier::new(100));
+
+        let mut handles = vec![];
+        for _ in 0..100 {
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                pool.get_connection(addr).await
+            }));
+        }
+
+        let mut successes = 0;
+        for handle in handles {
+            if handle.await.unwrap().is_ok() {
+                successes += 1;
+            }
+        }
+
+        assert_eq!(successes, 100, "All 100 get_connection calls should succeed");
+        assert!(
+            conn_count.load(Ordering::SeqCst) <= 3,
+            "Should create at most pool_size (3) connections, got {}",
+            conn_count.load(Ordering::SeqCst)
+        );
+    }
+
+    /// Kill the server mid-stream, then verify the pool recovers by
+    /// creating a new connection to a replacement server.
+    #[tokio::test]
+    async fn test_server_crash_recovery() {
+        use crate::pipeline::network::codec::TcpResponseMessage;
+
+        // First server — will be killed
+        let listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener1.local_addr().unwrap();
+
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener1.accept().await.unwrap();
+            let (mut read_half, mut write_half) = tokio::io::split(stream);
+
+            // Handle exactly 1 request then crash
+            let mut buf = [0u8; 2];
+            let _ = read_half.read_exact(&mut buf).await;
+            let path_len = u16::from_be_bytes(buf) as usize;
+            let mut path_buf = vec![0u8; path_len];
+            let _ = read_half.read_exact(&mut path_buf).await;
+            let mut hdr_buf = [0u8; 2];
+            let _ = read_half.read_exact(&mut hdr_buf).await;
+            let hdr_len = u16::from_be_bytes(hdr_buf) as usize;
+            let mut hdr = vec![0u8; hdr_len];
+            let _ = read_half.read_exact(&mut hdr).await;
+            let mut len_buf = [0u8; 4];
+            let _ = read_half.read_exact(&mut len_buf).await;
+            let plen = u32::from_be_bytes(len_buf) as usize;
+            let mut pbuf = vec![0u8; plen];
+            let _ = read_half.read_exact(&mut pbuf).await;
+
+            let resp = TcpResponseMessage::new(Bytes::from_static(b"first"));
+            let encoded = resp.encode().unwrap();
+            let _ = write_half.write_all(&encoded).await;
+            // Drop everything — simulates crash
+        });
+
+        let config = TcpRequestConfig {
+            request_timeout: Duration::from_secs(3),
+            connect_timeout: Duration::from_secs(3),
+            pool_size: 2,
+            channel_buffer: 10,
+        };
+
+        let pool = TcpConnectionPool::new(config);
+
+        // First request should succeed
+        let conn = pool.get_connection(addr).await.unwrap();
+        let result = conn
+            .send_request(Bytes::from("hello"), &test_headers())
+            .await;
+        assert!(result.is_ok(), "First request should succeed");
+        assert_eq!(result.unwrap(), Bytes::from("first"));
+
+        // Wait for server to crash
+        let _ = server_handle.await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Second request on same connection should fail (server crashed)
+        let result2 = conn
+            .send_request(Bytes::from("hello2"), &test_headers())
+            .await;
+        assert!(result2.is_err(), "Request on crashed connection should fail");
+
+        // Connection should now be unhealthy
+        assert!(!conn.is_healthy(), "Connection should be marked unhealthy");
+
+        // Start replacement server on same port
+        let listener2 = TcpListener::bind(addr).await.unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener2.accept().await.unwrap();
+            let (mut rh, mut wh) = tokio::io::split(stream);
+            let mut buf = [0u8; 2];
+            let _ = rh.read_exact(&mut buf).await;
+            let plen = u16::from_be_bytes(buf) as usize;
+            let mut pbuf = vec![0u8; plen];
+            let _ = rh.read_exact(&mut pbuf).await;
+            let mut hdr_buf = [0u8; 2];
+            let _ = rh.read_exact(&mut hdr_buf).await;
+            let hdr_len = u16::from_be_bytes(hdr_buf) as usize;
+            let mut hdr = vec![0u8; hdr_len];
+            let _ = rh.read_exact(&mut hdr).await;
+            let mut len_buf = [0u8; 4];
+            let _ = rh.read_exact(&mut len_buf).await;
+            let plen2 = u32::from_be_bytes(len_buf) as usize;
+            let mut pbuf2 = vec![0u8; plen2];
+            let _ = rh.read_exact(&mut pbuf2).await;
+            let resp = TcpResponseMessage::new(Bytes::from_static(b"recovered"));
+            let encoded = resp.encode().unwrap();
+            let _ = wh.write_all(&encoded).await;
+        });
+
+        // Pool should detect unhealthy, create new connection to replacement server
+        let conn3 = pool.get_connection(addr).await.unwrap();
+        let result3 = conn3
+            .send_request(Bytes::from("recover"), &test_headers())
+            .await;
+        assert!(result3.is_ok(), "Recovery request should succeed");
+        assert_eq!(result3.unwrap(), Bytes::from("recovered"));
+    }
+
+    /// Verify the pool doesn't create connections beyond pool_size even under
+    /// sustained concurrent load over multiple rounds.
+    #[tokio::test]
+    async fn test_pool_size_cap_sustained_load() {
+        let (addr, conn_count) = spawn_echo_server().await;
+
+        let config = TcpRequestConfig {
+            request_timeout: Duration::from_secs(10),
+            connect_timeout: Duration::from_secs(5),
+            pool_size: 4,
+            channel_buffer: 50,
+        };
+
+        let pool = Arc::new(TcpConnectionPool::new(config));
+
+        // Run 3 rounds of 200 concurrent requests
+        for round in 0..3 {
+            let mut handles = vec![];
+            for i in 0..200 {
+                let pool = pool.clone();
+                handles.push(tokio::spawn(async move {
+                    let conn = pool.get_connection(addr).await.unwrap();
+                    conn.send_request(
+                        Bytes::from(format!("r{round}-{i}")),
+                        &test_headers(),
+                    )
+                    .await
+                }));
+            }
+
+            for handle in handles {
+                assert!(
+                    handle.await.unwrap().is_ok(),
+                    "Round {round}: all requests should succeed"
+                );
+            }
+        }
+
+        // After 600 total requests across 3 rounds, should still be <= pool_size connections
+        assert!(
+            conn_count.load(Ordering::SeqCst) <= 4,
+            "Should never exceed pool_size (4) connections, got {}",
+            conn_count.load(Ordering::SeqCst)
+        );
+    }
+
+    /// Connect timeout should fire quickly when the server is unreachable.
+    #[tokio::test]
+    async fn test_connect_timeout_unreachable() {
+        // Use a non-routable address to trigger connect timeout
+        let addr: SocketAddr = "192.0.2.1:1".parse().unwrap();
+
+        let config = TcpRequestConfig {
+            request_timeout: Duration::from_secs(10),
+            connect_timeout: Duration::from_millis(500),
+            pool_size: 2,
+            channel_buffer: 10,
+        };
+
+        let pool = TcpConnectionPool::new(config);
+
+        let start = tokio::time::Instant::now();
+        let result = pool.get_connection(addr).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "Should fail to connect to unreachable address");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Should timeout quickly, took {:?}",
+            elapsed
+        );
+    }
+
+    /// Blast the pool from multiple tokio tasks with tiny channel buffers
+    /// to force backpressure through the mpsc channel.
+    #[tokio::test]
+    async fn test_backpressure_small_channel() {
+        let (addr, conn_count) = spawn_echo_server().await;
+
+        let config = TcpRequestConfig {
+            request_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(5),
+            pool_size: 1,   // Single connection
+            channel_buffer: 1, // Tiny buffer — forces backpressure
+        };
+
+        let pool = Arc::new(TcpConnectionPool::new(config));
+
+        let mut handles = vec![];
+        for i in 0..50 {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(async move {
+                let conn = pool.get_connection(addr).await.unwrap();
+                conn.send_request(Bytes::from(format!("bp-{i}")), &test_headers())
+                    .await
+            }));
+        }
+
+        let mut success = 0;
+        for handle in handles {
+            if handle.await.unwrap().is_ok() {
+                success += 1;
+            }
+        }
+
+        assert_eq!(success, 50, "All requests should eventually succeed under backpressure");
+        assert_eq!(
+            conn_count.load(Ordering::SeqCst),
+            1,
+            "Should use exactly 1 connection"
+        );
     }
 }
