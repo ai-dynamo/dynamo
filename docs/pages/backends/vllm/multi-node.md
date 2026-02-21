@@ -83,7 +83,8 @@ python -m dynamo.frontend --router-mode kv &
 python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
-  --enforce-eager
+  --enforce-eager \
+  --is-decode-worker
 ```
 
 **Node 2**: Run prefill worker
@@ -104,3 +105,5 @@ you need multiple nodes to host a **single** model instance. One node runs the f
 spawning only vLLM workers.
 
 See [`examples/backends/vllm/launch/multi_node_tp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/multi_node_tp.sh) for a ready-to-use launch script that supports both head and worker roles via `--head` / `--worker` flags. The model, TP size, and node count are configurable via `MODEL`, `TENSOR_PARALLEL_SIZE`, and `NNODES` environment variables.
+
+For details on the flags used for multi-node distributed execution (`--master-addr`, `--master-port`, `--nnodes`, `--node-rank`), see the [vLLM multiprocessing docs](https://docs.vllm.ai/en/stable/serving/parallelism_scaling/#running-vllm-with-multiprocessing).
