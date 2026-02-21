@@ -152,6 +152,31 @@ def patch_model_runner() -> None:
         return original_init_memory_pool(self, *args, **kwargs)
 
     ModelRunner.init_memory_pool = patched_init_memory_pool
+
+    # Wrap load_model so that model_loader_extra_config is available to
+    # GMSMemorySaverImpl before TorchMemorySaver._ensure_initialized runs.
+    original_load_model = ModelRunner.load_model
+
+    def patched_load_model(self, *args, **kwargs):
+        import json
+
+        import gpu_memory_service.integrations.sglang.memory_saver as ms_mod
+
+        raw = getattr(self.server_args, "model_loader_extra_config", None) or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "[GMS] Failed to parse model_loader_extra_config, using defaults"
+                )
+                raw = {}
+        ms_mod._model_loader_extra_config = raw
+
+        return original_load_model(self, *args, **kwargs)
+
+    ModelRunner.load_model = patched_load_model
+
     ModelRunner._gms_patched = True
     _model_runner_patched = True
-    logger.info("[GMS] Patched ModelRunner.init_memory_pool")
+    logger.info("[GMS] Patched ModelRunner.init_memory_pool and load_model")
