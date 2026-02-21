@@ -230,6 +230,8 @@ async def async_main():
         kwargs["tls_key_path"] = config.tls_key_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
+    if config.namespace_prefix:
+        kwargs["namespace_prefix"] = config.namespace_prefix
     if config.kserve_grpc_server and config.grpc_metrics_port:
         kwargs["http_metrics_port"] = config.grpc_metrics_port
 
