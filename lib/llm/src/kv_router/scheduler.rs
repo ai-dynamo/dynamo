@@ -65,6 +65,8 @@ pub struct SchedulingRequest {
     pub lora_name: Option<String>,
     /// Priority jump in seconds; decreases effective arrival time in the queue.
     pub priority_jump: f64,
+    /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     // Option to take it out to send the response without moving the struct
     resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
 }
@@ -208,8 +210,17 @@ impl KvScheduler {
                     request.prefill_tokens = prefill_tokens;
 
                     // Read the current workers configuration from watch receiver
-                    let workers: HashMap<WorkerId, ModelRuntimeConfig> =
+                    let mut workers: HashMap<WorkerId, ModelRuntimeConfig> =
                         scheduler_rx.borrow().clone();
+
+                    if let Some(ref allowed_ids) = request.allowed_worker_ids {
+                        workers.retain(|worker_id, _| allowed_ids.contains(worker_id));
+                        tracing::debug!(
+                            allowed_count = allowed_ids.len(),
+                            filtered_worker_count = workers.len(),
+                            "Applied allowed_worker_ids filter"
+                        );
+                    }
 
                     match selector.select_worker(&workers, &request, block_size) {
                         Ok(selection) => {
@@ -277,6 +288,7 @@ impl KvScheduler {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<WorkerWithDpRank, KvSchedulerError> {
         #[cfg(feature = "bench")]
         let start = Instant::now();
@@ -293,6 +305,7 @@ impl KvScheduler {
             update_states,
             lora_name,
             priority_jump,
+            allowed_worker_ids,
             resp_tx: Some(resp_tx),
         };
 

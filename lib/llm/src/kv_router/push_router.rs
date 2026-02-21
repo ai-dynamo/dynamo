@@ -221,6 +221,7 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
+                    None,
                 )
                 .await?;
 

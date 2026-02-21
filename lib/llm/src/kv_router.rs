@@ -60,6 +60,8 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
 };
 
+use std::collections::HashSet;
+
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 
@@ -346,7 +348,9 @@ impl KvRouter {
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
-    /// Now also takes optional context_id for request tracking
+    /// Now also takes optional context_id for request tracking.
+    ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
         &self,
@@ -357,6 +361,7 @@ impl KvRouter {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let start = Instant::now();
 
@@ -370,12 +375,18 @@ impl KvRouter {
             .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos));
         let hash_elapsed = start.elapsed();
 
-        let overlap_scores = self
+        let mut overlap_scores = self
             .indexer
             .find_matches(block_hashes)
             .instrument(tracing::info_span!("kv_router.find_matches"))
             .await?;
         let find_matches_elapsed = start.elapsed();
+
+        if let Some(ref allowed_ids) = allowed_worker_ids {
+            overlap_scores
+                .scores
+                .retain(|worker, _| allowed_ids.contains(&worker.worker_id));
+        }
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
@@ -398,6 +409,7 @@ impl KvRouter {
                 update_states,
                 lora_name,
                 priority_jump,
+                allowed_worker_ids,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
@@ -553,15 +565,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                 block_mm_infos,
             } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(
-                        Some(&context_id),
-                        &tokens,
-                        block_mm_infos.as_deref(),
-                        None,
-                        true,
-                        None,
-                        0.0,
-                    )
+                    .find_best_match(Some(&context_id), &tokens, block_mm_infos.as_deref(), None, true, None, 0.0, None)
                     .await?;
 
                 RouterResponse::New {
