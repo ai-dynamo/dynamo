@@ -246,9 +246,17 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        // Using vLLM default behavior
+        // Always return true to match vLLM default behavior.
+        //
+        // Context: PR #5223 intentionally hardcoded this to `true` to fix a
+        // customer-reported regression where skipping the generation prompt
+        // after assistant messages caused incorrect completions.  A smarter
+        // message-driven implementation (checking whether the last message is
+        // an Assistant message) is tracked as a backlog TODO but must not be
+        // re-enabled without end-to-end validation of the affected workflows.
         true
-        // // Only add generation prompt if the last message was not assistant (default to true when no last message)
+        // // Only add generation prompt if the last message was not assistant
+        // // (default to true when no last message).
         // self.inner
         //     .messages
         //     .last()
@@ -1199,6 +1207,9 @@ NORMAL MODE
     fn tool() -> Msg {
         Msg::Tool(Default::default())
     }
+    fn assistant() -> Msg {
+        Msg::Assistant(Default::default())
+    }
 
     fn dummy_state(messages: Vec<Msg>) -> NvCreateChatCompletionRequest {
         let json = serde_json::json!({
@@ -1217,6 +1228,14 @@ NORMAL MODE
     #[test]
     fn add_after_tool() {
         let s = dummy_state(vec![tool()]);
+        assert!(s.should_add_generation_prompt());
+    }
+
+    #[test]
+    fn add_after_assistant() {
+        // Even after an assistant message we return true (vLLM default).
+        // See PR #5223 for the customer-reported issue that motivated this.
+        let s = dummy_state(vec![assistant()]);
         assert!(s.should_add_generation_prompt());
     }
 

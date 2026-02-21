@@ -67,6 +67,8 @@ jobs:
     if: needs.changed-files.outputs.rust == 'true'
     runs-on:
       group: Fastchecker
+    env:
+      RUSTFLAGS: -D warnings
     strategy:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
