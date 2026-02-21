@@ -1,0 +1,120 @@
+# Dynamo Dark Design System -- Shared Tokens
+# Based on NVIDIA Brand Guide (colors, typography)
+# Used by D2 theme (dynamo.d2) and Plotly template (plotly_dynamo.py)
+# Version history: see STYLE_GUIDE.md
+
+meta:
+  name: "dynamo-dark"
+  version: "2.0"
+
+colors:
+  # --- NVIDIA Brand Primary ---
+  brand:
+    nvidia_green: "#76b900"    # primary brand color
+    rich_black: "#000000"      # dark background
+    white: "#ffffff"           # light text / light background
+
+  # --- Backgrounds (gaming/dark experience) ---
+  background:
+    primary: "#000000"         # Rich Black -- outermost background
+    surface: "#1a1a1a"         # container fill -- level 1
+    surface_alt: "#2a2a2a"     # container fill -- level 2
+    elevated: "#3a3a3a"        # container fill -- level 3
+
+  # --- Borders ---
+  border:
+    frame: "#76b900"           # NVIDIA Green -- outer frame accent
+    container: "#008564"       # Emerald -- container borders
+    subtle: "#3a3a3a"          # Dark Gray -- grid lines, separators
+
+  # --- NVIDIA Accent Colors (muted for dark theme) ---
+  accent:
+    nvidia_green: "#76b900"    # primary accent -- data, GPU, key actions
+    cpu_blue: "#0071c5"        # CPU, compute, control paths
+    fluorite: "#fac200"        # data flow, NVLink, highlights
+    emerald: "#008564"         # storage, databases, caches, pipelines
+    garnet: "#890c58"          # NIC, network hardware
+    amethyst: "#5d1682"        # services, APIs, middleware
+    amber: "#c08050"           # queues, events, messaging
+    coral: "#b04040"           # critical paths, errors, alerts
+    olive: "#909040"           # load balancers, infrastructure
+
+  # --- Muted fills (desaturated for dark backgrounds) ---
+  fills:
+    green: "#3a5a00"           # data components
+    blue: "#0f1e30"            # CPU, compute
+    purple: "#1a1428"          # services, APIs
+    teal: "#142025"            # storage, databases
+    warm: "#201810"            # queues, events
+    wine: "#2a1520"            # NIC, network
+    signal: "#1e1a14"          # flags, signals, state
+    red: "#2a1010"             # critical, alerts
+    neutral: "#1a1a1a"         # generic, utility
+
+  # --- Neutrals (NVIDIA brand grays) ---
+  text:
+    primary: "#ffffff"         # White -- main text
+    secondary: "#cdcdcd"       # Light Gray (205,205,205)
+    muted: "#767676"           # Muted Gray (118,118,118) -- 4.6:1 min AA
+    medium: "#8c8c8c"          # Medium Gray (140,140,140)
+
+  # --- Chart series (accent strokes for bar/line/scatter) ---
+  chart_series:
+    - "#76b900"                # NVIDIA Green
+    - "#0071c5"                # CPU Blue
+    - "#fac200"                # Fluorite
+    - "#008564"                # Emerald
+    - "#8c8c8c"                # Medium Gray
+    - "#5d1682"                # Amethyst
+    - "#c08050"                # Amber
+    - "#b04040"                # Coral
+
+  # --- Chart fills (muted versions of chart_series for bar/hist fills) ---
+  # Brighter than D2 component fills for chart readability, but not fully saturated
+  chart_fills:
+    - "#4a7500"                # Muted NVIDIA Green
+    - "#0a4a80"                # Muted CPU Blue
+    - "#9a7800"                # Muted Fluorite
+    - "#005a40"                # Muted Emerald
+    - "#555555"                # Muted Medium Gray
+    - "#3a1050"                # Muted Amethyst
+    - "#7a5030"                # Muted Amber
+    - "#702828"                # Muted Coral
+
+typography:
+  # Body / UI text -- NVIDIA Sans with Arial fallback
+  font_family: "'NVIDIA Sans', Arial, Helvetica, sans-serif"
+
+  # Code and aligned chart labels -- Roboto Mono
+  font_family_mono: "'Roboto Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace"
+
+  title:
+    size: 18
+    weight: 700
+    transform: "uppercase"
+    letter_spacing: "0.08em"
+  heading:
+    size: 14
+    weight: 600
+    transform: "uppercase"
+    letter_spacing: "0.05em"
+  label:
+    size: 12
+    weight: 400
+    transform: "none"
+  annotation:
+    size: 10
+    weight: 400
+    transform: "none"
+
+borders:
+  frame_width: 1.5
+  container_width: 1
+  frame_style: "solid"
+  container_style: "solid"
+  control_flow_style: "dashed"
+  border_radius: 0
+
+spacing:
+  padding: 16
+  gap: 8
