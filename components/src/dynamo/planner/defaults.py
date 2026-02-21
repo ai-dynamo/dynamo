@@ -73,6 +73,8 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
     mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
 
+    throughput_metrics_source = "frontend"  # "frontend" | "router"
+
     # Scaling mode flags
     enable_throughput_scaling = True
     enable_load_scaling = False
