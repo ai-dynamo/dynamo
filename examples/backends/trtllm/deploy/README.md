@@ -55,6 +55,44 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 > [!NOTE]
 > This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/pages/components/profiler/profiler-guide.md) for detailed instructions.
 
+### 7. **Docker Compose Disaggregated Deployment** (`docker-compose-disagg.yml`)
+Docker-based disaggregated deployment for single-host setups without Kubernetes.
+
+**Architecture:**
+- `frontend`: HTTP API server with KV routing
+- `prefill-0`: Prefill-only worker (GPU 0)
+- `decode-0`: Decode-only worker (GPU 1)
+
+> [!IMPORTANT]
+> **Every worker container must have a globally unique `hostname:`** when using
+> `network_mode: host`. TensorRT-LLM identifies NIXL agents by `hostname_pid_counter`.
+> Containers sharing the host's network namespace inherit the same hostname, and
+> separate PID namespaces produce identical PIDs, causing agent name collisions.
+> This makes workers skip NIXL connection setup, silently breaking KV cache transfer.
+>
+> The provided Docker Compose file sets `hostname: dynamo-prefill-0`,
+> `hostname: dynamo-decode-0`, etc. If you write custom `docker run` commands,
+> add `--hostname <unique-name>` to **every** worker container — including
+> multiple workers of the same role (e.g., `--hostname dynamo-prefill-1`).
+
+> [!NOTE]
+> Docker Compose `--scale` does **not** work with `network_mode: host` because
+> replicas would share ports, GPU assignments, and hostnames. To add more workers,
+> define additional services in the compose file (see the commented-out `prefill-1`
+> example). For dynamic scaling, use the Kubernetes DynamoGraphDeployment
+> (see `disagg_router.yaml`).
+
+**Usage:**
+```bash
+# Start infrastructure (etcd, nats)
+docker compose -f deploy/docker-compose.yml up -d
+
+# Start disaggregated workers
+export CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1.post1
+export MODEL_PATH=/path/to/model
+docker compose -f examples/backends/trtllm/deploy/docker-compose-disagg.yml up
+```
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
@@ -284,5 +322,6 @@ Common issues and solutions:
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
 6. **Git LFS issues**: Ensure git-lfs is installed before building containers
 7. **ARM deployment**: Use `--platform linux/arm64` when building on ARM machines
+8. **NIXL KV cache transfer fails in Docker disaggregated mode**: If you see `storeContextBlocks: Can not find sequence for request` in worker logs and `Unfold must not be polled after it returned Poll::Ready(None)` in frontend logs, ensure each Docker worker container has a unique `--hostname`. See the [Docker Compose disaggregated deployment](#7-docker-compose-disaggregated-deployment-docker-compose-disaggyml) section.
 
 For additional support, refer to the [deployment troubleshooting guide](../../../../docs/pages/kubernetes/README.md).
