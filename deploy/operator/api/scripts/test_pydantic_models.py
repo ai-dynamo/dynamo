@@ -21,6 +21,7 @@ Validates that the generated Pydantic models can be imported and used correctly.
 
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 
@@ -49,6 +50,39 @@ def _repo_root() -> Path:
 # Add the components src to path so we can import the generated models
 sys.path.insert(0, str(_repo_root() / "components" / "src"))
 
+# ---------------------------------------------------------------------------
+# Stub dynamo.runtime.logging and bypass the heavy dynamo.planner.__init__
+# before importing any dynamo module. Same technique as generate_planner_schema.py.
+#
+# dynamo itself must be a namespace-like package (has __path__) so that
+# Python's import machinery can traverse down to dynamo.profiler from the
+# filesystem.  dynamo.planner is pre-registered as a stub to skip its heavy
+# __init__.py, while still allowing dynamo.planner.utils.* to load normally.
+# ---------------------------------------------------------------------------
+_repo = _repo_root()
+_components_src = str(_repo / "components" / "src")
+_dynamo_path = str(_repo / "components" / "src" / "dynamo")
+_planner_path = str(_repo / "components" / "src" / "dynamo" / "planner")
+
+if "dynamo" not in sys.modules:
+    _dynamo_mod = types.ModuleType("dynamo")
+    _dynamo_mod.__path__ = [_dynamo_path]  # type: ignore[attr-defined]
+    _dynamo_mod.__package__ = "dynamo"
+    sys.modules["dynamo"] = _dynamo_mod
+
+if "dynamo.runtime" not in sys.modules:
+    _runtime_mod = types.ModuleType("dynamo.runtime")
+    sys.modules["dynamo.runtime"] = _runtime_mod
+
+_logging_mod = types.ModuleType("dynamo.runtime.logging")
+_logging_mod.configure_dynamo_logging = lambda *args, **kwargs: None  # type: ignore[attr-defined]
+sys.modules["dynamo.runtime.logging"] = _logging_mod
+
+_planner_mod = types.ModuleType("dynamo.planner")
+_planner_mod.__path__ = [_planner_path]  # type: ignore[attr-defined]
+_planner_mod.__package__ = "dynamo.planner"
+sys.modules["dynamo.planner"] = _planner_mod
+
 import pydantic  # noqa: E402
 
 from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
@@ -61,8 +95,8 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
     MockerSpec,
     ModelCacheSpec,
     OptimizationType,
+    PlannerConfig,
     PlannerPreDeploymentSweepMode,
-    PlannerSpec,
     ProfilingPhase,
     SearchStrategy,
     SLASpec,
@@ -105,7 +139,7 @@ def test_full_dgdr():
             pvcModelPath="llama-3.1-405b",
         ),
         features=FeaturesSpec(
-            planner=PlannerSpec(enabled=True),
+            planner=PlannerConfig(enable_load_scaling=False),
             mocker=MockerSpec(enabled=False),
         ),
         searchStrategy=SearchStrategy.Rapid,
@@ -120,7 +154,7 @@ def test_full_dgdr():
     assert spec.sla.itl == 10.0
     assert spec.modelCache.pvcName == "model-cache"
     assert spec.modelCache.pvcModelPath == "llama-3.1-405b"
-    assert spec.features.planner.enabled is True
+    assert isinstance(spec.features.planner, PlannerConfig)
     assert spec.features.mocker.enabled is False
     print("✓ Full DGDR spec validation passed")
 

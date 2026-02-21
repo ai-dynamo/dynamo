@@ -30,6 +30,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+# Types that should be IMPORTED rather than re-emitted.
+# Maps Go type name → (Python import path, Python name).
+# Planner-specific types are the canonical hand-written source of truth.
+_IMPORT_OVERRIDES: dict[str, tuple[str, str]] = {
+    "PlannerPreDeploymentSweepMode": (
+        "dynamo.planner.utils.planner_config",
+        "PlannerPreDeploymentSweepMode",
+    ),
+    "PlannerConfig": (
+        "dynamo.planner.utils.planner_config",
+        "PlannerConfig",
+    ),
+}
+
 # Per-struct docstring overrides for cases where the Python docstring should differ
 # from the Go comment (e.g. Python-specific mutual-exclusivity documentation).
 _STRUCT_DOCSTRINGS: dict = {
@@ -62,6 +76,14 @@ _STRUCT_EXTRAS: dict = {
             raise ValueError("ttft and itl must both be provided together.")
         return self
 """,
+}
+
+# Per-field Python type overrides.  Maps (StructName, json_field_name) → Python type string.
+# Used when the Go type (e.g. *runtime.RawExtension) should map to a richer Python type
+# rather than the generic Dict[str, Any].
+_FIELD_TYPE_OVERRIDES: dict[tuple[str, str], str] = {
+    # FeaturesSpec.planner is opaque in Go but strongly typed in Python.
+    ("FeaturesSpec", "planner"): "Optional[PlannerConfig]",
 }
 
 _SPDX_HEADER = """\
@@ -154,6 +176,8 @@ class GoToPydanticConverter:
         "runtime.RawExtension": "Dict[str, Any]",
         "batchv1.JobSpec": "Dict[str, Any]",
         "corev1.ResourceRequirements": "Dict[str, Any]",
+        "corev1.Toleration": "Dict[str, Any]",
+        "apiextensionsv1.JSON": "Any",
     }
 
     def __init__(self):
@@ -447,8 +471,35 @@ class GoToPydanticConverter:
             "",
         ]
 
-        # Generate enums first
+        # Emit import statements for overridden types, grouped by module
+        import_groups: dict[str, list[str]] = {}
+        for go_name, (mod, py_name) in _IMPORT_OVERRIDES.items():
+            # Only emit if the type actually appears in the parsed content
+            in_enums = any(e.name == go_name for e in self.enums)
+            in_structs = any(s.name == go_name for s in self.structs)
+            # Always emit if it's a known planner type (may appear as field type)
+            if (
+                in_enums
+                or in_structs
+                or go_name in ("PlannerPreDeploymentSweepMode", "PlannerConfig")
+            ):
+                import_groups.setdefault(mod, []).append(py_name)
+
+        for mod in sorted(import_groups):
+            names = sorted(import_groups[mod])
+            lines.append(
+                "# Import canonical planner types – do NOT redefine them here."
+            )
+            lines.append(f"from {mod} import (  # noqa: F401 (re-exported)")
+            for n in names:
+                lines.append(f"    {n},")
+            lines.append(")")
+            lines.append("")
+
+        # Generate enums first (skip ones that are imported)
         for enum in self.enums:
+            if enum.name in _IMPORT_OVERRIDES:
+                continue  # imported above
             lines.append("")
             if enum.comment:
                 lines.append(f"# {enum.comment}")
@@ -490,9 +541,13 @@ class GoToPydanticConverter:
                 effective_optional = go_field.is_optional and (
                     go_field.is_pointer or go_field.default is None
                 )
-                python_type = self._go_type_to_python(
-                    go_field.go_type, go_field.is_pointer, effective_optional
-                )
+                override_key = (struct.name, go_field.name)
+                if override_key in _FIELD_TYPE_OVERRIDES:
+                    python_type = _FIELD_TYPE_OVERRIDES[override_key]
+                else:
+                    python_type = self._go_type_to_python(
+                        go_field.go_type, go_field.is_pointer, effective_optional
+                    )
 
                 field_def = f"    {go_field.name}: {python_type}"
 
