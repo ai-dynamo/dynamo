@@ -283,7 +283,7 @@ pub async fn start_kv_router_background(
     let generate_endpoint = component.endpoint("generate");
     let discovery_client = component.drt().discovery();
     let router_discovery_key =
-        router_discovery_query(component.namespace().name(), component.name());
+        router_discovery_query(component.namespace().name(), component.name().to_string());
     let mut router_event_stream = discovery_client
         .list_and_watch(router_discovery_key, Some(cancellation_token.clone()))
         .await?;
@@ -575,7 +575,7 @@ async fn cleanup_orphaned_consumers(
     let Ok(router_instances) = discovery
         .list(router_discovery_query(
             component.namespace().name(),
-            component.name(),
+            component.name().to_string(),
         ))
         .await
     else {

@@ -419,9 +419,9 @@ impl ModelManager {
         let instance_id = discovery.instance_id();
 
         // Build transport for router endpoint based on request plane mode
-        // Derive the router's discovery component name from the target worker component
+        // Use the worker's component name so each target pool gets its own router discovery group
         let router_endpoint_id =
-            router_endpoint_id(endpoint.id().namespace, &endpoint.id().component);
+            router_endpoint_id(endpoint.id().namespace, endpoint.id().component);
         let transport = build_transport_type(endpoint, &router_endpoint_id, instance_id).await?;
 
         let discovery_spec = DiscoverySpec::Endpoint {
