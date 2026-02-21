@@ -99,72 +99,8 @@ python -m dynamo.vllm \
 ### Multi-node Tensor/Pipeline Parallelism
 
 When the total parallelism (TP × PP) exceeds the number of GPUs on a single node,
-you need multiple nodes to host a **single** model instance. In this mode, one node
-runs the full `dynamo.vllm` process (head node) while additional nodes run in
-`--headless` mode — spawning only vLLM workers without Dynamo endpoints, NATS, or etcd.
+you need multiple nodes to host a **single** model instance. One node runs the full
+`dynamo.vllm` process (head) while additional nodes run in `--headless` mode,
+spawning only vLLM workers.
 
-**How it works:**
-
-- **Head node** (`node_rank_within_dp == 0`): runs the full Dynamo stack — engine core,
-  scheduler, and Dynamo endpoints (NATS/etcd required).
-- **Worker nodes** (`--headless`): run `vLLM` workers only via `run_headless()`.
-  No engine core, no scheduler, no Dynamo endpoints. Only `torch.distributed`
-  connectivity to the head node is required.
-
-**Infrastructure requirements:**
-
-| Node | NATS/etcd | torch.distributed | Dynamo endpoints |
-|------|-----------|-------------------|------------------|
-| Head | Yes | Yes | Yes |
-| Worker (`--headless`) | No | Yes | No |
-
-**Example: TP=16 across 2× 8-GPU nodes**
-
-```bash
-# On both nodes
-export HEAD_NODE_IP="<your-head-node-ip>"
-export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
-export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
-```
-
-Node 1 (head):
-```bash
-python -m dynamo.frontend --router-mode kv &
-
-python -m dynamo.vllm \
-  --model meta-llama/Llama-3.1-405B-Instruct \
-  --tensor-parallel-size 16 \
-  --enforce-eager
-```
-
-Node 2 (worker):
-```bash
-python -m dynamo.vllm \
-  --model meta-llama/Llama-3.1-405B-Instruct \
-  --tensor-parallel-size 16 \
-  --enforce-eager \
-  --headless
-```
-
-**Example: TP=8, PP=2 across 2× 8-GPU nodes**
-
-Node 1 (head):
-```bash
-python -m dynamo.frontend --router-mode kv &
-
-python -m dynamo.vllm \
-  --model meta-llama/Llama-3.1-405B-Instruct \
-  --tensor-parallel-size 8 \
-  --pipeline-parallel-size 2 \
-  --enforce-eager
-```
-
-Node 2 (worker):
-```bash
-python -m dynamo.vllm \
-  --model meta-llama/Llama-3.1-405B-Instruct \
-  --tensor-parallel-size 8 \
-  --pipeline-parallel-size 2 \
-  --enforce-eager \
-  --headless
-```
+See [`examples/backends/vllm/launch/multi_node_tp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/multi_node_tp.sh) for a ready-to-use launch script that supports both head and worker roles via `--head` / `--worker` flags. The model, TP size, and node count are configurable via `MODEL`, `TENSOR_PARALLEL_SIZE`, and `NNODES` environment variables.
