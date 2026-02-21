@@ -19,6 +19,7 @@ package gpu
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -371,4 +372,96 @@ func TestInferHardwareSystem_SpacesAndDashes(t *testing.T) {
 		result := InferHardwareSystem(variant)
 		assert.Equal(t, "h100_sxm", result, "Should normalize spaces/dashes: %s", variant)
 	}
+}
+
+// fakeScrapePod allows us to override scrapePod during tests
+var fakeScrapePod = func(ctx context.Context, pod corev1.Pod) (*GPUInfo, error) {
+	// Return deterministic GPU info based on pod name
+	switch pod.Name {
+	case "gpu-pod-1":
+		return &GPUInfo{
+			NodeName:    pod.Spec.NodeName,
+			GPUsPerNode: 4,
+			Model:       "A100-SXM4-40GB",
+			VRAMPerGPU:  40960,
+		}, nil
+	case "gpu-pod-2":
+		return &GPUInfo{
+			NodeName:    pod.Spec.NodeName,
+			GPUsPerNode: 8,
+			Model:       "H100-SXM5-80GB",
+			VRAMPerGPU:  81920,
+		}, nil
+	default:
+		return nil, fmt.Errorf("no GPU info")
+	}
+}
+
+// patchScrapePod temporarily overrides the package-level scrapePod function for testing
+func patchScrapePod(f func(ctx context.Context, pod corev1.Pod) (*GPUInfo, error)) func() {
+	old := scrapePodFunc
+	scrapePodFunc = f
+	return func() { scrapePodFunc = old }
+}
+func TestDiscoverGPUsFromDCGM_NoValidPods(t *testing.T) {
+	ctx := context.Background()
+
+	defer patchScrapePod(func(ctx context.Context, pod corev1.Pod) (*GPUInfo, error) {
+		return nil, fmt.Errorf("scrape failed")
+	})()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-pod-bad",
+			Labels: map[string]string{
+				"app": "dcgm-exporter",
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-bad",
+		},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.3",
+		},
+	}
+
+	k8sClient := newFakeClient(pod)
+	cache := NewGPUDiscoveryCache()
+
+	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	assert.Error(t, err)
+	assert.Nil(t, info)
+	assert.Contains(t, err.Error(), "no valid GPU info found")
+}
+
+func TestDiscoverGPUsFromDCGM_SinglePod(t *testing.T) {
+	ctx := context.Background()
+
+	defer patchScrapePod(fakeScrapePod)()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-pod-1",
+			Labels: map[string]string{
+				"app": "dcgm-exporter",
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "gpu-node-1",
+		},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.1",
+		},
+	}
+
+	k8sClient := newFakeClient(pod)
+	cache := NewGPUDiscoveryCache()
+
+	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+
+	assert.Equal(t, 4, info.GPUsPerNode)
+	assert.Equal(t, "A100-SXM4-40GB", info.Model)
+	assert.Equal(t, 40960, info.VRAMPerGPU)
 }
