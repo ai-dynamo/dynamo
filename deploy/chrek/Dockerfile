@@ -67,7 +67,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /chrek-agent ./cmd/agent
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /restore-entrypoint ./cmd/restore-entrypoint
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -125,6 +125,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     uuid-runtime \
     tar \
     ca-certificates \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy CRIU from builder
@@ -137,17 +138,20 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint
 
 # Copy the built binaries
 COPY --from=builder /chrek-agent /usr/local/bin/chrek-agent
-COPY --from=builder /restore-entrypoint /restore-entrypoint
+COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 
-# Create checkpoint directory
-RUN mkdir -p /checkpoints
+# Create directories
+RUN mkdir -p /checkpoints /var/run/chrek
 
 USER root
 
 ENTRYPOINT ["/usr/local/bin/chrek-agent"]
 
 # =============================================================================
-# Stage: Placeholder - Restore placeholder image (requires BASE_IMAGE arg)
+# Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)
+# This image is a superset of the runtime image: same default execution contract
+# (entrypoint/cmd/user), plus CRIU/cuda-checkpoint tooling for external restore.
+# The operator may still override command to "sleep infinity" for restore pods.
 # =============================================================================
 FROM ${BASE_IMAGE} AS placeholder
 
@@ -156,7 +160,7 @@ ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
 
 USER root
 
-# Install CRIU runtime dependencies
+# Install minimal runtime dependencies for CRIU restore (nsrestore runs here via nsenter)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libbsd0 \
     libcap2 \
@@ -174,20 +178,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy CRIU from builder
+# Copy CRIU from builder (needed by nsrestore running inside these namespaces)
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 RUN criu --version && echo "CRIU installed successfully"
 
-# Copy cuda-checkpoint binary
+# Copy cuda-checkpoint binary (used for external CUDA state checkpoint/restore)
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 RUN chmod +x /usr/local/sbin/cuda-checkpoint
+
+# Copy nsrestore binary (invoked by DaemonSet via nsenter)
+COPY --from=builder /nsrestore /usr/local/bin/nsrestore
+RUN chmod +x /usr/local/bin/nsrestore
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
 
-# Copy restore binaries
-COPY --from=builder /restore-entrypoint /restore-entrypoint
-RUN chmod +x /restore-entrypoint
-
-ENTRYPOINT ["/restore-entrypoint"]
-CMD []

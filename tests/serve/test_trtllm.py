@@ -199,21 +199,37 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
-    "epd_multimodal_image_and_embeddings": TRTLLMConfig(
-        name="epd_multimodal_image_and_embeddings",
+    # TensorRT-LLM EPD (Encode-Prefill-Decode) multimodal test for nightly CI
+    # Uses llava model with 2 GPUs (encode shares GPU with prefill)
+    #
+    # TODO: Add Llama-4-Scout multimodal tests (agg_multimodal_llama, disagg_multimodal_llama)
+    #       once CI supports gpu_8 runners and launch scripts are available
+    "epd_multimodal": TRTLLMConfig(
+        name="epd_multimodal",
         directory=trtllm_dir,
-        script_name="epd_multimodal_image_and_embeddings.sh",
+        script_name="epd_multimodal_image.sh",
         marks=[
-            pytest.mark.gpu_4,
+            pytest.mark.gpu_2,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.nightly,
         ],
         model="llava-hf/llava-v1.6-mistral-7b-hf",
         frontend_port=DefaultPort.FRONTEND.value,
-        timeout=1200,
+        timeout=900,
         delayed_start=120,
-        request_payloads=[multimodal_payload_default()],
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            # Override GPU assignments to fit on 2 GPUs (encode shares with prefill)
+            "PREFILL_CUDA_VISIBLE_DEVICES": "0",
+            "DECODE_CUDA_VISIBLE_DEVICES": "1",
+            "ENCODE_CUDA_VISIBLE_DEVICES": "0",
+        },
     ),
     "completions_only": TRTLLMConfig(
         name="completions_only",

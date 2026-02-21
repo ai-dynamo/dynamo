@@ -63,10 +63,10 @@ daemonset:
   # Resource limits and requests
   resources:
     limits:
-      cpu: 2
+      cpu: 4
       memory: 4Gi
     requests:
-      cpu: 500m
+      cpu: 2
       memory: 1Gi
 
   # Node selector - target GPU nodes
@@ -81,9 +81,6 @@ daemonset:
     - key: dedicated
       operator: Exists
       effect: NoSchedule
-
-  # Runtime class name for GPU access
-  runtimeClassName: nvidia
 
   # Pod labels
   podLabels: {}
@@ -120,60 +117,62 @@ rbac:
   namespaceRestricted: true
 
 # Static configuration (loaded from ConfigMap)
-# Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) still come from environment variables
+# Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
 config:
-  agent:
-    # How checkpoints are triggered: "http" or "watcher"
-    signalSource: "watcher"
-    # HTTP server address for health checks and API
-    listenAddr: ":8080"
+  overlay:
+    # Virtual FS dirs are COW artifacts in the overlay upperdir.
+    systemDirs:
+      - /proc
+      - /sys
+      - /dev
+    # Cache directories to exclude (reduces checkpoint size)
+    cacheDirs:
+      - /.cache/huggingface
+    # Python bytecode is already loaded in memory at restore time and
+    # regenerated automatically on cold start.
+    additionalExclusions:
+      - "*/__pycache__"
+      - "*.pyc"
 
-  checkpoint:
-    criu:
-      # Ghost file size limit in bytes (512MB recommended for GPU workloads)
-      ghostLimit: 536870912
-      # CRIU timeout in seconds (6 hours for large GPU checkpoints)
-      timeout: 21600
-      # CRIU logging verbosity (0-4)
-      logLevel: 4
-      # CRIU work directory for temporary files
-      workDir: "/var/criu-work"
+  restore:
+    # Path to the nsrestore binary in the placeholder image
+    nsRestorePath: /usr/local/bin/nsrestore
+    # Maximum seconds to wait for a restored pod to become Ready (0 = no timeout)
+    restoreReadyTimeoutSeconds: 0
 
-      # K8s-specific options (recommended defaults for containers)
-      leaveRunning: true      # Keep process running after checkpoint
-      shellJob: true          # Containers are often session leaders
-      tcpClose: true          # Pod IPs change on restore/migration
-      fileLocks: true         # Applications use file locks
-      orphanPtsMaster: true   # Containers with TTYs
-      extUnixSk: true         # External Unix sockets
-      linkRemap: true         # Handle deleted-but-open files
-      extMasters: true        # External bind mount masters
-      manageCgroupsMode: "ignore"  # Let K8s manage cgroups (ignore/soft/full/strict)
+  criu:
+    # Path to the criu binary
+    binaryPath: /usr/local/sbin/criu
+    # Ghost file size limit in bytes. Deleted-but-open files smaller than this
+    # are saved inline in the checkpoint image as ghost files.
+    ghostLimit: 536870912
+    # CRIU logging verbosity (0-4)
+    logLevel: 4
+    # CRIU work directory for temporary files
+    workDir: /var/criu-work
 
-      # Advanced options
-      autoDedup: false        # Auto-deduplication of memory pages
-      lazyPages: false        # Lazy page migration (experimental)
+    # K8s-specific options (recommended defaults for containers)
+    leaveRunning: true      # Keep process running after checkpoint
+    shellJob: true          # Containers are often session leaders
+    tcpClose: true          # Pod IPs change on restore/migration
+    fileLocks: true         # Applications use file locks
+    orphanPtsMaster: true   # Containers with TTYs
+    extUnixSk: true         # External Unix sockets
+    linkRemap: true         # Required for deleted-but-open files (e.g. POSIX semaphores in /dev/shm)
+    extMasters: true        # External bind mount masters
+    manageCgroupsMode: soft # CRIU cgroup management mode (ignore/soft/full/strict)
 
-      # Config file options (NOT available via RPC - written to criu.conf)
-      libDir: "/usr/local/lib/criu"  # Plugin directory (required for GPU checkpoints)
-      allowUprobes: true             # Required for CUDA
-      skipInFlight: true             # Skip in-flight TCP connections
+    # Restore-specific options (only apply during CRIU restore, not dump)
+    rstSibling: true         # Restore as sibling process (required for go-criu swrk mode)
+    mntnsCompatMode: false   # Mount namespace compatibility mode
+    evasiveDevices: true     # Use any device path if original is inaccessible
+    forceIrmap: true         # Force resolving inotify/fsnotify watch names
 
-    rootfsExclusions:
-      # System directories excluded from rootfs diff capture
-      # These are injected by NVIDIA GPU Operator and cause conflicts during restore
-      systemDirs:
-        - "./usr"
-        - "./etc"
-        - "./opt"
-        - "./var"
-        - "./run"
-      # Cache directories to exclude (reduces checkpoint size)
-      cacheDirs:
-        - "./.cache/huggingface"
-      # Additional custom exclusions (application-specific)
-      additionalExclusions: []
+    # Advanced options
+    autoDedup: false        # Auto-deduplication of memory pages
+    lazyPages: false        # Lazy page migration (experimental)
 
-  # NOTE: Restore configuration is NOT in this ConfigMap.
-  # Placeholder containers do not mount it. Restore defaults are hardcoded in Go.
-  # CRIU options for restore come from the saved checkpoint manifest (manifest.yaml).
+    # Config file options (NOT available via RPC - written to criu.conf)
+    libDir: ""                     # Keep empty: external CUDA checkpoint/restore only (no CRIU CUDA plugin)
+    allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
+    skipInFlight: true             # Skip in-flight TCP connections

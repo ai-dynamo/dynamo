@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,7 @@ from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
 
 @dataclass
@@ -22,6 +24,19 @@ class PreprocessResult:
     chat_template_kwargs: dict[str, Any]
     engine_prompt: dict[str, Any]
     prompt_token_ids: list[int]
+
+
+_ASYNC_TOKENIZER_POOL: dict[int, AsyncMicrobatchTokenizer] = {}
+SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
+
+
+def _get_async_tokenizer(tokenizer: TokenizerLike) -> AsyncMicrobatchTokenizer:
+    key = id(tokenizer)
+    async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
+    if async_tokenizer is None:
+        async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
+        _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
+    return async_tokenizer
 
 
 def _materialize_assistant_tool_calls(
@@ -53,14 +68,34 @@ def _materialize_assistant_tool_calls(
     return normalized
 
 
-async def preprocess_chat_request(
-    request: dict[str, Any],
+def _prepare_request(
+    request: dict[str, Any] | ChatCompletionRequest,
     *,
     tokenizer: TokenizerLike,
-    renderer,
     tool_parser_class: type[ToolParser] | None,
-) -> PreprocessResult:
-    request_for_sampling = ChatCompletionRequest.model_validate(request)
+) -> tuple[
+    ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, dict[str, Any]
+]:
+    """Validate request and build arguments for template rendering.
+
+    Returns:
+        request_for_sampling: Validated ChatCompletionRequest.
+        tool_parser: Instantiated tool parser, or None.
+        chat_template_kwargs: Template kwargs (for PreprocessResult).
+        messages_for_render: Messages to pass as first arg to render_messages.
+        render_kwargs: Keyword arguments for render_messages / render_messages_async.
+    """
+    if isinstance(request, ChatCompletionRequest):
+        request_for_sampling = request
+    elif SKIP_REQUEST_VALIDATION:
+        # Trusted fast path; caller must provide OpenAI-compatible payload.
+        request_for_sampling = ChatCompletionRequest.model_construct(**request)
+        if request_for_sampling.tools and any(
+            not hasattr(tool, "model_dump") for tool in request_for_sampling.tools
+        ):
+            request_for_sampling = ChatCompletionRequest.model_validate(request)
+    else:
+        request_for_sampling = ChatCompletionRequest.model_validate(request)
 
     tool_parser: ToolParser | None = None
     if tool_parser_class and request_for_sampling.tools:
@@ -88,8 +123,7 @@ async def preprocess_chat_request(
         else request_for_sampling.messages
     )
 
-    _, engine_prompt = await renderer.render_messages_async(
-        messages_for_render,
+    render_kwargs = dict(
         chat_template=request_for_sampling.chat_template,
         chat_template_content_format="auto",
         add_generation_prompt=request_for_sampling.add_generation_prompt,
@@ -99,6 +133,73 @@ async def preprocess_chat_request(
         tokenize=tokenize_in_template,
         **chat_template_kwargs,
     )
+
+    return (
+        request_for_sampling,
+        tool_parser,
+        chat_template_kwargs,
+        messages_for_render,
+        render_kwargs,
+    )
+
+
+async def preprocess_chat_request(
+    request: dict[str, Any] | ChatCompletionRequest,
+    *,
+    tokenizer: TokenizerLike,
+    renderer,
+    tool_parser_class: type[ToolParser] | None,
+) -> PreprocessResult:
+    (
+        request_for_sampling,
+        tool_parser,
+        chat_template_kwargs,
+        messages,
+        render_kwargs,
+    ) = _prepare_request(
+        request, tokenizer=tokenizer, tool_parser_class=tool_parser_class
+    )
+
+    _, engine_prompt = await renderer.render_messages_async(messages, **render_kwargs)
+
+    if "prompt_token_ids" in engine_prompt:
+        tokens = list(engine_prompt["prompt_token_ids"])
+    else:
+        async_tokenizer = _get_async_tokenizer(tokenizer)
+        encoded = await async_tokenizer(
+            engine_prompt["prompt"],
+            add_special_tokens=request_for_sampling.add_special_tokens,
+        )
+        tokens = list(encoded.input_ids)
+
+    return PreprocessResult(
+        request_for_sampling=request_for_sampling,
+        tool_parser=tool_parser,
+        chat_template_kwargs=chat_template_kwargs,
+        engine_prompt=engine_prompt,
+        prompt_token_ids=tokens,
+    )
+
+
+def preprocess_chat_request_sync(
+    request: dict[str, Any] | ChatCompletionRequest,
+    *,
+    tokenizer: TokenizerLike,
+    renderer,
+    tool_parser_class: type[ToolParser] | None,
+) -> PreprocessResult:
+    """Sync version of preprocess_chat_request for worker processes."""
+    (
+        request_for_sampling,
+        tool_parser,
+        chat_template_kwargs,
+        messages,
+        render_kwargs,
+    ) = _prepare_request(
+        request, tokenizer=tokenizer, tool_parser_class=tool_parser_class
+    )
+
+    _, engine_prompt = renderer.render_messages(messages, **render_kwargs)
 
     if "prompt_token_ids" in engine_prompt:
         tokens = list(engine_prompt["prompt_token_ids"])
@@ -140,6 +241,9 @@ class StreamingPostProcessor:
             )
             if reasoning_parser_class
             else None
+        )
+        self._fast_plain_text = (
+            self.tool_parser is None and self.reasoning_parser is None
         )
 
         self._control_markers = tuple(
@@ -190,6 +294,23 @@ class StreamingPostProcessor:
         # vLLM output_processor already applies stop-token/stop-string trimming
         # to text. Re-detokenizing from token_ids can reintroduce stop markers.
         delta_text = output.text or ""
+
+        if self._fast_plain_text:
+            if delta_text:
+                delta: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": delta_text,
+                }
+            elif output.finish_reason:
+                delta = {}
+            else:
+                return None
+            return {
+                "index": output.index,
+                "delta": delta,
+                "finish_reason": output.finish_reason,
+                "logprobs": output.logprobs,
+            }
 
         current_text = self.previous_text + delta_text
         current_token_ids = self.previous_token_ids + delta_token_ids

@@ -76,6 +76,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -951,6 +952,17 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		}
 	}
 
+	// Checkpoint-restore pods must avoid overlap with prior replicas.
+	// Enforce Recreate whenever the rendered template is a restore target so
+	// the old pod is terminated before the restore placeholder is started.
+	if podTemplateSpec != nil &&
+		podTemplateSpec.Labels != nil &&
+		podTemplateSpec.Labels[commonconsts.KubeLabelIsRestoreTarget] == commonconsts.KubeLabelValueTrue {
+		strategy = appsv1.DeploymentStrategy{
+			Type: appsv1.RecreateDeploymentStrategyType,
+		}
+	}
+
 	kubeDeployment.Spec = appsv1.DeploymentSpec{
 		Replicas: opt.dynamoComponentDeployment.Spec.Replicas,
 		Selector: &metav1.LabelSelector{
@@ -1052,6 +1064,19 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if extraPodMetadata != nil {
 		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
 		maps.Copy(podLabels, extraPodMetadata.Labels)
+	}
+	// Restore labels are operator-controlled. Clear any stale/user-provided
+	// value after metadata merge; the controller re-adds it only when the
+	// checkpoint contract below is satisfied.
+	delete(podLabels, commonconsts.KubeLabelIsRestoreTarget)
+
+	// Explicit restore orchestration contract:
+	// only mark pods as restore targets when checkpoint material is ready.
+	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
+		podLabels[commonconsts.KubeLabelIsRestoreTarget] = commonconsts.KubeLabelValueTrue
+		if checkpointInfo.Hash != "" {
+			podLabels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
+		}
 	}
 
 	// Propagate restart annotation to pod template to trigger rolling restart
