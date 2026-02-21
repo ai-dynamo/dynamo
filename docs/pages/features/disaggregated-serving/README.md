@@ -45,19 +45,19 @@ pip3 install aiconfigurator
 
 # Find optimal configuration for vLLM backend
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 8 \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
+  --backend-version 0.12.0 \
   --isl 4000 \
   --osl 500 \
   --ttft 600 \
   --tpot 16.67 \
-  --save_dir ./results_vllm
+  --save-dir ./results_vllm
 
 # Deploy on Kubernetes
-kubectl apply -f ./results_vllm/agg/top1/agg/k8s_deploy.yaml
+kubectl apply -f ./results_vllm/<result_dir>/agg/top1/k8s_deploy.yaml
 ```
 
 ## Complete Walkthrough: vLLM on H200
@@ -68,27 +68,27 @@ This section walks through a validated example deploying Qwen3-32B-FP8 on 8× H2
 
 ```bash
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
+  --model-path Qwen/Qwen3-32B-FP8 \
   --system h200_sxm \
-  --total_gpus 8 \
+  --total-gpus 8 \
   --isl 4000 \
   --osl 500 \
   --ttft 600 \
   --tpot 16.67 \
   --backend vllm \
-  --backend_version 0.12.0 \
-  --save_dir ./results_vllm
+  --backend-version 0.12.0 \
+  --save-dir ./results_vllm
 ```
 
 **Parameters explained:**
-- `--model_path`: HuggingFace model ID or local path (e.g., `Qwen/Qwen3-32B-FP8`)
-- `--system`: GPU system type (`h200_sxm`, `h100_sxm`, `a100_sxm`)
-- `--total_gpus`: Number of GPUs available for deployment
+- `--model-path`: HuggingFace model ID or local path (e.g., `Qwen/Qwen3-32B-FP8`)
+- `--system`: GPU system type (`h200_sxm`, `h100_sxm`, `a100_sxm`, `b200_sxm`, `gb200`, `gb300`, `l40s`)
+- `--total-gpus`: Number of GPUs available for deployment
 - `--isl` / `--osl`: Input/Output sequence lengths in tokens
 - `--ttft` / `--tpot`: SLA targets - Time To First Token (ms) and Time Per Output Token (ms)
 - `--backend`: Inference backend (`vllm`, `trtllm`, or `sglang`)
-- `--backend_version`: Backend version (e.g., `0.12.0` for vLLM)
-- `--save_dir`: Directory to save generated deployment configs
+- `--backend-version`: Backend version (e.g., `0.12.0` for vLLM)
+- `--save-dir`: Directory to save generated deployment configs
 
 ### Step 2: Review the Results
 
@@ -145,21 +145,27 @@ disagg Top Configurations: (Sorted by tokens/s/gpu)
 
 ### Step 3: Deploy on Kubernetes
 
-The `--save_dir` generates ready-to-use Kubernetes manifests:
+The `--save-dir` generates ready-to-use Kubernetes manifests:
 
 ```
-results_vllm/
+results_vllm/<result_dir>/
 ├── agg/
+│   ├── best_config_topn.csv
+│   ├── exp_config.yaml
+│   ├── pareto.csv
 │   └── top1/
-│       └── agg/
-│           ├── k8s_deploy.yaml    # Kubernetes DynamoGraphDeployment
-│           └── agg_config.yaml    # Engine configuration
+│       ├── k8s_deploy.yaml        # Kubernetes DynamoGraphDeployment
+│       ├── agg_config.yaml        # Engine configuration
+│       └── generator_config.yaml
 ├── disagg/
+│   ├── best_config_topn.csv
+│   ├── exp_config.yaml
+│   ├── pareto.csv
 │   └── top1/
-│       └── disagg/
-│           ├── k8s_deploy.yaml
-│           ├── prefill_config.yaml
-│           └── decode_config.yaml
+│       ├── k8s_deploy.yaml
+│       ├── prefill_config.yaml
+│       ├── decode_config.yaml
+│       └── generator_config.yaml
 └── pareto_frontier.png
 ```
 
@@ -194,7 +200,7 @@ Before deploying, ensure you have:
 The generated `k8s_deploy.yaml` provides a starting point. You'll typically need to customize it for your environment:
 
 ```bash
-kubectl apply -f ./results_vllm/agg/top1/agg/k8s_deploy.yaml
+kubectl apply -f ./results_vllm/<result_dir>/agg/top1/k8s_deploy.yaml
 ```
 
 **Complete deployment example** with model cache and production settings:
@@ -222,7 +228,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
           imagePullPolicy: IfNotPresent
 
     VLLMWorker:
@@ -242,7 +248,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           command:
@@ -362,16 +368,16 @@ If your real workload differs from the benchmark parameters:
 # For longer outputs (chat/code generation):
 # increase OSL, relax TTFT target
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 8 \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
+  --backend-version 0.12.0 \
   --isl 2000 \
   --osl 2000 \
   --ttft 1000 \
   --tpot 10 \
-  --save_dir ./results_long_output
+  --save-dir ./results_long_output
 ```
 
 ### Exploring Alternative Configurations
@@ -418,7 +424,7 @@ exp_tp4:
 ```
 
 ```bash
-aiconfigurator cli exp --yaml_path custom_exp.yaml --save_dir ./results_custom
+aiconfigurator cli exp --yaml-path custom_exp.yaml --save-dir ./results_custom
 ```
 
 > **Critical**: Disaggregated deployments **require RDMA** for KV cache transfer. Without RDMA, performance degrades by **40x** (TTFT increases from 355ms to 10+ seconds). See the Disaggregated Deployment section below.
@@ -458,7 +464,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
           imagePullPolicy: IfNotPresent
 
     VLLMPrefillWorker:
@@ -485,7 +491,7 @@ spec:
           value: "0"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           securityContext:
@@ -532,7 +538,7 @@ spec:
           value: "0"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           securityContext:
@@ -586,14 +592,14 @@ Override vLLM engine parameters with `--generator-set`:
 
 ```bash
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 8 \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
+  --backend-version 0.12.0 \
   --isl 4000 --osl 500 \
   --ttft 600 --tpot 16.67 \
-  --save_dir ./results_tuned \
+  --save-dir ./results_tuned \
   --generator-set Workers.agg.kv_cache_free_gpu_memory_fraction=0.85 \
   --generator-set Workers.agg.max_num_seqs=2048
 ```
@@ -615,53 +621,60 @@ AIConfigurator's default predictions assume no prefix caching. Enable it post-de
 
 | Backend | Versions | Status |
 |---------|----------|--------|
-| TensorRT-LLM | 1.0.0rc3, 1.2.0rc5 | Production |
-| vLLM | 0.12.0 | Production |
-| SGLang | 0.5.6.post2 | Production |
+| TensorRT-LLM | 1.0.0, 1.0.0rc3, 1.0.0rc6, 1.2.0rc5, 1.2.0rc6, 1.2.0rc6.post3 | Production |
+| vLLM | 0.12.0, 0.14.0 | Production |
+| SGLang | 0.5.5.post3, 0.5.6.post2, 0.5.8, 0.5.8.post1 | Production |
+
+> **Note**: Available versions vary by GPU system. Use `aiconfigurator cli support` to check what's available for your hardware.
 
 ### Systems
 
 | GPU System | TensorRT-LLM | vLLM | SGLang |
 |------------|--------------|------|--------|
-| H200 SXM | Yes | Yes | Yes |
-| H100 SXM | Yes | Yes | Yes |
-| A100 SXM | Yes | Yes | -- |
-| B200 SXM | Yes | -- | Yes |
-| GB200 SXM | Yes | -- | -- |
+| H200 SXM (`h200_sxm`) | Yes | Yes | Yes |
+| H100 SXM (`h100_sxm`) | Yes | Yes | Yes |
+| A100 SXM (`a100_sxm`) | Yes | Yes | Yes |
+| B200 SXM (`b200_sxm`) | Yes | -- | Yes |
+| GB200 (`gb200`) | Yes | -- | -- |
+| GB300 (`gb300`) | Yes | -- | -- |
+| L40S (`l40s`) | Yes | Yes | Yes |
 
 ### Models
 
-- **Dense**: GPT, LLAMA2/3, QWEN2.5/3
-- **MoE**: Mixtral, DEEPSEEK_V3
+- **Dense**: Llama 2 (7B/13B/70B), Llama 3.1 (8B/70B/405B), Qwen 2.5 (1.5B/7B/32B/72B), Qwen 3 (0.6B/1.7B/8B/32B/235B-A22B), GPT-OSS (20B/120B)
+- **MoE**: Mixtral (8x7B/8x22B), DeepSeek-V3, Qwen3-30B-A3B, Qwen3-235B-A22B, Qwen3-Coder-480B-A35B
+- **NVIDIA**: Nemotron-Super-49B, Nemotron-3-Nano-30B, Nemotron-3-Super-120B, Nemotron-H-56B, DeepSeek-V3.1-NVFP4, Qwen3-235B-A22B-NVFP4
+
+> Models with the same architecture as the above are also supported via architecture-based inference.
 
 ## Common Use Cases
 
 ```bash
 # Strict latency SLAs (real-time chat)
 aiconfigurator cli default \
-  --model_path meta-llama/Llama-3.1-70B \
-  --total_gpus 16 \
+  --model-path meta-llama/Llama-3.1-70B \
+  --total-gpus 16 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
+  --backend-version 0.12.0 \
   --ttft 200 --tpot 8
 
 # High throughput (batch processing)
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 32 \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 32 \
   --system h200_sxm \
   --backend trtllm \
   --ttft 2000 --tpot 50
 
 # Request latency constraint (end-to-end SLA)
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 16 \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 16 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
-  --request_latency 12000 \
+  --backend-version 0.12.0 \
+  --request-latency 12000 \
   --isl 4000 --osl 500
 ```
 
@@ -674,14 +687,14 @@ aiconfigurator webapp  # Visit http://127.0.0.1:7860
 
 # Quick config generation (no parameter sweep)
 aiconfigurator cli generate \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 8 \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
   --system h200_sxm \
   --backend vllm
 
 # Check model/system support
 aiconfigurator cli support \
-  --model_path Qwen/Qwen3-32B-FP8 \
+  --model-path Qwen/Qwen3-32B-FP8 \
   --system h200_sxm \
   --backend vllm
 ```
@@ -692,7 +705,7 @@ aiconfigurator cli support \
 
 **Model not found**: Use the full HuggingFace path (e.g., `Qwen/Qwen3-32B-FP8` not `QWEN3_32B`)
 
-**Backend version mismatch**: Check supported versions with `aiconfigurator cli support --model_path <model> --system <system> --backend <backend>`
+**Backend version mismatch**: Check supported versions with `aiconfigurator cli support --model-path <model> --system <system> --backend <backend>`
 
 ### Deployment Issues
 
