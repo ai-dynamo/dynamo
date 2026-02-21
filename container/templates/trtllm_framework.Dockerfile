@@ -105,7 +105,7 @@ ARG GITHUB_TRTLLM_COMMIT
 {% if context.trtllm.has_trtllm_context == "1" %}
 # Copy only wheel files and commit info from trtllm_wheel stage from build_context
 COPY --from=trtllm_wheel / /trtllm_wheel/
-{%- endif %}
+{% endif %}
 COPY --from=trtllm_wheel_image /app/tensorrt_llm /trtllm_wheel_image/
 
 # Cache uv downloads; uv handles its own locking for this cache.
