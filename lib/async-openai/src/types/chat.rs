@@ -478,8 +478,23 @@ pub struct ChatCompletionRequestAssistantMessage {
     pub content: Option<ChatCompletionRequestAssistantMessageContent>,
     /// Optional internal reasoning content from a previous assistant turn.
     /// Used by reasoning-capable models that consume prior chain-of-thought-like context.
+    /// For non-interleaved turns (single <think> block), this is the full reasoning string.
+    /// When `reasoning_segments` is present, prefer that for accurate context reconstruction.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Interleaved reasoning segments from a previous assistant turn, preserving the exact
+    /// per-position order needed for KV cache–correct context reconstruction.
+    ///
+    /// When set, `segments.len() == tool_calls.len() + 1`:
+    ///   - `segments[i]` is the reasoning that preceded `tool_calls[i]`
+    ///   - `segments[tool_calls.len()]` is any trailing reasoning after the last tool call
+    ///   - Individual entries may be empty (no reasoning at that position)
+    ///
+    /// A chat template should reconstruct:
+    ///   `<think>seg[0]</think><call>tc[0]</call>…<think>seg[N-1]</think><call>tc[N-1]</call><think>seg[N]</think>`
+    /// (skipping empty segments) rather than lumping all reasoning into a single <think> block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_segments: Option<Vec<String>>,
     /// The refusal message by the assistant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,

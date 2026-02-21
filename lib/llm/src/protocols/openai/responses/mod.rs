@@ -277,6 +277,7 @@ fn convert_input_items_to_messages(
                                     text,
                                 )),
                                 reasoning_content: None,
+                                reasoning_segments: None,
                                 refusal: None,
                                 name: None,
                                 audio: None,
@@ -293,6 +294,7 @@ fn convert_input_items_to_messages(
                         ChatCompletionRequestAssistantMessage {
                             content: None,
                             reasoning_content: None,
+                            reasoning_segments: None,
                             refusal: None,
                             name: None,
                             audio: None,
@@ -358,6 +360,7 @@ fn convert_input_items_to_messages(
                                 content_text,
                             )),
                             reasoning_content: None,
+                            reasoning_segments: None,
                             refusal: None,
                             name: None,
                             audio: None,
