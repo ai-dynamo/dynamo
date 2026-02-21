@@ -86,7 +86,7 @@ def generate_dgd_config_with_planner(
 
     # --- Add planner service to DGD ---
     planner_service = DgdPlannerServiceConfig()
-    if dgdr.image and planner_service.extraPodSpec.mainContainer:
+    if planner_service.extraPodSpec.mainContainer:
         planner_service.extraPodSpec.mainContainer.image = dgdr.image
 
     planner_dict = planner_service.model_dump(exclude_unset=False)

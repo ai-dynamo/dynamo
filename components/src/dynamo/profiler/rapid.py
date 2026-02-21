@@ -56,8 +56,7 @@ def _generate_dgd_from_pick(
     generator_overrides: dict = {}
 
     k8s_overrides: dict = {}
-    if dgdr.image:
-        k8s_overrides["k8s_image"] = dgdr.image
+    k8s_overrides["k8s_image"] = dgdr.image
     if dgdr.modelCache:
         if dgdr.modelCache.pvcName:
             k8s_overrides["k8s_pvc_name"] = dgdr.modelCache.pvcName
@@ -116,8 +115,7 @@ def run_rapid(
         dgd_config = yaml.safe_load(dgd_yaml) if dgd_yaml else None
         if dgd_config:
             config_modifier = CONFIG_MODIFIERS[backend]
-            if dgdr.image:
-                dgd_config = config_modifier.update_image(dgd_config, dgdr.image)
+            dgd_config = config_modifier.update_image(dgd_config, dgdr.image)
             if dgdr.modelCache and dgdr.modelCache.pvcName:
                 dgd_config = config_modifier.update_model_from_pvc(
                     dgd_config,

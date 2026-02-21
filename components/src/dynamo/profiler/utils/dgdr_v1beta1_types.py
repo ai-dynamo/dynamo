@@ -1,6 +1,17 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Auto-generated Pydantic models from v1beta1 DGDR Go types.
 
@@ -15,7 +26,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from dynamo.planner.utils.planner_config import (
+# Import canonical planner types – do NOT redefine them here.
+from dynamo.planner.utils.planner_config import (  # noqa: F401 (re-exported)
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
 )
@@ -76,29 +88,26 @@ class WorkloadSpec(BaseModel):
         description="RequestRate is the target request rate (req/s). Required (or Concurrency) when the planner is disabled.",
     )
 
-    @model_validator(mode="after")
-    def check_concurrency_or_requestrate(self) -> "WorkloadSpec":
-        if self.concurrency is not None and self.requestRate is not None:
-            raise ValueError(
-                "Only one of 'concurrency' or 'requestRate' can be provided, not both."
-            )
-        return self
-
 
 class SLASpec(BaseModel):
-    """SLASpec defines the service-level agreement targets."""
+    """Service-level agreement targets.
+
+    Provide exactly one of:
+
+    - ``ttft`` + ``itl``: explicit latency targets (default: 2000 ms / 30 ms)
+    - ``e2eLatency``: end-to-end latency target
+    - ``optimizationType``: high-level objective without explicit numeric targets"""
 
     optimizationType: Optional[OptimizationType] = Field(
         default=None,
         description="OptimizationType controls the profiling optimization strategy. Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.",
     )
     ttft: Optional[float] = Field(
-        default=2000.0,
+        default=2000,
         description="TTFT is the Time To First Token target in milliseconds.",
     )
     itl: Optional[float] = Field(
-        default=30.0,
-        description="ITL is the Inter-Token Latency target in milliseconds.",
+        default=30, description="ITL is the Inter-Token Latency target in milliseconds."
     )
     e2eLatency: Optional[float] = Field(
         default=None,
@@ -106,28 +115,19 @@ class SLASpec(BaseModel):
     )
 
     @model_validator(mode="after")
-    def check_sla_targets(self) -> "SLASpec":
-        for name, val in [
-            ("ttft", self.ttft),
-            ("itl", self.itl),
-            ("e2eLatency", self.e2eLatency),
-        ]:
-            if val is not None and val <= 0:
-                raise ValueError(f"{name} must be positive.")
-
-        has_e2e = self.e2eLatency is not None
-
-        # When e2eLatency is provided, it takes precedence — clear ttft/itl defaults
-        if has_e2e:
-            self.ttft = None
-            self.itl = None
-
+    def _validate_sla_options(self) -> "SLASpec":
+        """Ensure at most one SLA mode is active."""
         has_ttft_itl = self.ttft is not None and self.itl is not None
-        if not has_ttft_itl and not has_e2e:
+        has_e2e = self.e2eLatency is not None
+        has_opt = self.optimizationType is not None
+        options_count = sum([has_ttft_itl, has_e2e, has_opt])
+        if options_count > 1:
             raise ValueError(
-                "Either both 'ttft' and 'itl', or 'e2eLatency', must be provided in the SLA spec."
+                "SLA must specify exactly one of: (ttft and itl), e2eLatency, "
+                "or optimizationType — not multiple."
             )
-
+        if (self.ttft is not None) != (self.itl is not None):
+            raise ValueError("ttft and itl must both be provided together.")
         return self
 
 
@@ -142,8 +142,8 @@ class ModelCacheSpec(BaseModel):
         default=None,
         description='PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").',
     )
-    pvcMountPath: Optional[str] = Field(
-        default=None,
+    pvcMountPath: str = Field(
+        default="/opt/model-cache",
         description="PVCMountPath is the mount path for the PVC inside the container.",
     )
 
@@ -184,48 +184,30 @@ class FeaturesSpec(BaseModel):
 
     planner: Optional[PlannerConfig] = Field(
         default=None,
-        description="Planner configures the SLA planner for autoscaling in the generated DGD.",
+        description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig. Go treats this as opaque bytes; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,
         description="Mocker configures the simulated (mocker) backend for testing without GPUs.",
     )
 
-    @model_validator(mode="after")
-    def _validate_mocker_sweeping_mode(self) -> "FeaturesSpec":
-        if (
-            self.mocker
-            and self.mocker.enabled
-            and self.planner
-            and (
-                self.planner.pre_deployment_sweeping_mode is None
-                or self.planner.pre_deployment_sweeping_mode
-                == PlannerPreDeploymentSweepMode.None_
-            )
-        ):
-            raise ValueError(
-                "pre_deployment_sweeping_mode cannot be 'none' when mocker is enabled. "
-                "Mocker backend requires pre-deployment sweeping to generate simulated "
-                "performance profiles."
-            )
-        return self
-
 
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
 
-    gpuSku: str = Field(
+    gpuSku: Optional[str] = Field(
+        default=None,
         description='GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").',
     )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."
     )
-    totalGpus: int = Field(
+    totalGpus: Optional[int] = Field(
         default=None,
         description="TotalGPUs is the total number of GPUs available in the cluster.",
     )
-    numGpusPerNode: int = Field(
-        description="NumGPUsPerNode is the number of GPUs per node."
+    numGpusPerNode: Optional[int] = Field(
+        default=None, description="NumGPUsPerNode is the number of GPUs per node."
     )
 
 
@@ -236,25 +218,27 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.'
     )
     backend: BackendType = Field(
-        default=BackendType.Auto,
+        default="auto",
         description="Backend specifies the inference backend to use for profiling and deployment.",
     )
-    image: str = Field(
+    image: Optional[str] = Field(
+        default=None,
         description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/dynamo-runtime:latest" TODO: In a future MR, the operator will derive the backend inference image from the backend type automatically; backend images can be overridden via overrides.dgd.',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
         description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.",
     )
-    hardware: HardwareSpec = Field(
+    hardware: Optional[HardwareSpec] = Field(
+        default=None,
         description="Hardware describes the hardware resources available for profiling and deployment. Typically auto-filled by the operator from cluster discovery.",
     )
-    workload: WorkloadSpec = Field(
-        default=WorkloadSpec(),
+    workload: Optional[WorkloadSpec] = Field(
+        default=None,
         description="Workload defines the expected workload characteristics for SLA-based profiling.",
     )
-    sla: SLASpec = Field(
-        default_factory=SLASpec,
+    sla: Optional[SLASpec] = Field(
+        default=None,
         description="SLA defines service-level agreement targets that drive profiling optimization.",
     )
     overrides: Optional[OverridesSpec] = Field(
@@ -266,7 +250,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         description="Features controls optional Dynamo platform features in the generated deployment.",
     )
     searchStrategy: SearchStrategy = Field(
-        default=SearchStrategy.Rapid,
+        default="rapid",
         description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
     )
     autoApply: bool = Field(

@@ -33,6 +33,7 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import generate_dgd_config_with_planner
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dgdr_validate import validate_dgdr_for_profiler
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     determine_picking_mode,
@@ -72,6 +73,9 @@ async def run_profile(
     )
 
     try:
+        # Validate and normalise — after this, required fields are guaranteed non-None
+        validate_dgdr_for_profiler(dgdr)
+
         model = dgdr.model
         backend = dgdr.backend.value.lower()
         system = dgdr.hardware.gpuSku.lower()
@@ -83,8 +87,8 @@ async def run_profile(
             target_ttft = request_latency
             target_tpot = request_latency
         else:
-            target_ttft = dgdr.sla.ttft or 2000.0
-            target_tpot = dgdr.sla.itl or 30.0
+            target_ttft = dgdr.sla.ttft
+            target_tpot = dgdr.sla.itl
         search_strategy = SearchStrategy(dgdr.searchStrategy.value)
 
         picking_mode = determine_picking_mode(dgdr)
