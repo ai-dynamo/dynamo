@@ -481,6 +481,82 @@ await register_model(
 )
 ```
 
+## LoRA Adapters on Multimodal Workers
+
+Multimodal workers support dynamic loading and unloading of LoRA adapters at runtime via the management API. This enables serving fine-tuned multimodal models alongside the base model.
+
+### Loading a LoRA Adapter
+
+Load an adapter on a running multimodal worker via the `load_lora` endpoint:
+
+```bash
+# For components workers (URI-based, requires DYN_LORA_ENABLED=true)
+curl -X POST http://<worker-host>:<port>/load_lora \
+  -H "Content-Type: application/json" \
+  -d '{
+    "lora_name": "my-vlm-adapter",
+    "source": {"uri": "s3://my-bucket/adapters/my-vlm-adapter"}
+  }'
+
+# For example workers (path-based)
+curl -X POST http://<worker-host>:<port>/load_lora \
+  -H "Content-Type: application/json" \
+  -d '{
+    "lora_name": "my-vlm-adapter",
+    "lora_path": "/path/to/adapter"
+  }'
+```
+
+### Sending Requests with a LoRA
+
+Set the `model` field in the request to the LoRA adapter name:
+
+```bash
+curl -X POST http://<frontend-host>:<port>/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "my-vlm-adapter",
+    "messages": [
+      {"role": "user", "content": [
+        {"type": "text", "text": "Describe this image"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+      ]}
+    ]
+  }'
+```
+
+Requests without a LoRA name (or with the base model name) will use the base model.
+
+### Unloading a LoRA Adapter
+
+```bash
+curl -X POST http://<worker-host>:<port>/unload_lora \
+  -H "Content-Type: application/json" \
+  -d '{"lora_name": "my-vlm-adapter"}'
+```
+
+### Listing Loaded Adapters
+
+```bash
+curl -X POST http://<worker-host>:<port>/list_loras
+```
+
+### Disaggregated Mode
+
+In disaggregated (prefill/decode) deployments, the **same LoRA adapter must be loaded on both the prefill and decode workers**. The LoRA identity (`model` field) is automatically propagated from the prefill worker to the decode worker in the forwarded request.
+
+```bash
+# Load on prefill worker
+curl -X POST http://<prefill-worker>/load_lora \
+  -d '{"lora_name": "my-adapter", "source": {"uri": "s3://bucket/adapter"}}'
+
+# Load on decode worker (same adapter)
+curl -X POST http://<decode-worker>/load_lora \
+  -d '{"lora_name": "my-adapter", "source": {"uri": "s3://bucket/adapter"}}'
+```
+
+If a LoRA is loaded on the prefill worker but not on the decode worker, the decode worker will fall back to the base model for that request.
+
 ## Known Limitations
 
 - **Disaggregated flows require Python Processor** - All multimodal disaggregation requires the Python Processor component (`ModelInput.Text`).
