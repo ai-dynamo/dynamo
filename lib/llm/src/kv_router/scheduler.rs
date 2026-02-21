@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::KvRouterConfig;
+use super::RouterConfigOverride;
+use super::WorkerSelector;
+use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use super::queue::SchedulerQueue;
+use super::sequence::{ActiveSequencesMultiWorker, SequenceError, SequenceRequest};
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
@@ -13,14 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "bench")]
 use std::time::Instant;
-use tokio::sync::Notify;
-
-use super::KvRouterConfig;
-use super::RouterConfigOverride;
-use super::WorkerSelector;
-use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
-use super::queue::SchedulerQueue;
-use super::sequence::{ActiveSequencesMultiWorker, SequenceError, SequenceRequest};
 
 use dynamo_tokens::SequenceHash;
 
@@ -65,20 +63,17 @@ pub struct SchedulingRequest {
     pub lora_name: Option<String>,
     /// Priority jump in seconds; decreases effective arrival time in the queue.
     pub priority_jump: f64,
-    // Option to take it out to send the response without moving the struct
-    resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
+    resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
 }
 
 impl SchedulingRequest {
-    pub fn respond(&mut self, response: SchedulingResponse) {
-        // Changed to &mut self
-        if let Some(tx) = self.resp_tx.take() {
-            // Use take() to extract the sender
-            if tx.send(response).is_err() {
-                tracing::error!("failed to send response to requestor");
-            }
-        } else {
+    pub fn respond(&mut self, result: Result<SchedulingResponse, KvSchedulerError>) {
+        let Some(tx) = self.resp_tx.take() else {
             tracing::error!("respond called multiple times on same request");
+            return;
+        };
+        if tx.send(result).is_err() {
+            tracing::error!("failed to send response to requestor");
         }
     }
 }
@@ -150,29 +145,25 @@ impl KvScheduler {
             }
         });
 
-        let slots_clone = slots.clone();
-        let scheduler_rx = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
 
-        // Create queue with shared notify for waking the scheduler loop
-        let ready_notify = Arc::new(Notify::new());
         let queue = Arc::new(SchedulerQueue::new(
             slots.clone(),
             workers_with_configs.clone(),
-            ready_notify.clone(),
             kv_router_config.router_queue_threshold,
+            block_size,
+            selector,
         ));
         let queue_clone = queue.clone();
 
-        // Background task to handle scheduling requests
+        // Background task: receive requests and periodically recheck pending
         tokio::spawn(async move {
             let mut request_rx = request_rx;
             let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
             tracing::trace!("scheduler background task started");
 
             loop {
-                // Use select! to wait on: new request, ready_notify, periodic recheck, or cancellation
                 tokio::select! {
                     _ = scheduler_cancel_token.cancelled() => {
                         tracing::trace!("scheduler background task shutting down");
@@ -186,72 +177,8 @@ impl KvScheduler {
                         tracing::trace!("received request to be scheduled");
                         queue_clone.enqueue(request).await;
                     }
-                    _ = ready_notify.notified() => {
-                        // Woken by update() after prefill_complete/free - just continue to drain ready queue
-                    }
                     _ = recheck_interval.tick() => {
-                        // Periodic recheck to prevent requests stuck in pending
                         queue_clone.update().await;
-                    }
-                }
-
-                // Drain ALL ready requests (each iteration uses fresh slot state)
-                while let Some(mut request) = queue_clone.try_dequeue().await {
-                    let (decode_blocks, prefill_tokens) = slots_clone
-                        .potential_blocks_and_tokens(
-                            request.token_seq.clone(),
-                            request.isl_tokens,
-                            request.overlaps.clone(),
-                        )
-                        .await;
-                    request.decode_blocks = decode_blocks;
-                    request.prefill_tokens = prefill_tokens;
-
-                    // Read the current workers configuration from watch receiver
-                    let workers: HashMap<WorkerId, ModelRuntimeConfig> =
-                        scheduler_rx.borrow().clone();
-
-                    match selector.select_worker(&workers, &request, block_size) {
-                        Ok(selection) => {
-                            let response = SchedulingResponse {
-                                best_worker: selection.worker,
-                                overlap_blocks: selection.overlap_blocks,
-                            };
-                            request.respond(response);
-
-                            // Skip state update if not requested
-                            if !request.update_states {
-                                continue;
-                            }
-
-                            let Some(request_id) = request.maybe_request_id else {
-                                tracing::error!(
-                                    "No request_id provided to add_request to the slot tracker"
-                                );
-                                continue;
-                            };
-
-                            if let Err(e) = slots_clone
-                                .add_request(SequenceRequest {
-                                    request_id: request_id.clone(),
-                                    token_sequence: request.token_seq,
-                                    isl: request.isl_tokens,
-                                    overlap: selection.overlap_blocks,
-                                    expected_output_tokens: None,
-                                    worker: selection.worker,
-                                    lora_name: request.lora_name.clone(),
-                                })
-                                .await
-                            {
-                                tracing::warn!("Failed to add request {request_id}: {e}");
-                            }
-                        }
-                        Err(KvSchedulerError::NoEndpoints) => {
-                            tracing::warn!("no endpoints available, dropping request");
-                        }
-                        Err(e) => {
-                            tracing::error!("error scheduling request: {:?}", e);
-                        }
                     }
                 }
             }
@@ -306,7 +233,7 @@ impl KvScheduler {
 
         let response = resp_rx
             .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)??;
 
         #[cfg(feature = "bench")]
         let total_elapsed = start.elapsed();
@@ -430,25 +357,14 @@ fn softmax_sample(
         // All values are the same, uniform probability
         vec![1.0 / keys.len() as f64; keys.len()]
     } else {
-        // Normalize values
-        let normalized: Vec<_> = values
-            .iter()
-            .map(|&v| {
-                // Lower is better, so negate
-                // Note we don't need to do actual min-max norm here, just off by an offset
-                let norm = v / (max_val - min_val);
-                -norm
-            })
-            .collect();
-
-        // Apply temperature and softmax
-        let scaled: Vec<_> = normalized.iter().map(|&v| v / temperature).collect();
-
+        // Fused normalize → negate → scale → exp, then normalize probabilities
+        let range = max_val - min_val;
+        let scaled: Vec<f64> = values.iter().map(|&v| -(v / range) / temperature).collect();
         let max_scaled = scaled.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let exp_values: Vec<_> = scaled.iter().map(|&v| (v - max_scaled).exp()).collect();
-
-        let sum_exp: f64 = exp_values.iter().sum();
-        exp_values.iter().map(|&v| v / sum_exp).collect()
+        let mut probs: Vec<f64> = scaled.iter().map(|&v| (v - max_scaled).exp()).collect();
+        let sum: f64 = probs.iter().sum();
+        probs.iter_mut().for_each(|p| *p /= sum);
+        probs
     };
 
     // Sample from the probability distribution
