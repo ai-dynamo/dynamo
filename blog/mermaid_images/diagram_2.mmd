@@ -1,0 +1,8 @@
+flowchart TD
+    Root["root"]
+    Root -->|"local=0xA1"| B0["block 0 — W0, W1, W2"]
+    Root -->|"local=0xB2"| B0p["block 0' — W3"]
+    B0 -->|"local=0xC3"| B1["block 1 — W0, W1, W2"]
+    B1 -->|"local=0xD4"| B2["block 2 — W0, W1"]
+    B1 -->|"local=0xE5"| B2p["block 2' — W2"]
+    B2 -->|"local=0xF6"| B3["block 3 — W0"]

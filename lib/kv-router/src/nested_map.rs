@@ -102,17 +102,24 @@ impl SeqEntry {
 
 type LevelIndex = RwLock<FxHashMap<ExternalSequenceBlockHash, (usize, LocalBlockHash)>>;
 
+/// Pre-allocated number of position slots in the index Vec.
+/// Positions beyond this will be silently ignored.
+const MAX_POSITIONS: usize = 10_000;
+
 /// Positional HashMap-based KV cache index.
 ///
 /// Implements [`SyncIndexer`] for use with [`ThreadPoolIndexer`](crate::indexer::ThreadPoolIndexer).
 /// All methods are synchronous and thread-safe.
+///
+/// The index is a `Vec<DashMap<LocalBlockHash, SeqEntry>>` where the Vec
+/// is indexed by position. This separates hot prefix positions (small DashMaps
+/// that stay in L1/L2 cache) from cold tail positions, improving cache locality
+/// for the common shared-prefix access pattern.
 pub struct PositionalIndexer {
-    index: DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
+    index: Vec<DashMap<LocalBlockHash, SeqEntry, FxBuildHasher>>,
     /// Per-worker reverse lookup: worker -> seq_hash -> (position, local_hash)
     /// Enables efficient remove operations without global flat reverse map.
-    /// Uses a single RwLock rather than DashMap because structural mutations
-    /// (adding/removing workers) are rare; the hot path is read-only.
-    worker_blocks: RwLock<FxHashMap<WorkerWithDpRank, LevelIndex>>,
+    worker_blocks: DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
 
     jump_size: usize,
 }
@@ -127,9 +134,13 @@ impl PositionalIndexer {
     pub fn new(jump_size: usize) -> Self {
         assert!(jump_size > 0, "jump_size must be greater than 0");
 
+        let index: Vec<_> = (0..MAX_POSITIONS)
+            .map(|_| DashMap::with_hasher(FxBuildHasher))
+            .collect();
+
         Self {
-            index: DashMap::with_hasher(FxBuildHasher),
-            worker_blocks: RwLock::new(FxHashMap::default()),
+            index,
+            worker_blocks: DashMap::with_hasher(FxBuildHasher),
             jump_size,
         }
     }
@@ -161,10 +172,9 @@ impl SyncIndexer for PositionalIndexer {
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        let wb = self.worker_blocks.read();
-        for (worker, level_index) in wb.iter() {
-            let worker = *worker;
-            let worker_map = level_index.read();
+        for entry in self.worker_blocks.iter() {
+            let worker = *entry.key();
+            let worker_map = entry.value().read();
 
             // Collect (position, local_hash, seq_hash) and sort by position
             // so parents are emitted before children during replay.
@@ -228,8 +238,8 @@ impl PositionalIndexer {
     /// Process an event using the provided index and worker_blocks.
     /// This is called from worker threads.
     fn apply_event_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
-        worker_blocks: &RwLock<FxHashMap<WorkerWithDpRank, LevelIndex>>,
+        index: &[DashMap<LocalBlockHash, SeqEntry, FxBuildHasher>],
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         event: RouterEvent,
     ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
@@ -267,8 +277,8 @@ impl PositionalIndexer {
     }
 
     fn store_blocks_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
-        worker_blocks: &RwLock<FxHashMap<WorkerWithDpRank, LevelIndex>>,
+        index: &[DashMap<LocalBlockHash, SeqEntry, FxBuildHasher>],
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         worker: WorkerWithDpRank,
         store_data: KvCacheStoreData,
         event_id: u64,
@@ -276,8 +286,7 @@ impl PositionalIndexer {
         // Determine starting position based on parent_hash
         let start_pos = match store_data.parent_hash {
             Some(parent_hash) => {
-                let wb = worker_blocks.read();
-                let Some(level_index) = wb.get(&worker) else {
+                let Some(level_ref) = worker_blocks.get(&worker) else {
                     tracing::warn!(
                         worker_id = worker.worker_id.to_string(),
                         dp_rank = worker.dp_rank,
@@ -287,7 +296,7 @@ impl PositionalIndexer {
                     return Err(KvCacheEventError::ParentBlockNotFound);
                 };
 
-                let worker_map = level_index.read();
+                let worker_map = level_ref.read();
 
                 let Some(entry) = worker_map.get(&parent_hash) else {
                     tracing::warn!(
@@ -304,23 +313,22 @@ impl PositionalIndexer {
             None => 0, // Start from position 0
         };
 
-        if !worker_blocks.read().contains_key(&worker) {
-            worker_blocks
-                .write()
-                .entry(worker)
-                .or_insert_with(|| RwLock::new(FxHashMap::default()));
-        }
-
-        let wb = worker_blocks.read();
-        let mut worker_map = wb.get(&worker).unwrap().write();
+        worker_blocks
+            .entry(worker)
+            .or_insert_with(|| RwLock::new(FxHashMap::default()));
+        let worker_ref = worker_blocks.get(&worker).unwrap();
+        let mut worker_map = worker_ref.write();
 
         for (i, block_data) in store_data.blocks.into_iter().enumerate() {
             let position = start_pos + i;
+            if position >= index.len() {
+                break;
+            }
             let local_hash = block_data.tokens_hash;
             let seq_hash = block_data.block_hash;
 
-            index
-                .entry((position, local_hash))
+            index[position]
+                .entry(local_hash)
                 .and_modify(|entry| entry.insert(seq_hash, worker))
                 .or_insert_with(|| SeqEntry::new(seq_hash, worker));
 
@@ -332,14 +340,13 @@ impl PositionalIndexer {
     }
 
     fn remove_blocks_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
-        worker_blocks: &RwLock<FxHashMap<WorkerWithDpRank, LevelIndex>>,
+        index: &[DashMap<LocalBlockHash, SeqEntry, FxBuildHasher>],
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         worker: WorkerWithDpRank,
         seq_hashes: &Vec<ExternalSequenceBlockHash>,
         event_id: u64,
     ) -> Result<(), KvCacheEventError> {
-        let wb = worker_blocks.read();
-        let level_index = wb.get(&worker).ok_or_else(|| {
+        let level_ref = worker_blocks.get(&worker).ok_or_else(|| {
             tracing::warn!(
                 worker_id = worker.worker_id.to_string(),
                 dp_rank = worker.dp_rank,
@@ -350,7 +357,7 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
-        let mut worker_map = level_index.write();
+        let mut worker_map = level_ref.write();
 
         for seq_hash in seq_hashes {
             let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
@@ -365,7 +372,9 @@ impl PositionalIndexer {
             };
 
             // Remove from index
-            if let Some(mut entry) = index.get_mut(&(position, local_hash)) {
+            if position < index.len()
+                && let Some(mut entry) = index[position].get_mut(&local_hash)
+            {
                 let _ = entry.remove(*seq_hash, worker);
             }
         }
@@ -376,8 +385,8 @@ impl PositionalIndexer {
     /// Clear all blocks for a specific worker_id (all dp_ranks), but keep worker tracked.
     /// Static version for use in worker threads.
     fn clear_worker_blocks_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
-        worker_blocks: &RwLock<FxHashMap<WorkerWithDpRank, LevelIndex>>,
+        index: &[DashMap<LocalBlockHash, SeqEntry, FxBuildHasher>],
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         worker_id: WorkerId,
     ) {
         Self::remove_or_clear_worker_blocks_impl(index, worker_blocks, worker_id, true);
@@ -386,9 +395,8 @@ impl PositionalIndexer {
     /// Get total number of blocks across all workers.
     pub fn current_size(&self) -> usize {
         self.worker_blocks
-            .read()
-            .values()
-            .map(|level_index| level_index.read().len())
+            .iter()
+            .map(|entry| entry.value().read().len())
             .sum()
     }
 
@@ -407,30 +415,30 @@ impl PositionalIndexer {
     /// If `keep_worker` is true, the worker remains tracked with empty blocks.
     /// If `keep_worker` is false, the worker is completely removed.
     fn remove_or_clear_worker_blocks_impl(
-        index: &DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
-        worker_blocks: &RwLock<FxHashMap<WorkerWithDpRank, LevelIndex>>,
+        index: &[DashMap<LocalBlockHash, SeqEntry, FxBuildHasher>],
+        worker_blocks: &DashMap<WorkerWithDpRank, LevelIndex, FxBuildHasher>,
         worker_id: WorkerId,
         keep_worker: bool,
     ) {
         let workers: Vec<WorkerWithDpRank> = worker_blocks
-            .read()
-            .keys()
-            .filter(|w| w.worker_id == worker_id)
-            .copied()
+            .iter()
+            .filter(|entry| entry.key().worker_id == worker_id)
+            .map(|entry| *entry.key())
             .collect();
 
-        let mut wb = worker_blocks.write();
         for worker in workers {
-            if let Some(worker_map) = wb.remove(&worker) {
+            if let Some((_, worker_map)) = worker_blocks.remove(&worker) {
                 for (seq_hash, (position, local_hash)) in worker_map.read().iter() {
-                    if let Some(mut entry) = index.get_mut(&(*position, *local_hash)) {
+                    if *position < index.len()
+                        && let Some(mut entry) = index[*position].get_mut(local_hash)
+                    {
                         let _ = entry.remove(*seq_hash, worker);
                     }
                 }
             }
 
             if keep_worker {
-                wb.insert(worker, RwLock::new(FxHashMap::default()));
+                worker_blocks.insert(worker, RwLock::new(FxHashMap::default()));
             }
         }
     }
@@ -441,6 +449,18 @@ impl PositionalIndexer {
 // -----------------------------------------------------------------------------
 
 impl PositionalIndexer {
+    /// Score all active workers at the given position and clear the active set.
+    #[inline]
+    fn drain_active(
+        active: &mut FxHashSet<WorkerWithDpRank>,
+        scores: &mut OverlapScores,
+        pos: usize,
+    ) {
+        for worker in active.drain() {
+            scores.scores.insert(worker, pos as u32);
+        }
+    }
+
     /// Compute sequence hash incrementally from previous hash and current local hash.
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
@@ -486,7 +506,7 @@ impl PositionalIndexer {
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
         sequence: &[LocalBlockHash],
     ) -> Option<FxHashSet<WorkerWithDpRank>> {
-        let entry = self.index.get(&(position, local_hash))?;
+        let entry = self.index.get(position)?.get(&local_hash)?;
 
         // Always compute and verify seq_hash to handle divergent queries correctly.
         // Even if there's only one seq_hash entry, the query's seq_hash might differ
@@ -503,7 +523,7 @@ impl PositionalIndexer {
         seq_hashes: &mut Vec<ExternalSequenceBlockHash>,
         sequence: &[LocalBlockHash],
     ) -> Option<usize> {
-        let entry = self.index.get(&(position, local_hash))?;
+        let entry = self.index.get(position)?.get(&local_hash)?;
 
         // Always compute and verify seq_hash to handle divergent queries correctly.
         // Even if there's only one seq_hash entry, the query's seq_hash might differ
@@ -519,9 +539,6 @@ impl PositionalIndexer {
     }
 
     /// Scan positions sequentially, updating active set and recording drain scores.
-    ///
-    /// Inlines the DashMap lookup so the guard lives for each iteration,
-    /// avoiding a per-position `FxHashSet` clone.
     #[allow(clippy::too_many_arguments)]
     fn linear_scan_drain(
         &self,
@@ -538,37 +555,34 @@ impl PositionalIndexer {
                 break;
             }
 
-            let Some(entry) = self.index.get(&(pos, sequence[pos])) else {
-                for worker in active.iter() {
-                    scores.scores.insert(*worker, pos as u32);
-                }
-                active.clear();
+            let Some(pos_map) = self.index.get(pos) else {
+                Self::drain_active(active, scores, pos);
+                break;
+            };
+            let Some(entry) = pos_map.get(&sequence[pos]) else {
+                Self::drain_active(active, scores, pos);
                 break;
             };
 
             Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
-            let seq_hash = seq_hashes[pos];
+            let Some(workers) = entry.get(seq_hashes[pos]) else {
+                Self::drain_active(active, scores, pos);
+                break;
+            };
 
-            match entry.get(seq_hash) {
-                Some(workers) => {
-                    active.retain(|w| {
-                        if workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, pos as u32);
-                            false
-                        }
-                    });
-                    if early_exit && !active.is_empty() {
-                        break;
+            if workers.len() < active.len() {
+                active.retain(|w| {
+                    if workers.contains(w) {
+                        true
+                    } else {
+                        scores.scores.insert(*w, pos as u32);
+                        false
                     }
-                }
-                None => {
-                    for worker in active.iter() {
-                        scores.scores.insert(*worker, pos as u32);
-                    }
-                    active.clear();
-                }
+                });
+            }
+
+            if early_exit && !active.is_empty() {
+                break;
             }
         }
     }
@@ -605,7 +619,7 @@ impl PositionalIndexer {
         }
 
         // Lazily computed sequence hashes
-        let mut seq_hashes: Vec<ExternalSequenceBlockHash> = Vec::new();
+        let mut seq_hashes: Vec<ExternalSequenceBlockHash> = Vec::with_capacity(local_hashes.len());
 
         // Check first position to initialize active set
         let Some(initial_workers) =
@@ -626,10 +640,9 @@ impl PositionalIndexer {
                 scores.scores.insert(*worker, 1);
             }
             // Populate tree_sizes
-            let wb = self.worker_blocks.read();
             for worker in scores.scores.keys() {
-                if let Some(level_index) = wb.get(worker) {
-                    scores.tree_sizes.insert(*worker, level_index.read().len());
+                if let Some(level_ref) = self.worker_blocks.get(worker) {
+                    scores.tree_sizes.insert(*worker, level_ref.read().len());
                 }
             }
             return scores;
@@ -678,10 +691,9 @@ impl PositionalIndexer {
         }
 
         // Populate tree_sizes from worker_blocks
-        let wb = self.worker_blocks.read();
         for worker in scores.scores.keys() {
-            if let Some(level_index) = wb.get(worker) {
-                scores.tree_sizes.insert(*worker, level_index.read().len());
+            if let Some(level_ref) = self.worker_blocks.get(worker) {
+                scores.tree_sizes.insert(*worker, level_ref.read().len());
             }
         }
 
