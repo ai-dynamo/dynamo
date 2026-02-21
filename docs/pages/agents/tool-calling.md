@@ -45,7 +45,14 @@ Parser to Model Mapping
 | pythonic |  meta-llama/Llama-4-* |
 | jamba |  ai21labs/AI21-Jamba-*-1.5, ai21labs/AI21-Jamba-*-1.6, ai21labs/AI21-Jamba-*-1.7, |
 | glm47 | zai-org/GLM-4.7 |
+| kimi_k2 | moonshotai/Kimi-K2-Thinking*, moonshotai/Kimi-K2-Instruct*, moonshotai/Kimi-K2.5* |
 
+\* Currently requires converting `tiktoken.model` to `tokenizers.json`.
+
+> [!TIP]
+> For Kimi K2.5 thinking models, pair `--dyn-tool-call-parser kimi_k2` with
+> `--dyn-reasoning-parser kimi_k25` so that both `<think>` blocks and tool calls
+> are parsed correctly from the same response.
 
 ## Examples
 
