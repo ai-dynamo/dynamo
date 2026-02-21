@@ -28,6 +28,10 @@ dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
+  # -- Whether to manage CRDs via a pre-install/pre-upgrade hook Job.
+  # The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
+  upgradeCRD: true
+
   # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
   natsAddr: ""
 
