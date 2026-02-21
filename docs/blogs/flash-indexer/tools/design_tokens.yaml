@@ -1,5 +1,7 @@
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
 # Dynamo Dark Design System -- Shared Tokens
-# Based on NVIDIA Brand Guide (colors, typography)
+# Dynamo design system (colors, typography)
 # Used by D2 theme (dynamo.d2) and Plotly template (plotly_dynamo.py)
 # Version history: see STYLE_GUIDE.md
 
@@ -8,9 +10,9 @@ meta:
   version: "2.0"
 
 colors:
-  # --- NVIDIA Brand Primary ---
+  # --- Brand Primary ---
   brand:
-    nvidia_green: "#76b900"    # primary brand color
+    dynamo_green: "#76b900"    # primary brand color
     rich_black: "#000000"      # dark background
     white: "#ffffff"           # light text / light background
 
@@ -23,13 +25,13 @@ colors:
 
   # --- Borders ---
   border:
-    frame: "#76b900"           # NVIDIA Green -- outer frame accent
+    frame: "#76b900"           # Dynamo green -- outer frame accent
     container: "#008564"       # Emerald -- container borders
     subtle: "#3a3a3a"          # Dark Gray -- grid lines, separators
 
-  # --- NVIDIA Accent Colors (muted for dark theme) ---
+  # --- Accent Colors (muted for dark theme) ---
   accent:
-    nvidia_green: "#76b900"    # primary accent -- data, GPU, key actions
+    dynamo_green: "#76b900"    # primary accent -- data, GPU, key actions
     cpu_blue: "#0071c5"        # CPU, compute, control paths
     fluorite: "#fac200"        # data flow, NVLink, highlights
     emerald: "#008564"         # storage, databases, caches, pipelines
@@ -51,7 +53,7 @@ colors:
     red: "#2a1010"             # critical, alerts
     neutral: "#1a1a1a"         # generic, utility
 
-  # --- Neutrals (NVIDIA brand grays) ---
+  # --- Neutrals (brand grays) ---
   text:
     primary: "#ffffff"         # White -- main text
     secondary: "#cdcdcd"       # Light Gray (205,205,205)
@@ -60,7 +62,7 @@ colors:
 
   # --- Chart series (accent strokes for bar/line/scatter) ---
   chart_series:
-    - "#76b900"                # NVIDIA Green
+    - "#76b900"                # Dynamo green
     - "#0071c5"                # CPU Blue
     - "#fac200"                # Fluorite
     - "#008564"                # Emerald
@@ -72,7 +74,7 @@ colors:
   # --- Chart fills (muted versions of chart_series for bar/hist fills) ---
   # Brighter than D2 component fills for chart readability, but not fully saturated
   chart_fills:
-    - "#4a7500"                # Muted NVIDIA Green
+    - "#4a7500"                # Muted green
     - "#0a4a80"                # Muted CPU Blue
     - "#9a7800"                # Muted Fluorite
     - "#005a40"                # Muted Emerald
@@ -82,8 +84,8 @@ colors:
     - "#702828"                # Muted Coral
 
 typography:
-  # Body / UI text -- NVIDIA Sans with Arial fallback
-  font_family: "'NVIDIA Sans', Arial, Helvetica, sans-serif"
+  # Body / UI text
+  font_family: "Arial, Helvetica, sans-serif"
 
   # Code and aligned chart labels -- Roboto Mono
   font_family_mono: "'Roboto Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace"

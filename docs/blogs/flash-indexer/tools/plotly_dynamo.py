@@ -1,10 +1,12 @@
-"""Dynamo Dark theme for Plotly charts -- NVIDIA Brand.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
+"""Dynamo Dark theme for Plotly charts.
 
 Loads design tokens from design_tokens.yaml and produces a reusable
-plotly.graph_objects.layout.Template aligned with NVIDIA visual identity.
+plotly.graph_objects.layout.Template aligned with the Dynamo visual identity.
 
 Typography:
-    - Titles, headings, body: NVIDIA Sans (Arial fallback)
+    - Titles, headings, body: Arial (sans-serif)
     - Tick labels, code-like text: Roboto Mono (monospace fallback)
 
 Usage:
@@ -65,15 +67,14 @@ def build_template(tokens: dict[str, Any] | None = None) -> go.layout.Template:
     border_subtle = colors["border"]["subtle"]
     series = colors["chart_series"]
 
-    # Dual font families per NVIDIA Brand Guide
-    font_sans = typo["font_family"]  # NVIDIA Sans for titles/body
+    font_sans = typo["font_family"]
     font_mono = typo["font_family_mono"]  # Roboto Mono for ticks/code
 
     layout = go.Layout(
         # -- Background --
         paper_bgcolor=bg_primary,
         plot_bgcolor=bg_primary,
-        # -- Typography (base: NVIDIA Sans) --
+        # -- Typography --
         font=dict(
             family=font_sans,
             color=text_primary,
@@ -212,7 +213,7 @@ dynamo_template = build_template()
 
 
 def apply_outer_frame(fig: go.Figure) -> go.Figure:
-    """Add the NVIDIA Green outer frame to an existing figure.
+    """Add the Dynamo green outer frame to an existing figure.
 
     Useful when creating a figure without the template, or when
     the frame was lost during updates.
@@ -244,7 +245,7 @@ def section_annotation(
 ) -> go.Figure:
     """Add a section header annotation (e.g., 'DISPATCH (us)').
 
-    Uses NVIDIA Sans for section headers.
+    Uses the Dynamo theme font for section headers.
 
     Args:
         fig: The Plotly figure.

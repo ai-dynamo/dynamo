@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
 """Plot achieved vs. offered throughput from mooncake_bench sweep data.
 
 Uses the Dynamo dark Plotly template (design_tokens.yaml + plotly_dynamo.py).
@@ -22,7 +24,7 @@ from plotly_dynamo import build_template, load_tokens
 BACKENDS = {
     "nested-map": {
         "label": "Concurrent Positional Indexer (Flash Indexer)",
-        "color": "#76b900",  # NVIDIA Green -- best performer
+        "color": "#76b900",  # Dynamo green -- best performer
         "version": "Dynamo v1.0.0",
     },
     "concurrent-radix-tree": {
