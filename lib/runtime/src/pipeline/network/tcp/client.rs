@@ -14,6 +14,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use super::{CallHomeHandshake, ControlMessage, TcpStreamConnectionInfo};
 use crate::engine::AsyncEngineContext;
+use crate::pipeline::error::TwoPartCodecError;
 use crate::pipeline::network::{
     ConnectionInfo, ResponseStreamPrologue, StreamSender,
     codec::{TwoPartCodec, TwoPartMessage},
@@ -248,6 +249,10 @@ async fn handle_reader(
                                 panic!("received a non-control message; this should never happen");
                            }
                         }
+                    }
+                    Some(Err(TwoPartCodecError::Io(io_err))) => {
+                        tracing::warn!("tcp stream read error (connection lost): {io_err}");
+                        break;
                     }
                     Some(Err(e)) => {
                         // TODO(#171) - address fatal errors

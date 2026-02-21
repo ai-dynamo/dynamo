@@ -31,6 +31,7 @@ use super::{
 use crate::engine::AsyncEngineContext;
 use crate::pipeline::{
     PipelineError,
+    error::TwoPartCodecError,
     network::{
         ResponseService, ResponseStreamPrologue,
         codec::{TwoPartMessage, TwoPartMessageType},
@@ -565,6 +566,11 @@ async fn tcp_listener(
                                     control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
                                     break;
                                 };
+                        }
+                        Some(Err(TwoPartCodecError::Io(io_err))) => {
+                            tracing::warn!("tcp stream read error (connection lost): {io_err}");
+                            control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                            break;
                         }
                         Some(Err(_)) => {
                             // TODO(#171) - address fatal errors
