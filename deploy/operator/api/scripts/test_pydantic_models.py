@@ -53,16 +53,34 @@ sys.path.insert(0, str(_repo_root() / "components" / "src"))
 # ---------------------------------------------------------------------------
 # Stub dynamo.runtime.logging and bypass the heavy dynamo.planner.__init__
 # before importing any dynamo module. Same technique as generate_planner_schema.py.
+#
+# dynamo itself must be a namespace-like package (has __path__) so that
+# Python's import machinery can traverse down to dynamo.profiler from the
+# filesystem.  dynamo.planner is pre-registered as a stub to skip its heavy
+# __init__.py, while still allowing dynamo.planner.utils.* to load normally.
 # ---------------------------------------------------------------------------
-_runtime_mod = types.ModuleType("dynamo.runtime")
+_repo = _repo_root()
+_components_src = str(_repo / "components" / "src")
+_dynamo_path = str(_repo / "components" / "src" / "dynamo")
+_planner_path = str(_repo / "components" / "src" / "dynamo" / "planner")
+
+if "dynamo" not in sys.modules:
+    _dynamo_mod = types.ModuleType("dynamo")
+    _dynamo_mod.__path__ = [_dynamo_path]  # type: ignore[attr-defined]
+    _dynamo_mod.__package__ = "dynamo"
+    sys.modules["dynamo"] = _dynamo_mod
+
+if "dynamo.runtime" not in sys.modules:
+    _runtime_mod = types.ModuleType("dynamo.runtime")
+    sys.modules["dynamo.runtime"] = _runtime_mod
+
 _logging_mod = types.ModuleType("dynamo.runtime.logging")
 _logging_mod.configure_dynamo_logging = lambda *args, **kwargs: None  # type: ignore[attr-defined]
-_planner_mod = types.ModuleType("dynamo.planner")
-_planner_mod.__path__ = [str(_repo_root() / "components" / "src" / "dynamo" / "planner")]  # type: ignore[attr-defined]
-_planner_mod.__package__ = "dynamo.planner"
-sys.modules.setdefault("dynamo", types.ModuleType("dynamo"))
-sys.modules.setdefault("dynamo.runtime", _runtime_mod)
 sys.modules["dynamo.runtime.logging"] = _logging_mod
+
+_planner_mod = types.ModuleType("dynamo.planner")
+_planner_mod.__path__ = [_planner_path]  # type: ignore[attr-defined]
+_planner_mod.__package__ = "dynamo.planner"
 sys.modules["dynamo.planner"] = _planner_mod
 
 import pydantic  # noqa: E402
