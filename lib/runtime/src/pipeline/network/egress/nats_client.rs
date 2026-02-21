@@ -7,6 +7,7 @@
 //! providing a consistent interface across all transport types.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::error::{DynamoError, ErrorType};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -47,9 +48,15 @@ impl RequestPlaneClient for NatsRequestClient {
         // Send request with headers
         let response = self
             .client
-            .request_with_headers(address, nats_headers, payload)
+            .request_with_headers(address.clone(), nats_headers, payload)
             .await
-            .map_err(|e| anyhow::anyhow!("NATS request failed: {}", e))?;
+            .map_err(|e| {
+                anyhow::anyhow!(DynamoError::new(
+                    ErrorType::CannotConnect,
+                    format!("NATS request to {address} failed"),
+                    Some(e),
+                ))
+            })?;
 
         Ok(response.payload)
     }

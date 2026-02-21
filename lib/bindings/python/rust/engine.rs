@@ -14,10 +14,11 @@ use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
     pipeline::{AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn},
-    protocols::annotated::Annotated,
+    protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
 use super::context::{Context, callable_accepts_kwarg};
@@ -237,38 +238,37 @@ where
                     Err(e) => {
                         done = true;
 
-                        let msg = match &e {
+                        match e {
                             ResponseProcessingError::DeserializeError(e) => {
                                 // tell the python async generator to stop generating
                                 // right now, this is impossible as we are not passing the context to the python async generator
                                 // todo: add task-local context to the python async generator
                                 ctx.stop_generating();
-                                let msg = format!(
+                                Annotated::from_error(format!(
                                     "critical error: invalid response object from python async generator; application-logic-mismatch: {}",
                                     e
-                                );
-                                msg
+                                ))
                             }
                             ResponseProcessingError::PyGeneratorExit(_) => {
-                                "Stream ended before generation completed".to_string()
+                                Annotated::from_err(DynamoError::new(
+                                    ErrorType::Backend(BackendError::EngineShutdown),
+                                    "engine shutting down",
+                                    None::<DynamoError>,
+                                ))
                             }
                             ResponseProcessingError::PythonException(e) => {
-                                let msg = format!(
+                                Annotated::from_error(format!(
                                     "a python exception was caught while processing the async generator: {}",
                                     e
-                                );
-                                msg
+                                ))
                             }
                             ResponseProcessingError::OffloadError(e) => {
-                                let msg = format!(
+                                Annotated::from_error(format!(
                                     "critical error: failed to offload the python async generator to a new thread: {}",
                                     e
-                                );
-                                msg
+                                ))
                             }
-                        };
-
-                        Annotated::from_error(msg)
+                        }
                     }
                 };
 

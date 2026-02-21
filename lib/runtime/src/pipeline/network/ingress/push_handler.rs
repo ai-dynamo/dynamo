@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+
 use crate::metrics::prometheus_names::work_handler;
 use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
@@ -265,13 +266,6 @@ where
         let mut send_complete_final = true;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
-            if let Some(err) = resp.err()
-                && format!("{:?}", err) == STREAM_ERR_MSG
-            {
-                tracing::warn!(STREAM_ERR_MSG);
-                send_complete_final = false;
-                break;
-            }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
                 complete_final: false,

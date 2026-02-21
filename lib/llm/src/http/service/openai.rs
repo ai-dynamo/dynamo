@@ -2463,6 +2463,7 @@ mod tests {
             id: None,
             event: Some("error".to_string()),
             comment: Some(vec!["Backend service unavailable".to_string()]),
+            error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);
@@ -2489,6 +2490,7 @@ mod tests {
             id: None,
             event: Some("error".to_string()),
             comment: Some(vec![error_json.to_string()]),
+            error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);
@@ -2525,6 +2527,7 @@ mod tests {
             id: Some("msg-1".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
 
         let test_stream = stream::iter(vec![normal_event.clone()]);
@@ -2571,6 +2574,7 @@ mod tests {
             id: None,
             event: None,
             comment: Some(vec!["Connection timeout".to_string()]),
+            error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);

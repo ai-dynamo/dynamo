@@ -6,11 +6,11 @@ use std::sync::Arc;
 use super::unified_client::RequestPlaneClient;
 use super::*;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
+use crate::error::{DynamoError, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
-use crate::pipeline::network::STREAM_ERR_MSG;
 use crate::pipeline::network::StreamOptions;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
@@ -187,12 +187,10 @@ where
         .filter_map(move |res| {
             if let Some(res_bytes) = res {
                 if is_complete_final {
-                    return Some(U::from_err(
-                        Error::msg(
-                            "Response received after generation ended - this should never happen",
-                        )
-                        .into(),
-                    ));
+                    let err = DynamoError::msg(
+                        "Response received after generation ended - this should never happen",
+                    );
+                    return Some(U::from_err(err));
                 }
                 match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
                     Ok(item) => {
@@ -202,10 +200,10 @@ where
                         } else if is_complete_final {
                             None
                         } else {
-                            Some(U::from_err(
-                                Error::msg("Empty response received - this should never happen")
-                                    .into(),
-                            ))
+                            let err = DynamoError::msg(
+                                "Empty response received - this should never happen",
+                            );
+                            Some(U::from_err(err))
                         }
                     }
                     Err(err) => {
@@ -213,7 +211,7 @@ where
                         let json_str = String::from_utf8_lossy(&res_bytes);
                         tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
 
-                        Some(U::from_err(Error::new(err).into()))
+                        Some(U::from_err(DynamoError::msg(err.to_string())))
                     }
                 }
             } else if is_complete_final {
@@ -227,8 +225,13 @@ where
                 None
             } else {
                 // stream ended unexpectedly
-                tracing::debug!("{STREAM_ERR_MSG}");
-                Some(U::from_err(Error::msg(STREAM_ERR_MSG).into()))
+                let err = DynamoError::new(
+                    ErrorType::Disconnected,
+                    "Stream ended before generation completed",
+                    None::<DynamoError>,
+                );
+                tracing::debug!("{}", err);
+                Some(U::from_err(err))
             }
         });
 
