@@ -2,19 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::discovery::RuntimeConfigWatch;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
-
 use super::WorkerSelector;
-use super::protocols::{WorkerId, WorkerWithDpRank};
+use super::protocols::WorkerWithDpRank;
 use super::scheduler::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
 use super::sequence::{ActiveSequencesMultiWorker, SequenceRequest};
+use crate::discovery::RuntimeConfigWatch;
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
@@ -148,13 +146,13 @@ impl SchedulerQueue {
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
 
-        let workers: HashMap<WorkerId, ModelRuntimeConfig> =
-            self.workers_with_configs.borrow().clone();
+        let selection = {
+            let workers = self.workers_with_configs.borrow();
+            self.selector
+                .select_worker(&workers, &request, self.block_size)
+        };
 
-        match self
-            .selector
-            .select_worker(&workers, &request, self.block_size)
-        {
+        match selection {
             Ok(selection) => {
                 request.respond(SchedulingResponse {
                     best_worker: selection.worker,
