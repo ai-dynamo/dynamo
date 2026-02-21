@@ -27,7 +27,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 sys.path.insert(0, str(Path(__file__).parent))
-from plotly_dynamo import dynamo_template, load_tokens  # noqa: E402
+from plotly_dynamo import dynamo_template, load_tokens
 
 TOKENS = load_tokens()
 C = TOKENS["colors"]

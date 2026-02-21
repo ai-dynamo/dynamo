@@ -133,7 +133,8 @@ def inject(svg: str, cfg: dict) -> str:
     svg = strip_injections(svg)
 
     vb_m = re.search(r'viewBox="([^"]*)"', svg)
-    assert vb_m, "No viewBox found"
+    if not vb_m:
+        raise ValueError("No viewBox found in SVG")
     orig_vb = vb_m.group(1)
     vbx, vby, vbw, vbh = (float(v) for v in orig_vb.split())
 
@@ -177,7 +178,7 @@ def inject(svg: str, cfg: dict) -> str:
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    for diagram_id, cfg in CONFIG.items():
+    for cfg in CONFIG.values():
         src = HERE / cfg["file"]
         if not src.exists():
             print(f"  SKIP: {cfg['file']} not found")

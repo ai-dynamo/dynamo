@@ -80,7 +80,7 @@ Dynamo dark theme.
 
 ## Contents
 
-```
+```text
 tools/
 ├── README.md                  # This file
 ├── build.sh                   # One-shot build for all figures

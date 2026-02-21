@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+import warnings
 from pathlib import Path
 
 import plotly.graph_objects as go
@@ -78,15 +80,6 @@ def main():
             ordered.append((k, data[k]))
 
     fig = go.Figure()
-
-    global_min = float("inf")
-    global_max = float("-inf")
-    for _, steps in ordered:
-        for s in steps:
-            offered = s["offered_block_throughput"]
-            achieved = s["block_throughput"]
-            global_min = min(global_min, offered, achieved)
-            global_max = max(global_max, offered, achieved)
 
     axis_min = 1e5  # 100k fixed floor
     x_max = 2e9  # 2.0G
@@ -226,11 +219,15 @@ def main():
     # ] bracket from pixel editor (bracket_editor_px.html)
     # Pixel coords on 775x650 canvas → Plotly paper-x / data-y
     top_peak = peak_values.get("nested-map", 170e6)
+    if "nested-map" not in peak_values:
+        warnings.warn("nested-map not in data; using fallback 170M")
     bot_peak = peak_values.get("radix-tree", 4e6)
+    if "radix-tree" not in peak_values:
+        warnings.warn("radix-tree not in data; using fallback 4M")
     improvement = top_peak / bot_peak
 
-    _margin_l, _margin_t, _margin_b = 60, 70, 60
-    _plot_w = args.width - _margin_l - 55  # r=55
+    _margin_l, _margin_r, _margin_t, _margin_b = 60, 55, 70, 60
+    _plot_w = args.width - _margin_l - _margin_r
     _plot_h = args.height - _margin_t - _margin_b
     _y_log_lo = _log10(axis_min)
     _y_log_hi = _log10(y_max)
@@ -287,7 +284,7 @@ def main():
             yref="y",
             x=bx_paper,
             y=_log10(mid_y),
-            text=f"{improvement:.0f}×",
+            text=f"{improvement:.0f}×",  # noqa: RUF001
             showarrow=False,
             xanchor="left",
             xshift=br_lx_shift,
@@ -322,7 +319,7 @@ def main():
         ),
         width=args.width,
         height=args.height,
-        margin=dict(l=60, r=55, t=70, b=60),
+        margin=dict(l=_margin_l, r=_margin_r, t=_margin_t, b=_margin_b),
         annotations=peak_annotations,
         shapes=peak_shapes,
     )
@@ -338,8 +335,6 @@ def main():
 
 
 def _log10(x: float) -> float:
-    import math
-
     return math.log10(x)
 
 

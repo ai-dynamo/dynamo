@@ -10,7 +10,7 @@ Typography:
     - Tick labels, code-like text: Roboto Mono (monospace fallback)
 
 Usage:
-    from docs.diagrams.theme.plotly_dynamo import dynamo_template, load_tokens
+    from plotly_dynamo import dynamo_template, load_tokens
 
     fig = go.Figure(data=[...], layout=go.Layout(template=dynamo_template))
     fig.write_image("chart.svg")
