@@ -221,6 +221,7 @@ class Processor(ProcessMixIn):
             model=raw_request.model,
             messages=[msg],
             stream=True,
+            stream_options=raw_request.stream_options,
             max_tokens=raw_request.max_tokens,
             temperature=raw_request.temperature,
             request_id=str(uuid.uuid4()),
