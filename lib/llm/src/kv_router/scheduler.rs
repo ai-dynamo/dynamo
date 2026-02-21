@@ -63,20 +63,17 @@ pub struct SchedulingRequest {
     pub lora_name: Option<String>,
     /// Priority jump in seconds; decreases effective arrival time in the queue.
     pub priority_jump: f64,
-    // Option to take it out to send the response without moving the struct
-    resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
+    resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
 }
 
 impl SchedulingRequest {
-    pub fn respond(&mut self, response: SchedulingResponse) {
-        // Changed to &mut self
-        if let Some(tx) = self.resp_tx.take() {
-            // Use take() to extract the sender
-            if tx.send(response).is_err() {
-                tracing::error!("failed to send response to requestor");
-            }
-        } else {
+    pub fn respond(&mut self, result: Result<SchedulingResponse, KvSchedulerError>) {
+        let Some(tx) = self.resp_tx.take() else {
             tracing::error!("respond called multiple times on same request");
+            return;
+        };
+        if tx.send(result).is_err() {
+            tracing::error!("failed to send response to requestor");
         }
     }
 }
@@ -236,7 +233,7 @@ impl KvScheduler {
 
         let response = resp_rx
             .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)??;
 
         #[cfg(feature = "bench")]
         let total_elapsed = start.elapsed();

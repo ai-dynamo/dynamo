@@ -152,44 +152,43 @@ impl SchedulerQueue {
                 .select_worker(&workers, &request, self.block_size)
         };
 
-        match selection {
-            Ok(selection) => {
-                request.respond(SchedulingResponse {
-                    best_worker: selection.worker,
-                    overlap_blocks: selection.overlap_blocks,
-                });
-
-                if !request.update_states {
-                    return;
-                }
-
-                let Some(request_id) = request.maybe_request_id else {
-                    tracing::error!("No request_id provided to add_request to the slot tracker");
-                    return;
-                };
-
-                if let Err(e) = self
-                    .slots
-                    .add_request(SequenceRequest {
-                        request_id: request_id.clone(),
-                        token_sequence: request.token_seq,
-                        isl: request.isl_tokens,
-                        overlap: selection.overlap_blocks,
-                        expected_output_tokens: None,
-                        worker: selection.worker,
-                        lora_name: request.lora_name.clone(),
-                    })
-                    .await
-                {
-                    tracing::warn!("Failed to add request {request_id}: {e}");
-                }
-            }
-            Err(KvSchedulerError::NoEndpoints) => {
-                tracing::warn!("no endpoints available, dropping request");
-            }
+        let selection = match selection {
+            Ok(s) => s,
             Err(e) => {
-                tracing::error!("error scheduling request: {:?}", e);
+                tracing::warn!("scheduling failed: {e}");
+                request.respond(Err(e));
+                return;
             }
+        };
+
+        request.respond(Ok(SchedulingResponse {
+            best_worker: selection.worker,
+            overlap_blocks: selection.overlap_blocks,
+        }));
+
+        if !request.update_states {
+            return;
+        }
+
+        let Some(request_id) = request.maybe_request_id else {
+            tracing::error!("No request_id provided to add_request to the slot tracker");
+            return;
+        };
+
+        if let Err(e) = self
+            .slots
+            .add_request(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: request.token_seq,
+                isl: request.isl_tokens,
+                overlap: selection.overlap_blocks,
+                expected_output_tokens: None,
+                worker: selection.worker,
+                lora_name: request.lora_name.clone(),
+            })
+            .await
+        {
+            tracing::warn!("Failed to add request {request_id}: {e}");
         }
     }
 
