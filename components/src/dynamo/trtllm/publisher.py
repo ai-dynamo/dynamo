@@ -305,6 +305,7 @@ class Publisher:
         component_gauges: LLMBackendMetrics,
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
+        metrics_collector=None,
     ):
         self.component = component
         self.engine = engine
@@ -315,6 +316,7 @@ class Publisher:
         self.metrics_labels = metrics_labels
         self.component_gauges = component_gauges
         self.enable_local_indexer = enable_local_indexer
+        self.metrics_collector = metrics_collector
         self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
@@ -483,6 +485,16 @@ class Publisher:
                 kv_active_blocks / kv_total_blocks if kv_total_blocks > 0 else 0.0
             )
             self.component_gauges.set_gpu_cache_usage("0", gpu_cache_usage)
+
+            # Log iteration stats to TRT-LLM MetricsCollector (PR #11243)
+            # This populates trtllm_kv_cache_hit_rate and trtllm_kv_cache_utilization gauges
+            if self.metrics_collector and hasattr(
+                self.metrics_collector, "log_iteration_stats"
+            ):
+                try:
+                    self.metrics_collector.log_iteration_stats(stat)
+                except Exception as e:
+                    logging.warning(f"Failed to log iteration stats: {e}")
 
         await self._polling_loop(
             lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
@@ -769,6 +781,7 @@ async def get_publisher(
     component_gauges: LLMBackendMetrics,
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
+    metrics_collector=None,
 ):
     publisher = Publisher(
         component,
@@ -780,6 +793,7 @@ async def get_publisher(
         component_gauges=component_gauges,
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
+        metrics_collector=metrics_collector,
     )
     try:
         publisher.initialize()
