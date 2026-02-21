@@ -19,8 +19,10 @@ use super::pythonic::{
 };
 use super::response::ToolCallResponse;
 use super::xml::{
-    detect_tool_call_start_glm47, detect_tool_call_start_xml, find_tool_call_end_position_glm47,
-    find_tool_call_end_position_xml, try_tool_call_parse_glm47, try_tool_call_parse_xml,
+    detect_tool_call_start_glm47, detect_tool_call_start_kimi_k2, detect_tool_call_start_xml,
+    find_tool_call_end_position_glm47, find_tool_call_end_position_kimi_k2,
+    find_tool_call_end_position_xml, try_tool_call_parse_glm47, try_tool_call_parse_kimi_k2,
+    try_tool_call_parse_xml,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -45,6 +47,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("jamba", ToolCallConfig::jamba());
         map.insert("minimax_m2", ToolCallConfig::minimax_m2());
         map.insert("glm47", ToolCallConfig::glm47());
+        map.insert("kimi_k2", ToolCallConfig::kimi_k2());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
         map
@@ -89,6 +92,11 @@ pub async fn try_tool_call_parse(
         ParserConfig::Glm47(glm47_config) => {
             let (results, normal_content) =
                 try_tool_call_parse_glm47(message, glm47_config, tools)?;
+            Ok((results, normal_content))
+        }
+        ParserConfig::KimiK2(kimi_config) => {
+            let (results, normal_content) =
+                try_tool_call_parse_kimi_k2(message, kimi_config, tools)?;
             Ok((results, normal_content))
         }
     }
@@ -144,6 +152,9 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
             ParserConfig::Glm47(glm47_config) => {
                 Ok(detect_tool_call_start_glm47(chunk, glm47_config))
             }
+            ParserConfig::KimiK2(kimi_config) => {
+                Ok(detect_tool_call_start_kimi_k2(chunk, kimi_config))
+            }
         },
         None => anyhow::bail!(
             "Parser '{}' is not implemented. Available parsers: {:?}",
@@ -183,6 +194,9 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usi
             ParserConfig::Dsml(dsml_config) => find_tool_call_end_position_dsml(chunk, dsml_config),
             ParserConfig::Glm47(glm47_config) => {
                 find_tool_call_end_position_glm47(chunk, glm47_config)
+            }
+            ParserConfig::KimiK2(kimi_config) => {
+                find_tool_call_end_position_kimi_k2(chunk, kimi_config)
             }
         },
         None => {
@@ -225,6 +239,7 @@ mod tests {
             "nemotron_nano",
             "minimax_m2",
             "glm47",
+            "kimi_k2",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
