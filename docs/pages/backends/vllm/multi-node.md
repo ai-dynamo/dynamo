@@ -79,19 +79,28 @@ Deploy prefill and decode workers on separate nodes for optimized resource utili
 # Start ingress
 python -m dynamo.frontend --router-mode kv &
 
-# Start prefill worker
+# Start decode worker
 python -m dynamo.vllm \
-  --model meta-llama/Llama-3.3-70B-Instruct
+  --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager
 ```
 
 **Node 2**: Run prefill worker
 ```bash
-# Start decode worker
+# Start prefill worker
 python -m dynamo.vllm \
-  --model meta-llama/Llama-3.3-70B-Instruct
+  --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager \
   --is-prefill-worker
 ```
+
+### Multi-node Tensor/Pipeline Parallelism
+
+When the total parallelism (TP × PP) exceeds the number of GPUs on a single node,
+you need multiple nodes to host a **single** model instance. One node runs the full
+`dynamo.vllm` process (head) while additional nodes run in `--headless` mode,
+spawning only vLLM workers.
+
+See [`examples/backends/vllm/launch/multi_node_tp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/multi_node_tp.sh) for a ready-to-use launch script that supports both head and worker roles via `--head` / `--worker` flags. The model, TP size, and node count are configurable via `MODEL`, `TENSOR_PARALLEL_SIZE`, and `NNODES` environment variables.
