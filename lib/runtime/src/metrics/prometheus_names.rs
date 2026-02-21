@@ -249,6 +249,30 @@ pub mod frontend_service {
         /// Value for unary requests
         pub const UNARY: &str = "unary";
     }
+
+    /// Error type label values for fine-grained error classification
+    pub mod error_type {
+        /// No error (used for successful requests)
+        pub const NONE: &str = "";
+
+        /// Client validation error (4xx with "Validation:" prefix)
+        pub const VALIDATION: &str = "validation";
+
+        /// Model or resource not found (404)
+        pub const NOT_FOUND: &str = "not_found";
+
+        /// Service overloaded, too many requests (503)
+        pub const OVERLOAD: &str = "overload";
+
+        /// Request cancelled by client or timeout
+        pub const CANCELLED: &str = "cancelled";
+
+        /// Internal server error (500 and other unexpected errors)
+        pub const INTERNAL: &str = "internal";
+
+        /// Feature not implemented (501)
+        pub const NOT_IMPLEMENTED: &str = "not_implemented";
+    }
 }
 
 /// Work handler Prometheus metric names
