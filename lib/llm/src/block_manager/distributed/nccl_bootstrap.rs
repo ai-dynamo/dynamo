@@ -13,7 +13,7 @@
 
 use anyhow::{Context, Result};
 use cudarc::nccl::sys::{
-    ncclComm_t, ncclCommDestroy, ncclCommInitRank, ncclGetUniqueId, ncclResult_t, ncclUniqueId,
+    ncclComm_t, ncclCommDestroy, ncclCommInitRankConfig, ncclGetUniqueId, ncclResult_t, ncclUniqueId, ncclConfig_t
 };
 
 /// Check NCCL result and convert to anyhow::Result
@@ -152,13 +152,45 @@ impl NcclBootstrap {
             self.world_size
         );
 
+        // CudaRC doesn't seem to have any nice bindings to the NCCL config.
+        // We have to manually create it the same way the NCCL C++ macros do.
+        let mut config: ncclConfig_t;
+
+        let max_ctas = std::env::var("DYN_KVBM_NCCL_MAX_CTAS")
+            .ok()
+            .and_then(|val| val.parse::<i32>().ok())
+            .unwrap_or(8);
+
+        unsafe {
+            config = ncclConfig_t {
+                size: std::mem::size_of::<ncclConfig_t>(),
+                magic: 0xcafebeef, // Required Magic Number
+                version: 22800, // NOTE: This needs to be updated whenever we update the NCCL version.
+                blocking: 1,
+                cgaClusterSize: std::i32::MIN,
+                minCTAs: 1,
+                maxCTAs: max_ctas,
+                netName: std::ptr::null_mut(),
+                splitShare: std::i32::MIN,
+                trafficClass: std::i32::MIN,
+                commName: std::ptr::null_mut(),
+                collnetEnable: 0,
+                CTAPolicy: std::i32::MIN,
+                shrinkShare: std::i32::MIN,
+                nvlsCTAs: std::i32::MIN,
+                nChannelsPerNetPeer: std::i32::MIN,
+                nvlinkCentricSched: std::i32::MIN,
+            }
+        }
+
         let mut comm: ncclComm_t = std::ptr::null_mut();
         tracing::debug!(
             "Calling ncclCommInitRank: rank={}, world_size={}",
             rank,
             self.world_size
         );
-        let result = unsafe { ncclCommInitRank(&mut comm, self.world_size, self.unique_id, rank) };
+
+        let result = unsafe { ncclCommInitRankConfig(&mut comm, self.world_size, self.unique_id, rank, &mut config) };
         check_nccl_result(result, &format!("ncclCommInitRank(rank={}, world_size={})", rank, self.world_size))?;
         tracing::info!(
             "NCCL communicator initialized successfully: rank={}, world_size={}",
