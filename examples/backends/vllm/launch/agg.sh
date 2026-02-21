@@ -24,6 +24,8 @@ done
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+# found warning of pynvml being imported instead of nvidia-ml-py, so please address this import
+# correctly to suppress the warning.
 python -m dynamo.frontend &
 
 # run worker
