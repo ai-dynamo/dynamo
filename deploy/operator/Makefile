@@ -111,11 +111,9 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 			yq eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	if [ ! -d "../helm/charts/crds/templates/" ]; then \
-		echo "Creating directory ../helm/charts/crds/templates/"; \
-		mkdir -p ../helm/charts/crds/templates/; \
-	fi
-	cp config/crd/bases/*.yaml ../helm/charts/crds/templates/
+	echo "Copying CRD files to operator Helm chart crds/ directory"
+	mkdir -p ../helm/charts/platform/components/operator/crds/
+	cp config/crd/bases/*.yaml ../helm/charts/platform/components/operator/crds/
 	echo "Adding NVIDIA header to RBAC files"
 	for file in config/rbac/*.yaml; do \
 		if [ -f "$$file" ] && ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \

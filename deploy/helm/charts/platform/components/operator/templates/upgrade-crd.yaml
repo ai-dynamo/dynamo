@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- if .Values.upgradeCRD }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-crd-apply-sa
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+    helm.sh/hook-weight: "0"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-crd-apply-role
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+    helm.sh/hook-weight: "0"
+rules:
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - patch
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-crd-apply-binding
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+    helm.sh/hook-weight: "0"
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dynamo-operator.fullname" . }}-crd-apply-sa
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-crd-apply-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-crd-apply
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-apply
+spec:
+  template:
+    metadata:
+      name: {{ include "dynamo-operator.fullname" . }}-crd-apply
+      labels:
+        {{- include "dynamo-operator.labels" . | nindent 8 }}
+        app.kubernetes.io/component: crd-apply
+    spec:
+      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-crd-apply-sa
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controllerManager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controllerManager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        runAsNonRoot: true
+      containers:
+        - name: crd-apply
+          image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
+          imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | default "IfNotPresent" }}
+          command: ["crd-apply"]
+          args:
+            - "--crds-dir=/opt/dynamo-operator/crds/"
+            - "--version={{ .Chart.AppVersion }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      restartPolicy: OnFailure
+{{- end }}
