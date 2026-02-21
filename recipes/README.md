@@ -77,6 +77,25 @@ Ensure your cluster has:
 - GPU operator installed
 - Appropriate GPU drivers and container runtime
 
+> [!NOTE]
+> **GB200 recipes require a ComputeDomain resource (MNNVL / IMEX channel)**
+>
+> Recipes targeting GB200 nodes (e.g., `gpt-oss-120b`, `deepseek-r1/trtllm/disagg/wide_ep/gb200`)
+> use the CUTLASS or WideEP MoE backend with Expert Parallelism. These backends rely on NVLink
+> OneSided AlltoAll communication, which requires MNNVL shared memory allocated via `cuMemCreate`.
+> This allocation only succeeds when an IMEX channel is available on the node.
+>
+> IMEX channels are provisioned by the `ComputeDomain` custom resource (`resource.nvidia.com/v1beta1`),
+> which requires the `nvidia-dra-driver-gpu` DaemonSet running on the cluster. GB200 recipes include
+> a `ComputeDomain` manifest by default for this reason.
+>
+> **Grove operator interaction:** If your cluster runs the [Grove operator](https://github.com/ai-dynamo/grove)
+> with `network.autoMNNVLEnabled: true`, Grove automatically creates `ComputeDomain` resources and
+> injects the IMEX claim into all GPU pods. In that case, **remove the `ComputeDomain` block from
+> the recipe's `deploy.yaml`** before applying it — a duplicate causes a double-claim scheduling
+> conflict that leaves pods stuck in `Pending`. Grove's auto-MNNVL is a released feature but is
+> **not enabled by default**.
+
 **3. HuggingFace Access**
 
 Configure authentication to download models:
