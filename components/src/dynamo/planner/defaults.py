@@ -114,10 +114,12 @@ class TrtllmComponentName:
     # Unified frontend architecture (consistent with vLLM/SGLang):
     # - Prefill workers use "prefill" component
     # - Decode workers use "tensorrt_llm" component
-    prefill_worker_k8s_name = "TRTLLMPrefillWorker"
+    # Note: profiler output uses "PrefillWorker"/"DecodeWorker" (shortened from the legacy
+    # "TRTLLMPrefillWorker"/"TRTLLMDecodeWorker") to satisfy Grove's 45-char naming limit.
+    prefill_worker_k8s_name = "PrefillWorker"
     prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
-    decode_worker_k8s_name = "TRTLLMDecodeWorker"
+    decode_worker_k8s_name = "DecodeWorker"
     decode_worker_component_name = "tensorrt_llm"
     decode_worker_endpoint = "generate"
 

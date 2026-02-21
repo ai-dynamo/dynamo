@@ -261,4 +261,9 @@ def apply_parallel_mapping_to_config(
             max_num_tokens=PREFILL_MAX_NUM_TOKENS * mapping.get_attn_dp_size(),
             component_type=prefill_component_type,
         )
+    elif phase == SubComponentType.DECODE:
+        cfg = config_modifier.set_decode_config(
+            cfg,
+            component_type=SubComponentType.DECODE,
+        )
     return cfg

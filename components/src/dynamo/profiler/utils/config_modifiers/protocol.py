@@ -35,6 +35,14 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigModifierProtocol(Protocol):
+    # NOTE: Many methods below default component_type to SubComponentType.DECODE.
+    # This is because convert_config() always labels the surviving worker as "decode"
+    # in the aggregated config, even for prefill-only profiling. So DECODE is the
+    # correct default for the common post-conversion case. The parameter exists for
+    # the disaggregated path (TEP/DEP) where prefill and decode are separate services.
+    # TODO: Refactor to a single get_active_worker_service() helper so callers don't
+    # need to know this convention.
+
     @classmethod
     def convert_config(
         cls,
@@ -88,6 +96,14 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
+    def set_decode_config(
+        cls,
+        config: dict,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        ...
+
+    @classmethod
     def get_port(cls, config: dict) -> int:
         ...
 
@@ -133,6 +149,21 @@ class BaseConfigModifier:
 
     # Subclasses should override, e.g. "vllm" / "sglang" / "trtllm"
     BACKEND: str = ""
+
+    @classmethod
+    def set_decode_config(
+        cls,
+        config: dict,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Configure decode engine limits. No-op by default; override in backends that need it."""
+        return config
+
+    @classmethod
+    def normalize_output_service_names(cls, config_dict: dict) -> None:
+        """Rename service names in an output DGD config dict (in-place). No-op by default."""
+        pass
+
     # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
     WORKER_MODEL_PATH_ARG: str = "--model-path"
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
