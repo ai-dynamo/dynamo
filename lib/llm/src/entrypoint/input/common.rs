@@ -277,7 +277,7 @@ where
         RouterMode::Direct => {
             ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
         }
-        RouterMode::Random | RouterMode::RoundRobin => {
+        RouterMode::Random | RouterMode::RoundRobin | RouterMode::LeastLoaded => {
             ServiceBackend::from_engine(Arc::new(router))
         }
         RouterMode::KV => {
