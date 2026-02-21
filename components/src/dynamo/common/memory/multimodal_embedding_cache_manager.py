@@ -82,6 +82,18 @@ class MultimodalEmbeddingCacheManager:
         ), "Tensor must be contiguous for accurate size calculation"
         return tensor.element_size() * tensor.numel()
 
+    def contains(self, key: str) -> bool:
+        """
+        Check if a key exists in the cache without updating LRU order or stats.
+
+        Args:
+            key: Cache key (typically content hash).
+
+        Returns:
+            True if the key is in the cache, False otherwise.
+        """
+        return key in self._cache
+
     def get(self, key: str) -> Optional[CachedEmbedding]:
         """
         Get a cached embedding from the cache.

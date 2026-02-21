@@ -274,8 +274,19 @@ async def _fetch_embeddings(
                     ),
                 )
             results[idx] = group
-    else:
-        logger.info(f"[{request_id}] All {len(image_urls)} URLs served from cache")
+
+    if cache is not None:
+        hits = len(image_urls) - len(to_fetch)
+        misses = len(to_fetch)
+        stats = cache.stats
+        logger.info(
+            f"[{request_id}] Embedding cache: "
+            f"request hits={hits} misses={misses}, "
+            f"cumulative hit_rate={stats['hit_rate']:.2%} "
+            f"(hits={stats['hits']} misses={stats['misses']} "
+            f"entries={stats['entries']} "
+            f"mem={stats['current_bytes'] / 1024**2:.1f}MB)"
+        )
 
     return [r for r in results if r is not None], pending
 

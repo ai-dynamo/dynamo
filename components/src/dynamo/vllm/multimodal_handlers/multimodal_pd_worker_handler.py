@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import copy
 import logging
 import os
 import uuid
-from collections import defaultdict
 from typing import Any
 
 import torch
@@ -74,7 +74,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self.decode_worker_client = decode_worker_client
         self.enable_disagg = config.is_prefill_worker
         self.embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None
-        if config.multimodal_embedding_cache_capacity_gb > 0:
+        if encode_worker_client and config.multimodal_embedding_cache_capacity_gb > 0:
             capacity_bytes = int(
                 config.multimodal_embedding_cache_capacity_gb * 1024**3
             )
@@ -151,13 +151,27 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
     async def _load_multimodal_data(
         self, image_urls: list[str], request_id: str
     ) -> dict[str, Any]:
-        """Fetch embeddings from encode workers and load into an engine-ready dict.
+        """Load multimodal data for the request.
 
-        Returns an empty dict when no encode worker is configured or no images
-        are present.
+        When an encode worker is connected (E/PD or E/P/D mode), fetches
+        pre-computed embeddings.  Otherwise (agg EPD mode), loads raw images
+        locally and lets vLLM's internal vision tower handle encoding.
+
+        Returns an empty dict when no images are present.
         """
-        if not self.encode_worker_client or not image_urls:
-            return defaultdict(list)
+        if not image_urls:
+            return {}
+
+        # Agg EPD mode: load images locally
+        if not self.encode_worker_client:
+            images = list(
+                await asyncio.gather(
+                    *(self.image_loader.load_image(url) for url in image_urls)
+                )
+            )
+            if not images:
+                return {}
+            return {"image": images[0] if len(images) == 1 else images}
 
         return await load_multimodal_embeddings(
             self.encode_worker_client,  # type: ignore[arg-type]
@@ -197,7 +211,10 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             if image_embeds is not None:
                 request.embeddings_shape = list(image_embeds.shape)
 
-        logger.debug(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
+        image_data = multi_modal_data.get("image")
+        if image_data is not None:
+            count = len(image_data) if isinstance(image_data, (list, dict)) else 1
+            logger.debug("Prepared multimodal data: %d image(s)", count)
         logger.debug("Multimodal data keys: %s", list(multi_modal_data.keys()))
 
     # ── Response serialization ───────────────────────────────────────
@@ -263,7 +280,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=request.engine_prompt["prompt_token_ids"],
-                multi_modal_data=multi_modal_data,
+                # Pass None for text-only requests; an empty dict would
+                # still trigger vLLM's multimodal processing path.
+                multi_modal_data=multi_modal_data or None,
             ),
             sampling_params=request.sampling_params,
             request_id=request.request_id,
@@ -279,6 +298,16 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             yield self._format_engine_output(response, num_output_tokens_so_far)
             if response.outputs:
                 num_output_tokens_so_far = len(response.outputs[0].token_ids)
+                if response.outputs[0].finish_reason:
+                    prompt_tokens = len(response.prompt_token_ids)
+                    cached = response.num_cached_tokens or 0
+                    hit_rate = cached / prompt_tokens if prompt_tokens else 0
+                    logger.info(
+                        f"[{request.request_id}] KV prefix cache: "
+                        f"cached_tokens={cached}/{prompt_tokens} "
+                        f"hit_rate={hit_rate:.2%} "
+                        f"output_tokens={num_output_tokens_so_far}"
+                    )
 
     # ── Disaggregated generation (prefill here, decode remote) ───────
 
@@ -301,7 +330,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=prefill_only_request.engine_prompt["prompt_token_ids"],
-                multi_modal_data=multi_modal_data,
+                # Pass None for text-only requests; an empty dict would
+                # still trigger vLLM's multimodal processing path.
+                multi_modal_data=multi_modal_data or None,
             ),
             sampling_params=prefill_only_request.sampling_params,
             request_id=prefill_only_request.request_id,
