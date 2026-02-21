@@ -88,23 +88,22 @@ pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
 }
 
 // for router discovery registration
-pub const KV_ROUTER_COMPONENT: &str = "kv-router";
-pub const KV_ROUTER_ENDPOINT: &str = "generate";
+pub const KV_ROUTER_ENDPOINT: &str = "router-discovery";
 
 /// Creates an EndpointId for the KV router in the given namespace.
-pub fn router_endpoint_id(namespace: String) -> EndpointId {
+pub fn router_endpoint_id(namespace: String, component: String) -> EndpointId {
     EndpointId {
         namespace,
-        component: KV_ROUTER_COMPONENT.to_string(),
+        component,
         name: KV_ROUTER_ENDPOINT.to_string(),
     }
 }
 
 /// Creates a DiscoveryQuery for the KV router in the given namespace.
-pub fn router_discovery_query(namespace: String) -> DiscoveryQuery {
+pub fn router_discovery_query(namespace: String, component: String) -> DiscoveryQuery {
     DiscoveryQuery::Endpoint {
         namespace,
-        component: KV_ROUTER_COMPONENT.to_string(),
+        component,
         endpoint: KV_ROUTER_ENDPOINT.to_string(),
     }
 }
