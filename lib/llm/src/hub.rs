@@ -66,9 +66,20 @@ fn is_offline_mode() -> bool {
 ///
 /// If HF_HUB_OFFLINE=1 is set and the model is already cached, returns the cached
 /// path without making any API calls to HuggingFace.
+///
+/// If the name is an existing local directory and config.json exists,
+/// returns the path directly (no download).
+/// This aligns with workers, which skips fetch_llm when model_path exists.
 pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
     let model_name = name.display().to_string();
+
+    // Check local directory first and return immediately if config.json is found
+    if name.is_dir() && name.join("config.json").exists() {
+        let path = name.to_path_buf();
+        tracing::info!("Using existing local model path '{model_name}', skipping download");
+        return Ok(path);
+    }
 
     // In offline mode, check cache first and return immediately if found
     if is_offline_mode() {
@@ -179,6 +190,44 @@ fn get_model_express_cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_from_hf_local_dir_with_config_returns_path() {
+        // If name is an existing local directory and config.json exists,
+        // from_hf returns it directly (no download).
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let dir_path = temp_dir.path().to_path_buf();
+        std::fs::write(dir_path.join("config.json"), "{}").expect("write config.json");
+
+        let result = from_hf(&dir_path, false).await;
+
+        assert!(
+            result.is_ok(),
+            "from_hf should succeed when directory exists and config.json is present"
+        );
+        let path = result.unwrap();
+        assert_eq!(
+            path, dir_path,
+            "should return the same path, skipping download"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_from_hf_local_dir_without_config_errors() {
+        // If name is an existing local directory but config.json does not exist,
+        // from_hf does not return early,
+        // falls back to download from HF, which fails (path is not a valid HF model id).
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let dir_path = temp_dir.path().to_path_buf();
+        // Do not create config.json.
+
+        let result = from_hf(&dir_path, false).await;
+
+        assert!(
+            result.is_err(),
+            "from_hf should fail when config.json is missing (download from HF with path as model id fails)"
+        );
+    }
 
     #[tokio::test]
     async fn test_from_hf_with_model_express() {
