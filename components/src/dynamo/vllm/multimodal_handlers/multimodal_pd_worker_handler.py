@@ -20,7 +20,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     NixlPersistentEmbeddingReceiver,
 )
-from dynamo.runtime import Client, Component, DistributedRuntime
+from dynamo.runtime import Client, DistributedRuntime
 
 from ..args import Config
 from ..handlers import BaseWorkerHandler, build_sampling_params
@@ -44,7 +44,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
-        component: Component,
         engine_client: AsyncLLM,
         config: Config,
         encode_worker_client: Client | None = None,
@@ -60,7 +59,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Call BaseWorkerHandler.__init__ with proper parameters
         super().__init__(
             runtime,
-            component,
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,

@@ -91,14 +91,21 @@ class WorkerFactory:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
-        component = generate_endpoint.component()
-        clear_endpoint = component.endpoint("clear_kv_blocks")
+        clear_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.clear_kv_blocks"
+        )
 
         lora_enabled = config.engine_args.enable_lora
         if lora_enabled:
-            load_lora_endpoint = component.endpoint("load_lora")
-            unload_lora_endpoint = component.endpoint("unload_lora")
-            list_loras_endpoint = component.endpoint("list_loras")
+            load_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.load_lora"
+            )
+            unload_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.unload_lora"
+            )
+            list_loras_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.list_loras"
+            )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         if pre_created_engine is not None:
@@ -141,7 +148,6 @@ class WorkerFactory:
         if config.multimodal_decode_worker:
             handler = MultimodalDecodeWorkerHandler(
                 runtime,
-                component,
                 engine_client,
                 config,
                 shutdown_event,
@@ -150,7 +156,6 @@ class WorkerFactory:
         else:
             handler = MultimodalPDWorkerHandler(
                 runtime,
-                component,
                 engine_client,
                 config,
                 encode_worker_client,
@@ -164,7 +169,7 @@ class WorkerFactory:
 
         # Set up KV event publisher for prefix caching if enabled
         kv_publisher = self.setup_kv_event_publisher(
-            config, component, generate_endpoint, vllm_config
+            config, generate_endpoint, vllm_config
         )
         if kv_publisher:
             handler.kv_publisher = kv_publisher

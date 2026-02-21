@@ -597,7 +597,6 @@ class TestVideoHandlerConcurrency:
             return_value=MagicMock(),
         ):
             handler = VideoGenerationHandler(
-                component=MagicMock(),
                 engine=mock_engine,
                 config=config,
             )
@@ -684,7 +683,6 @@ class TestVideoHandlerResponseFormats:
             return_value=MagicMock(),
         ):
             handler = VideoGenerationHandler(
-                component=MagicMock(),
                 engine=mock_engine,
                 config=config,
             )
