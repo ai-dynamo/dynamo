@@ -1602,12 +1602,14 @@ dependencies = [
  "rayon",
  "reqwest",
  "rmp-serde",
+ "rustc-hash 1.1.0",
  "rustls",
  "serde",
  "serde_json",
  "strum",
  "tempfile",
  "thiserror 2.0.18",
+ "tiktoken-rs",
  "tmq",
  "tokenizers",
  "tokio",
@@ -6430,6 +6432,21 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg 0.4.21",
+]
+
+[[package]]
+name = "tiktoken-rs"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a19830747d9034cd9da43a60eaa8e552dfda7712424aebf187b7a60126bae0d"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bstr",
+ "fancy-regex",
+ "lazy_static",
+ "regex",
+ "rustc-hash 1.1.0",
 ]
 
 [[package]]
