@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import asyncio
 import logging
 import os
@@ -11,6 +12,7 @@ from typing import Optional
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.entrypoints.cli.serve import run_headless
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -89,6 +91,30 @@ async def graceful_shutdown(runtime, shutdown_event):
     logging.info("DistributedRuntime shutdown complete")
 
 
+def build_headless_namespace(config: Config) -> argparse.Namespace:
+    """Build an argparse Namespace from engine_args for vLLM's run_headless().
+
+    run_headless() expects the raw CLI namespace. We reconstruct it from
+    the already-parsed AsyncEngineArgs so parse_args() doesn't need to
+    leak transport details.
+    """
+    ns = argparse.Namespace(**vars(config.engine_args))
+    # run_headless() reads api_server_count; default to 0 (no API server)
+    if not hasattr(ns, "api_server_count"):
+        ns.api_server_count = 0
+    return ns
+
+
+def run_dynamo_headless(config: Config) -> None:
+    """Run in headless mode for multi-node TP/PP.
+
+    Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
+    no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
+    """
+    args = build_headless_namespace(config)
+    run_headless(args)
+
+
 async def worker():
     config = parse_args()
 
@@ -115,6 +141,18 @@ async def worker():
     # that path (ideally via a shared folder).
     if not os.path.exists(config.model):
         await fetch_model(config.model)
+
+    # HEADLESS MODE: bypass DistributedRuntime entirely.
+    # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
+    if config.headless:
+        if checkpoint_cfg is not None:
+            raise ValueError(
+                "--headless is incompatible with checkpoint mode "
+                "(DYN_CHECKPOINT_SIGNAL_FILE is set). "
+                "Remove --headless or unset DYN_CHECKPOINT_SIGNAL_FILE."
+            )
+        run_dynamo_headless(config)
+        return
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
