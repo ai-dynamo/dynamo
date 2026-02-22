@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+from pydantic import BaseModel
+
+from dynamo.common.protocols.image_protocol import NvCreateImageRequest
+from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
 from dynamo.llm import ModelType
 
 
@@ -32,6 +36,15 @@ class OutputModality(Enum):
         return {m.name.lower() for m in cls}
 
 
+class RequestType(Enum):
+    """Identifies the parsed request type returned by parse_request_type."""
+
+    CHAT_COMPLETION = "chat_completion"
+    IMAGE_GENERATION = "image_generation"
+    VIDEO_GENERATION = "video_generation"
+    AUDIO_GENERATION = "audio_generation"
+
+
 def get_output_modalities(cli_input: List[str], model_repo: str) -> Optional[ModelType]:
     """
     Get the combined ModelType flags for omni models based on CLI input.
@@ -52,3 +65,34 @@ def get_output_modalities(cli_input: List[str], model_repo: str) -> Optional[Mod
                 flag if output_modalities is None else output_modalities | flag
             )
     return output_modalities
+
+
+def parse_request_type(
+    raw_request: Dict[str, Any],
+    output_modalities: List[str],
+) -> Tuple[Union[BaseModel, Dict[str, Any]], RequestType]:
+    """
+    Classify the endpoint based on the output modality and serialize the request if necessary.
+
+    Assumption: Right now we only consider user passes only one modality at a time.
+    """
+    # Fetch the first output modality from the list.
+    if not output_modalities:
+        raise ValueError("output_modalities must not be empty")
+    output_modality = output_modalities[0]
+    modality = OutputModality.from_name(output_modality)
+
+    if modality is OutputModality.IMAGE:
+        if "messages" in raw_request:
+            return raw_request, RequestType.CHAT_COMPLETION
+        return NvCreateImageRequest(**raw_request), RequestType.IMAGE_GENERATION
+
+    if modality is OutputModality.VIDEO:
+        return NvCreateVideoRequest(**raw_request), RequestType.VIDEO_GENERATION
+
+    if modality is OutputModality.AUDIO:
+        # Audio protocol types are not yet defined; pass through the raw dict.
+        return raw_request, RequestType.AUDIO_GENERATION
+
+    # Text Modality
+    return raw_request, RequestType.CHAT_COMPLETION

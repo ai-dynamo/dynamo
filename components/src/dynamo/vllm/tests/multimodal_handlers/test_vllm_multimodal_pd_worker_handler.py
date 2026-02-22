@@ -4,17 +4,17 @@
 """Unit tests for MultimodalPDWorkerHandler."""
 
 import json
+from collections import defaultdict
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import torch
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.vllm.multimodal_handlers import multimodal_pd_worker_handler as mod
 from dynamo.vllm.multimodal_utils.protocol import (
-    MultiModalGroup,
-    MultiModalInput,
     MyRequestOutput,
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
@@ -128,26 +128,98 @@ class TestInit:
         assert handler.embedding_cache_manager._capacity_bytes == expected_bytes
 
 
-class TestBuildRequestFromFrontend:
-    @pytest.mark.asyncio
-    async def test_with_encode_worker_calls_fetch(self):
-        """With encode client -> delegates to fetch_embeddings_from_encode_workers."""
-        mock_client = MagicMock()
-        handler = _make_handler(encode_worker_client=mock_client)
+class TestParseFrontendRequest:
+    def test_extracts_token_ids_and_sampling_params(self):
+        """Parses token_ids and sampling_params from raw frontend dict."""
+        handler = _make_handler()
         handler.default_sampling_params = {}
 
-        fake_group = MultiModalGroup(multimodal_input=MultiModalInput())
+        raw = _make_raw_frontend_request()
+        request, image_urls = handler._parse_frontend_request(raw)
+
+        assert request.engine_prompt["prompt_token_ids"] == [1, 2, 3]
+        assert image_urls == []
+
+    def test_extracts_image_urls(self):
+        """Extracts image URLs from multi_modal_data."""
+        handler = _make_handler()
+        handler.default_sampling_params = {}
+
+        raw = _make_raw_frontend_request(image_urls=["http://a.png", "http://b.png"])
+        request, image_urls = handler._parse_frontend_request(raw)
+
+        assert image_urls == ["http://a.png", "http://b.png"]
+
+
+class TestLoadMultimodalData:
+    @pytest.mark.asyncio
+    async def test_no_encode_client_returns_empty(self):
+        """Without encode client -> returns empty dict."""
+        handler = _make_handler(encode_worker_client=None)
+        mm_data = await handler._load_multimodal_data(["http://img.png"], "req-1")
+        assert len(mm_data) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_images_returns_empty(self):
+        """With encode client but no images -> returns empty dict."""
+        handler = _make_handler(encode_worker_client=MagicMock())
+        mm_data = await handler._load_multimodal_data([], "req-1")
+        assert len(mm_data) == 0
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_load_multimodal_embeddings(self):
+        """With encode client -> delegates to load_multimodal_embeddings."""
+        mock_client = MagicMock()
+        handler = _make_handler(encode_worker_client=mock_client)
+
+        fake_mm_data = defaultdict(list, {"image": torch.randn(1, 10)})
         with patch.object(
             mod,
-            "fetch_embeddings_from_encode_workers",
+            "load_multimodal_embeddings",
             new_callable=AsyncMock,
-            return_value=[fake_group],
-        ) as mock_fetch:
-            raw = _make_raw_frontend_request(image_urls=["http://img.png"])
-            result = await handler._build_request_from_frontend(raw)
+            return_value=fake_mm_data,
+        ) as mock_load:
+            result = await handler._load_multimodal_data(["http://img.png"], "req-1")
 
-        mock_fetch.assert_awaited_once()
-        assert result.multimodal_inputs == [fake_group]
+        mock_load.assert_awaited_once()
+        assert result is fake_mm_data
+
+    @pytest.mark.asyncio
+    async def test_passes_cache_to_load_multimodal_embeddings(self):
+        """With cache enabled -> passes cache manager kwarg."""
+        mock_client = MagicMock()
+        config = _make_config(multimodal_embedding_cache_capacity_gb=1.0)
+        handler = _make_handler(config=config, encode_worker_client=mock_client)
+
+        with patch.object(
+            mod,
+            "load_multimodal_embeddings",
+            new_callable=AsyncMock,
+            return_value=defaultdict(list),
+        ) as mock_load:
+            await handler._load_multimodal_data(["http://img.png"], "req-1")
+
+        mock_load.assert_awaited_once()
+        assert mock_load.call_args.kwargs["cache"] is handler.embedding_cache_manager
+
+    @pytest.mark.asyncio
+    async def test_passes_model_and_dtype(self):
+        """Model name and embeddings dtype are forwarded."""
+        mock_client = MagicMock()
+        handler = _make_handler(encode_worker_client=mock_client)
+
+        with patch.object(
+            mod,
+            "load_multimodal_embeddings",
+            new_callable=AsyncMock,
+            return_value=defaultdict(list),
+        ) as mock_load:
+            await handler._load_multimodal_data(["http://img.png"], "req-1")
+
+        assert mock_load.call_args.kwargs["model"] == handler.config.model
+        assert (
+            mock_load.call_args.kwargs["embeddings_dtype"] == handler.EMBEDDINGS_DTYPE
+        )
 
 
 class TestGenerateAgg:
@@ -158,7 +230,6 @@ class TestGenerateAgg:
         request = _make_vllm_request()
         engine_resp = _make_engine_response()
 
-        # Add a proper output so we exercise the happy path
         output = MagicMock()
         output.token_ids = [10, 11]
         output.finish_reason = "stop"
@@ -189,7 +260,6 @@ class TestGenerateDisagg:
         handler = _make_handler(config=config, decode_worker_client=decode_client)
         handler.engine_client = MagicMock()
 
-        # Mock prefill engine response
         prefill_resp = _make_engine_response()
         prefill_resp.kv_transfer_params = {"block_ids": [0, 1]}
 
@@ -198,7 +268,6 @@ class TestGenerateDisagg:
 
         handler.engine_client.generate = fake_generate
 
-        # Mock decode worker response
         decode_output = MyRequestOutput(
             request_id="req-1",
             prompt="test",

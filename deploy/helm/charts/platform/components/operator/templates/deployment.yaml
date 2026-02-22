@@ -96,7 +96,7 @@ spec:
         {{- end }}
         {{- if .Values.etcdAddr }}
           - --etcdAddr={{ .Values.etcdAddr }}
-        {{- else }}
+        {{- else if and .Values.global .Values.global.etcd .Values.global.etcd.install }}
           - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}.svc.cluster.local:2379
         {{- end }}
         {{- if and .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}
@@ -142,18 +142,13 @@ spec:
           - --namespace-scope-lease-duration={{ .Values.namespaceRestriction.lease.duration }}
           - --namespace-scope-lease-renew-interval={{ .Values.namespaceRestriction.lease.renewInterval }}
         {{- end }}
+          - --gpu-discovery-enabled={{ .Values.gpuDiscovery.enabled }}
         {{- end }}
           - --operator-version={{ .Chart.AppVersion }}
-        {{- if .Values.webhook.enabled }}
-          - --enable-webhooks=true
-        {{- end }}
         {{- if .Values.checkpoint.enabled }}
           - --checkpoint-enabled=true
           - --checkpoint-storage-type={{ .Values.checkpoint.storage.type }}
-          - --checkpoint-signal-host-path={{ .Values.checkpoint.storage.signalHostPath }}
-          - --checkpoint-init-container-image={{ .Values.checkpoint.initContainerImage }}
           - --checkpoint-ready-for-checkpoint-file-path={{ .Values.checkpoint.readyForCheckpointFilePath }}
-          - --checkpoint-restore-marker-file-path={{ .Values.checkpoint.restoreMarkerFilePath }}
           {{- if eq .Values.checkpoint.storage.type "pvc" }}
           - --checkpoint-pvc-name={{ .Values.checkpoint.storage.pvc.pvcName }}
           - --checkpoint-pvc-base-path={{ .Values.checkpoint.storage.pvc.basePath }}
@@ -176,9 +171,6 @@ spec:
         env:
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
-        envFrom:
-        - secretRef:
-            name: dynamo-deployment-env
         imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | quote }}
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag
 | default .Chart.AppVersion }}
@@ -189,12 +181,10 @@ spec:
           initialDelaySeconds: 15
           periodSeconds: 20
         name: manager
-        {{- if .Values.webhook.enabled }}
         ports:
         - containerPort: 9443
           name: webhook-server
           protocol: TCP
-        {{- end }}
         readinessProbe:
           httpGet:
             path: /readyz
@@ -205,20 +195,16 @@ spec:
           10 }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
           | nindent 10 }}
-        {{- if .Values.webhook.enabled }}
         volumeMounts:
         - mountPath: /tmp/k8s-webhook-server/serving-certs
           name: cert
           readOnly: true
-        {{- end }}
       securityContext:
         runAsNonRoot: true
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
       terminationGracePeriodSeconds: 30
-      {{- if .Values.webhook.enabled }}
       volumes:
       - name: cert
         secret:
           defaultMode: 420
           secretName: {{ .Values.webhook.certificateSecret.name }}
-      {{- end }}
