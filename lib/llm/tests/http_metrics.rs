@@ -169,6 +169,88 @@ async fn test_metrics_prefix_sanitized() {
     .await;
 }
 
+#[tokio::test]
+async fn test_metrics_dynamo_namespace_label() {
+    // When dynamo_namespace is set via builder, all metrics should include the label.
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let port = get_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .dynamo_namespace(Some("test-ns-deployment".to_string()))
+            .build()
+            .unwrap();
+        let token = CancellationToken::new();
+        let handle = service.spawn(token.clone()).await;
+        wait_for_metrics_ready(port).await;
+
+        let state = service.state_clone();
+        {
+            let _guard = state.metrics_clone().create_inflight_guard(
+                "test-model",
+                Endpoint::ChatCompletions,
+                false,
+            );
+        }
+
+        let body = reqwest::get(format!("http://localhost:{}/metrics", port))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        // The label should appear on multiple metric families, not just one.
+        let label_count = body
+            .matches("dynamo_namespace=\"test-ns-deployment\"")
+            .count();
+        assert!(
+            label_count >= 3,
+            "Expected dynamo_namespace on multiple metrics, found {label_count} occurrences"
+        );
+
+        token.cancel();
+        let _ = handle.await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_metrics_no_dynamo_namespace_when_unset() {
+    // When dynamo_namespace is not set, the label should not appear.
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let port = get_random_port().await;
+        let service = HttpService::builder().port(port).build().unwrap();
+        let token = CancellationToken::new();
+        let handle = service.spawn(token.clone()).await;
+        wait_for_metrics_ready(port).await;
+
+        let state = service.state_clone();
+        {
+            let _guard = state.metrics_clone().create_inflight_guard(
+                "test-model",
+                Endpoint::ChatCompletions,
+                false,
+            );
+        }
+
+        let body = reqwest::get(format!("http://localhost:{}/metrics", port))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        assert!(
+            !body.contains("dynamo_namespace="),
+            "dynamo_namespace label should not appear when namespace is not set"
+        );
+
+        token.cancel();
+        let _ = handle.await;
+    })
+    .await;
+}
+
 // Poll /metrics until ready or timeout
 async fn wait_for_metrics_ready(port: u16) {
     let url = format!("http://localhost:{}/metrics", port);
