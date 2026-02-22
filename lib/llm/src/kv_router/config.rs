@@ -34,10 +34,9 @@ pub struct KvRouterConfig {
 
     pub use_kv_events: bool,
 
-    /// Enable durable KV events using NATS JetStream instead of the default event plane.
-    /// When false (default), the router uses the event-plane subscriber and requires
-    /// workers to have local_indexer enabled for gap recovery.
-    /// When true, uses JetStream for durability and multi-replica consistency.
+    /// **Deprecated:** Enable durable KV events using NATS JetStream instead of the default event plane.
+    /// This option will be removed in a future release. The event-plane subscriber
+    /// (local_indexer mode) is now the recommended path.
     pub durable_kv_events: bool,
 
     pub router_replica_sync: bool,

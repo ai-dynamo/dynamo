@@ -151,6 +151,10 @@ pub async fn start_subscriber(
     // - durable_kv_events=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
     // - durable_kv_events=true: Use JetStream for durability and multi-replica consistency
     if kv_router_config.durable_kv_events {
+        tracing::warn!(
+            "--durable-kv-events is deprecated and will be removed in a future release. \
+             The event-plane subscriber (local_indexer mode) is now the recommended path."
+        );
         if transport_kind == EventTransportKind::Zmq {
             tracing::warn!(
                 "--durable-kv-events requires NATS, but ZMQ event plane is configured; falling back to JetStream anyway"
