@@ -27,8 +27,13 @@
 //! - `DYN_REGISTRY_HUB_CAPACITY`: Registry capacity (default: 1000000)
 //! - `DYN_REGISTRY_HUB_QUERY_ADDR`: Query address (default: tcp://*:5555)
 //! - `DYN_REGISTRY_HUB_REGISTER_ADDR`: Register address (default: tcp://*:5556)
+//! - `DYN_REGISTRY_HUB_METRICS_ADDR`: Metrics HTTP address (default: 0.0.0.0:9108)
 
 use anyhow::Result;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -52,6 +57,84 @@ type G4RegistryHub = ZmqHub<
     PositionalEviction<PositionalKey, RemoteKey>,
     BinaryCodec<PositionalKey, RemoteKey, NoMetadata>,
 >;
+
+struct MetricsState {
+    started_at: Instant,
+    capacity: u64,
+}
+
+async fn run_metrics_server(
+    addr: String,
+    state: Arc<MetricsState>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let listener = TcpListener::bind(&addr).await?;
+    info!("Registry metrics endpoint listening on http://{addr}/metrics");
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                return Ok(());
+            }
+            accepted = listener.accept() => {
+                let (mut socket, _) = match accepted {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "registry metrics accept failed");
+                        continue;
+                    }
+                };
+
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = match socket.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "registry metrics read failed");
+                            return;
+                        }
+                    };
+                    if n == 0 {
+                        return;
+                    }
+
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or_default();
+
+                    let (status, body, content_type) = if first_line.starts_with("GET /metrics") {
+                        let uptime = state.started_at.elapsed().as_secs_f64();
+                        let body = format!(
+                            "# HELP registry_up Registry process liveness.\n\
+                             # TYPE registry_up gauge\n\
+                             registry_up 1\n\
+                             # HELP registry_capacity_entries Configured registry capacity.\n\
+                             # TYPE registry_capacity_entries gauge\n\
+                             registry_capacity_entries {}\n\
+                             # HELP registry_uptime_seconds Registry uptime in seconds.\n\
+                             # TYPE registry_uptime_seconds gauge\n\
+                             registry_uptime_seconds {:.3}\n",
+                            state.capacity, uptime
+                        );
+                        ("200 OK", body, "text/plain; version=0.0.4")
+                    } else if first_line.starts_with("GET /healthz") {
+                        ("200 OK", "ok\n".to_string(), "text/plain")
+                    } else {
+                        ("404 Not Found", "not found\n".to_string(), "text/plain")
+                    };
+
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    if let Err(e) = socket.write_all(resp.as_bytes()).await {
+                        tracing::warn!(error = %e, "registry metrics write failed");
+                    }
+                });
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -81,6 +164,9 @@ async fn main() -> Result<()> {
         "║  Lease Timeout:   {:<43}║",
         format!("{} secs", config.lease_timeout.as_secs())
     );
+    let metrics_addr = std::env::var("DYN_REGISTRY_HUB_METRICS_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:9108".to_string());
+    info!("║  Metrics Addr:    {:<43}║", metrics_addr);
     info!("╚══════════════════════════════════════════════════════════════╝");
 
     // Convert to ZmqHubServerConfig
@@ -100,6 +186,17 @@ async fn main() -> Result<()> {
     // Setup cancellation
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
+    let metrics_state = Arc::new(MetricsState {
+        started_at: Instant::now(),
+        capacity: config.capacity,
+    });
+
+    let metrics_cancel = cancel.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_metrics_server(metrics_addr, metrics_state, metrics_cancel).await {
+            tracing::error!(error = %e, "registry metrics server failed");
+        }
+    });
 
     // Handle Ctrl+C
     tokio::spawn(async move {
@@ -121,4 +218,3 @@ async fn main() -> Result<()> {
     info!("Registry hub stopped.");
     Ok(())
 }
-
