@@ -69,7 +69,7 @@ jobs:
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
       IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo-epp
+      IMAGE_REPOSITORY: dynamo/dynamo-epp
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -99,6 +99,7 @@ jobs:
 
           CACHE_ARGS=""
           CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache "
+          CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache,mode=max " #todo remove
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache,mode=max "
           fi
@@ -129,54 +130,51 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: test
+      - name: Generate Dockerfile
+        shell: bash
         run: |
-          echo "epp=${{ needs.build-epp-image.outputs.epp_image_uri }}" >> $GITHUB_OUTPUT
-  #     - name: Initialize Dynamo Builder
-  #       uses: ./.github/actions/init-dynamo-builder
-  #       with:
-  #         builder_name: ${{ needs.changed-files.outputs.builder_name }}
-  #         flavor: general
-  #         all_arch: 'true'
-  #     - name: Generate Dockerfile
-  #       shell: bash
-  #       run: |
-  #         echo "Generating Dockerfile for target: ${{ env.TARGET }} and framework: ${{ env.FRAMEWORK }} "
-  #         python ./container/render.py \
-  #             --target=${{ env.TARGET }} \
-  #             --framework=${{ env.FRAMEWORK }} \
-  #             --platform=${{ matrix.arch }} \
-  #             --cuda-version=${{ env.CUDA_VERSION }} \
-  #             --show-result \
-  #             --output-short-filename
-  #     - name: Calculate target tag
-  #       id: calculate-target-tag
-  #       shell: bash
-  #       run: |
-  #         TARGET_TAG="${{ github.sha }}-${{ env.TARGET }}-${{ matrix.arch }}"
-  #         DEFAULT_TARGET_IMAGE_URI="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}"
-  #         echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
-  #         echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
-  #         echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
-  #     - name: Print Build Container parameters
-  #       run: |
-  #         echo "=== Build Container Parameters ==="
-  #         echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
-  #         echo "framework: ${{ env.FRAMEWORK }}"
-  #         echo "target: ${{ env.TARGET }}"
-  #         echo "platform: ${{ matrix.arch }}"
-  #         echo "cuda_version: ${{ env.CUDA_VERSION }}"
-  #         echo "extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}"
-  #         echo "push_image: true"
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
+          echo "Generating Dockerfile for target: ${{ env.TARGET }} and framework: ${{ env.FRAMEWORK }} "
+          python ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --platform=${{ matrix.arch }} \
+              --cuda-version=${{ env.CUDA_VERSION }} \
+              --show-result \
+              --output-short-filename
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          TARGET_TAG="${{ github.sha }}-${{ env.TARGET }}-${{ matrix.arch }}"
+          DEFAULT_TARGET_IMAGE_URI="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}"
+          echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
+      - name: Print Build Container parameters
+        run: |
+          echo "=== Build Container Parameters ==="
+          echo "image_tag: ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}"
+          echo "framework: ${{ env.FRAMEWORK }}"
+          echo "target: ${{ env.TARGET }}"
+          echo "platform: ${{ matrix.arch }}"
+          echo "cuda_version: ${{ env.CUDA_VERSION }}"
+          echo "extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}"
+          echo "epp_image_uri: ${{ needs.build-epp-image.outputs.epp_image_uri }}"
+          echo "push_image: true"
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          flavor: general
+          arch: ${{ matrix.arch }}
   #     - name: Build Frontend Container
   #       id: build-image
   #       timeout-minutes: 30
