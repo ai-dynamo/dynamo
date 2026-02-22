@@ -4,6 +4,7 @@
 title: "Flash Indexer: A Story of Inter-Galactic KV Routing"
 subtitle: "Rudy Pei, [John Thomson](https://developer.nvidia.com/blog/author/jwillthomson/), Janelle Cai, Alec Flowers, Dan Gil — February 2026"
 description: "Dynamo's Flash Indexer tracks every cached KV block across all inference workers at 170M ops/s. Six iterations of data structure design got it there."
+keywords: KV cache, prefix caching, LLM inference, radix tree, distributed inference, disaggregated serving, Dynamo, concurrent data structures, block routing
 last-updated: February 23, 2026
 ---
 
