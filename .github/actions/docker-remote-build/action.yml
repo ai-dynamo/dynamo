@@ -56,10 +56,6 @@ inputs:
     description: 'Use SCCache for caching'
     required: false
     default: 'true'
-  ci:
-    description: 'CI mode: for frontend target, uses existing buildx builder and pushes EPP image to ECR'
-    required: false
-    default: 'false'
   extra_build_args:
     description: 'Additional Docker build args (newline-separated list of KEY=VALUE pairs)'
     required: false
@@ -110,24 +106,26 @@ runs:
         # Set base cache args and set --cache-to if this is a main commit
         CACHE_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM} "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache "
+          CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache"
+          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG} "
           if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
             # Release branches also use release cache
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache,mode=max "
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max "
           elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache,mode=max "
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
+          fi
+        else
+          CACHE_TAG="${{ inputs.target }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache"
+          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${CACHE_TAG} "
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
           fi
         fi
+
         echo "$CACHE_ARGS"
         # Collect optional overrides provided by the workflow
-
-        if [[ "${{ inputs.ci }}" == "true" ]]; then
-          # CI mode for frontend: use existing buildx builder, push EPP to registry
-          EXTRA_ARGS+=" --ci"
-        fi
-
         if [ "${{ inputs.no_cache }}" == "true" ]; then
           EXTRA_ARGS+=" --no-cache"
         fi
