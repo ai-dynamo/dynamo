@@ -79,6 +79,14 @@ jobs:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
           all_arch: 'true'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Build EPP Image
         id: build-epp-image
         shell: bash
@@ -104,7 +112,7 @@ jobs:
 
   build-frontend-image:
     name: Build Frontend Image
-    needs: changed-files
+    needs: [changed-files, build-epp-image]
     if: needs.changed-files.outputs.frontend == 'true'
     strategy:
       fail-fast: false
