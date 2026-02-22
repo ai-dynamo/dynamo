@@ -109,11 +109,6 @@ dynamo:
 
   groveTerminationDelay: 15m
 
-  internalImages:
-    debugger: python:3.12-slim
-
-  enableRestrictedSecurityContext: false
-
   dockerRegistry:
     server: ''
     # set to true if you want to use the kubernetes secret for the registry credentials
@@ -160,17 +155,9 @@ checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
 
-  # Image used for init containers in checkpoint jobs (e.g., signal file cleanup)
-  # Defaults to busybox:latest if not specified
-  initContainerImage: "busybox:latest"
-
   # Path written by worker when model is loaded and ready for checkpointing
   # Must match the path expected by checkpoint-enabled runtime images
   readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
-  # Path written by restore-entrypoint after successful CRIU restore
-  # Must match the path expected by checkpoint-enabled runtime images
-  restoreMarkerFilePath: "/tmp/dynamo-restored"
 
   # Storage configuration
   # These settings tell the operator where to find checkpoint storage
@@ -178,9 +165,6 @@ checkpoint:
   storage:
     # Storage backend type: pvc, s3, or oci
     type: pvc
-
-    # Host path for signal files (communication between checkpoint pod and DaemonSet)
-    signalHostPath: "/var/lib/chrek/signals"
 
     # PVC configuration (used when type=pvc)
     pvc:
@@ -213,10 +197,6 @@ checkpoint:
 
 # Webhook configuration
 webhook:
-  # Enable admission webhooks for validation
-  # Enabled by default for production-ready validation and better error reporting
-  enabled: true
-
   # Certificate configuration
   certificateSecret:
     # Name of the secret containing webhook TLS certificates

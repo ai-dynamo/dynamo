@@ -26,3 +26,5 @@ test-values.yaml
 minikube-demo-values.yaml
 # subchart sources
 components/
+bin/
+Makefile
