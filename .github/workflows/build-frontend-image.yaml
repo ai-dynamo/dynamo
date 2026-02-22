@@ -207,7 +207,7 @@ jobs:
 
   frontend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, build-frontend-image]
+    needs: [changed-files, build-frontend-image, build-epp-image]
     if: always()
     steps:
       - name: "Check all dependent jobs"
