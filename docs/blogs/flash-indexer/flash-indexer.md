@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Flash Indexer: A Story of Inter-Galactic KV Routing"
-description: "How Dynamo's concurrent global index evolved through six iterations to sustain over 100 million operations per second."
+subtitle: "Rudy Pei, [John Thomson](https://developer.nvidia.com/blog/author/jwillthomson/), Janelle Cai, Alec Flowers, Dan Gil — February 2026"
+description: "Dynamo's Flash Indexer tracks every cached KV block across all inference workers at 170M ops/s. Six iterations of data structure design got it there."
+last-updated: February 23, 2026
 ---
 
 The **Flash Indexer** is a concurrent global index of every cached KV block across every inference worker, sustaining over **100 million operations per second**. It evolved through six iterations—from a Python dictionary to a jump-optimized spatial index—to the point where network latency, tokenization, and hashing are the bottlenecks.
