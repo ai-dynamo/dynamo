@@ -65,7 +65,7 @@ jobs:
     if: needs.changed-files.outputs.frontend == 'true'
     runs-on: prod-builder-v3
     outputs:
-      epp_image_uri: ${{ steps.build-epp-image.outputs.epp_image_uri }}
+      epp_image_ref: ${{ steps.build-epp-image.outputs.epp_image_ref }}
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
       IMAGE_REGISTRY: ai-dynamo
@@ -94,12 +94,11 @@ jobs:
           set -x
           EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}"
           EPP_IMAGE_TAG="${{ github.sha }}"
-          EPP_IMAGE_URI="${EPP_IMAGE_REPO}:${EPP_IMAGE_TAG}"
-          echo "epp_image_uri=${EPP_IMAGE_URI}" >> $GITHUB_OUTPUT
+          EPP_IMAGE_REF="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${EPP_IMAGE_TAG}"
+          echo "epp_image_ref=${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
 
           CACHE_ARGS=""
           CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache "
-          CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache,mode=max " #todo remove
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:cache,mode=max "
           fi
@@ -159,7 +158,7 @@ jobs:
           echo "platform: ${{ matrix.arch }}"
           echo "cuda_version: ${{ env.CUDA_VERSION }}"
           echo "extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}"
-          echo "epp_image_uri: ${{ needs.build-epp-image.outputs.epp_image_uri }}"
+          echo "epp_image_uri: ${{ env.ECR_HOSTNAME }}/${{ needs.build-epp-image.outputs.epp_image_ref }}"
           echo "push_image: true"
       - name: Docker Login
         uses: ./.github/actions/docker-login
