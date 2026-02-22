@@ -45,14 +45,17 @@ def _get_package_version(dist_name: str) -> Optional[str]:
 
 
 def _get_sglang_version() -> Optional[str]:
+    """Get SGLang version if installed, without importing the module."""
     return _get_package_version("sglang")
 
 
 def _get_trtllm_version() -> Optional[str]:
+    """Get TensorRT-LLM version if installed, without importing the module."""
     return _get_package_version("tensorrt-llm")
 
 
 def _get_vllm_version() -> Optional[str]:
+    """Get vLLM version if installed, without importing the module."""
     return _get_package_version("vllm")
 
 
