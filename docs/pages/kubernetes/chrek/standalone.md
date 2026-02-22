@@ -327,7 +327,7 @@ Your application must implement the checkpoint flow. The DaemonSet communicates 
 
 - **`SIGUSR1`**: Checkpoint completed — your process should exit gracefully
 - **`SIGCONT`**: Restore completed — your process should wake up and continue
-- **`SIGUSR2`**: Checkpoint/restore failed
+- **`SIGKILL`**: Checkpoint failed — process is terminated immediately (unhandleable)
 
 Here's the pattern used by Dynamo vLLM (see `components/src/dynamo/vllm/checkpoint_restore.py`):
 
@@ -353,15 +353,14 @@ async def main():
 
     # 3. Install signal handlers BEFORE writing the ready file to avoid a race
     #    where the DaemonSet sends a signal while default disposition (terminate)
-    #    is still in effect.
+    #    is still in effect. No handler needed for checkpoint failure — the
+    #    watcher sends SIGKILL which terminates the process immediately.
     checkpoint_done = asyncio.Event()
     restore_done = asyncio.Event()
-    checkpoint_failed = asyncio.Event()
 
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGUSR1, checkpoint_done.set)
     loop.add_signal_handler(signal.SIGCONT, restore_done.set)
-    loop.add_signal_handler(signal.SIGUSR2, checkpoint_failed.set)
 
     # 4. Write ready file — triggers DaemonSet checkpoint via readiness probe
     with open(ready_file, "w") as f:
@@ -369,11 +368,11 @@ async def main():
 
     print("Ready for checkpoint. Waiting for watcher signal...")
 
-    # Wait for whichever signal comes first
+    # Wait for whichever signal comes first (SIGKILL on failure kills us
+    # immediately, so only success/restore signals reach this point)
     done, pending = await asyncio.wait(
         [asyncio.create_task(checkpoint_done.wait()),
-         asyncio.create_task(restore_done.wait()),
-         asyncio.create_task(checkpoint_failed.wait())],
+         asyncio.create_task(restore_done.wait())],
         return_when=asyncio.FIRST_COMPLETED,
     )
     for task in pending:
@@ -384,12 +383,9 @@ async def main():
         print("Restore complete, waking model")
         await model.wake_up()
         await run_application()
-    elif checkpoint_done.is_set():
+    else:
         # SIGUSR1: Checkpoint complete, exit
         print("Checkpoint complete, exiting")
-    else:
-        # SIGUSR2: Checkpoint failed
-        raise RuntimeError("Checkpoint failed (received SIGUSR2 from watcher)")
 ```
 
 **Important Notes:**
@@ -400,12 +396,12 @@ async def main():
 
 2. **Signal handler ordering**: Install signal handlers **before** writing the ready file. Otherwise there is a race window where the DaemonSet sends a signal while the default disposition (terminate) is still in effect.
 
-3. **Signal-based coordination**: The DaemonSet sends `SIGUSR1` after checkpoint completes, `SIGCONT` after restore completes, and `SIGUSR2` if checkpoint fails. Your application must handle all three signals (not poll for files).
+3. **Signal-based coordination**: The DaemonSet sends `SIGUSR1` after checkpoint completes, `SIGCONT` after restore completes, and `SIGKILL` if checkpoint fails. Your application must handle `SIGUSR1` and `SIGCONT` (not poll for files). `SIGKILL` cannot be caught — the kernel terminates the process immediately.
 
 4. **Three exit paths**:
    - **SIGUSR1 received**: Checkpoint complete, exit gracefully
    - **SIGCONT received**: Process was restored, wake model and continue
-   - **SIGUSR2 received**: Checkpoint failed, handle error (e.g., continue running or exit with error)
+   - **SIGKILL received**: Checkpoint failed, process terminated immediately (no handler needed)
 
 
 ---
@@ -501,7 +497,7 @@ The DaemonSet communicates checkpoint/restore completion via Unix signals, not f
 |--------|-----------|---------|
 | `SIGUSR1` | DaemonSet → checkpoint pod | Checkpoint completed, process should exit |
 | `SIGCONT` | DaemonSet → restored pod | Restore completed, process should wake up |
-| `SIGUSR2` | DaemonSet → checkpoint pod | Checkpoint failed (wake process to continue) |
+| `SIGKILL` | DaemonSet → checkpoint pod | Checkpoint failed — process terminated immediately |
 
 CRIU tuning options are configured via the ChReK Helm chart's `config.checkpoint.criu` values, not environment variables. See the [Helm Chart Values](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/values.yaml) for available options.
 
