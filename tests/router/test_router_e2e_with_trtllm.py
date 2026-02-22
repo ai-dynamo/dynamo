@@ -408,9 +408,7 @@ def test_router_decisions_trtllm_attention_dp(
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the vLLM workers
-        namespace = runtime.namespace(trtllm_workers.namespace)
-        component = namespace.component("tensorrt_llm")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{trtllm_workers.namespace}.tensorrt_llm.generate")
 
         _test_router_decisions(
             trtllm_workers,
@@ -457,9 +455,7 @@ def test_router_decisions_trtllm_multiple_workers(
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
 
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(trtllm_workers.namespace)
-        component = namespace.component("tensorrt_llm")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{trtllm_workers.namespace}.tensorrt_llm.generate")
 
         _test_router_decisions(
             trtllm_workers,

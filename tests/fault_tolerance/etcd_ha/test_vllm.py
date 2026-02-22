@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import os
 import shutil
@@ -69,7 +70,19 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = port
 
         if is_prefill:
-            env["DYN_VLLM_KV_EVENT_PORT"] = "20082"
+            command.extend(
+                [
+                    "--kv-events-config",
+                    json.dumps(
+                        {
+                            "publisher": "zmq",
+                            "topic": "kv-events",
+                            "endpoint": "tcp://*:20082",
+                            "enable_kv_cache_events": True,
+                        }
+                    ),
+                ]
+            )
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
 
         # Set log directory based on worker type
