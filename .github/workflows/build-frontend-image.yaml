@@ -147,6 +147,7 @@ jobs:
           TARGET_TAG="${{ github.sha }}-${{ env.TARGET }}-${{ matrix.arch }}"
           DEFAULT_TARGET_IMAGE_URI="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}"
           echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${{ needs.build-epp-image.outputs.epp_image_ref }}" >> $GITHUB_OUTPUT
           echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
           echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
       - name: Print Build Container parameters
@@ -158,7 +159,7 @@ jobs:
           echo "platform: ${{ matrix.arch }}"
           echo "cuda_version: ${{ env.CUDA_VERSION }}"
           echo "extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}"
-          echo "epp_image_uri: ${{ env.ECR_HOSTNAME }}/${{ needs.build-epp-image.outputs.epp_image_ref }}"
+          echo "epp_image_uri: ${{ steps.calculate-target-tag.outputs.epp_image_uri }}"
           echo "push_image: true"
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -192,7 +193,7 @@ jobs:
           extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}
           push_image: true
           extra_build_args: |
-            EPP_IMAGE=${{ needs.build-epp-image.outputs.epp_image_uri }}
+            EPP_IMAGE=${{ steps.calculate-target-tag.outputs.epp_image_uri }}
 
       - name: Show summary
         shell: bash
