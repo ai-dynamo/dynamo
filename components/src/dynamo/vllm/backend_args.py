@@ -31,7 +31,7 @@ class DynamoVllmArgGroup(ArgGroup):
             g,
             flag_name="--disaggregation-mode",
             env_var="DYN_VLLM_DISAGGREGATION_MODE",
-            default=DisaggregationMode.AGGREGATED.value,
+            default=None,
             help="Worker disaggregation mode: 'prefill_and_decode' (default, aggregated), "
             "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
             choices=[m.value for m in DisaggregationMode],
@@ -310,8 +310,8 @@ class DynamoVllmConfig(ConfigBase):
     """Configuration for Dynamo vLLM wrapper (vLLM-specific only). All fields optional."""
 
     disaggregation_mode: Union[
-        str, DisaggregationMode
-    ]  # resolved to enum in validate()
+        None, str, DisaggregationMode
+    ]  # None when not provided; resolved to enum in validate()
     is_prefill_worker: bool
     is_decode_worker: bool
     use_vllm_tokenizer: bool
@@ -370,17 +370,17 @@ class DynamoVllmConfig(ConfigBase):
         """Resolve disaggregation_mode from new enum or legacy boolean flags.
 
         Priority:
-        1. If --disaggregation-mode is explicitly set to a non-default value, use it.
-           Raise if legacy booleans conflict.
+        1. If --disaggregation-mode was explicitly provided, use it.
+           Raise if legacy booleans are also set.
         2. If legacy --is-prefill-worker or --is-decode-worker is set,
            emit DeprecationWarning and translate to enum.
-        3. Sync boolean fields from the resolved enum value.
+        3. Apply default (AGGREGATED) if nothing was provided.
+        4. Sync boolean fields from the resolved enum value.
         """
-        # Convert string to enum
+        # Convert string to enum (non-None means explicitly provided)
+        explicit_mode = self.disaggregation_mode is not None
         if isinstance(self.disaggregation_mode, str):
             self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
-
-        explicit_mode = self.disaggregation_mode != DisaggregationMode.AGGREGATED
 
         # Check for legacy boolean flags
         has_legacy = self.is_prefill_worker or self.is_decode_worker
@@ -410,6 +410,10 @@ class DynamoVllmConfig(ConfigBase):
                     stacklevel=2,
                 )
                 self.disaggregation_mode = DisaggregationMode.DECODE
+
+        # Apply default if neither new flag nor legacy flags were provided
+        if self.disaggregation_mode is None:
+            self.disaggregation_mode = DisaggregationMode.AGGREGATED
 
         # Sync booleans from enum (canonical source of truth)
         self.is_prefill_worker = self.disaggregation_mode == DisaggregationMode.PREFILL

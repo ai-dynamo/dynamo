@@ -289,3 +289,16 @@ def test_conflicting_legacy_and_new_flags_raises(mock_vllm_cli):
     )
     with pytest.raises(ValueError, match="Cannot combine"):
         parse_args()
+
+
+def test_explicit_default_mode_with_legacy_flag_raises(mock_vllm_cli):
+    """Test that --disaggregation-mode prefill_and_decode --is-decode-worker raises ValueError."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disaggregation-mode",
+        "prefill_and_decode",
+        "--is-decode-worker",
+    )
+    with pytest.raises(ValueError, match="Cannot combine"):
+        parse_args()
