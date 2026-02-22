@@ -68,7 +68,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     cargo build --release -p libdynamo_llm && \
     mkdir -p /out && \
     cp target/release/libdynamo_llm_capi.a /out/ && \
-    cp lib/bindings/c/include/nvidia/dynamo_llm/llm_engine.h /out/
+    find target/release/build -name llm_engine.h -path "*/out/*" -exec cp {} /out/ \;
 
 # =============================================================================
 # Stage 2: Build Go EPP binary
