@@ -313,11 +313,6 @@ pub(crate) async fn start_kv_router_background(
 
                 _ = cancellation_token.cancelled() => {
                     tracing::debug!("KV Router background task received cancellation signal");
-                    // Clean up the queue and remove the durable consumer
-                    // TODO: durable consumer cannot cleanup if ungraceful shutdown (crash)
-                    if let Err(e) = nats_queue.shutdown(None).await {
-                        tracing::warn!("Failed to shutdown NatsQueue: {e}");
-                    }
                     break;
                 }
 
