@@ -19,9 +19,6 @@ inputs:
   image_tag:
     description: 'Custom image tag'
     required: true
-  ci_token:
-    description: 'CI Token'
-    required: false
   aws_default_region:
     description: 'AWS Default Region'
     required: false
@@ -72,7 +69,6 @@ runs:
       id: build
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.ci_token }}
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
         SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
@@ -117,8 +113,7 @@ runs:
           fi
         else
           CACHE_TAG="${{ inputs.target }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache"
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${CACHE_TAG} "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
+          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
           fi
