@@ -102,25 +102,28 @@ jobs:
             EXTRA_BUILD_ARGS="${CACHE_ARGS}"
 
 
-  # build-frontend-image:
-  #   name: Build Frontend Image
-  #   needs: changed-files
-  #   if: needs.changed-files.outputs.frontend == 'true'
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       arch: [amd64, arm64]
-  #   runs-on: prod-builder-v3
-  #   env:
-  #     IMAGE_REGISTRY: ai-dynamo
-  #     IMAGE_REPOSITORY: dynamo
-  #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #     TARGET: frontend
-  #     CUDA_VERSION: "12.9"
-  #     FRAMEWORK: dynamo
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  build-frontend-image:
+    name: Build Frontend Image
+    needs: changed-files
+    if: needs.changed-files.outputs.frontend == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: prod-builder-v3
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      TARGET: frontend
+      CUDA_VERSION: "12.9"
+      FRAMEWORK: dynamo
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: test
+        run: |
+          echo "epp=${{ needs.build-epp-image.outputs.epp_image_uri }}" >> $GITHUB_OUTPUT
   #     - name: Initialize Dynamo Builder
   #       uses: ./.github/actions/init-dynamo-builder
   #       with:
