@@ -60,6 +60,10 @@ inputs:
     description: 'CI mode: for frontend target, uses existing buildx builder and pushes EPP image to ECR'
     required: false
     default: 'false'
+  extra_build_args:
+    description: 'Additional Docker build args (newline-separated list of KEY=VALUE pairs)'
+    required: false
+    default: ''
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -148,6 +152,16 @@ runs:
           done <<< "$EXTRA_TAGS"
         fi
 
+        # Add extra build args (each as a separate --build-arg)
+        EXTRA_BUILD_ARGS="${{ inputs.extra_build_args }}"
+        if [ -n "$EXTRA_BUILD_ARGS" ]; then
+          while IFS= read -r BUILD_ARG; do
+            if [ -n "$BUILD_ARG" ]; then
+              EXTRA_ARGS+=" --build-arg ${BUILD_ARG}"
+            fi
+          done <<< "$EXTRA_BUILD_ARGS"
+        fi
+
         # Pass AWS credentials as build secrets for sccache S3 access.
         # Dockerfile steps reference these via --mount=type=secret,id=aws-key-id,env=...
         SECRET_ARGS=""
@@ -161,7 +175,7 @@ runs:
           --tag "$IMAGE_TAG" \
           --platform linux/${{ inputs.platform }} \
           -f ./container/rendered.Dockerfile \
-          $CACHE_ARGS $EXTRA_ARGS $SECRET_ARGS $EPP_IMAGE_ARG . 2>&1 | tee "${BUILD_LOG_FILE}"
+          $CACHE_ARGS $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
