@@ -186,7 +186,7 @@ Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MO
 
 ```yaml
    args:
-     - --is-prefill-worker  # For disaggregated prefill workers
+     - --disaggregation-mode prefill  # For disaggregated prefill workers
 ```
 
 ### Image Pull Secret Configuration

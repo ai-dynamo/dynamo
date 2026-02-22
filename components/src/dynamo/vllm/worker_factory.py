@@ -13,6 +13,7 @@ from dynamo.llm import ModelInput
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
+from .constants import DisaggregationMode
 from .multimodal_handlers import (
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
@@ -149,7 +150,7 @@ class WorkerFactory:
 
         # Set up decode worker client for disaggregated mode
         decode_worker_client = None
-        if config.is_prefill_worker:
+        if config.disaggregation_mode == DisaggregationMode.PREFILL:
             decode_worker_client = await runtime.endpoint(
                 f"{config.namespace}.decoder.generate"
             ).client()

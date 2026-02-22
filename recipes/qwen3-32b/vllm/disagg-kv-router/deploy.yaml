@@ -95,7 +95,8 @@ spec:
           args:
           - --model
           - Qwen/Qwen3-32B
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           - --tensor-parallel-size
           - '2'
           - --disable-log-requests

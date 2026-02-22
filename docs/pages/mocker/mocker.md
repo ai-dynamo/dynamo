@@ -50,13 +50,13 @@ python -m dynamo.mocker \
 # Launch prefill worker
 python -m dynamo.mocker \
     --model-path Qwen/Qwen3-0.6B \
-    --is-prefill-worker \
+    --disaggregation-mode prefill \
     --bootstrap-ports 50100
 
 # Launch decode worker (in another terminal)
 python -m dynamo.mocker \
     --model-path Qwen/Qwen3-0.6B \
-    --is-decode-worker
+    --disaggregation-mode decode
 ```
 
 ### Multiple Workers in One Process
@@ -88,8 +88,8 @@ python -m dynamo.mocker \
 | `--planner-profile-data` | None | Path to NPZ file with timing data |
 | `--num-workers` | 1 | Workers per process |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
-| `--is-prefill-worker` | False | Prefill-only mode |
-| `--is-decode-worker` | False | Decode-only mode |
+| `--disaggregation-mode prefill` | False | Prefill-only mode |
+| `--disaggregation-mode decode` | False | Decode-only mode |
 | `--durable-kv-events` | False | Enable durable KV events via JetStream (disables local indexer) |
 | `--bootstrap-ports` | None | Ports for P/D rendezvous |
 

@@ -506,7 +506,7 @@ spec:
             - "fp8"
             - "--max-num-seqs"
             - "1"               # Prefill workers use batch size 1
-            - --is-prefill-worker
+            - --disaggregation-mode prefill
 
     VLLMDecodeWorker:
       envFromSecret: hf-token-secret
@@ -553,7 +553,7 @@ spec:
             - "fp8"
             - "--max-num-seqs"
             - "1024"            # Decode workers handle high concurrency
-            - --is-decode-worker
+            - --disaggregation-mode decode
 ```
 
 **Critical RDMA settings:**

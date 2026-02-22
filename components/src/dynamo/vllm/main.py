@@ -54,6 +54,7 @@ from dynamo.vllm.worker_factory import WorkerFactory
 
 from .args import Config, parse_args
 from .checkpoint_restore import get_checkpoint_config
+from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
     VllmHealthCheckPayload,
@@ -190,7 +191,7 @@ async def worker():
     elif config.omni:
         await init_omni(runtime, config, shutdown_event)
         logger.debug("init_omni completed")
-    elif config.is_prefill_worker:
+    elif config.disaggregation_mode == DisaggregationMode.PREFILL:
         await init_prefill(
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
         )
@@ -318,7 +319,7 @@ def setup_kv_event_publisher(
         return None
 
     # Skip KV event publishing for decode workers
-    if config.is_decode_worker:
+    if config.disaggregation_mode == DisaggregationMode.DECODE:
         logger.info("Skipping KV event publisher setup for decode worker")
         return None
 
@@ -516,7 +517,8 @@ async def register_vllm_model(
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     runtime_config.enable_local_indexer = (
-        config.enable_local_indexer and not config.is_decode_worker
+        config.enable_local_indexer
+        and config.disaggregation_mode != DisaggregationMode.DECODE
     )
 
     # Add tool/reasoning parsers for decode models

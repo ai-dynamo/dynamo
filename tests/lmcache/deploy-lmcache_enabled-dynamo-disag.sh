@@ -40,4 +40,4 @@ LMCACHE_MAX_LOCAL_CPU_SIZE=20 \
 CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
     --model $MODEL_URL \
-    --is-prefill-worker
+    --disaggregation-mode prefill

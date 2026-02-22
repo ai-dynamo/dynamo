@@ -223,7 +223,7 @@ Key customization points include:
 - **Resource Allocation**: Configure GPU requirements under `resources.limits`
 - **Scaling**: Set `replicas` for number of worker instances
 - **Routing Mode**: Enable KV-cache routing by setting `DYN_ROUTER_MODE=kv` in Frontend envs
-- **Worker Specialization**: Add `--is-prefill-worker` flag for disaggregated prefill workers
+- **Worker Specialization**: Add `--disaggregation-mode prefill` flag for disaggregated prefill workers
 
 ## Additional Resources
 

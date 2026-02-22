@@ -4,11 +4,13 @@
 """Unit tests for vLLM backend components."""
 
 import re
+import warnings
 from pathlib import Path
 
 import pytest
 
 from dynamo.vllm.args import parse_args
+from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -169,13 +171,14 @@ def test_endpoint_not_provided_preserves_defaults(mock_vllm_cli):
 
 
 def test_endpoint_overrides_with_prefill_worker(mock_vllm_cli):
-    """Test that --endpoint overrides even with --is-prefill-worker."""
+    """Test that --endpoint overrides even with --disaggregation-mode prefill."""
     mock_vllm_cli(
         "--model",
         "Qwen/Qwen3-0.6B",
         "--endpoint",
         "dyn://custom.worker.serve",
-        "--is-prefill-worker",
+        "--disaggregation-mode",
+        "prefill",
     )
     config = parse_args()
     assert config.namespace == "custom"
@@ -216,3 +219,73 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     # Core engine fields must survive the round-trip
     assert hasattr(ns, "model")
     assert hasattr(ns, "tensor_parallel_size")
+
+
+# --disaggregation-mode tests
+
+
+def test_disaggregation_mode_default(mock_vllm_cli):
+    """Test that default disaggregation mode is AGGREGATED."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    config = parse_args()
+    assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+    assert config.is_prefill_worker is False
+    assert config.is_decode_worker is False
+
+
+def test_disaggregation_mode_prefill(mock_vllm_cli):
+    """Test --disaggregation-mode prefill sets correct state."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill")
+    config = parse_args()
+    assert config.disaggregation_mode == DisaggregationMode.PREFILL
+    assert config.is_prefill_worker is True
+    assert config.is_decode_worker is False
+    assert config.component == "prefill"
+
+
+def test_disaggregation_mode_decode(mock_vllm_cli):
+    """Test --disaggregation-mode decode sets correct state."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "decode")
+    config = parse_args()
+    assert config.disaggregation_mode == DisaggregationMode.DECODE
+    assert config.is_prefill_worker is False
+    assert config.is_decode_worker is True
+
+
+def test_legacy_is_prefill_worker_emits_deprecation(mock_vllm_cli):
+    """Test that --is-prefill-worker still works but emits DeprecationWarning."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--is-prefill-worker")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        config = parse_args()
+    deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+    assert len(deprecation_warnings) >= 1
+    assert "deprecated" in str(deprecation_warnings[0].message).lower()
+    assert config.disaggregation_mode == DisaggregationMode.PREFILL
+    assert config.is_prefill_worker is True
+
+
+def test_legacy_is_decode_worker_emits_deprecation(mock_vllm_cli):
+    """Test that --is-decode-worker still works but emits DeprecationWarning."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--is-decode-worker")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        config = parse_args()
+    deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+    assert len(deprecation_warnings) >= 1
+    assert "deprecated" in str(deprecation_warnings[0].message).lower()
+    assert config.disaggregation_mode == DisaggregationMode.DECODE
+    assert config.is_decode_worker is True
+
+
+def test_conflicting_legacy_and_new_flags_raises(mock_vllm_cli):
+    """Test that combining legacy flags with explicit --disaggregation-mode raises ValueError."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disaggregation-mode",
+        "prefill",
+        "--is-decode-worker",
+    )
+    with pytest.raises(ValueError, match="Cannot combine"):
+        parse_args()

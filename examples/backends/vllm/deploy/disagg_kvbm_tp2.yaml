@@ -65,7 +65,8 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-8B
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
             - --gpu-memory-utilization
             - "0.23"
             - --max-model-len
