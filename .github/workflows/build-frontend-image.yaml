@@ -89,6 +89,7 @@ jobs:
       - name: Build EPP Image
         id: build-epp-image
         shell: bash
+        timeout-minutes: 20
         run: |
           set -x
           EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}"
