@@ -71,7 +71,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CudaContextProivder, DeviceStorage, DiskStorage, PinnedStorage, RegistationHandle,
-    RegisterableStorage, Remote, Storage, StorageError, StorageType, SystemStorage,
+    RegisterableStorage, Remote, RemoteDiskStorage, Storage, StorageError, StorageType,
+    SystemStorage,
 };
 
 /// NIXL remote descriptor
@@ -413,6 +414,33 @@ impl NixlDescriptor for DiskStorage {
     }
 
     /// Nixl treats the file descriptor as the device ID.
+    fn device_id(&self) -> u64 {
+        self.fd()
+    }
+}
+
+// RemoteDiskStorage — short-lived transfer handle with RAII fd close.
+
+impl NixlAccessible for RemoteDiskStorage {}
+
+/// Use the default nixl_register impl (register only, no unlink — files are persistent).
+impl NixlRegisterableStorage for RemoteDiskStorage {}
+
+impl MemoryRegion for RemoteDiskStorage {
+    unsafe fn as_ptr(&self) -> *const u8 {
+        unsafe { Storage::as_ptr(self) }
+    }
+
+    fn size(&self) -> usize {
+        Storage::size(self)
+    }
+}
+
+impl NixlDescriptor for RemoteDiskStorage {
+    fn mem_type(&self) -> MemType {
+        MemType::File
+    }
+
     fn device_id(&self) -> u64 {
         self.fd()
     }

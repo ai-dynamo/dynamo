@@ -350,26 +350,29 @@ pub mod kvbm {
     /// Disk cache hit rate (0.0-1.0) from the sliding window
     pub const DISK_CACHE_HIT_RATE: &str = "disk_cache_hit_rate";
 
-    /// Object storage cache hit rate (0.0-1.0) from the sliding window
-    pub const OBJECT_CACHE_HIT_RATE: &str = "object_cache_hit_rate";
+    /// Remote storage cache hit rate (0.0-1.0) from the sliding window
+    pub const REMOTE_CACHE_HIT_RATE: &str = "remote_cache_hit_rate";
 
-    /// Number of blocks offloaded from device to object storage
-    pub const OFFLOAD_BLOCKS_D2O: &str = "offload_blocks_d2o";
+    /// Number of blocks offloaded from device to remote storage
+    pub const OFFLOAD_BLOCKS_D2R: &str = "offload_blocks_d2r";
 
-    /// Number of blocks onboarded from object storage to device
-    pub const ONBOARD_BLOCKS_O2D: &str = "onboard_blocks_o2d";
+    /// Number of blocks onboarded from remote storage to device
+    pub const ONBOARD_BLOCKS_R2D: &str = "onboard_blocks_r2d";
 
-    /// Bytes transferred to object storage (offload)
-    pub const OFFLOAD_BYTES_OBJECT: &str = "offload_bytes_object";
+    /// Bytes transferred to remote storage (offload)
+    pub const OFFLOAD_BYTES_REMOTE: &str = "offload_bytes_remote";
 
-    /// Bytes transferred from object storage (onboard)
-    pub const ONBOARD_BYTES_OBJECT: &str = "onboard_bytes_object";
+    /// Bytes transferred from remote storage (onboard)
+    pub const ONBOARD_BYTES_REMOTE: &str = "onboard_bytes_remote";
 
-    /// Number of failed object storage read operations (blocks)
-    pub const OBJECT_READ_FAILURES: &str = "object_read_failures";
+    /// Number of failed remote storage read operations (blocks)
+    pub const REMOTE_READ_FAILURES: &str = "remote_read_failures";
 
-    /// Number of failed object storage write operations (blocks)
-    pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
+    /// Number of failed remote storage write operations (blocks)
+    pub const REMOTE_WRITE_FAILURES: &str = "remote_write_failures";
+
+    /// Remote storage transfer latency histogram in seconds
+    pub const REMOTE_TRANSFER_LATENCY_SECONDS: &str = "remote_transfer_latency_seconds";
 }
 
 /// Routing overhead phase latency histogram names (raw Prometheus, not component-scoped).

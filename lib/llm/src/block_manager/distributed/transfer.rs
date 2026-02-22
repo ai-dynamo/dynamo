@@ -245,12 +245,20 @@ impl BlockTransferHandler {
         let num_blocks = pipeline.num_blocks();
         let direction = pipeline.direction();
         let is_onboard = direction.is_onboard();
+        use crate::block_manager::config::DISK_FLAG_GDS_WRITE;
+        let backend = match remote_ctx.config() {
+            crate::block_manager::config::RemoteStorageConfig::Object { .. } => "object",
+            crate::block_manager::config::RemoteStorageConfig::Disk { transfer_flags, .. } => {
+                if transfer_flags & DISK_FLAG_GDS_WRITE != 0 { "gds_mt" } else { "posix" }
+            }
+        };
 
         tracing::debug!(
             target: "kvbm-g4",
             request_id = %request.request_id,
             operation_id = %request.operation_id,
             num_blocks,
+            backend = backend,
             direction = ?direction,
             "executing remote transfer"
         );
@@ -316,6 +324,7 @@ impl BlockTransferHandler {
             request_id = %request.request_id,
             operation_id = %request.operation_id,
             num_blocks,
+            backend = backend,
             "remote transfer completed"
         );
 

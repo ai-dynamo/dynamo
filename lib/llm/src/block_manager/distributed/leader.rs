@@ -292,11 +292,24 @@ impl KvbmLeader {
         let disk_use_gds = std::env::var("DYN_KVBM_REMOTE_DISK_USE_GDS")
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(true);
+        let disk_gds_reads_only = std::env::var("DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+        use crate::block_manager::config::{
+            DISK_FLAG_GDS_READ, DISK_FLAG_GDS_WRITE, DISK_FLAGS_POSIX_BOTH,
+        };
+        let disk_flags = if !disk_use_gds {
+            DISK_FLAGS_POSIX_BOTH
+        } else if disk_gds_reads_only {
+            DISK_FLAG_GDS_READ
+        } else {
+            DISK_FLAG_GDS_WRITE | DISK_FLAG_GDS_READ
+        };
 
         match storage_type.as_str() {
             "disk" => disk_path.map(|path| RemoteStorageConfig::Disk {
                 base_path: path,
-                use_gds: disk_use_gds,
+                transfer_flags: disk_flags,
             }),
             "object" => Some(RemoteStorageConfig::Object {
                 default_bucket: bucket,
@@ -311,7 +324,7 @@ impl KvbmLeader {
                 }),
                 (None, Some(path)) => Some(RemoteStorageConfig::Disk {
                     base_path: path.clone(),
-                    use_gds: disk_use_gds,
+                    transfer_flags: disk_flags,
                 }),
                 (None, None) => None,
             },

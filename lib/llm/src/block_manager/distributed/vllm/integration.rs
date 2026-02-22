@@ -168,7 +168,7 @@ pub async fn register_tp(
     );
 
     for worker_id in 0..world_size {
-        let entries = build_entries(hashes_with_positions, storage_config, worker_id);
+        let entries = build_entries(hashes_with_positions, storage_config, worker_id, world_size);
         handle.register_hashes(&entries, worker_id as u64).await;
         tracing::trace!(worker_id, entries = entries.len(), "register_tp done");
     }
@@ -179,6 +179,7 @@ fn build_entries(
     hashes_with_positions: &[(SequenceHash, u32)],
     storage_config: &RemoteStorageConfig,
     worker_id: usize,
+    world_size: usize,
 ) -> Vec<(SequenceHash, u32, RemoteKey)> {
     match storage_config {
         RemoteStorageConfig::Object { default_bucket, .. } => {
@@ -202,7 +203,7 @@ fn build_entries(
                 .map(|&(hash, pos)| {
                     let key = RemoteKey::Disk(DiskKey {
                         path: path.clone(),
-                        key: format!("{:016x}", hash),
+                        key: format!("{:016x}_{}_{}", hash, worker_id, world_size),
                     });
                     (hash, pos, key)
                 })
@@ -218,6 +219,8 @@ pub fn create_descriptors(
     hashes: &[SequenceHash],
     storage_config: &RemoteStorageConfig,
     block_size: usize,
+    worker_id: usize,
+    world_size: usize,
 ) -> Vec<RemoteBlockDescriptor> {
     match storage_config {
         RemoteStorageConfig::Object { default_bucket, .. } => {
@@ -229,7 +232,15 @@ pub fn create_descriptors(
         }
         RemoteStorageConfig::Disk { base_path, .. } => hashes
             .iter()
-            .map(|&hash| RemoteBlockDescriptor::disk_from_hash(base_path, hash, block_size))
+            .map(|&hash| {
+                RemoteBlockDescriptor::disk_from_hash(
+                    base_path,
+                    hash,
+                    block_size,
+                    worker_id,
+                    world_size,
+                )
+            })
             .collect(),
     }
 }
@@ -370,12 +381,14 @@ pub fn create_transfer_pipeline(
     hashes: &[SequenceHash],
     storage_config: &RemoteStorageConfig,
     block_size: usize,
+    worker_id: usize,
+    world_size: usize,
     is_onboard: bool,
     is_h2o: bool,
     bounce_block_ids: Vec<usize>,
     device_block_ids: Vec<usize>,
 ) -> RemoteTransferPipeline {
-    let descriptors = create_descriptors(hashes, storage_config, block_size);
+    let descriptors = create_descriptors(hashes, storage_config, block_size, worker_id, world_size);
     create_pipeline(
         descriptors,
         is_onboard,

@@ -2927,6 +2927,13 @@ async fn process_remote_transfer_request(
         RemoteStorageConfig::Object { .. } => "object",
         RemoteStorageConfig::Disk { .. } => "disk",
     };
+    let backend_label = match &storage_config {
+        RemoteStorageConfig::Object { .. } => "object",
+        RemoteStorageConfig::Disk { transfer_flags, .. } => {
+            use dynamo_llm::block_manager::config::DISK_FLAG_GDS_WRITE;
+            if transfer_flags & DISK_FLAG_GDS_WRITE != 0 { "gds_mt" } else { "posix" }
+        }
+    };
 
     tracing::debug!(
         target = "kvbm-g4",
@@ -2961,6 +2968,8 @@ async fn process_remote_transfer_request(
         &hashes,
         &storage_config,
         req.block_size,
+        leader.worker_id() as usize,
+        leader.world_size(),
         req.is_onboard,
         req.is_h2o(),
         bounce,
@@ -2989,6 +2998,8 @@ async fn process_remote_transfer_request(
         );
 
     let notify_receiver = leader.remote_transfer_request(wire_req).await?;
+    let transfer_start = Instant::now();
+    let transfer_bytes = (num_blocks as u64).saturating_mul(req.block_size as u64);
 
     let result = match tokio::time::timeout(*G4_TRANSFER_TIMEOUT, notify_receiver).await {
         Ok(Ok(_)) => {
@@ -3003,9 +3014,23 @@ async fn process_remote_transfer_request(
 
             // Track success metrics
             if req.is_onboard {
-                kvbm_metrics.onboard_blocks_o2d.inc_by(num_blocks as u64);
+                kvbm_metrics.onboard_blocks_r2d.inc_by(num_blocks as u64);
+                kvbm_metrics.record_remote_onboard_bytes(transfer_bytes);
+                kvbm_metrics.record_remote_transfer_latency(
+                    "onboard",
+                    "success",
+                    backend_label,
+                    transfer_start.elapsed().as_secs_f64(),
+                );
             } else {
-                kvbm_metrics.offload_blocks_d2o.inc_by(num_blocks as u64);
+                kvbm_metrics.offload_blocks_d2r.inc_by(num_blocks as u64);
+                kvbm_metrics.record_remote_offload_bytes(transfer_bytes);
+                kvbm_metrics.record_remote_transfer_latency(
+                    "offload",
+                    "success",
+                    backend_label,
+                    transfer_start.elapsed().as_secs_f64(),
+                );
             }
 
             // Register with remote registry after successful offload (all TP ranks)
@@ -3032,9 +3057,21 @@ async fn process_remote_transfer_request(
             );
             // Track failure metrics
             if req.is_onboard {
-                kvbm_metrics.record_object_read_failure(num_blocks as u64);
+                kvbm_metrics.record_remote_read_failure(num_blocks as u64);
+                kvbm_metrics.record_remote_transfer_latency(
+                    "onboard",
+                    "error",
+                    backend_label,
+                    transfer_start.elapsed().as_secs_f64(),
+                );
             } else {
-                kvbm_metrics.record_object_write_failure(num_blocks as u64);
+                kvbm_metrics.record_remote_write_failure(num_blocks as u64);
+                kvbm_metrics.record_remote_transfer_latency(
+                    "offload",
+                    "error",
+                    backend_label,
+                    transfer_start.elapsed().as_secs_f64(),
+                );
             }
             Err(anyhow::anyhow!(
                 "Remote transfer completion notification failed"
@@ -3050,9 +3087,21 @@ async fn process_remote_transfer_request(
             );
             // Track failure metrics
             if req.is_onboard {
-                kvbm_metrics.record_object_read_failure(num_blocks as u64);
+                kvbm_metrics.record_remote_read_failure(num_blocks as u64);
+                kvbm_metrics.record_remote_transfer_latency(
+                    "onboard",
+                    "timeout",
+                    backend_label,
+                    transfer_start.elapsed().as_secs_f64(),
+                );
             } else {
-                kvbm_metrics.record_object_write_failure(num_blocks as u64);
+                kvbm_metrics.record_remote_write_failure(num_blocks as u64);
+                kvbm_metrics.record_remote_transfer_latency(
+                    "offload",
+                    "timeout",
+                    backend_label,
+                    transfer_start.elapsed().as_secs_f64(),
+                );
             }
             Err(anyhow::anyhow!(
                 "Remote transfer timed out after {} seconds",

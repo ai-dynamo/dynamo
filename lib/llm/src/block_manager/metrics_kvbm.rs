@@ -4,14 +4,15 @@
 use axum::Router;
 use dynamo_runtime::metrics::prometheus_names::{
     kvbm::{
-        DISK_CACHE_HIT_RATE, HOST_CACHE_HIT_RATE, MATCHED_TOKENS, OBJECT_CACHE_HIT_RATE,
-        OBJECT_READ_FAILURES, OBJECT_WRITE_FAILURES, OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H,
-        OFFLOAD_BLOCKS_D2O, OFFLOAD_BLOCKS_H2D, ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D,
-        ONBOARD_BLOCKS_O2D,
+        DISK_CACHE_HIT_RATE, HOST_CACHE_HIT_RATE, MATCHED_TOKENS, OFFLOAD_BLOCKS_D2D,
+        OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_D2R, OFFLOAD_BLOCKS_H2D, OFFLOAD_BYTES_REMOTE,
+        ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D, ONBOARD_BLOCKS_R2D, ONBOARD_BYTES_REMOTE,
+        REMOTE_CACHE_HIT_RATE, REMOTE_READ_FAILURES, REMOTE_TRANSFER_LATENCY_SECONDS,
+        REMOTE_WRITE_FAILURES,
     },
     sanitize_prometheus_name,
 };
-use prometheus::{Gauge, IntCounter, Opts, Registry};
+use prometheus::{Gauge, HistogramOpts, HistogramVec, IntCounter, Opts, Registry};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, thread};
 use tokio::{net::TcpListener, sync::Notify};
 
@@ -28,8 +29,8 @@ pub struct KvbmMetrics {
     // number of blocks offloaded from device to disk (bypassing host memory)
     pub offload_blocks_d2d: IntCounter,
 
-    // number of blocks offloaded from device to object storage
-    pub offload_blocks_d2o: IntCounter,
+    // number of blocks offloaded from device to remote storage
+    pub offload_blocks_d2r: IntCounter,
 
     // number of blocks onboarded from host to device
     pub onboard_blocks_h2d: IntCounter,
@@ -37,8 +38,8 @@ pub struct KvbmMetrics {
     // number of blocks onboarded from disk to device
     pub onboard_blocks_d2d: IntCounter,
 
-    // number of blocks onboarded from object storage to device
-    pub onboard_blocks_o2d: IntCounter,
+    // number of blocks onboarded from remote storage to device
+    pub onboard_blocks_r2d: IntCounter,
 
     // number of matched tokens from KVBM
     pub matched_tokens: IntCounter,
@@ -49,14 +50,23 @@ pub struct KvbmMetrics {
     // disk cache hit rate (0.0-1.0) from the sliding window
     pub disk_cache_hit_rate: Gauge,
 
-    // object cache hit rate (0.0-1.0) from the sliding window
-    pub object_cache_hit_rate: Gauge,
+    // remote cache hit rate (0.0-1.0) from the sliding window
+    pub remote_cache_hit_rate: Gauge,
 
-    // number of failed object storage read operations (blocks)
-    pub object_read_failures: IntCounter,
+    // number of failed remote storage read operations (blocks)
+    pub remote_read_failures: IntCounter,
 
-    // number of failed object storage write operations (blocks)
-    pub object_write_failures: IntCounter,
+    // number of failed remote storage write operations (blocks)
+    pub remote_write_failures: IntCounter,
+
+    // bytes transferred to remote storage (offload)
+    pub offload_bytes_remote: IntCounter,
+
+    // bytes transferred from remote storage (onboard)
+    pub onboard_bytes_remote: IntCounter,
+
+    // transfer latency histogram for remote storage operations
+    pub remote_transfer_latency_seconds: HistogramVec,
 
     shutdown_notify: Option<Arc<Notify>>,
 }
@@ -87,10 +97,10 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
-        let offload_blocks_d2o = mr
+        let offload_blocks_d2r = mr
             .create_intcounter(
-                OFFLOAD_BLOCKS_D2O,
-                "The number of offload blocks from device to object storage",
+                OFFLOAD_BLOCKS_D2R,
+                "The number of offload blocks from device to remote storage",
                 &[],
             )
             .unwrap();
@@ -108,10 +118,10 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
-        let onboard_blocks_o2d = mr
+        let onboard_blocks_r2d = mr
             .create_intcounter(
-                ONBOARD_BLOCKS_O2D,
-                "The number of onboard blocks from object storage to device",
+                ONBOARD_BLOCKS_R2D,
+                "The number of onboard blocks from remote storage to device",
                 &[],
             )
             .unwrap();
@@ -133,25 +143,50 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
-        let object_cache_hit_rate = mr
+        let remote_cache_hit_rate = mr
             .create_gauge(
-                OBJECT_CACHE_HIT_RATE,
-                "Object storage cache hit rate (0.0-1.0) from the sliding window",
+                REMOTE_CACHE_HIT_RATE,
+                "Remote storage cache hit rate (0.0-1.0) from the sliding window",
                 &[],
             )
             .unwrap();
-        let object_read_failures = mr
+        let remote_read_failures = mr
             .create_intcounter(
-                OBJECT_READ_FAILURES,
-                "The number of failed object storage read operations (blocks)",
+                REMOTE_READ_FAILURES,
+                "The number of failed remote storage read operations (blocks)",
                 &[],
             )
             .unwrap();
-        let object_write_failures = mr
+        let remote_write_failures = mr
             .create_intcounter(
-                OBJECT_WRITE_FAILURES,
-                "The number of failed object storage write operations (blocks)",
+                REMOTE_WRITE_FAILURES,
+                "The number of failed remote storage write operations (blocks)",
                 &[],
+            )
+            .unwrap();
+        let offload_bytes_remote = mr
+            .create_intcounter(
+                OFFLOAD_BYTES_REMOTE,
+                "The number of bytes offloaded from device to remote storage",
+                &[],
+            )
+            .unwrap();
+        let onboard_bytes_remote = mr
+            .create_intcounter(
+                ONBOARD_BYTES_REMOTE,
+                "The number of bytes onboarded from remote storage to device",
+                &[],
+            )
+            .unwrap();
+        let remote_transfer_latency_seconds = mr
+            .create_histogram_vec(
+                REMOTE_TRANSFER_LATENCY_SECONDS,
+                "Remote storage transfer latency in seconds",
+                &["direction", "result", "backend"],
+                vec![
+                    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+                    10.0, 30.0, 60.0,
+                ],
             )
             .unwrap();
         // early return if no endpoint is needed
@@ -160,16 +195,19 @@ impl KvbmMetrics {
                 offload_blocks_d2h,
                 offload_blocks_h2d,
                 offload_blocks_d2d,
-                offload_blocks_d2o,
+                offload_blocks_d2r,
                 onboard_blocks_h2d,
                 onboard_blocks_d2d,
-                onboard_blocks_o2d,
+                onboard_blocks_r2d,
                 matched_tokens,
                 host_cache_hit_rate,
                 disk_cache_hit_rate,
-                object_cache_hit_rate,
-                object_read_failures,
-                object_write_failures,
+                remote_cache_hit_rate,
+                remote_read_failures,
+                remote_write_failures,
+                offload_bytes_remote,
+                onboard_bytes_remote,
+                remote_transfer_latency_seconds,
                 shutdown_notify: None,
             };
         }
@@ -221,34 +259,60 @@ impl KvbmMetrics {
             offload_blocks_d2h,
             offload_blocks_h2d,
             offload_blocks_d2d,
-            offload_blocks_d2o,
+            offload_blocks_d2r,
             onboard_blocks_h2d,
             onboard_blocks_d2d,
-            onboard_blocks_o2d,
+            onboard_blocks_r2d,
             matched_tokens,
             host_cache_hit_rate,
             disk_cache_hit_rate,
-            object_cache_hit_rate,
-            object_read_failures,
-            object_write_failures,
+            remote_cache_hit_rate,
+            remote_read_failures,
+            remote_write_failures,
+            offload_bytes_remote,
+            onboard_bytes_remote,
+            remote_transfer_latency_seconds,
             shutdown_notify: Some(notify),
         }
     }
 
     /// Update cache hit rate metrics from a CacheStatsTracker
-    pub fn update_cache_hit_rates(&self, host_rate: f32, disk_rate: f32, object_rate: f32) {
+    pub fn update_cache_hit_rates(&self, host_rate: f32, disk_rate: f32, remote_rate: f32) {
         self.host_cache_hit_rate.set(host_rate as f64);
         self.disk_cache_hit_rate.set(disk_rate as f64);
-        self.object_cache_hit_rate.set(object_rate as f64);
+        self.remote_cache_hit_rate.set(remote_rate as f64);
     }
-    /// Record failed object storage read operations
-    pub fn record_object_read_failure(&self, num_blocks: u64) {
-        self.object_read_failures.inc_by(num_blocks);
+    /// Record failed remote storage read operations
+    pub fn record_remote_read_failure(&self, num_blocks: u64) {
+        self.remote_read_failures.inc_by(num_blocks);
     }
 
-    /// Record failed object storage write operations
-    pub fn record_object_write_failure(&self, num_blocks: u64) {
-        self.object_write_failures.inc_by(num_blocks);
+    /// Record failed remote storage write operations
+    pub fn record_remote_write_failure(&self, num_blocks: u64) {
+        self.remote_write_failures.inc_by(num_blocks);
+    }
+
+    /// Record successful offload bytes to remote storage.
+    pub fn record_remote_offload_bytes(&self, num_bytes: u64) {
+        self.offload_bytes_remote.inc_by(num_bytes);
+    }
+
+    /// Record successful onboard bytes from remote storage.
+    pub fn record_remote_onboard_bytes(&self, num_bytes: u64) {
+        self.onboard_bytes_remote.inc_by(num_bytes);
+    }
+
+    /// Record remote transfer latency.
+    pub fn record_remote_transfer_latency(
+        &self,
+        direction: &str,
+        result: &str,
+        backend: &str,
+        seconds: f64,
+    ) {
+        self.remote_transfer_latency_seconds
+            .with_label_values(&[direction, result, backend])
+            .observe(seconds);
     }
 }
 
@@ -315,6 +379,20 @@ impl KvbmMetricsRegistry {
 
     pub fn inner(&self) -> Arc<Registry> {
         Arc::clone(&self.registry)
+    }
+
+    pub fn create_histogram_vec(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[&str],
+        buckets: Vec<f64>,
+    ) -> anyhow::Result<HistogramVec> {
+        let metrics_name = sanitize_prometheus_name(&format!("{}_{}", self.prefix, name))?;
+        let opts = HistogramOpts::new(metrics_name, description).buckets(buckets);
+        let h = HistogramVec::new(opts, labels)?;
+        self.registry.register(Box::new(h.clone()))?;
+        Ok(h)
     }
 }
 

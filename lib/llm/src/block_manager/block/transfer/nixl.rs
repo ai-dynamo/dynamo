@@ -6,11 +6,11 @@ use super::*;
 use super::remote::{RemoteBlockDescriptor, RemoteKey, RemoteStorageKind, RemoteTransferDirection};
 use crate::block_manager::config::RemoteTransferContext;
 use crate::block_manager::storage::nixl::NixlRegisterableStorage;
-use crate::block_manager::storage::{DiskStorage, ObjectStorage};
+use crate::block_manager::storage::{ObjectStorage, RemoteDiskStorage};
 use anyhow::Result;
 use nixl_sys::{
-    Agent as NixlAgent, MemType, MemoryRegion, NixlDescriptor, XferDescList, XferOp, XferRequest,
-    XferStatus,
+    Agent as NixlAgent, MemType, MemoryRegion, NixlDescriptor, OptArgs, XferDescList, XferOp,
+    XferRequest, XferStatus,
 };
 use std::future::Future;
 use std::time::Duration;
@@ -425,15 +425,45 @@ where
     // For Onboard (read): open existing files
     let create_files = matches!(direction, RemoteTransferDirection::Offload);
 
+    // Determine per-direction backend from transfer flags.
+    //
+    // Offload: use GDS_MT when DISK_FLAG_GDS_WRITE is set, else POSIX.
+    // Onboard: use GDS_MT when DISK_FLAG_GDS_READ is set AND the backend is
+    //          available; fall back to POSIX otherwise.
+    use crate::block_manager::config::{DISK_FLAG_GDS_READ, DISK_FLAG_GDS_WRITE};
+    let flags = ctx.disk_transfer_flags();
+    let gds_write = flags & DISK_FLAG_GDS_WRITE != 0;
+    let gds_read  = flags & DISK_FLAG_GDS_READ  != 0;
+
+    // Resolve the GDS_MT backend handle once (None if not loaded in agent).
+    let gds_backend = agent.get_backend("GDS_MT");
+
+    // O_DIRECT is required for GDS; POSIX works without it.
+    let use_odirect = if create_files {
+        gds_write
+    } else {
+        gds_read && gds_backend.is_some()
+    };
+
     // Use a scope block to ensure all non-Send types are dropped before await
-    let (xfer_req, still_pending, _disk_storages) = {
+    // (OptArgs contains NonNull which is !Send)
+    let (xfer_req, still_pending, disk_storages) = {
         // Dynamically create/open and register disk storage for each block
-        let mut disk_storages = Vec::with_capacity(num_blocks);
+        let mut disk_storages: Vec<RemoteDiskStorage> = Vec::with_capacity(num_blocks);
 
         for desc in descriptors.iter() {
-            // Get file path from descriptor's DiskKey
+            // Get file path from descriptor's DiskKey.
+            // Use ctx.base_path() (the per-worker path) rather than
+            // disk_key.full_path(), which bakes in the leader's rank-0 path
+            // and causes all workers to write to the same directory.
             let file_path = match desc.key() {
-                RemoteKey::Disk(disk_key) => disk_key.full_path(),
+                RemoteKey::Disk(disk_key) => {
+                    if let Some(base_path) = ctx.base_path() {
+                        format!("{}/{}", base_path, disk_key.key)
+                    } else {
+                        disk_key.full_path()
+                    }
+                }
                 _ => {
                     return Err(TransferError::IncompatibleTypes(
                         "Expected Disk key for disk storage transfer".to_string(),
@@ -441,19 +471,19 @@ where
                 }
             };
 
-            // Create or open DiskStorage at the specified path
-            // persist=true ensures files aren't deleted when DiskStorage is dropped
+            // Open a short-lived RemoteDiskStorage handle for this transfer.
+            // RemoteDiskStorage holds an OwnedFd that closes automatically on
+            // drop, preventing fd accumulation across high-throughput transfers.
             let mut disk_storage =
-                DiskStorage::new_at_path(&file_path, block_size, create_files, true).map_err(
-                    |e| {
+                RemoteDiskStorage::open(&file_path, block_size, create_files, use_odirect)
+                    .map_err(|e| {
                         TransferError::ExecutionError(format!(
-                            "Failed to {} DiskStorage at {}: {:?}",
+                            "Failed to {} RemoteDiskStorage at {}: {:?}",
                             if create_files { "create" } else { "open" },
                             file_path,
                             e
                         ))
-                    },
-                )?;
+                    })?;
 
             // Register with NIXL - this makes it available for transfers
             disk_storage.nixl_register(agent, None).map_err(|e| {
@@ -492,15 +522,36 @@ where
             RemoteTransferDirection::Onboard => XferOp::Read,
         };
 
-        // Create transfer request
+        // Build OptArgs inside scope block so it's dropped before any await.
+        // OptArgs contains NonNull which is !Send; it must not be held across await.
+        // Offload: always POSIX when gds_write=false; GDS_MT when true.
+        // Onboard: GDS_MT if available, else let NIXL fall through to POSIX.
+        let opt_args: Option<OptArgs> = {
+            let backend_name = if create_files {
+                if gds_write { Some("GDS_MT") } else { Some("POSIX") }
+            } else if gds_read {
+                if gds_backend.is_some() { Some("GDS_MT") } else { Some("POSIX") }
+            } else {
+                Some("POSIX")
+            };
+            backend_name.and_then(|name| {
+                let backend = agent.get_backend(name)?;
+                let mut opt = OptArgs::new().ok()?;
+                opt.add_backend(&backend).ok()?;
+                Some(opt)
+            })
+        };
+        let opt_ref = opt_args.as_ref();
+
+        // Create transfer request, pinning the backend via OptArgs when set.
         let agent_name = agent.name();
         let xfer_req = agent
-            .create_xfer_req(xfer_op, &src_dl, &dst_dl, &agent_name, None)
+            .create_xfer_req(xfer_op, &src_dl, &dst_dl, &agent_name, opt_ref)
             .map_err(|e| {
                 TransferError::ExecutionError(format!("Failed to create xfer_req: {:?}", e))
             })?;
 
-        let still_pending = agent.post_xfer_req(&xfer_req, None).map_err(|e| {
+        let still_pending = agent.post_xfer_req(&xfer_req, opt_ref).map_err(|e| {
             TransferError::ExecutionError(format!("Failed to post xfer_req: {:?}", e))
         })?;
 
@@ -526,6 +577,17 @@ where
                 // Fall back to inline polling
                 poll_transfer_completion_inline(agent, &xfer_req, cancel_token).await?;
             }
+        }
+    }
+
+    // After a POSIX offload, flush dirty page-cache pages to storage so that
+    // a subsequent GDS O_DIRECT read (which bypasses the page cache) sees
+    // the committed data.  This is a no-op for GDS writes and for onboard.
+    if create_files && !gds_write {
+        for ds in &disk_storages {
+            ds.fdatasync().map_err(|e| {
+                TransferError::ExecutionError(format!("fdatasync failed: {:?}", e))
+            })?;
         }
     }
 
@@ -652,8 +714,8 @@ mod tests {
 
         // Create 2 descriptors but 1 block - should fail
         let descriptors = vec![
-            RemoteBlockDescriptor::disk_from_hash("/tmp", 0x1234, 1024),
-            RemoteBlockDescriptor::disk_from_hash("/tmp", 0x5678, 1024),
+            RemoteBlockDescriptor::disk_from_hash("/tmp", 0x1234, 1024, 0, 1),
+            RemoteBlockDescriptor::disk_from_hash("/tmp", 0x5678, 1024, 0, 1),
         ];
 
         let mut layout = create_test_layout(1);
@@ -690,7 +752,7 @@ mod tests {
         // Cancel before starting
         cancel_token.cancel();
 
-        let descriptors = vec![RemoteBlockDescriptor::disk_from_hash("/tmp", 0x1234, 1024)];
+        let descriptors = vec![RemoteBlockDescriptor::disk_from_hash("/tmp", 0x1234, 1024, 0, 1)];
 
         let mut layout = create_test_layout(1);
         layout
@@ -754,7 +816,9 @@ mod tests {
         }
 
         let descriptors: Vec<RemoteBlockDescriptor> = (0..2u64)
-            .map(|i| RemoteBlockDescriptor::disk_from_hash(&base_path, 0x1000 + i, block_size))
+            .map(|i| {
+                RemoteBlockDescriptor::disk_from_hash(&base_path, 0x1000 + i, block_size, 0, 1)
+            })
             .collect();
 
         // Offload (write to disk via POSIX)

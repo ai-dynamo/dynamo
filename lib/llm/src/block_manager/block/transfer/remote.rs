@@ -91,11 +91,13 @@ impl DiskKey {
         }
     }
 
-    /// Create from sequence hash.
-    pub fn from_hash(path: impl Into<String>, hash: u64) -> Self {
+    /// Create from sequence hash with topology suffix for uniqueness.
+    ///
+    /// Format: `<sequence_hash_hex>_<worker_id>_<world_size>`.
+    pub fn from_hash(path: impl Into<String>, hash: u64, worker_id: usize, world_size: usize) -> Self {
         Self {
             path: path.into(),
-            key: format!("{:016x}", hash),
+            key: format!("{:016x}_{}_{}", hash, worker_id, world_size),
         }
     }
 
@@ -136,7 +138,11 @@ impl RemoteKey {
     pub fn sequence_hash(&self) -> Option<u64> {
         match self {
             RemoteKey::Object(obj) => obj.as_hash(),
-            RemoteKey::Disk(disk) => u64::from_str_radix(&disk.key, 16).ok(),
+            RemoteKey::Disk(disk) => {
+                // Backward compatible: supports both "<hash>" and "<hash>_<rank>_<world_size>".
+                let hash_prefix = disk.key.split('_').next().unwrap_or(&disk.key);
+                u64::from_str_radix(hash_prefix, 16).ok()
+            }
         }
     }
 
@@ -161,9 +167,9 @@ impl RemoteKey {
         RemoteKey::Object(ObjectKey::from_hash(bucket, hash))
     }
 
-    /// Create disk key from sequence hash.
-    pub fn disk_from_hash(path: impl Into<String>, hash: u64) -> Self {
-        RemoteKey::Disk(DiskKey::from_hash(path, hash))
+    /// Create disk key from sequence hash with topology suffix.
+    pub fn disk_from_hash(path: impl Into<String>, hash: u64, worker_id: usize, world_size: usize) -> Self {
+        RemoteKey::Disk(DiskKey::from_hash(path, hash, worker_id, world_size))
     }
 }
 
@@ -307,9 +313,18 @@ impl RemoteBlockDescriptor {
         Self::new(RemoteKey::disk(path, key), size)
     }
 
-    pub fn disk_from_hash(path: impl Into<String>, hash: u64, size: usize) -> Self {
+    pub fn disk_from_hash(
+        path: impl Into<String>,
+        hash: u64,
+        size: usize,
+        worker_id: usize,
+        world_size: usize,
+    ) -> Self {
         let path = path.into();
-        let mut desc = Self::new(RemoteKey::Disk(DiskKey::from_hash(&path, hash)), size);
+        let mut desc = Self::new(
+            RemoteKey::Disk(DiskKey::from_hash(&path, hash, worker_id, world_size)),
+            size,
+        );
         desc.metadata = Some(RemoteBlockMetadata::new(hash));
         desc
     }

@@ -268,6 +268,16 @@ pub mod kvbm {
         /// Default: true
         pub const DYN_KVBM_REMOTE_DISK_USE_GDS: &str = "DYN_KVBM_REMOTE_DISK_USE_GDS";
 
+        /// Enable hybrid POSIX-write / GDS-read mode for remote disk transfers.
+        ///
+        /// When true:
+        ///   - Offload (write): POSIX backend, no O_DIRECT, no pre-allocation.
+        ///     Works on any filesystem (tmpfs, NFS, Lustre, bind mounts).
+        ///   - Onboard (read): GDS_MT if available, falls back to POSIX otherwise.
+        /// Default: false (both directions use GDS_MT, existing behaviour).
+        pub const DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY: &str =
+            "DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY";
+
         /// Timeout in seconds for G4 (remote storage) transfers.
         pub const DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS: &str = "DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS";
 
@@ -515,6 +525,7 @@ mod tests {
             kvbm::remote_storage::DYN_KVBM_REMOTE_STORAGE_TYPE,
             kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_PATH,
             kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_USE_GDS,
+            kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY,
             kvbm::remote_storage::DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS,
             kvbm::remote_storage::DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS,
             // LLM

@@ -12,7 +12,7 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Write;
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
 const DISK_CACHE_KEY: &str = "DYN_KVBM_DISK_CACHE_DIR";
@@ -454,14 +454,27 @@ impl DiskStorage {
 
 impl Drop for DiskStorage {
     fn drop(&mut self) {
-        tracing::warn!(
-            "DiskStorage being dropped: fd={}, file={}, size={} bytes, already_unlinked={}, persist={}",
-            self.fd,
-            self.file_name,
-            self.size,
-            self.unlinked,
-            self.persist
-        );
+        // Warn only when a non-persistent file hasn't been unlinked yet — it's
+        // about to be deleted implicitly, which may be unexpected.  For
+        // persist=true (normal offload path) or already-unlinked temp files,
+        // a debug message is sufficient.
+        if !self.persist && !self.unlinked {
+            tracing::warn!(
+                "DiskStorage being dropped without prior unlink: fd={}, file={}, size={} bytes",
+                self.fd,
+                self.file_name,
+                self.size,
+            );
+        } else {
+            tracing::trace!(
+                "DiskStorage being dropped: fd={}, file={}, size={} bytes, already_unlinked={}, persist={}",
+                self.fd,
+                self.file_name,
+                self.size,
+                self.unlinked,
+                self.persist
+            );
+        }
 
         self.handles.release();
 
@@ -470,7 +483,7 @@ impl Drop for DiskStorage {
             let _ = self.unlink();
         }
 
-        tracing::info!(
+        tracing::trace!(
             "DiskStorage dropped and cleaned up: fd={}, file={}, persist={}",
             self.fd,
             self.file_name,
@@ -516,6 +529,153 @@ impl RegisterableStorage for DiskStorage {
 
     fn registration_handle(&self, key: &str) -> Option<&dyn RegistationHandle> {
         self.handles.registration_handle(key)
+    }
+}
+
+/// Short-lived file handle used exclusively for G4 remote disk transfers.
+///
+/// Each instance opens a single file for the duration of one NIXL transfer,
+/// then closes the fd automatically on drop via [`OwnedFd`].  The file itself
+/// is never unlinked — ownership of files on disk belongs to the block manager.
+///
+/// This type exists to prevent fd leaks in the transfer path.  [`DiskStorage`]
+/// holds a raw `u64` fd with no RAII close, which is fine for long-lived pool
+/// storage but accumulates open fds when hundreds of short-lived handles are
+/// created per transfer.
+#[derive(Debug)]
+pub struct RemoteDiskStorage {
+    fd: OwnedFd,
+    file_name: String,
+    size: usize,
+    handles: RegistrationHandles,
+}
+
+impl RemoteDiskStorage {
+    /// Open (or create) a file at `path` for a single NIXL transfer.
+    ///
+    /// * `create`     — `true` on offload (creates the file), `false` on onboard.
+    /// * `use_odirect` — when `true`, opens with `O_DIRECT` and pre-allocates space
+    ///   (required for GDS_MT). When `false`, skips both (POSIX write path: any
+    ///   filesystem, no pre-allocation; caller must `fdatasync` before GDS reads).
+    pub fn open(path: &str, size: usize, create: bool, use_odirect: bool) -> Result<Self, StorageError> {
+        use nix::fcntl::{OFlag, open};
+        use nix::sys::stat::Mode;
+
+        if let Some(parent) = Path::new(path).parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                StorageError::AllocationFailed(format!(
+                    "Failed to create parent directory for {}: {}",
+                    path, e
+                ))
+            })?;
+        }
+
+        let mut flags = OFlag::O_RDWR | OFlag::O_CLOEXEC;
+        if create {
+            flags |= OFlag::O_CREAT;
+        }
+        if use_odirect && std::env::var(DISK_DISABLE_O_DIRECT_KEY).is_err() {
+            flags |= OFlag::O_DIRECT;
+        }
+
+        let mode = Mode::from_bits_truncate(0o644);
+        let raw_fd = open(path, flags, mode).map_err(|e| {
+            StorageError::AllocationFailed(format!(
+                "Failed to {} file {}: {}",
+                if create { "create" } else { "open" },
+                path,
+                e
+            ))
+        })?;
+
+        // Pre-allocate only when using O_DIRECT (GDS requires real blocks).
+        // POSIX writes allocate blocks naturally; no pre-allocation needed.
+        if create && use_odirect {
+            allocate_file(raw_fd, size as u64).map_err(|e| {
+                unsafe { nix::libc::close(raw_fd) };
+                StorageError::AllocationFailed(format!("Failed to allocate file {}: {}", path, e))
+            })?;
+        }
+
+        tracing::debug!(
+            "RemoteDiskStorage opened: fd={}, file={}, size={} bytes, create={}, odirect={}",
+            raw_fd, path, size, create, use_odirect
+        );
+
+        Ok(Self {
+            fd: unsafe { OwnedFd::from_raw_fd(raw_fd) },
+            file_name: path.to_string(),
+            size,
+            handles: RegistrationHandles::new(),
+        })
+    }
+
+    pub fn fd(&self) -> u64 {
+        self.fd.as_raw_fd() as u64
+    }
+
+    /// Flush written data to the storage device.
+    ///
+    /// Must be called after a POSIX offload and before GDS onboard so that
+    /// O_DIRECT reads see committed data rather than dirty page-cache pages.
+    pub fn fdatasync(&self) -> Result<(), StorageError> {
+        nix::unistd::fdatasync(self.fd.as_raw_fd()).map_err(|e| {
+            StorageError::AllocationFailed(format!("fdatasync failed on {}: {}", self.file_name, e))
+        })
+    }
+}
+
+impl Local for RemoteDiskStorage {}
+impl SystemAccessible for RemoteDiskStorage {}
+
+impl Storage for RemoteDiskStorage {
+    fn storage_type(&self) -> StorageType {
+        StorageType::Disk(self.fd())
+    }
+
+    fn addr(&self) -> u64 {
+        0
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    unsafe fn as_ptr(&self) -> *const u8 {
+        std::ptr::null()
+    }
+
+    unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
+        std::ptr::null_mut()
+    }
+}
+
+impl RegisterableStorage for RemoteDiskStorage {
+    fn register(
+        &mut self,
+        key: &str,
+        handle: Box<dyn RegistationHandle>,
+    ) -> Result<(), StorageError> {
+        self.handles.register(key, handle)
+    }
+
+    fn is_registered(&self, key: &str) -> bool {
+        self.handles.is_registered(key)
+    }
+
+    fn registration_handle(&self, key: &str) -> Option<&dyn RegistationHandle> {
+        self.handles.registration_handle(key)
+    }
+}
+
+impl Drop for RemoteDiskStorage {
+    fn drop(&mut self) {
+        // Deregister from NIXL before OwnedFd closes the fd.
+        self.handles.release();
+        // OwnedFd::drop() closes the fd here.
+        tracing::trace!("RemoteDiskStorage dropped: file={}, size={}", self.file_name, self.size);
     }
 }
 

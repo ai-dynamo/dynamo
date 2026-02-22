@@ -366,6 +366,22 @@ pub fn should_disable_cpu_cache_lookup() -> bool {
     cpu_cache_lookup_disabled()
 }
 
+/// Bit flags for RemoteDiskStorage (G4) transfer backend selection.
+///
+/// Bit 0: use GDS_MT for offload (write)
+/// Bit 1: use GDS_MT for onboard (read); falls back to POSIX if GDS_MT unavailable
+///
+/// Common combinations:
+///   `DISK_FLAGS_GDS_BOTH`       (0b11) — GDS for both directions (default)
+///   `DISK_FLAGS_GDS_READS_ONLY` (0b10) — POSIX write + GDS read (hybrid, works on any FS)
+///   `DISK_FLAGS_POSIX_BOTH`     (0b00) — POSIX for both directions
+pub type DiskTransferFlags = u8;
+pub const DISK_FLAG_GDS_WRITE: DiskTransferFlags = 0b01;
+pub const DISK_FLAG_GDS_READ: DiskTransferFlags = 0b10;
+pub const DISK_FLAGS_GDS_BOTH: DiskTransferFlags = DISK_FLAG_GDS_WRITE | DISK_FLAG_GDS_READ;
+pub const DISK_FLAGS_POSIX_BOTH: DiskTransferFlags = 0b00;
+pub const DISK_FLAGS_GDS_READS_ONLY: DiskTransferFlags = DISK_FLAG_GDS_READ;
+
 #[derive(Clone, Debug)]
 pub enum RemoteStorageConfig {
     Object {
@@ -375,7 +391,7 @@ pub enum RemoteStorageConfig {
     },
     Disk {
         base_path: String,
-        use_gds: bool,
+        transfer_flags: DiskTransferFlags,
     },
 }
 
@@ -400,10 +416,10 @@ impl RemoteStorageConfig {
         }
     }
 
-    pub fn disk(base_path: impl Into<String>, use_gds: bool) -> Self {
+    pub fn disk(base_path: impl Into<String>, transfer_flags: DiskTransferFlags) -> Self {
         Self::Disk {
             base_path: base_path.into(),
-            use_gds,
+            transfer_flags,
         }
     }
 }
@@ -459,11 +475,15 @@ impl RemoteTransferContext {
         }
     }
 
-    pub fn for_disk(base: Arc<TransferContext>, base_path: String, use_gds: bool) -> Self {
+    pub fn for_disk(
+        base: Arc<TransferContext>,
+        base_path: String,
+        transfer_flags: DiskTransferFlags,
+    ) -> Self {
         let tx = spawn_notification_handler(base.async_rt_handle());
         Self {
             base,
-            config: RemoteStorageConfig::Disk { base_path, use_gds },
+            config: RemoteStorageConfig::Disk { base_path, transfer_flags },
             worker_id: 0,
             tx_notifications: Some(tx),
         }
@@ -515,6 +535,13 @@ impl RemoteTransferContext {
         match &self.config {
             RemoteStorageConfig::Disk { base_path, .. } => Some(base_path),
             _ => None,
+        }
+    }
+
+    pub fn disk_transfer_flags(&self) -> DiskTransferFlags {
+        match &self.config {
+            RemoteStorageConfig::Disk { transfer_flags, .. } => *transfer_flags,
+            _ => DISK_FLAGS_GDS_BOTH,
         }
     }
 
@@ -635,24 +662,37 @@ mod tests {
         }
 
         #[test]
-        fn test_disk_config() {
-            let config = RemoteStorageConfig::disk("/mnt/kv-cache", false);
+        fn test_disk_config_posix() {
+            let config = RemoteStorageConfig::disk("/mnt/kv-cache", DISK_FLAGS_POSIX_BOTH);
             match config {
-                RemoteStorageConfig::Disk { base_path, use_gds } => {
+                RemoteStorageConfig::Disk { base_path, transfer_flags } => {
                     assert_eq!(base_path, "/mnt/kv-cache");
-                    assert!(!use_gds);
+                    assert_eq!(transfer_flags, DISK_FLAGS_POSIX_BOTH);
                 }
                 _ => panic!("Expected Disk variant"),
             }
         }
 
         #[test]
-        fn test_disk_config_with_gds() {
-            let config = RemoteStorageConfig::disk("/mnt/nvme", true);
+        fn test_disk_config_gds() {
+            let config = RemoteStorageConfig::disk("/mnt/nvme", DISK_FLAGS_GDS_BOTH);
             match config {
-                RemoteStorageConfig::Disk { base_path, use_gds } => {
+                RemoteStorageConfig::Disk { base_path, transfer_flags } => {
                     assert_eq!(base_path, "/mnt/nvme");
-                    assert!(use_gds);
+                    assert_eq!(transfer_flags, DISK_FLAGS_GDS_BOTH);
+                }
+                _ => panic!("Expected Disk variant"),
+            }
+        }
+
+        #[test]
+        fn test_disk_config_gds_reads_only() {
+            let config = RemoteStorageConfig::disk("/mnt/nfs", DISK_FLAGS_GDS_READS_ONLY);
+            match config {
+                RemoteStorageConfig::Disk { base_path, transfer_flags } => {
+                    assert_eq!(base_path, "/mnt/nfs");
+                    assert_eq!(transfer_flags & DISK_FLAG_GDS_READ, DISK_FLAG_GDS_READ);
+                    assert_eq!(transfer_flags & DISK_FLAG_GDS_WRITE, 0);
                 }
                 _ => panic!("Expected Disk variant"),
             }
@@ -707,14 +747,14 @@ mod tests {
         #[test]
         fn test_remote_context_config_disk() {
             let config = RemoteContextConfig {
-                remote_storage_config: RemoteStorageConfig::disk("/data/cache", true),
+                remote_storage_config: RemoteStorageConfig::disk("/data/cache", DISK_FLAGS_GDS_BOTH),
                 worker_id: 7,
             };
             assert_eq!(config.worker_id, 7);
             match config.remote_storage_config {
-                RemoteStorageConfig::Disk { base_path, use_gds } => {
+                RemoteStorageConfig::Disk { base_path, transfer_flags } => {
                     assert_eq!(base_path, "/data/cache");
-                    assert!(use_gds);
+                    assert_eq!(transfer_flags, DISK_FLAGS_GDS_BOTH);
                 }
                 _ => panic!("Expected Disk variant"),
             }

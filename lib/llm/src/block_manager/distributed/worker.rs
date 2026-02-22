@@ -981,6 +981,7 @@ fn create_remote_context(
     worker_id: usize,
 ) -> Option<Arc<RemoteTransferContext>> {
     use crate::block_manager::config::RemoteStorageConfig;
+    use std::fs;
 
     // Get storage type preference
     let storage_type =
@@ -1010,6 +1011,19 @@ fn create_remote_context(
     let disk_use_gds = std::env::var("DYN_KVBM_REMOTE_DISK_USE_GDS")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(true);
+    let disk_gds_reads_only = std::env::var("DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+    use crate::block_manager::config::{
+        DISK_FLAG_GDS_READ, DISK_FLAG_GDS_WRITE, DISK_FLAGS_POSIX_BOTH,
+    };
+    let disk_flags = if !disk_use_gds {
+        DISK_FLAGS_POSIX_BOTH
+    } else if disk_gds_reads_only {
+        DISK_FLAG_GDS_READ
+    } else {
+        DISK_FLAG_GDS_WRITE | DISK_FLAG_GDS_READ
+    };
 
     // Determine storage config based on type and available settings
     let storage_config: Option<RemoteStorageConfig> = match storage_type.as_str() {
@@ -1022,9 +1036,19 @@ fn create_remote_context(
                     use_gds = disk_use_gds,
                     "Creating remote context for disk storage (explicit)"
                 );
+
+                if let Err(e) = fs::create_dir_all(&path) {
+                    tracing::warn!(
+                        worker_id = worker_id,
+                        base_path = %path,
+                        error = %e,
+                        "Failed to create remote disk base path; remote transfers may fail"
+                    );
+                }
+
                 Some(RemoteStorageConfig::Disk {
                     base_path: path,
-                    use_gds: disk_use_gds,
+                    transfer_flags: disk_flags,
                 })
             } else {
                 tracing::warn!(
@@ -1086,9 +1110,19 @@ fn create_remote_context(
                         use_gds = disk_use_gds,
                         "Creating remote context for disk storage (auto-detected)"
                     );
+
+                    if let Err(e) = fs::create_dir_all(&path) {
+                        tracing::warn!(
+                            worker_id = worker_id,
+                            base_path = %path,
+                            error = %e,
+                            "Failed to create remote disk base path; remote transfers may fail"
+                        );
+                    }
+
                     Some(RemoteStorageConfig::Disk {
                         base_path: path.clone(),
-                        use_gds: disk_use_gds,
+                        transfer_flags: disk_flags,
                     })
                 }
                 (None, None) => {
