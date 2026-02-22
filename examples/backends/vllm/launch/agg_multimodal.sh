@@ -53,7 +53,7 @@ export DYN_REQUEST_PLANE=tcp
 python -m dynamo.frontend &
 
 # Configure GPU memory optimization for specific models (if no extra args override)
-MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 16384"
+MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.9 --max-model-len 16384"
 if [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
     MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 elif [[ "$MODEL_NAME" == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ]]; then
@@ -62,7 +62,7 @@ fi
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --enable-multimodal --multimodal-worker --model $MODEL_NAME --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
+python -m dynamo.vllm --enable-multimodal --multimodal-worker --model $MODEL_NAME --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
 
 # Wait for all background processes to complete
 wait
