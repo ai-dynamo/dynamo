@@ -8,7 +8,7 @@ keywords: KV cache, prefix caching, LLM inference, radix tree, distributed infer
 last-updated: February 23, 2026
 ---
 
-The **Flash Indexer** is a concurrent global index of every cached KV block across every inference worker, sustaining over **100 million operations per second**. It evolved through six iterations—from a Python dictionary to a jump-optimized spatial index—to the point where network latency, tokenization, and hashing are the bottlenecks.
+The **Flash Indexer** is a concurrent global index of every cached KV block across every inference worker, sustaining over **100 million operations per second**. It evolved through six iterations—from a Python dictionary to a jump-optimized spatial index—to the point where network latency, tokenization, and hashing are the bottlenecks. We're shipping it as the default indexer in Dynamo v1.0.0.
 
 For reference, a typical inference workload produces roughly one KV block per second (≈64 tokens). At 100 million index operations per second, the system could theoretically support on the order of 100 million concurrent workloads generating and querying blocks at that rate—well beyond current planetary-scale inference demand.
 
@@ -272,6 +272,8 @@ Achieved vs. offered block throughput across five indexer backends, measured wit
 ---
 
 ## 8. Future Directions
+
+With the Flash Indexer shipping in Dynamo v1.0.0, the next round of optimizations targets the remaining constant factors:
 
 - **Binary search within jumps.** Replace the linear scan-back after a failed jump with binary search: `O(log J)` instead of `O(J)` per failed jump.
 - **Hierarchical routing.** A sparse top-level indexer for coarse-grained prefix coverage across deployment groups, with full indexers at the leaves.
