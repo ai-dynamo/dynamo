@@ -100,6 +100,7 @@ jobs:
             >$JOBS_JSON
 
           FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "• " + .name' "$JOBS_JSON")
+          echo $FAILED_JOBS
           echo "FAILED_JOBS=$FAILED_JOBS" >> $GITHUB_ENV
       - name: Notify Slack
         uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
