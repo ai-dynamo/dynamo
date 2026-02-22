@@ -24,93 +24,140 @@ import (
 	"time"
 
 	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
-	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// EnsureDCGMHelmRelease ensures that the DCGM exporter Helm release is installed in the given namespace.
+const (
+	GPUOperatorReleaseName = "gpu-operator"
+	GPUOperatorNamespace   = "gpu-operator"
+)
+
+// EnsureDCGMEnabled ensures that both DCGM and DCGM Exporter are enabled
+// in the NVIDIA GPU Operator Helm release for the specified namespace.
 //
-// The function checks if a release named "dcgm-exporter" already exists, and if not:
-//   - Initializes Helm using the specified namespace and driver.
-//   - Locates the DCGM exporter chart from NVIDIA's Helm repo.
-//   - Installs the chart with default values (serviceMonitor disabled).
+// Function Behavior:
+//  1. Checks if the GPU Operator Helm release exists in the given namespace.
+//     - If not installed, returns an error asking the user to install it first.
+//  2. Retrieves the existing Helm release values and merges in the following:
+//     - dcgm.enabled = true       (enables GPU telemetry collection)
+//     - dcgmExporter.enabled = true (enables Prometheus metrics export)
+//  3. Performs a Helm upgrade in-place using the existing chart, preserving
+//     other user-provided values.
 //
-// This function requires Helm client libraries and permissions to install Helm releases
-// in the target namespace. It is idempotent: if the release already exists, no action is taken.
-//
-// Returns an error if Helm initialization, chart loading, or installation fails.
-func EnsureDCGMHelmRelease(ctx context.Context, namespace string) error {
+// Notes:
+//   - Does NOT install the GPU Operator; it only modifies an existing release.
+//   - Both DCGM and DCGM Exporter must be enabled to collect full GPU metrics
+//     (utilization, memory, power, ECC errors, MIG profiles, per-process stats).
+//   - The function assumes the caller has cluster-wide RBAC and access to
+//     the target namespace for Helm operations.
+//   - Uses /tmp as a temporary HOME directory for Helm caching and config.
+func EnsureDCGMEnabled(ctx context.Context) error {
+	// Configure Helm environment
+	// Set temporary HOME for Helm to write cache/config in controller environments.
+	os.Setenv("HOME", "/tmp")
+
 	settings := cli.New()
+	settings.RepositoryCache = "/tmp/.cache/helm/repository"
+	settings.RepositoryConfig = "/tmp/.config/helm/repositories.yaml"
+
+	// Initialize Helm action configuration for the target namespace
 	actionConfig := new(action.Configuration)
-	if err := actionConfig.Init(settings.RESTClientGetter(), namespace, os.Getenv("HELM_DRIVER"), func(format string, v ...interface{}) {}); err != nil {
-		return err
+	if err := actionConfig.Init(
+		settings.RESTClientGetter(),
+		GPUOperatorNamespace,
+		os.Getenv("HELM_DRIVER"),
+		func(format string, v ...interface{}) {}, // no-op logger
+	); err != nil {
+		return fmt.Errorf("helm init failed: %w", err)
 	}
 
-	// Skip if release exists
+	// Verify GPU Operator is installed
 	get := action.NewGet(actionConfig)
-	if _, err := get.Run("dcgm-exporter"); err == nil {
-		return nil
-	}
-
-	install := action.NewInstall(actionConfig)
-	install.ReleaseName = "dcgm-exporter"
-	install.Namespace = namespace
-	install.CreateNamespace = true
-	install.ChartPathOptions.RepoURL = "https://nvidia.github.io/dcgm-exporter/helm-charts"
-
-	chartPath, err := install.ChartPathOptions.LocateChart("dcgm-exporter", settings)
+	release, err := get.Run(GPUOperatorReleaseName)
 	if err != nil {
-		return fmt.Errorf("locate chart: %w", err)
+		return fmt.Errorf(
+			"gpu operator is not installed in namespace %s. please install gpu operator first",
+			GPUOperatorNamespace,
+		)
 	}
 
-	chart, err := loader.Load(chartPath)
-	if err != nil {
-		return err
+	// Upgrade GPU Operator and enable DCGM + DCGM Exporter
+	upgrade := action.NewUpgrade(actionConfig)
+	upgrade.Namespace = GPUOperatorNamespace
+
+	// Start with existing release values to avoid overwriting user config
+	values := release.Config
+	if values == nil {
+		values = map[string]interface{}{}
 	}
 
-	values := map[string]interface{}{
-		"serviceMonitor": map[string]interface{}{"enabled": false},
-		"image": map[string]interface{}{
-			"repository": "nvcr.io/nvidia/k8s/dcgm-exporter",
-			"tag":        "4.5.2-4.8.1-distroless", // pin exact version
-			"pullPolicy": "IfNotPresent",
-		},
+	// Enable DCGM
+	dcgmValues, ok := values["dcgm"].(map[string]interface{})
+	if !ok {
+		dcgmValues = map[string]interface{}{}
 	}
+	dcgmValues["enabled"] = true
+	values["dcgm"] = dcgmValues
 
-	if _, err := install.Run(chart, values); err != nil {
-		return fmt.Errorf("helm install failed: %w", err)
+	// Enable DCGM Exporter
+	dcgmExporterValues, ok := values["dcgmExporter"].(map[string]interface{})
+	if !ok {
+		dcgmExporterValues = map[string]interface{}{}
+	}
+	dcgmExporterValues["enabled"] = true
+	values["dcgmExporter"] = dcgmExporterValues
+
+	// Reuse existing chart to upgrade in-place
+	chart := release.Chart
+
+	if _, err := upgrade.Run(GPUOperatorReleaseName, chart, values); err != nil {
+		return fmt.Errorf("failed to enable dcgm and dcgmExporter in gpu operator: %w", err)
 	}
 
 	return nil
 }
 
-// WaitForDCGMPods waits until at least one DCGM exporter pod is running in the cluster.
+// WaitForDCGMService waits until the DCGM exporter Service has at least one ready endpoint.
 //
-// The function polls the Kubernetes API, listing pods labeled "app=dcgm-exporter"
-// in the cluster (or namespace provided in the client). It returns as soon as a
-// pod reaches the Running phase, or an error if the timeout elapses.
+// It polls the Kubernetes API, checking the Endpoints associated with the
+// "nvidia-dcgm-exporter" Service in the specified namespace. Returns as soon as
+// any endpoint is ready, or an error if the timeout elapses.
 //
 // Parameters:
 //   - ctx: context for cancellation and deadlines.
-//   - c: Kubernetes client used to list pods.
-//   - timeout: maximum duration to wait for a pod to become running.
+//   - c: Kubernetes client used to list Endpoints.
+//   - timeout: maximum duration to wait for an endpoint to become ready.
 //
-// Returns an error if the timeout is exceeded or if there is a failure listing pods.
-func WaitForDCGMPods(ctx context.Context, c client.Client, timeout time.Duration) error {
+// Returns an error if the timeout is exceeded, or if there is a failure accessing the API.
+func WaitForDCGMService(ctx context.Context, c client.Client, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	serviceName := "nvidia-dcgm-exporter"
+
 	for time.Now().Before(deadline) {
-		pods := &corev1.PodList{}
-		if err := c.List(ctx, pods, client.MatchingLabels{"app": "dcgm-exporter"}); err != nil {
-			return err
+		sliceList := &discoveryv1.EndpointSliceList{}
+
+		err := c.List(ctx, sliceList,
+			client.InNamespace(GPUOperatorNamespace),
+			client.MatchingLabels{
+				"kubernetes.io/service-name": serviceName,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to list EndpointSlices for %s/%s: %w", GPUOperatorNamespace, serviceName, err)
 		}
-		for _, pod := range pods.Items {
-			if pod.Status.Phase == corev1.PodRunning {
-				return nil
+
+		for _, slice := range sliceList.Items {
+			for _, endpoint := range slice.Endpoints {
+				if endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready {
+					return nil
+				}
 			}
 		}
+
 		time.Sleep(5 * time.Second)
 	}
-	return fmt.Errorf("timeout waiting for dcgm pods")
+
+	return fmt.Errorf("timeout waiting for DCGM exporter service endpoints in namespace %s", GPUOperatorNamespace)
 }
