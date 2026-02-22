@@ -29,7 +29,7 @@ echo "🔧 Starting dynamo disaggregated serving with LMCache enabled..."
 
 python -m dynamo.frontend &
 
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model $MODEL_URL&
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model $MODEL_URL --disaggregation-mode decode &
 
 sleep 20
 

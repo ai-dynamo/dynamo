@@ -43,6 +43,8 @@ spec:
           args:
           - --model
           - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - decode
           - --tensor-parallel-size
           - '2'
           - --disable-log-requests

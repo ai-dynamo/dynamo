@@ -147,7 +147,7 @@ def validate_worker_type_args(args):
     """
     import warnings
 
-    explicit_mode = args.disaggregation_mode != "prefill_and_decode"
+    explicit_mode = args.disaggregation_mode is not None
     has_legacy = args.is_prefill_worker or args.is_decode_worker
 
     if has_legacy and explicit_mode:
@@ -176,6 +176,10 @@ def validate_worker_type_args(args):
                 stacklevel=2,
             )
             args.disaggregation_mode = "decode"
+
+    # Apply default if neither new flag nor legacy flags were provided
+    if args.disaggregation_mode is None:
+        args.disaggregation_mode = "prefill_and_decode"
 
     # Sync booleans from disaggregation_mode
     args.is_prefill_worker = args.disaggregation_mode == "prefill"
@@ -338,7 +342,7 @@ def parse_args():
     parser.add_argument(
         "--disaggregation-mode",
         type=str,
-        default="prefill_and_decode",
+        default=None,
         choices=["prefill_and_decode", "prefill", "decode"],
         help="Worker disaggregation mode: 'prefill_and_decode' (default, aggregated), "
         "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
