@@ -113,16 +113,16 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             self._cache_order.move_to_end(identifier)
             self._has_cache_item_hits += 1
             total = self._has_cache_item_hits + self._has_cache_item_misses
-            # if self._has_cache_item_hits == 1 or total % 50 == 0:
-            logger.info(
-                "has_cache_item HIT: id=%s… hits=%d misses=%d "
-                "cache_size=%d used_bytes=%d",
-                identifier[:16],
-                self._has_cache_item_hits,
-                self._has_cache_item_misses,
-                len(self._cache_order),
-                self._num_used_bytes,
-            )
+            if self._has_cache_item_hits == 1 or total % 50 == 0:
+                logger.info(
+                    "has_cache_item HIT: id=%s… hits=%d misses=%d "
+                    "cache_size=%d used_bytes=%d",
+                    identifier[:16],
+                    self._has_cache_item_hits,
+                    self._has_cache_item_misses,
+                    len(self._cache_order),
+                    self._num_used_bytes,
+                )
             return True
         self._has_cache_item_misses += 1
         total = self._has_cache_item_hits + self._has_cache_item_misses

@@ -62,12 +62,7 @@ fi
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-nsys profile -o /workspace/logs/nsys \
-  --trace=cuda,nvtx,cublas,cudnn \
-  --cuda-memory-usage=true \
-  --backtrace=dwarf \
-  --sample=process-tree \
-  -- python -m dynamo.vllm --enable-multimodal --multimodal-worker --model $MODEL_NAME --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
+python -m dynamo.vllm --enable-multimodal --multimodal-worker --model $MODEL_NAME --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
 
 # Wait for all background processes to complete
 wait
