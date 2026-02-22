@@ -336,7 +336,7 @@ for ARCH in "${ARCHS[@]}"; do
     RANDOM_VALUE="${TARGET_INDICES[$RANDOM_INDEX]}"
     POD_NAME="${POD_PREFIX}-${RANDOM_VALUE}"
     ADDRS="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
-    
+
     echo "    -> Routing ${flavor}_${ARCH} to Candidate Pool: {${TARGET_INDICES[*]}} | Selected: ${RANDOM_VALUE}"
 
     # Write to GitHub Output
