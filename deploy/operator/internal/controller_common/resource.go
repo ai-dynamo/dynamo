@@ -236,7 +236,8 @@ func CopySpec(source, destination client.Object) error {
 		return err
 	}
 	if !found {
-		return fmt.Errorf("spec not found in source object")
+		// Some resources (e.g. ServiceAccount) have no spec field - nothing to copy
+		return nil
 	}
 
 	// Set the spec in the destination
@@ -390,6 +391,10 @@ func GetSpecHash(obj client.Object) (string, error) {
 	spec, err := getSpec(obj)
 	if err != nil {
 		return "", err
+	}
+	if spec == nil {
+		// Resources without spec (e.g. ServiceAccount) get a stable empty hash
+		return GetResourceHash(map[string]interface{}{})
 	}
 	return GetResourceHash(spec)
 }
