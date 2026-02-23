@@ -106,6 +106,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR} && \
     rm -rf /var/lib/apt/lists/*
 
+{% if context.vllm.enable_media_ffmpeg == "true" %}
+# Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+{% endif %}
+
 USER dynamo
 ENV HOME=/home/dynamo
 # This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
@@ -159,14 +169,6 @@ COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/l
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 
-# Copy ffmpeg
-RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
-    true # in case ffmpeg not enabled
-
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $NIXL_LIB_DIR:\
@@ -213,6 +215,15 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     uv pip install . && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
+
+
+# Install ModelExpress for P2P weight transfer (optional)
+ARG ENABLE_MODELEXPRESS_P2P
+ARG MODELEXPRESS_REF
+RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
+        echo "Installing ModelExpress from ref: ${MODELEXPRESS_REF}" && \
+        uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
+    fi
 
 # Install common and test dependencies. Cache uv downloads; uv handles its own locking for this cache.
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \

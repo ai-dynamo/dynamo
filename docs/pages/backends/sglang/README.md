@@ -162,8 +162,8 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 > [!NOTE]
-> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
-> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events. Workers must be explicitly configured with `--kv-events-config` to publish events. Use `--no-router-kv-events` on the frontend for prediction-based routing without events
 > - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 > [!TIP]
@@ -261,4 +261,4 @@ We currently provide deployment examples for Kubernetes and SLURM.
 - **[Deploying Dynamo with SGLang on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/slurm-jobs/README.md)**
+- **[Deploying Dynamo with SGLang on SLURM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/slurm_jobs/README.md)**

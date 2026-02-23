@@ -50,8 +50,8 @@ use crate::{
         approx::PruneConfig,
         indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
-            DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
-            TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+            BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, RouterRequest,
+            RouterResponse, TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
             compute_block_hash_for_seq,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
@@ -141,7 +141,6 @@ impl Indexer {
         component: &dynamo_runtime::component::Component,
         kv_router_config: &KvRouterConfig,
         block_size: u32,
-        cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Self {
         if kv_router_config.overlap_score_weight == 0.0 {
             return Indexer::None;
@@ -156,6 +155,7 @@ impl Indexer {
         }
 
         let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
+        let cancellation_token = component.drt().primary_token();
 
         // If use_kv_events is false, enable TTL and pruning for approximate behavior
         let prune_config = if !kv_router_config.use_kv_events {
@@ -184,11 +184,7 @@ impl Indexer {
         match self {
             Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
             Indexer::Concurrent(tpi) => tpi.find_matches(sequence).await,
-            Indexer::None => Ok(OverlapScores {
-                scores: HashMap::new(),
-                frequencies: Vec::new(),
-                tree_sizes: HashMap::new(),
-            }),
+            Indexer::None => Ok(OverlapScores::new()),
         }
     }
 
@@ -278,7 +274,6 @@ pub struct KvRouter {
 }
 
 impl KvRouter {
-    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
@@ -286,7 +281,6 @@ impl KvRouter {
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
-        router_id: u64,
         worker_type: &'static str,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
@@ -294,12 +288,7 @@ impl KvRouter {
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
 
-        let indexer = Indexer::new(
-            component,
-            &kv_router_config,
-            block_size,
-            cancellation_token.clone(),
-        );
+        let indexer = Indexer::new(component, &kv_router_config, block_size);
 
         // Wait for at least one worker with a known runtime config before starting scheduler
         let _ = workers_with_configs
@@ -314,23 +303,15 @@ impl KvRouter {
             block_size,
             workers_with_configs.clone(),
             selector,
-            kv_router_config.router_replica_sync,
-            router_id,
+            &kv_router_config,
             worker_type,
-            kv_router_config.router_queue_threshold,
         )
         .await?;
 
         // Start KV event subscription if needed (use_kv_events=true and overlap_score_weight>0)
         if kv_router_config.should_subscribe_to_kv_events() {
-            subscriber::start_subscriber(
-                component.clone(),
-                &kv_router_config,
-                router_id,
-                indexer.clone(),
-                cancellation_token.clone(),
-            )
-            .await?;
+            subscriber::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
+                .await?;
         } else {
             tracing::info!(
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_weight={})",
@@ -371,6 +352,7 @@ impl KvRouter {
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -385,7 +367,7 @@ impl KvRouter {
         let isl_tokens = tokens.len();
 
         let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
-            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, None));
+            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos));
         let hash_elapsed = start.elapsed();
 
         let overlap_scores = self
@@ -566,9 +548,20 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let context_id = ctx.context().id().to_string();
         // Handle different request types
         let response = match request {
-            RouterRequest::New { tokens } => {
+            RouterRequest::New {
+                tokens,
+                block_mm_infos,
+            } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(Some(&context_id), &tokens, None, true, None, 0.0)
+                    .find_best_match(
+                        Some(&context_id),
+                        &tokens,
+                        block_mm_infos.as_deref(),
+                        None,
+                        true,
+                        None,
+                        0.0,
+                    )
                     .await?;
 
                 RouterResponse::New {

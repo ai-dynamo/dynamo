@@ -19,5 +19,28 @@ limitations under the License.
 
 SLA-driven autoscaling controller for Dynamo inference graphs.
 
-- **User docs**: [docs/planner/](/docs/pages/components/planner/) (deployment, configuration, examples)
-- **Design docs**: [docs/pages/design-docs/planner-design.md](/docs/pages/design-docs/planner-design.md) (architecture, algorithms)
+## Scaling Modes
+
+The SLA Planner supports two scaling modes that can be used independently or together:
+
+### Throughput-Based Scaling
+
+Uses pre-deployment profiling data and traffic prediction to compute the number of prefill/decode replicas needed to meet TTFT and ITL SLA targets. Requires profiling data from the Dynamo profiler.
+
+### Load-Based Scaling (Experimental)
+
+Uses real-time per-worker load metrics (active prefill tokens, active KV blocks) from the router to make SLA-aware scaling decisions via online linear regression. Does not require profiling data. Responds quickly to traffic bursts.
+
+When both modes are enabled, throughput-based scaling provides a lower bound on replicas while load-based scaling handles real-time adjustments.
+
+### Support Matrix
+
+| Deployment Type | Throughput-Based | Load-Based (Experimental) |
+|-----------------|:----------------:|:-------------------------:|
+| Disaggregated   | Supported        | Supported                 |
+| Aggregated      | Unsupported      | Supported                 |
+
+## Documentation
+
+- **User docs**: [Planner Guide](../../../../docs/pages/components/planner/planner-guide.md) (deployment, configuration, examples)
+- **Design docs**: [Planner Design](../../../../docs/pages/design-docs/planner-design.md) (architecture, algorithms)

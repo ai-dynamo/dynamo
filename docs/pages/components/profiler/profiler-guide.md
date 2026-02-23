@@ -227,14 +227,35 @@ See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#
 
 ### Automatic GPU Discovery
 
-Cluster-scoped operators can optionally enable automatic GPU discovery:
+The operator automatically discovers GPU resources from cluster nodes, providing hardware info (GPU model, VRAM, GPUs per node) and automatic profiling search space calculation.
+
+**Requirements:**
+- **Cluster-scoped operators**: Have node read permissions by default
+- **Namespace-scoped operators**: GPU discovery is enabled by default when installing via Helm — the chart provisions the required ClusterRole/ClusterRoleBinding automatically
+
+**For namespace-scoped operators**, GPU discovery is controlled by a Helm value:
+
+```bash
+# GPU discovery enabled (default) — Helm provisions read-only node access automatically
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=true
+
+# GPU discovery disabled — you must provide hardware config manually in each DGDR
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=false
+```
+
+If GPU discovery is disabled, provide hardware config manually in the DGDR:
 
 ```yaml
 spec:
-  enableGpuDiscovery: true
+  profilingConfig:
+    config:
+      hardware:
+        numGpusPerNode: 8
+        gpuModel: "H100-SXM5-80GB"
+        gpuVramMib: 81920
 ```
 
-This is only available with cluster-scoped operators (`namespaceRestriction.enabled=false`) as it requires cluster-wide node access permissions.
+If GPU discovery is disabled and no manual hardware config is provided, the DGDR will be rejected at admission time.
 
 ## Configuration
 

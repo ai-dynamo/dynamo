@@ -72,8 +72,6 @@ impl PromptFormatter {
                         std::fs::read_to_string(chat_template_file).with_context(|| {
                             format!("fs:read_to_string '{}'", chat_template_file.display())
                         })?;
-                    // clean up the string to remove newlines
-                    let chat_template = chat_template.replace('\n', "");
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
                 }
                 Self::from_parts(

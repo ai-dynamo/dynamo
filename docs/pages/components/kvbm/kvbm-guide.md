@@ -49,10 +49,11 @@ To build KVBM from source, see the detailed instructions in the [KVBM bindings R
 docker compose -f deploy/docker-compose.yml up -d
 
 # Build a dynamo vLLM container (KVBM is built in by default)
-./container/build.sh --framework vllm
+python container/render.py --framework vllm --target runtime --output-short-filename
+docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
-./container/run.sh --framework vllm -it --mount-workspace --use-nixl-gds
+container/run.sh --image dynamo:latest-vllm-runtime -it --mount-workspace --use-nixl-gds
 ```
 
 ### Aggregated Serving
@@ -99,10 +100,11 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 docker compose -f deploy/docker-compose.yml up -d
 
 # Build a dynamo TRTLLM container (KVBM is built in by default)
-./container/build.sh --framework trtllm
+python container/render.py --framework trtllm --target runtime --output-short-filename
+docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
-./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
+container/run.sh --image dynamo:latest-trtllm-runtime -it --mount-workspace --use-nixl-gds
 ```
 
 ### Aggregated Serving
@@ -423,6 +425,26 @@ cd /workspace/lib/bindings/kvbm
 uv pip install maturin[patchelf]
 maturin build --release --out /workspace/dist
 uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
+```
+
+To use [Nsight Systems](https://developer.nvidia.com/nsight-systems) for perf analysis, please follow below steps (using vLLM as example). KVBM has NVTX annotation on top level KV Connector APIs (search for `@nvtx_annotate`). If more is needed, please add then rebuild.
+```bash
+# build and run local-dev container, which contains nsys
+python container/render.py --framework=vllm --target=local-dev --output-short-filename
+docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
+
+container/run.sh --image dynamo:latest-vllm-local-dev -it --mount-workspace --use-nixl-gds
+
+# export nsys to PATH
+# NOTE: change the version accordingly
+export PATH=/opt/nvidia/nsight-systems/2025.5.1/bin:$PATH
+
+# example usage of nsys: delay 30 seconds and then capture 60 seconds
+python -m dynamo.frontend &
+
+DYN_KVBM_CPU_CACHE_GB=10 \
+nsys profile -o /tmp/kvbm-nsys --trace-fork-before-exec=true --cuda-graph-trace=node --delay 30 --duration 60 \
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector kvbm
 ```
 
 ## See Also

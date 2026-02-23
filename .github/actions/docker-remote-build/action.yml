@@ -55,7 +55,7 @@ inputs:
   use_sccache:
     description: 'Use SCCache for caching'
     required: false
-    default: 'false'
+    default: 'true'
   ci:
     description: 'CI mode: for frontend target, uses existing buildx builder and pushes EPP image to ECR'
     required: false
@@ -107,8 +107,7 @@ runs:
         # TODO: Fix this - Skip cache for frontend target - a different docker driver is used for the EPP build, which causes issues with cache export
         CACHE_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
-          CACHE_ARGS="--cache-to type=inline "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache "
+          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache "
           CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM} "
           CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM}-cache "
           if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
@@ -130,7 +129,9 @@ runs:
           EXTRA_ARGS+=" --no-cache"
         fi
         if [ "${{ inputs.use_sccache }}" == "true" ]; then
-          EXTRA_ARGS+=" --build-arg CARGO_BUILD_JOBS=4 --use-sccache"
+          EXTRA_ARGS+=" --build-arg USE_SCCACHE=true"
+          EXTRA_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_S3_BUCKET}"
+          EXTRA_ARGS+=" --build-arg SCCACHE_REGION=${AWS_DEFAULT_REGION}"
         fi
         if [ "${{ inputs.push_image }}" == "true" ]; then
           EXTRA_ARGS+=" --push"
@@ -148,14 +149,20 @@ runs:
           done <<< "$EXTRA_TAGS"
         fi
 
+        # Pass AWS credentials as build secrets for sccache S3 access.
+        # Dockerfile steps reference these via --mount=type=secret,id=aws-key-id,env=...
+        SECRET_ARGS=""
+        if [ "${{ inputs.use_sccache }}" == "true" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
+          SECRET_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
+          SECRET_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
+        fi
+
         docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \
           --platform linux/${{ inputs.platform }} \
           -f ./container/rendered.Dockerfile \
-          $CACHE_ARGS \
-          $EXTRA_ARGS \
-          $EPP_IMAGE_ARG . 2>&1 | tee "${BUILD_LOG_FILE}"
+          $CACHE_ARGS $EXTRA_ARGS $SECRET_ARGS $EPP_IMAGE_ARG . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
@@ -169,6 +176,8 @@ runs:
     - name: Capture Build Metrics
       id: metrics
       shell: bash
+      env:
+        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
       run: |
 
         # Create metrics directory
@@ -188,11 +197,34 @@ runs:
         echo "  End: ${BUILD_END_TIME}"
         echo "  Duration: ${BUILD_DURATION_SEC} seconds"
 
-        # Get image size using docker inspect
+        # Get image size
         IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+        IMAGE_SIZE_TYPE="unknown"
         if [ -n "$IMAGE_TAG" ]; then
-          IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_TAG" --format='{{.Size}}' 2>/dev/null || echo "0")
-          echo "📦 Image size: ${IMAGE_SIZE_BYTES} bytes"
+          if [ "${{ inputs.no_load }}" == "false" ]; then
+            # Image was loaded into local Docker daemon but not pushed; docker inspect
+            # reports uncompressed (virtual) size, which differs from the compressed
+            # registry size reported below
+            IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_TAG" --format='{{.Size}}' 2>/dev/null || echo "0")
+            IMAGE_SIZE_TYPE="uncompressed"
+          elif [ "${{ inputs.push_image }}" == "true" ]; then
+            # Image was pushed to ECR without loading locally; query ECR for compressed size
+            REPO_NAME=$(echo "$IMAGE_TAG" | sed 's|.*amazonaws.com/||' | cut -d: -f1)
+            IMAGE_TAG_NAME=$(echo "$IMAGE_TAG" | cut -d: -f2-)
+            IMAGE_SIZE_BYTES=$(aws ecr describe-images \
+              --repository-name "$REPO_NAME" \
+              --image-ids "imageTag=${IMAGE_TAG_NAME}" \
+              --query 'imageDetails[0].imageSizeInBytes' \
+              --output text 2>/dev/null || echo "0")
+            # Treat empty or "None" response as 0
+            if [[ "$IMAGE_SIZE_BYTES" == "None" || -z "$IMAGE_SIZE_BYTES" ]]; then
+              IMAGE_SIZE_BYTES=0
+            fi
+            IMAGE_SIZE_TYPE="compressed"
+          else
+            IMAGE_SIZE_BYTES=0
+          fi
+          echo "📦 Image size: ${IMAGE_SIZE_BYTES} bytes (${IMAGE_SIZE_TYPE})"
         else
           IMAGE_SIZE_BYTES=0
           echo "⚠️  No image tag available"
@@ -216,6 +248,7 @@ runs:
           "platform": "${{ inputs.platform }}",
           "platform_arch": "${PLATFORM_ARCH}",
           "image_size_bytes": ${IMAGE_SIZE_BYTES},
+          "image_size_type": "${IMAGE_SIZE_TYPE}",
           "build_start_time": "${BUILD_START_TIME}",
           "build_end_time": "${BUILD_END_TIME}",
           "build_duration_sec": ${BUILD_DURATION_SEC}

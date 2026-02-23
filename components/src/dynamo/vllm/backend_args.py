@@ -62,17 +62,10 @@ class DynamoVllmArgGroup(ArgGroup):
         # Multimodal
         add_negatable_bool_argument(
             g,
-            flag_name="--multimodal-processor",
-            env_var="DYN_VLLM_MULTIMODAL_PROCESSOR",
+            flag_name="--route-to-encoder",
+            env_var="DYN_VLLM_ROUTE_TO_ENCODER",
             default=False,
-            help="Run as multimodal processor component for handling multimodal requests.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--ec-processor",
-            env_var="DYN_VLLM_EC_PROCESSOR",
-            default=False,
-            help="Run as ECConnector processor (routes multimodal requests to encoder then PD workers).",
+            help="Enable routing to separate encoder workers for multimodal processing.",
         )
         add_negatable_bool_argument(
             g,
@@ -94,13 +87,6 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_MULTIMODAL_DECODE_WORKER",
             default=False,
             help="Run as multimodal decode worker in disaggregated mode.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-encode-prefill-worker",
-            env_var="DYN_VLLM_MULTIMODAL_ENCODE_PREFILL_WORKER",
-            default=False,
-            help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4).",
         )
         add_negatable_bool_argument(
             g,
@@ -136,43 +122,6 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
-        # vLLM-native encoder (ECConnector)
-        add_negatable_bool_argument(
-            g,
-            flag_name="--vllm-native-encoder-worker",
-            env_var="DYN_VLLM_NATIVE_ENCODER_WORKER",
-            default=False,
-            help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
-        )
-        add_argument(
-            g,
-            flag_name="--ec-connector-backend",
-            env_var="DYN_VLLM_EC_CONNECTOR_BACKEND",
-            default="ECExampleConnector",
-            help="ECConnector implementation class for encoder disaggregation.",
-        )
-        add_argument(
-            g,
-            flag_name="--ec-storage-path",
-            env_var="DYN_VLLM_EC_STORAGE_PATH",
-            default=None,
-            help="Storage path for ECConnector (required for ECExampleConnector, optional for other backends).",
-        )
-        add_argument(
-            g,
-            flag_name="--ec-extra-config",
-            env_var="DYN_VLLM_EC_EXTRA_CONFIG",
-            default=None,
-            help="Additional ECConnector configuration as JSON string.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--ec-consumer-mode",
-            env_var="DYN_VLLM_EC_CONSUMER_MODE",
-            default=False,
-            help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers).",
-        )
-
         # vLLM-Omni
         add_negatable_bool_argument(
             g,
@@ -189,6 +138,155 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
         )
 
+        # Video encoding
+        add_argument(
+            g,
+            flag_name="--default-video-fps",
+            env_var="DYN_VLLM_DEFAULT_VIDEO_FPS",
+            default=16,
+            arg_type=int,
+            help="Default frames per second for generated videos.",
+        )
+
+        # Diffusion engine-level args (passed to AsyncOmni constructor)
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-layerwise-offload",
+            env_var="DYN_VLLM_ENABLE_LAYERWISE_OFFLOAD",
+            default=False,
+            help="Enable layerwise (blockwise) offloading on DiT modules to reduce GPU memory.",
+        )
+        add_argument(
+            g,
+            flag_name="--layerwise-num-gpu-layers",
+            env_var="DYN_VLLM_LAYERWISE_NUM_GPU_LAYERS",
+            default=1,
+            arg_type=int,
+            help="Number of ready layers (blocks) to keep on GPU during generation.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--vae-use-slicing",
+            env_var="DYN_VLLM_VAE_USE_SLICING",
+            default=False,
+            help="Enable VAE slicing for memory optimization in diffusion models.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--vae-use-tiling",
+            env_var="DYN_VLLM_VAE_USE_TILING",
+            default=False,
+            help="Enable VAE tiling for memory optimization in diffusion models.",
+        )
+        add_argument(
+            g,
+            flag_name="--boundary-ratio",
+            env_var="DYN_VLLM_BOUNDARY_RATIO",
+            default=0.875,
+            arg_type=float,
+            help=(
+                "Boundary split ratio for low/high DiT transformers. "
+                "Default 0.875 uses both transformers for best quality. "
+                "Set to 1.0 to load only the low-noise transformer (saves memory). "
+                "Only used with --omni."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--flow-shift",
+            env_var="DYN_VLLM_FLOW_SHIFT",
+            default=None,
+            arg_type=float,
+            help="Scheduler flow_shift parameter (5.0 for 720p, 12.0 for 480p). Only used with --omni.",
+        )
+        add_argument(
+            g,
+            flag_name="--diffusion-cache-backend",
+            env_var="DYN_VLLM_DIFFUSION_CACHE_BACKEND",
+            default=None,
+            choices=["cache_dit", "tea_cache"],
+            help=(
+                "Cache backend for diffusion acceleration. "
+                "'cache_dit' enables DBCache + SCM + TaylorSeer. "
+                "'tea_cache' enables TeaCache. Only used with --omni."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--diffusion-cache-config",
+            env_var="DYN_VLLM_DIFFUSION_CACHE_CONFIG",
+            default=None,
+            help="Cache configuration as JSON string (overrides defaults). Only used with --omni.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-cache-dit-summary",
+            env_var="DYN_VLLM_ENABLE_CACHE_DIT_SUMMARY",
+            default=False,
+            help="Enable cache-dit summary logging after diffusion forward passes.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-cpu-offload",
+            env_var="DYN_VLLM_ENABLE_CPU_OFFLOAD",
+            default=False,
+            help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enforce-eager",
+            env_var="DYN_VLLM_ENFORCE_EAGER",
+            default=False,
+            help="Disable torch.compile and force eager execution for diffusion models.",
+        )
+        # Diffusion parallel configuration
+        add_argument(
+            g,
+            flag_name="--ulysses-degree",
+            env_var="DYN_VLLM_ULYSSES_DEGREE",
+            default=1,
+            arg_type=int,
+            help="Number of GPUs used for Ulysses sequence parallelism in diffusion.",
+        )
+        add_argument(
+            g,
+            flag_name="--ring-degree",
+            env_var="DYN_VLLM_RING_DEGREE",
+            default=1,
+            arg_type=int,
+            help="Number of GPUs used for ring sequence parallelism in diffusion.",
+        )
+        add_argument(
+            g,
+            flag_name="--cfg-parallel-size",
+            env_var="DYN_VLLM_CFG_PARALLEL_SIZE",
+            default=1,
+            arg_type=int,
+            choices=[1, 2],
+            help="Number of GPUs used for classifier free guidance parallelism.",
+        )
+
+        # Headless mode for multi-node TP/PP
+        add_negatable_bool_argument(
+            g,
+            flag_name="--headless",
+            env_var="DYN_VLLM_HEADLESS",
+            default=False,
+            help="Run in headless mode for multi-node TP/PP. "
+            "Secondary nodes run vLLM workers only, no dynamo endpoints. "
+            "See vLLM multi-node data parallel documentation for more details.",
+        )
+
+        # ModelExpress P2P
+        add_argument(
+            g,
+            flag_name="--model-express-url",
+            env_var="MODEL_EXPRESS_URL",
+            default=None,
+            help="ModelExpress P2P server URL (e.g., http://mx-server:8080). "
+            "Required when using --load-format=mx-source or --load-format=mx-target.",
+        )
+
 
 # @dataclass()
 class DynamoVllmConfig(ConfigBase):
@@ -200,33 +298,49 @@ class DynamoVllmConfig(ConfigBase):
     sleep_mode_level: int
 
     # Multimodal
-    multimodal_processor: bool
-    ec_processor: bool
+    route_to_encoder: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
     multimodal_decode_worker: bool
-    multimodal_encode_prefill_worker: bool
     enable_multimodal: bool
     mm_prompt_template: str
     frontend_decoding: bool
 
-    # vLLM-native encoder (ECConnector)
-    vllm_native_encoder_worker: bool
-    ec_connector_backend: str
-    ec_storage_path: Optional[str] = None
-    ec_extra_config: Optional[str] = None
-    ec_consumer_mode: bool
-
     # vLLM-Omni
     omni: bool
     stage_configs_path: Optional[str] = None
+
+    # Video encoding
+    default_video_fps: int = 16
+
+    # Diffusion engine-level parameters (passed to AsyncOmni constructor)
+    enable_layerwise_offload: bool = False
+    layerwise_num_gpu_layers: int = 1
+    vae_use_slicing: bool = False
+    vae_use_tiling: bool = False
+    boundary_ratio: float = 0.875
+    flow_shift: Optional[float] = None
+    diffusion_cache_backend: Optional[str] = None
+    diffusion_cache_config: Optional[str] = None
+    enable_cache_dit_summary: bool = False
+    enable_cpu_offload: bool = False
+
+    # Diffusion parallel configuration
+    ulysses_degree: int = 1
+    ring_degree: int = 1
+    cfg_parallel_size: int = 1
+
+    # Headless mode for multi-node TP/PP
+    headless: bool = False
+
+    # ModelExpress P2P
+    model_express_url: Optional[str] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
         self._validate_prefill_decode_exclusive()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
-        self._validate_ec_connector_storage()
         self._validate_omni_stage_config()
 
     def _validate_prefill_decode_exclusive(self) -> None:
@@ -237,16 +351,15 @@ class DynamoVllmConfig(ConfigBase):
             )
 
     def _count_multimodal_roles(self) -> int:
-        """Return the number of multimodal roles set (0 or 1 allowed)."""
+        """Return the number of multimodal worker roles set (0 or 1 allowed).
+
+        Note: --route-to-encoder is a modifier flag, not a worker type.
+        """
         return sum(
             [
-                bool(self.multimodal_processor),
-                bool(self.ec_processor),
                 bool(self.multimodal_encode_worker),
                 bool(self.multimodal_worker),
                 bool(self.multimodal_decode_worker),
-                bool(self.multimodal_encode_prefill_worker),
-                bool(self.vllm_native_encoder_worker),
             ]
         )
 
@@ -254,10 +367,8 @@ class DynamoVllmConfig(ConfigBase):
         """Ensure only one multimodal role is set at a time."""
         if self._count_multimodal_roles() > 1:
             raise ValueError(
-                "Only one multimodal role can be set at a time: "
-                "multimodal-processor, ec-processor, multimodal-encode-worker, "
-                "multimodal-worker, multimodal-decode-worker, "
-                "multimodal-encode-prefill-worker, vllm-native-encoder-worker"
+                "Use only one of --multimodal-encode-worker, --multimodal-worker, "
+                "--multimodal-decode-worker"
             )
 
     def _validate_multimodal_requires_flag(self) -> None:
@@ -266,18 +377,6 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError(
                 "Use --enable-multimodal when enabling any multimodal component"
             )
-
-    def _validate_ec_connector_storage(self) -> None:
-        """Require ec_storage_path when using ECExampleConnector backend."""
-        if self.vllm_native_encoder_worker:
-            if (
-                self.ec_connector_backend == "ECExampleConnector"
-                and not self.ec_storage_path
-            ):
-                raise ValueError(
-                    "--ec-storage-path is required when using ECExampleConnector backend. "
-                    "Specify a shared storage path for encoder cache."
-                )
 
     def _validate_omni_stage_config(self) -> None:
         """Require stage_configs_path when using --omni."""

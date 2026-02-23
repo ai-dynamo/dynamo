@@ -112,7 +112,7 @@ Before using these templates, ensure you have:
 The deployment files currently require access to `my-registry/tensorrtllm-runtime`. If you don't have access, build and push your own image:
 
 ```bash
-python container/render.py --framework=trtllm --output-short-filename
+python container/render.py --framework=trtllm --output-short-filename --cuda-version=13.1
 docker build -f container/rendered.Dockerfile .
 # Tag and push to your container registry
 # Update the image references in the YAML files

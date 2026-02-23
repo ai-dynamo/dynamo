@@ -164,25 +164,25 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 
 Start the frontend:
 
-> **Tip:** To run in a single terminal (useful in containers), append `> logfile.log 2>&1 &` to run processes in background. Example: `python3 -m dynamo.frontend --store-kv file > dynamo.frontend.log 2>&1 &`
+> **Tip:** To run in a single terminal (useful in containers), append `> logfile.log 2>&1 &` to run processes in background. Example: `python3 -m dynamo.frontend --discovery-backend file > dynamo.frontend.log 2>&1 &`
 
 ```bash
 # Start an OpenAI compatible HTTP server with prompt templating, tokenization, and routing.
-# For local dev: --store-kv file avoids etcd (workers and frontend must share a disk)
-python3 -m dynamo.frontend --http-port 8000 --store-kv file
+# For local dev: --discovery-backend file avoids etcd (workers and frontend must share a disk)
+python3 -m dynamo.frontend --http-port 8000 --discovery-backend file
 ```
 
 In another terminal (or same terminal if using background mode), start a worker for your chosen backend:
 
 ```bash
 # SGLang
-python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --store-kv file
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
 
 # TensorRT-LLM
-python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --store-kv file
+python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
 
 # vLLM (note: uses --model, not --model-path)
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --store-kv file \
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
   --kv-events-config '{"enable_kv_cache_events": false}'
 ```
 
@@ -194,6 +194,8 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --store-kv file \
 > **TensorRT-LLM only:** The warning `Cannot connect to ModelExpress server/transport error. Using direct download.` is expected and can be safely ignored.
 >
 > See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
+
+> **Deprecation notice:** vLLM automatically enables KV event publishing when prefix caching is active. In a future release, this will change — KV events will be disabled by default for all backends. Start using `--kv-events-config` explicitly to prepare.
 
 #### Send a Request
 
@@ -335,7 +337,7 @@ python3 -m dynamo.frontend
 
 ## 9. Configure for Local Development
 
-- Pass `--store-kv file` to avoid external dependencies (see [Service Discovery and Messaging](#service-discovery-and-messaging))
+- Pass `--discovery-backend file` to avoid external dependencies (see [Service Discovery and Messaging](#service-discovery-and-messaging))
 - Set `DYN_LOG` to adjust the logging level (e.g., `export DYN_LOG=debug`). Uses the same syntax as `RUST_LOG`
 
 > **Note:** VSCode and Cursor users can use the `.devcontainer` folder for a pre-configured dev environment. See the [devcontainer README](.devcontainer/README.md) for details.
@@ -365,7 +367,7 @@ Dynamo uses TCP for inter-component communication. On Kubernetes, native resourc
 
 | Deployment | etcd | NATS | Notes |
 |------------|------|------|-------|
-| **Local Development** | ❌ Not required | ❌ Not required | Pass `--store-kv file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
+| **Local Development** | ❌ Not required | ❌ Not required | Pass `--discovery-backend file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
 | **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
 
 > **Note:** KV-Aware Routing requires NATS for prefix caching coordination.

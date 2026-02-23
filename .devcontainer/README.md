@@ -142,7 +142,7 @@ Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) fro
 
 ```bash
 # Single command approach (recommended)
-export FRAMEWORK=VLLM         # Note: any of VLLM, SGLANG, TRTLLM can be used
+export FRAMEWORK=vllm         # Note: any of vllm, sglang, trtllm can be used
 python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
 docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
 

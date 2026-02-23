@@ -18,28 +18,31 @@ if "TLLM_LOG_LEVEL" not in os.environ and os.getenv(
     os.environ["TLLM_LOG_LEVEL"] = tllm_level
 import uvloop
 
+from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.trtllm.utils.trtllm_utils import cmd_line_args
+from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.workers import init_worker
 
 configure_dynamo_logging()
+shutdown_endpoints: list = []
 
 
 async def worker():
-    config = cmd_line_args()
+    config = parse_args()
 
     shutdown_event = asyncio.Event()
-    runtime, _ = create_runtime(
-        store_kv=config.store_kv,
+    runtime, loop = create_runtime(
+        discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
         use_kv_events=config.use_kv_events,
-        shutdown_event=shutdown_event,
     )
 
+    install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
+
     logging.info(f"Initializing the worker with config: {config}")
-    await init_worker(runtime, config, shutdown_event)
+    await init_worker(runtime, config, shutdown_event, shutdown_endpoints)
 
 
 def main():
