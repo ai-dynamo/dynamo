@@ -14,11 +14,10 @@
 # limitations under the License.
 
 import math
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from dynamo import prometheus_names
 from dynamo.planner.utils.prometheus import (
     FrontendMetric,
     FrontendMetricContainer,
@@ -256,112 +255,3 @@ def test_get_average_metric_multiple_matching_containers(mock_prometheus_result)
         # Average of 42.7, 35.5, and 15.5 (using value[1] from each container)
         expected = (42.7 + 35.5 + 15.5) / 3
         assert result == expected
-
-
-# ---------------------------------------------------------------------------
-# Router metrics source tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def router_client():
-    """PrometheusAPIClient configured with metrics_source='router'."""
-    client = PrometheusAPIClient(
-        "http://localhost:9090", "test-fe-namespace", metrics_source="router"
-    )
-    client.prom = MagicMock()
-    client.prom.custom_query.return_value = [{"value": [0, "42.0"]}]
-    return client
-
-
-class TestPrometheusAPIClientRouterSource:
-    """Tests for PrometheusAPIClient when metrics_source='router'."""
-
-    def test_get_avg_inter_token_latency_dispatches_to_router_histogram(
-        self, router_client
-    ):
-        """get_avg_inter_token_latency with router source calls _get_router_average_histogram."""
-        result = router_client.get_avg_inter_token_latency("60s", "mymodel")
-        assert result == 42.0
-
-        call_args = str(router_client.prom.custom_query.call_args)
-        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.INTER_TOKEN_LATENCY_SECONDS}"
-        assert expected_metric in call_args
-
-    def test_get_avg_time_to_first_token_dispatches_to_router_histogram(
-        self, router_client
-    ):
-        """get_avg_time_to_first_token with router source calls _get_router_average_histogram."""
-        result = router_client.get_avg_time_to_first_token("60s", "mymodel")
-        assert result == 42.0
-
-        call_args = str(router_client.prom.custom_query.call_args)
-        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.TIME_TO_FIRST_TOKEN_SECONDS}"
-        assert expected_metric in call_args
-
-    def test_get_avg_input_sequence_tokens_dispatches_to_router_histogram(
-        self, router_client
-    ):
-        """get_avg_input_sequence_tokens with router source calls _get_router_average_histogram."""
-        result = router_client.get_avg_input_sequence_tokens("60s", "mymodel")
-        assert result == 42.0
-
-        call_args = str(router_client.prom.custom_query.call_args)
-        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.INPUT_SEQUENCE_TOKENS}"
-        assert expected_metric in call_args
-
-    def test_get_avg_output_sequence_tokens_dispatches_to_router_histogram(
-        self, router_client
-    ):
-        """get_avg_output_sequence_tokens with router source calls _get_router_average_histogram."""
-        result = router_client.get_avg_output_sequence_tokens("60s", "mymodel")
-        assert result == 42.0
-
-        call_args = str(router_client.prom.custom_query.call_args)
-        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.OUTPUT_SEQUENCE_TOKENS}"
-        assert expected_metric in call_args
-
-    def test_get_avg_request_count_uses_router_requests_total(self, router_client):
-        """get_avg_request_count with router source queries router_requests_total counter."""
-        result = router_client.get_avg_request_count("60s", "mymodel")
-        assert result == 42.0
-
-        call_args = str(router_client.prom.custom_query.call_args)
-        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
-        assert expected_metric in call_args
-
-    def test_no_dynamo_namespace_in_router_histogram_query(self, router_client):
-        """Regression: dynamo_namespace must NOT appear in router PromQL queries."""
-        router_client.get_avg_inter_token_latency("60s", "mymodel")
-        call_args = str(router_client.prom.custom_query.call_args)
-        assert "dynamo_namespace" not in call_args, (
-            "dynamo_namespace filter found in router histogram query — "
-            "this breaks disagg mode where planner namespace differs from router namespace"
-        )
-
-    def test_no_dynamo_namespace_in_router_request_count_query(self, router_client):
-        """Regression: dynamo_namespace must NOT appear in router request count PromQL."""
-        router_client.get_avg_request_count("60s", "mymodel")
-        call_args = str(router_client.prom.custom_query.call_args)
-        assert "dynamo_namespace" not in call_args, (
-            "dynamo_namespace filter found in router request count query — "
-            "this breaks disagg mode where planner namespace differs from router namespace"
-        )
-
-    def test_router_histogram_returns_zero_on_empty_result(self, router_client):
-        """_get_router_average_histogram returns 0 when Prometheus has no data."""
-        router_client.prom.custom_query.return_value = []
-        result = router_client.get_avg_inter_token_latency("60s", "mymodel")
-        assert result == 0
-
-    def test_router_request_count_returns_zero_on_empty_result(self, router_client):
-        """get_avg_request_count (router) returns 0 when Prometheus has no data."""
-        router_client.prom.custom_query.return_value = []
-        result = router_client.get_avg_request_count("60s", "mymodel")
-        assert result == 0
-
-    def test_router_histogram_returns_zero_on_nan(self, router_client):
-        """_get_router_average_histogram returns 0 when value is NaN."""
-        router_client.prom.custom_query.return_value = [{"value": [0, "NaN"]}]
-        result = router_client.get_avg_inter_token_latency("60s", "mymodel")
-        assert result == 0

@@ -63,27 +63,3 @@ def test_all_fields_work():
     assert config.itl == 50
     assert config.max_gpu_budget == 16
     assert config.throughput_adjustment_interval == 60
-
-
-def test_throughput_metrics_source_default():
-    """throughput_metrics_source defaults to 'frontend'."""
-    config = PlannerConfig(namespace="test-ns")
-    assert config.throughput_metrics_source == "frontend"
-
-
-def test_throughput_metrics_source_frontend():
-    """throughput_metrics_source accepts 'frontend'."""
-    config = PlannerConfig(namespace="test-ns", throughput_metrics_source="frontend")
-    assert config.throughput_metrics_source == "frontend"
-
-
-def test_throughput_metrics_source_router():
-    """throughput_metrics_source accepts 'router'."""
-    config = PlannerConfig(namespace="test-ns", throughput_metrics_source="router")
-    assert config.throughput_metrics_source == "router"
-
-
-def test_throughput_metrics_source_invalid():
-    """throughput_metrics_source rejects invalid values."""
-    with pytest.raises(ValidationError):
-        PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
