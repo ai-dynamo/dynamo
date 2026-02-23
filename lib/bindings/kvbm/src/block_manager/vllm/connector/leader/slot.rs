@@ -589,8 +589,9 @@ impl Slot for VllmConnectorSlot {
         priorities: Option<&[u32]>,
     ) -> Result<(), SlotError> {
         tracing::debug!(
-            "ENTRY: apply_scheduler_output: tokens.len={}, block_ids.len={}, computed={}, scheduled={}, \
+            "ENTRY: apply_scheduler_output: req={}, tokens.len={}, block_ids.len={}, computed={}, scheduled={}, \
              has_priorities={}, current_pos={}, evaluated_blocks={}, device_blocks_len={}",
+            self.request_id,
             tokens.len(),
             block_ids.len(),
             num_computed_tokens,
@@ -634,23 +635,13 @@ impl Slot for VllmConnectorSlot {
             let already_present = self.device_blocks.ends_with(block_ids);
             if already_present {
                 tracing::debug!(
-                    "DEDUP: skipping extend: {} block_ids already at tail, device_blocks_len={}",
+                    "DEDUP: skipping extend: req={}, {} block_ids already at tail, device_blocks_len={}",
+                    self.request_id,
                     block_ids.len(),
                     self.device_blocks.len()
                 );
             } else {
-                tracing::debug!(
-                    "EXTEND: device_blocks BEFORE extend: len={}, block_ids.len={}, block_ids={:?}",
-                    self.device_blocks.len(),
-                    block_ids.len(),
-                    &block_ids[..std::cmp::min(10, block_ids.len())]
-                );
                 self.device_blocks.extend(block_ids);
-                tracing::debug!(
-                    "EXTEND: device_blocks AFTER extend: len={}, first_10={:?}",
-                    self.device_blocks.len(),
-                    &self.device_blocks[..std::cmp::min(10, self.device_blocks.len())]
-                );
             }
         }
 
@@ -734,17 +725,6 @@ impl Slot for VllmConnectorSlot {
                 let new_blocks_start = self.device_blocks.len() - block_ids.len();
                 let candidate_start = self.evaluated_blocks;
 
-                tracing::debug!(
-                    "PRIORITY_CALC: new_blocks_start={}, candidate_start={}, device_blocks_len={}, \
-                     block_ids_len={}, prios_len={}, will_use_real_priorities={}",
-                    new_blocks_start,
-                    candidate_start,
-                    self.device_blocks.len(),
-                    block_ids.len(),
-                    prios.len(),
-                    candidate_start >= new_blocks_start
-                );
-
                 if candidate_start >= new_blocks_start {
                     let prio_offset = candidate_start - new_blocks_start;
                     debug_assert!(
@@ -769,35 +749,20 @@ impl Slot for VllmConnectorSlot {
                     // Candidate blocks predate current block_ids (candidate_start < new_blocks_start).
                     // In chunked prefill, chunk 2+ carries priorities only for its NEW blocks,
                     // but candidates may include blocks from earlier chunks. Use stored priorities.
-                    let stored: Vec<u32> = candidate_block_ids
+                    candidate_block_ids
                         .iter()
                         .map(|id| self.stored_block_priorities.get(id).copied().unwrap_or(0))
-                        .collect();
-                    tracing::debug!(
-                        "PRIORITY_STORED: candidate_start={} < new_blocks_start={}, \
-                         using stored priorities for {} candidates: {:?}",
-                        candidate_start,
-                        new_blocks_start,
-                        stored.len(),
-                        &stored[..std::cmp::min(10, stored.len())]
-                    );
-                    stored
+                        .collect()
                 } else {
                     vec![0; num_candidate_blocks]
                 }
             } else if !self.stored_block_priorities.is_empty() {
                 // priorities=None entirely (shouldn't happen in practice with TRT-LLM,
                 // but handle defensively).
-                let stored: Vec<u32> = candidate_block_ids
+                candidate_block_ids
                     .iter()
                     .map(|id| self.stored_block_priorities.get(id).copied().unwrap_or(0))
-                    .collect();
-                tracing::debug!(
-                    "PRIORITY_STORED: priorities=None, using stored priorities for {} candidates: {:?}",
-                    stored.len(),
-                    &stored[..std::cmp::min(10, stored.len())]
-                );
-                stored
+                    .collect()
             } else {
                 vec![0; num_candidate_blocks]
             };
@@ -821,8 +786,9 @@ impl Slot for VllmConnectorSlot {
             };
 
             tracing::debug!(
-                "OFFLOAD_DECISION: num_candidate={}, num_to_offload={}, threshold={}, \
+                "OFFLOAD_DECISION: req={}, num_candidate={}, num_to_offload={}, threshold={}, \
                  candidate_block_ids={:?}, candidate_priorities={:?}",
+                self.request_id,
                 num_candidate_blocks,
                 num_blocks_to_offload,
                 self.offload_min_priority,
@@ -1234,15 +1200,12 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id))]
     fn append_mutable_device_blocks(&mut self, block_ids: &[BlockId]) -> Result<(), SlotError> {
-        let len_before = self.device_blocks.len();
         let count = block_ids.len();
         self.device_blocks.extend(block_ids);
         tracing::debug!(
-            "APPEND_MUTABLE: adding {} blocks, len_before={}, len_after={}, block_ids={:?}",
+            "appended {} mutable device blocks to slot; total device blocks: {}",
             count,
-            len_before,
-            self.device_blocks.len(),
-            &block_ids[..std::cmp::min(10, block_ids.len())]
+            self.num_device_blocks_allocated()
         );
 
         Ok(())
