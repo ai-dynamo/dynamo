@@ -133,7 +133,7 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 // --nnodes, --node-rank 0, --master-addr, --master-port
 //
 // Worker: waits for leader's master port to be listening (TCP port-wait loop),
-// then runs the same vLLM command with --node-rank <rank> and the same coordination flags
+// then runs the same vLLM command with --headless, --node-rank <rank>, and the same coordination flags
 func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, numberOfNodes int32) {
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 	mpFlags := fmt.Sprintf("--distributed-executor-backend mp --nnodes %d --master-addr %s --master-port %s",
@@ -147,7 +147,7 @@ func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serv
 	case RoleWorker:
 		nodeRank, _ := multinodeDeployer.GetNodeRank()
 		needsShell = true // Always need shell for port-wait loop
-		mpFlags += fmt.Sprintf(" --node-rank %s", nodeRank)
+		mpFlags += fmt.Sprintf(" --node-rank %s --headless", nodeRank)
 	}
 
 	injectFlagsIntoContainerCommand(container, mpFlags, needsShell, "vllm")
