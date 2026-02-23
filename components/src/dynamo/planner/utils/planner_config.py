@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from dynamo.planner.defaults import SLAPlannerDefaults
 
@@ -39,17 +39,10 @@ class PlannerConfig(BaseModel):
 
     Replaces the argparse-based CLI. All fields mirror the former CLI flags
     with defaults sourced from SLAPlannerDefaults.
-
-    The field ``pre_deployment_sweeping_mode`` accepts either the Python
-    snake_case name or the legacy camelCase alias ``plannerPreDeploymentSweeping``
-    for backward compatibility with configs written before the rename.
     """
-
-    model_config = ConfigDict(populate_by_name=True)
 
     pre_deployment_sweeping_mode: Optional[PlannerPreDeploymentSweepMode] = Field(
         default=PlannerPreDeploymentSweepMode.Rapid,
-        alias="plannerPreDeploymentSweeping",
         description='Controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
     )
 
