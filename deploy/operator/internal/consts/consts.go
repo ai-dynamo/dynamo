@@ -98,6 +98,9 @@ const (
 	// VLLMMpMasterPort is the default port for vLLM multiprocessing coordination between nodes.
 	VLLMMpMasterPort = "29500"
 
+	// VLLMNixlSideChannelHostEnvVar is the env var that tells vLLM which host IP to use for the NIXL side channel.
+	VLLMNixlSideChannelHostEnvVar = "VLLM_NIXL_SIDE_CHANNEL_HOST"
+
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
 	KubeLabelMetricsEnabled      = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection

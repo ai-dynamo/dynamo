@@ -29,6 +29,17 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// Apply multinode-specific argument modifications
 		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, component.Resources, numberOfNodes, component.Annotations)
 
+		if shouldUseMpBackend(component.Annotations) {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "status.hostIP",
+					},
+				},
+			})
+		}
+
 		// Remove probes for multinode worker and leader
 		if role == RoleWorker {
 			container.LivenessProbe = nil
