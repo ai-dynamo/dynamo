@@ -122,10 +122,14 @@ class PrometheusAPIClient:
         """
         try:
             if model_name is None:
-                # Router aggregate path: sum() across all pods, no label filtering
+                # Router aggregate path: filter by dynamo_namespace so each pool
+                # planner only reads its own LocalRouter's metrics.
+                ns_filter = (
+                    f'{prometheus_names.labels.NAMESPACE}="{self.dynamo_namespace}"'
+                )
                 query = (
-                    f"sum(increase({full_metric_name}_sum[{interval}])) / "
-                    f"sum(increase({full_metric_name}_count[{interval}]))"
+                    f"sum(increase({full_metric_name}_sum{{{ns_filter}}}[{interval}])) / "
+                    f"sum(increase({full_metric_name}_count{{{ns_filter}}}[{interval}]))"
                 )
                 result = self.prom.custom_query(query=query)
                 if not result:
@@ -216,7 +220,10 @@ class PrometheusAPIClient:
         if self.metrics_source == "router":
             try:
                 router_req_total = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
-                query = f"sum(increase({router_req_total}[{interval}]))"
+                ns_filter = (
+                    f'{prometheus_names.labels.NAMESPACE}="{self.dynamo_namespace}"'
+                )
+                query = f"sum(increase({router_req_total}{{{ns_filter}}}[{interval}]))"
                 result = self.prom.custom_query(query=query)
                 if not result:
                     logger.warning(

@@ -330,23 +330,26 @@ class TestPrometheusAPIClientRouterSource:
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
         assert expected_metric in call_args
 
-    def test_no_dynamo_namespace_in_router_histogram_query(self, router_client):
-        """Regression: dynamo_namespace must NOT appear in router PromQL queries."""
+    def test_dynamo_namespace_filter_in_router_histogram_query(self, router_client):
+        """Router histogram query must filter by dynamo_namespace so each pool planner
+        only reads its own LocalRouter's metrics, not the cluster-wide aggregate."""
         router_client.get_avg_inter_token_latency("60s", "mymodel")
         call_args = str(router_client.prom.custom_query.call_args)
-        assert "dynamo_namespace" not in call_args, (
-            "dynamo_namespace filter found in router histogram query — "
-            "this breaks disagg mode where planner namespace differs from router namespace"
+        assert "dynamo_namespace" in call_args, (
+            "dynamo_namespace filter missing from router histogram query — "
+            "without it, all pool planners read the same cluster-wide aggregate"
         )
+        assert "test-fe-namespace" in call_args
 
-    def test_no_dynamo_namespace_in_router_request_count_query(self, router_client):
-        """Regression: dynamo_namespace must NOT appear in router request count PromQL."""
+    def test_dynamo_namespace_filter_in_router_request_count_query(self, router_client):
+        """Router request count query must filter by dynamo_namespace."""
         router_client.get_avg_request_count("60s", "mymodel")
         call_args = str(router_client.prom.custom_query.call_args)
-        assert "dynamo_namespace" not in call_args, (
-            "dynamo_namespace filter found in router request count query — "
-            "this breaks disagg mode where planner namespace differs from router namespace"
+        assert "dynamo_namespace" in call_args, (
+            "dynamo_namespace filter missing from router request count query — "
+            "without it, all pool planners read the same cluster-wide aggregate"
         )
+        assert "test-fe-namespace" in call_args
 
     def test_router_histogram_returns_zero_on_empty_result(self, router_client):
         """_get_router_average_histogram returns 0 when Prometheus has no data."""
