@@ -1405,8 +1405,15 @@ async fn responses(
 
                     // Add previous output items as context (they become input for next turn)
                     for item in output_items {
-                        if let Ok(input_item) = serde_json::from_value::<InputItem>(item.clone()) {
-                            new_items.push(input_item);
+                        match serde_json::from_value::<InputItem>(item.clone()) {
+                            Ok(input_item) => new_items.push(input_item),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("unknown"),
+                                    "Could not convert previous output item to input item, skipping"
+                                );
+                            }
                         }
                     }
 
@@ -1982,7 +1989,9 @@ async fn handler_delete_response(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Extension(session): Extension<RequestSession>,
     Path(response_id): Path<String>,
-) -> Result<StatusCode, ErrorResponse> {
+) -> Result<Response, ErrorResponse> {
+    use dynamo_async_openai::types::responses::DeleteResponse;
+
     let storage = state.response_storage();
 
     match storage
@@ -1996,7 +2005,12 @@ async fn handler_delete_response(
                 response_id = %response_id,
                 "Deleted stored response"
             );
-            Ok(StatusCode::NO_CONTENT)
+            Ok(Json(DeleteResponse {
+                id: response_id.clone(),
+                object: "response".to_string(),
+                deleted: true,
+            })
+            .into_response())
         }
         Err(StorageError::NotFound | StorageError::TenantMismatch) => {
             // Map TenantMismatch to 404 to avoid leaking whether the
