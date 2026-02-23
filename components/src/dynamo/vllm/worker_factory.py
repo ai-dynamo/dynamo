@@ -103,6 +103,7 @@ class WorkerFactory:
         clear_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.clear_kv_blocks"
         )
+        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
 
         lora_enabled = config.engine_args.enable_lora
         if lora_enabled:
