@@ -53,7 +53,7 @@ jobs:
     steps:
       - name: Run test
         run: |
-          echo "Running test"
+          python /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check
 
 
   test:
