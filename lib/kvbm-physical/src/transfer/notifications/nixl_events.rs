@@ -60,7 +60,7 @@ fn check_and_warn_slow_transfer(
 pub async fn process_nixl_notification_events(
     agent: NixlAgent,
     mut rx: mpsc::Receiver<RegisterNixlNotification>,
-    system: Arc<dyn EventManager>,
+    system: Arc<EventManager>,
 ) {
     let mut outstanding: HashMap<Uuid, OutstandingTransfer> = HashMap::new();
     let mut check_interval = interval(Duration::from_millis(1));

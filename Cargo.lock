@@ -1970,7 +1970,7 @@ dependencies = [
 [[package]]
 name = "dynamo-config"
 version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-next-memory#581ee33e434f3f99b84f6ea99fcf0a3fda26a685"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=main#673822ea931352cebe5d6e49a9b66f66a8f1d272"
 dependencies = [
  "anyhow",
 ]
@@ -2034,7 +2034,7 @@ dependencies = [
  "chrono",
  "clap 4.5.58",
  "criterion 0.3.6",
- "cudarc 0.17.8",
+ "cudarc 0.19.2",
  "dashmap 5.5.3",
  "derive-getters",
  "derive_builder",
@@ -2125,11 +2125,11 @@ dependencies = [
 [[package]]
 name = "dynamo-memory"
 version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-next-memory#581ee33e434f3f99b84f6ea99fcf0a3fda26a685"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=main#673822ea931352cebe5d6e49a9b66f66a8f1d272"
 dependencies = [
  "anyhow",
  "cudarc 0.17.8",
- "dynamo-config 0.9.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fkvbm-next-memory)",
+ "dynamo-config 0.9.0 (git+https://github.com/ai-dynamo/dynamo?branch=main)",
  "libc",
  "nix 0.30.1",
  "nixl-sys",
@@ -4256,7 +4256,7 @@ dependencies = [
  "bincode 2.0.1",
  "blake3",
  "bytes",
- "cudarc 0.17.8",
+ "cudarc 0.19.2",
  "derive-getters",
  "derive_builder",
  "dynamo-memory",
@@ -4272,7 +4272,7 @@ dependencies = [
  "tracing",
  "uuid",
  "validator",
- "velo-events",
+ "velo-events 0.9.0 (git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-events)",
 ]
 
 [[package]]
@@ -9044,6 +9044,23 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "velo-events"
 version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "dashmap 6.1.0",
+ "futures",
+ "parking_lot",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "velo-events"
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/dynamo?branch=ryan%2Fvelo-events#290e0d6e7ea453e9f4ac471f65d554f64c02fb67"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",

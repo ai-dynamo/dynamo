@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use velo_events::{EventAwaiter, EventManager, LocalEvent};
+use velo_events::{Event, EventAwaiter, EventManager};
 
 pub enum TransferAwaiter {
     Local(EventAwaiter),
@@ -94,7 +94,7 @@ impl TransferCompleteNotification {
     /// - Otherwise, creates a new event and spawns a task to await all notifications
     pub fn aggregate(
         notifications: Vec<Self>,
-        events: &Arc<dyn EventManager>,
+        events: &Arc<EventManager>,
         runtime: &tokio::runtime::Handle,
     ) -> Result<Self> {
         if notifications.is_empty() {
@@ -126,7 +126,7 @@ impl TransferCompleteNotification {
 /// then triggers the event on success or poisons it with error details on failure.
 async fn await_all_notifications(
     notifications: Vec<TransferCompleteNotification>,
-    local_event: LocalEvent,
+    local_event: Event,
 ) {
     // Await all notifications, collecting results
     let results: Vec<Result<()>> =

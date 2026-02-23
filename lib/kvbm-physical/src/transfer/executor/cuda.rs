@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow};
 use cudarc::driver::{CudaStream, result as cuda_result};
 use cudarc::runtime::sys::cudaStream_t;
 use dynamo_memory::CudaMemPool;
+use kvbm_kernels::MemcpyBatchMode;
 use std::ffi::c_void;
 use std::ops::Range;
 use std::sync::Arc;
@@ -196,6 +197,7 @@ fn execute_whole_block_cuda(
             dst_ptrs.as_ptr(),
             bytes_per_block,
             num_blocks,
+            MemcpyBatchMode::BatchedWithFallback,
             stream.cu_stream() as cudarc::runtime::sys::cudaStream_t,
         )
     };
@@ -268,8 +270,16 @@ fn execute_fc_lw_vectorized(
     }
 
     // Allocate device memory for pointer arrays
-    let src_ptrs_device = pool.alloc_async(total_chunks * std::mem::size_of::<usize>(), stream)?;
-    let dst_ptrs_device = pool.alloc_async(total_chunks * std::mem::size_of::<usize>(), stream)?;
+    unsafe {
+        let src_ptrs_device = pool.alloc_async_raw(
+            total_chunks * std::mem::size_of::<usize>(),
+            stream.cu_stream(),
+        )?;
+        let dst_ptrs_device = pool.alloc_async_raw(
+            total_chunks * std::mem::size_of::<usize>(),
+            stream.cu_stream(),
+        )?;
+    }
 
     // Upload pointer arrays to device
     unsafe {
@@ -308,7 +318,7 @@ fn execute_fc_lw_vectorized(
     pool.free_async(src_ptrs_device, stream)?;
     pool.free_async(dst_ptrs_device, stream)?;
 
-    if status != cudarc::runtime::sys::cudaError::cudaSuccess {
+    if status != cuda_result::cudaError::cudaSuccess {
         return Err(anyhow!("vectorized_copy failed: {:?}", status));
     }
 

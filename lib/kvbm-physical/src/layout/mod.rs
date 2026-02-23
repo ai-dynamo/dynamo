@@ -30,6 +30,7 @@ pub use config::{BlockDimension, LayoutConfig};
 pub(crate) use fully_contiguous::FullyContiguousLayout;
 pub use kv_block_layout::{BlockDim, KvBlockLayout};
 pub(crate) use layer_separate::LayerSeparateLayout;
+pub(crate) use physical::NixlMetadata;
 pub use physical::PhysicalLayout;
 pub(crate) use serialize::LayoutDescriptor;
 pub use serialize::{BlockFormat, FullyContiguousDetails, LayerSeparateDetails, LayoutTypeDetails};

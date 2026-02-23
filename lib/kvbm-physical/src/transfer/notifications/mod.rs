@@ -78,7 +78,7 @@ fn check_and_warn_slow_transfer(
 /// Works with any CompletionChecker implementation (NIXL status, CUDA events, etc.)
 pub async fn process_polling_notifications<C: CompletionChecker>(
     mut rx: mpsc::Receiver<RegisterPollingNotification<C>>,
-    system: Arc<dyn EventManager>,
+    system: Arc<EventManager>,
 ) {
     let mut outstanding: HashMap<Uuid, OutstandingPollingTransfer<C>> = HashMap::new();
     let mut check_interval = interval(Duration::from_millis(1));

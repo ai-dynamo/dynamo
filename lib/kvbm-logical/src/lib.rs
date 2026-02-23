@@ -22,9 +22,6 @@ pub mod tinylfu;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-use bincode::{Decode, Encode};
-use serde::{Deserialize, Serialize};
-
 // Re-export common types and traits
 pub use blocks::{
     BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, WeakBlock,

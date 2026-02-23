@@ -663,7 +663,7 @@ fn derive_storage_kind(entries: &[MemoryEntry]) -> Result<StorageKind> {
     Ok(first_kind)
 }
 
-fn derive_nixl_metadata(agent: &NixlAgent, entries: &[MemoryEntry]) -> Result<NixlMetadata> {
+fn derive_nixl_metadata(agent: &NixlAgent, entries: &[MemoryEntry]) -> Result {
     // Try to find a descriptor from entries
     let descriptor_opt = entries.iter().find_map(|entry| entry.descriptor.clone());
 

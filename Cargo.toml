@@ -55,8 +55,7 @@ dynamo-runtime = { path = "lib/runtime", version = "0.9.0" }
 dynamo-llm = { path = "lib/llm", version = "0.9.0" }
 dynamo-config = { path = "lib/config", version = "0.9.0" }
 dynamo-tokens = { path = "lib/tokens", version = "0.9.0" }
-# dynamo-memory = { path = "lib/memory", version = "0.9.0" }
-dynamo-memory = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/kvbm-next-memory" }
+dynamo-memory = { path = "lib/memory", version = "0.9.0" }
 dynamo-mocker = { path = "lib/mocker", version = "0.9.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "0.9.0", features = ["metrics"] }
 dynamo-async-openai = { path = "lib/async-openai", version = "0.9.0", features = ["byot"] }
@@ -69,7 +68,8 @@ kvbm-kernels = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan
 kvbm-physical = { path = "lib/kvbm-physical", version = "0.9.0" }
 
 # velo
-velo-events = { path = "lib/velo-events", version = "0.9.0" }
+# velo-events = { path = "lib/velo-events", version = "0.9.0" }
+velo-events = { git = "https://github.com/ai-dynamo/dynamo", branch = "ryan/velo-events" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -86,7 +86,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.17.8", features = ["cuda-12020"] }
+cudarc = { version = "0.19.2", features = ["cuda-12020"] }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }

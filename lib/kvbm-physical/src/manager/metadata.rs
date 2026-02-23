@@ -35,14 +35,13 @@ impl WorkerAddress {
 ///
 /// This includes the logical layout type (G1, G2, G3, G4) so that remote instances
 /// know which physical handle corresponds to which tier.
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone)]
 pub struct LogicalLayoutDescriptor {
     /// Unique handle for this layout
     pub handle: LayoutHandle,
     /// The logical layout type (G1, G2, G3, G4)
     pub logical_type: LogicalLayoutHandle,
     /// Serialized layout data (uses Serde, bridged via bincode)
-    #[bincode(with_serde)]
     pub layout: LayoutDescriptor,
 }
 
@@ -171,9 +170,10 @@ mod tests {
     use super::*;
     use crate::layout::{
         BlockFormat, FullyContiguousDetails, KvBlockLayout, LayoutConfig, LayoutDescriptor,
-        LayoutTypeDetails, NixlMetadata,
+        LayoutTypeDetails, physical::NixlMetadata,
     };
     use dynamo_memory::{MemoryRegion, StorageKind, nixl};
+    use kvbm_common::LogicalLayoutHandle;
 
     fn make_test_serialized_layout() -> LayoutDescriptor {
         let config = LayoutConfig::builder()
@@ -211,8 +211,6 @@ mod tests {
 
     #[test]
     fn test_serialized_layout_with_handle() {
-        use dynamo_kvbm_logical::LogicalLayoutHandle;
-
         let handle = LayoutHandle::new(1, 2);
         let layout = make_test_serialized_layout();
         let with_handle = LogicalLayoutDescriptor::new(handle, LogicalLayoutHandle::G2, layout);
@@ -223,8 +221,6 @@ mod tests {
 
     #[test]
     fn test_metadata_pack_unpack() {
-        use dynamo_kvbm_logical::LogicalLayoutHandle;
-
         let worker_address = WorkerAddress::new(100, "worker_100".to_string());
         let nixl_metadata = vec![1, 2, 3, 4, 5];
         let layouts = vec![LogicalLayoutDescriptor::new(
@@ -251,8 +247,6 @@ mod tests {
 
     #[test]
     fn test_metadata_multiple_layouts() {
-        use dynamo_kvbm_logical::LogicalLayoutHandle;
-
         let worker_address = WorkerAddress::new(200, "worker_200".to_string());
         let nixl_metadata = vec![10, 20, 30];
         let layouts = vec![

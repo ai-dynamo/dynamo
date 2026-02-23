@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use dynamo_memory::CudaMemPool;
 use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
-use velo_events::{EventManager, LocalEventSystem};
+use velo_events::EventManager;
 
 use crate::manager::TransferManager;
 
@@ -30,8 +30,8 @@ pub use super::notifications::TransferCompleteNotification;
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"), public)]
 #[allow(dead_code)] // Fields are used in build() but derive macros confuse dead code analysis
 pub struct TransferConfig {
-    #[builder(default = "LocalEventSystem::new()")]
-    event_system: Arc<dyn EventManager>,
+    #[builder(default = "EventManager::local()")]
+    event_system: Arc<EventManager>,
 
     /// Optional custom name for the NIXL agent. If not provided, defaults to "worker-{worker_id}"
     #[builder(default = "None", setter(strip_option))]
@@ -70,7 +70,7 @@ impl TransferConfigBuilder {
     /// infrastructure.
     pub fn from_event_system_and_handle(
         self,
-        event_system: Arc<LocalEventSystem>,
+        event_system: Arc<EventManager>,
         handle: tokio::runtime::Handle,
     ) -> Self {
         self.event_system(event_system)
@@ -223,7 +223,7 @@ pub struct TransferContext {
     #[allow(dead_code)]
     tokio_runtime: TokioRuntime,
     capabilities: TransferCapabilities,
-    event_system: Arc<LocalEventSystem>,
+    event_system: Arc<EventManager>,
     // CUDA memory pool for kernel allocations
     cuda_pool: Arc<CudaMemPool>,
     // Channels for background notification handlers
@@ -240,7 +240,7 @@ impl TransferContext {
 
     pub(crate) fn new(
         nixl_agent: NixlAgent,
-        event_system: Arc<dyn EventSystem>,
+        event_system: Arc<EventManager>,
         cuda_context: Arc<CudaContext>,
         tokio_runtime: TokioRuntime,
         capabilities: TransferCapabilities,
@@ -298,7 +298,7 @@ impl TransferContext {
         let current_h2d_stream = Arc::new(AtomicUsize::new(0));
 
         Ok(Self {
-            worker_id: event_system.worker_id(),
+            worker_id: event_system.system_id(),
             nixl_agent,
             cuda_context: cuda_context.clone(),
             d2h_stream,
@@ -383,7 +383,7 @@ impl TransferContext {
     }
 
     #[doc(hidden)]
-    pub fn event_system(&self) -> &Arc<LocalEventSystem> {
+    pub fn event_system(&self) -> &Arc<EventManager> {
         &self.event_system
     }
 
