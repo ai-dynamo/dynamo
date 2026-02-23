@@ -6,18 +6,10 @@
 ##########################
 #### Build Arguments #####
 ##########################
-# Define general architecture ARGs for supporting both x86 and aarch64 builds.
-#   ARCH: Used for package suffixes (e.g., amd64, arm64)
-#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
-#
-# Default values are for x86/amd64:
-#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
-#
-# For arm64/aarch64, build with:
-#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
-ARG ARCH={{ platform }}
-ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
+# Architecture ARGs are declared per-stage (not globally) so that BuildKit
+# correctly injects TARGETARCH (amd64 or arm64) based on --platform per stage.
+# Global declaration of TARGETARCH would lock it to amd64 and prevent auto-injection.
+# Each stage that needs ARCH declares: ARG TARGETARCH / ARG ARCH=${TARGETARCH}
 
 # Python/CUDA configuration
 ARG PYTHON_VERSION={{ context.dynamo.python_version }}

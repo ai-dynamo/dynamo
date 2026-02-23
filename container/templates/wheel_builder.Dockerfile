@@ -7,14 +7,17 @@
 ##### Wheel Build Image ##########
 ##################################
 
-# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
-ARG ARCH_ALT
+# Manylinux base images keyed to BuildKit's TARGETARCH naming (amd64 / arm64)
+# Explicit --platform pins suppress InvalidBaseImagePlatform warnings when building cross-arch
+FROM --platform=linux/amd64 quay.io/pypa/manylinux_2_28_x86_64 AS manylinux-amd64
+FROM --platform=linux/arm64 quay.io/pypa/manylinux_2_28_aarch64 AS manylinux-arm64
 
-FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
+ARG TARGETARCH
+FROM manylinux-${TARGETARCH} AS wheel_builder
 
 # Redeclare ARGs for this stage
-ARG ARCH
-ARG ARCH_ALT
+ARG TARGETARCH
+ARG ARCH=${TARGETARCH}
 ARG CARGO_BUILD_JOBS
 
 WORKDIR /workspace
@@ -88,6 +91,7 @@ ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
+    ARCH_ALT=$(uname -m); \
     PROTOC_VERSION=25.3; \
     case "${ARCH_ALT}" in \
       x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;; \
@@ -127,7 +131,7 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
     cd gdrcopy/packages && \
     CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
-    rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
+    rpm -Uvh gdrcopy-*.el8.$(uname -m).rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
 # Install SCCACHE if requested
@@ -353,7 +357,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
             --exclude 'lib*.so*' \
-            --plat manylinux_2_28_${ARCH_ALT} \
+            --plat manylinux_2_28_$(uname -m) \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \

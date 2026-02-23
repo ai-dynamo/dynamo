@@ -9,8 +9,9 @@
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dynamo_base
 
-ARG ARCH
-ARG ARCH_ALT
+# TARGETARCH is auto-set by BuildKit per platform (amd64 or arm64) within stage scope
+ARG TARGETARCH
+ARG ARCH=${TARGETARCH}
 
 USER root
 WORKDIR /opt/dynamo
@@ -39,11 +40,10 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.90.0
 
-# Define Rust target based on ARCH_ALT ARG
-ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
-
-# Install Rust
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+# Install Rust — derive ARCH_ALT from uname -m (x86_64 or aarch64)
+RUN ARCH_ALT=$(uname -m) && \
+    RUSTARCH="${ARCH_ALT}-unknown-linux-gnu" && \
+    wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \

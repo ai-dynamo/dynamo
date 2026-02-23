@@ -13,8 +13,9 @@
 #   pull those binaries/configs in via COPY.
 FROM runtime AS dynamo_tools
 
-ARG ARCH
-ARG ARCH_ALT
+# TARGETARCH is auto-set by BuildKit per platform (amd64 or arm64) within stage scope
+ARG TARGETARCH
+ARG ARCH=${TARGETARCH}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/usr/local/bin:${PATH}
@@ -173,7 +174,6 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
 # wheels, but dev stage needs it for maturin develop and cargo build from source.
 # - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
 # - vllm/trtllm/none: NIXL/UCX are already present in runtime (no-op).
-ARG ARCH_ALT
 RUN --mount=from=wheel_builder,target=/wheel_builder \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
@@ -184,20 +184,21 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
             cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
             cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
             echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
-            # SGLang expects ARCH-qualified lib paths; mirror lib64 into lib/${ARCH_ALT}-linux-gnu for parity.
+            # SGLang expects ARCH-qualified lib paths; mirror lib64 into lib/<arch>-linux-gnu for parity.
             if [ -d /opt/nvidia/nvda_nixl/lib64 ]; then \
+                ARCH_ALT=$(uname -m); \
                 mkdir -p /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu; \
                 cp -r /opt/nvidia/nvda_nixl/lib64/. /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/; \
             fi; \
         fi; \
     fi
 
-# All frameworks use the same path pattern: /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu
+# All frameworks use lib64 as the canonical NIXL path (arch-qualified symlink created above/in runtime)
 # For vllm/trtllm/none: This resets the same values already set in runtime (no harm)
 # For sglang: This sets them for the first time (required)
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597

@@ -60,7 +60,9 @@ RUN mkdir -p /opt/dynamo/venv && \
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
-ARG ARCH
+# TARGETARCH is auto-set by BuildKit per platform (amd64 or arm64) within stage scope
+ARG TARGETARCH
+ARG ARCH=${TARGETARCH}
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF

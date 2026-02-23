@@ -24,7 +24,6 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
-ARG ARCH_ALT
 WORKDIR /workspace
 ENV ENV=${ENV:-/etc/shinit_v2}
 ENV VIRTUAL_ENV=/opt/dynamo/venv
@@ -56,7 +55,10 @@ ENV CUDA_HOME=/usr/local/cuda \
 # Copy OpenMPI from PyTorch base image
 COPY --from=pytorch_base /opt/hpcx/ompi /opt/hpcx/ompi
 # Copy NUMA library from PyTorch base image
-COPY --from=pytorch_base /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
+RUN --mount=type=bind,from=pytorch_base,source=/usr/lib,target=/mnt/ptbase_lib \
+    ARCH_ALT=$(uname -m) && \
+    mkdir -p /usr/lib/${ARCH_ALT}-linux-gnu && \
+    cp -a /mnt/ptbase_lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
 # Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
 COPY --from=pytorch_base /opt/hpcx /opt/hpcx
@@ -92,6 +94,7 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 ARG PYTHON_VERSION
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    ARCH_ALT=$(uname -m) && \
     if [ ${ARCH_ALT} = "x86_64" ]; then \
         ARCH_FOR_GPG=${ARCH_ALT}; \
     else \
@@ -160,12 +163,25 @@ SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
 ENV DYNAMO_HOME=/workspace
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
-# Copy libgomp.so from framework image
+# Copy TensorRT and libgomp from framework image; create arch symlinks (needs root)
 COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
-COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
+USER root
+RUN --mount=type=bind,from=framework,source=/usr/lib,target=/mnt/fw_lib \
+    ARCH_ALT=$(uname -m) && \
+    mkdir -p /usr/lib/${ARCH_ALT}-linux-gnu && \
+    cp -a /mnt/fw_lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/ && \
+    # TensorRT arch-stable symlink
+    ln -sfn /usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu \
+            /usr/local/tensorrt/targets/current-arch && \
+    # NIXL arch-qualified symlink (lib64 is canonical; create lib/<arch>-linux-gnu for compat)
+    mkdir -p ${NIXL_PREFIX}/lib && \
+    ln -sf ${NIXL_PREFIX}/lib64 ${NIXL_PREFIX}/lib/${ARCH_ALT}-linux-gnu && \
+    # nvshmem arch-stable symlink for LD_LIBRARY_PATH
+    ln -sfn /usr/lib/${ARCH_ALT}-linux-gnu /usr/lib/current-arch-linux-gnu
+USER dynamo
 
 # Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -180,7 +196,7 @@ COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_L
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
+ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/current-arch/lib
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
@@ -188,7 +204,7 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
-/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\
+/usr/lib/current-arch-linux-gnu/nvshmem/13/:\
 $TENSORRT_LIB_DIR:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
