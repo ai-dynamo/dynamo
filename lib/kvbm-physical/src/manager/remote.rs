@@ -62,7 +62,7 @@ mod tests {
     use crate::layout::{LayoutConfig, LayoutDescriptor, NixlMetadata, PhysicalLayout};
 
     fn make_serialized_layout() -> LayoutDescriptor {
-        use crate::layout::{BlockFormat, FullyContiguousDetails, LayoutTypeDetails, NixlMetadata};
+        use crate::layout::{BlockFormat, FullyContiguousDetails, LayoutTypeDetails};
         use dynamo_memory::{MemoryRegion, StorageKind, nixl};
 
         let config = LayoutConfig::builder()

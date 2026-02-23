@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(dead_code)]
+
 //! Transfer preferences for resolving redundant strategy choices.
 //!
 //! Some source/destination combinations can use multiple transfer strategies.
@@ -50,13 +52,11 @@ impl Default for TransferPreferences {
 
 impl TransferPreferences {
     /// Create preferences with all defaults.
-    #[expect(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Create preferences that always prefer native transports.
-    #[expect(dead_code)]
     pub fn prefer_native() -> Self {
         Self {
             native_vs_nixl: NativeVsNixlPolicy::PreferNative,
@@ -65,7 +65,6 @@ impl TransferPreferences {
     }
 
     /// Create preferences that always prefer NIXL.
-    #[expect(dead_code)]
     pub fn prefer_nixl() -> Self {
         Self {
             native_vs_nixl: NativeVsNixlPolicy::PreferNixl,
@@ -74,14 +73,12 @@ impl TransferPreferences {
     }
 
     /// Set the native vs NIXL policy.
-    #[expect(dead_code)]
     pub fn with_native_vs_nixl(mut self, policy: NativeVsNixlPolicy) -> Self {
         self.native_vs_nixl = policy;
         self
     }
 
     /// Set whether to prefer async CUDA operations.
-    #[expect(dead_code)]
     pub fn with_async_cuda(mut self, prefer_async: bool) -> Self {
         self.prefer_async_cuda = prefer_async;
         self
