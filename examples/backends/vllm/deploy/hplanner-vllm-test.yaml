@@ -25,7 +25,7 @@
 #   - hf-model-cache PVC (defined in this file) must be provisioned before workers start.
 #     The first worker to start will download the model; subsequent workers and restarts
 #     will read from the shared Azure Files volume (azurefile-csi-premium, RWX, 50Gi).
-#   - No profiling results needed: planners use load-based scaling only.
+#   - No profiling results needed: planners use throughput-based scaling with router metrics.
 #
 # Placeholders (substitute with sed before applying):
 #   <namespace>     Kubernetes namespace
@@ -148,6 +148,20 @@ spec:
       extraPodSpec:
         imagePullSecrets:
           - name: docker-imagepullsecret
+        tolerations:
+          - key: "karpenter.sh/disrupted"
+            operator: "Exists"
+            effect: "NoSchedule"
+        affinity:
+          nodeAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                preference:
+                  matchExpressions:
+                    - key: karpenter.sh/nodepool
+                      operator: In
+                      values:
+                        - general-medium-storage
         volumes:
           - name: global-router-config
             configMap:
@@ -290,7 +304,7 @@ spec:
               cp $SRC_COMP/planner/remote_planner_client.py         $SP/dynamo/planner/remote_planner_client.py
               echo "Patches applied. Starting SLA Planner (prefill pool 0)..."
               exec python3 -m dynamo.planner --config \
-                '{"environment":"global-planner","global_planner_namespace":"<namespace>-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":true,"enable_throughput_scaling":false,"load_router_metrics_url":"http://gp-prefill-0-0-localrouter-0.gp-prefill-0-0:9090/metrics","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"model_name":"<model>"}'
+                '{"environment":"global-planner","global_planner_namespace":"<namespace>-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"model_name":"<model>","profile_results_dir":"/tmp/dynamo-pr/tests/planner/profiling_results/H200_TP1P_TP1D"}'
 ---
 # =============================================================================
 # DGD 3: Prefill pool 1 — LocalRouter + VllmPrefillWorker (2 GPU, TP2) + SLA Planner
@@ -385,7 +399,7 @@ spec:
               cp $SRC_COMP/planner/remote_planner_client.py         $SP/dynamo/planner/remote_planner_client.py
               echo "Patches applied. Starting SLA Planner (prefill pool 1, TP2)..."
               exec python3 -m dynamo.planner --config \
-                '{"environment":"global-planner","global_planner_namespace":"<namespace>-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":true,"enable_throughput_scaling":false,"load_router_metrics_url":"http://gp-prefill-1-0-localrouter-0.gp-prefill-1-0:9090/metrics","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":2,"model_name":"<model>"}'
+                '{"environment":"global-planner","global_planner_namespace":"<namespace>-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":2,"model_name":"<model>","profile_results_dir":"/tmp/dynamo-pr/tests/planner/profiling_results/H200_TP1P_TP1D"}'
 ---
 # =============================================================================
 # DGD 4: Decode pool 0 — LocalRouter + VllmDecodeWorker (1 GPU) + SLA Planner
@@ -480,4 +494,4 @@ spec:
               cp $SRC_COMP/planner/remote_planner_client.py         $SP/dynamo/planner/remote_planner_client.py
               echo "Patches applied. Starting SLA Planner (decode pool 0)..."
               exec python3 -m dynamo.planner --config \
-                '{"environment":"global-planner","global_planner_namespace":"<namespace>-gp-ctrl","backend":"vllm","mode":"decode","enable_load_scaling":true,"enable_throughput_scaling":false,"load_router_metrics_url":"http://gp-decode-0-0-localrouter-0.gp-decode-0-0:9090/metrics","itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"model_name":"<model>"}'
+                '{"environment":"global-planner","global_planner_namespace":"<namespace>-gp-ctrl","backend":"vllm","mode":"decode","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"model_name":"<model>","profile_results_dir":"/tmp/dynamo-pr/tests/planner/profiling_results/H200_TP1P_TP1D"}'
