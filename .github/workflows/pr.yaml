@@ -31,9 +31,33 @@ env:
 
 jobs:
 
+  test2:
+    name: interesing
+    runs-on: 'ubuntu-slim'
+    outputs:
+      test_image: ${{ steps.calculate-target-tag.outputs.test_image }}
+    steps:
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:bfee3fa8a9865e5bd876e3aa00f87b6f422de7ba-trtllm-cuda13-amd64
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+
+  test3:
+    name: can?
+    runs-on: prod-tester-amd-gpu-v1
+    needs: [test2]
+    container:
+      image: ${{ needs.test2.outputs.test_image }}
+    steps:
+      - name: Run test
+        run: |
+          echo "Running test"
+
 
   test:
-    name: Test $
+    name: Test
     runs-on: 'prod-tester-amd-gpu-v1'
     env:
       FRAMEWORK: ${{ inputs.framework }}
@@ -67,7 +91,6 @@ jobs:
 
       - name: Determine cache marker expression
         id: cache-marks
-        if: ${{ inputs.run_cpu_tests || inputs.run_gpu_tests }}
         shell: bash
         run: |
           RUN_CPU="${{ inputs.run_cpu_tests }}"
@@ -102,7 +125,6 @@ jobs:
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
-        if: ${{ inputs.run_cpu_tests }}
         timeout-minutes: ${{ inputs.test_cpu_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
@@ -120,7 +142,6 @@ jobs:
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
-        if: ${{ inputs.run_gpu_tests && inputs.platform == 'amd64' }}
         timeout-minutes: ${{ inputs.test_gpu_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
