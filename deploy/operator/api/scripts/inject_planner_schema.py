@@ -166,7 +166,7 @@ def main() -> int:
         # forward compatibility so new PlannerConfig fields added after the CRD is
         # installed still pass validation.
         existing_description = features_props["planner"].get("description", "")
-        new_planner = dict(k8s_schema)
+        new_planner = copy.deepcopy(k8s_schema)
         if existing_description:
             new_planner["description"] = existing_description
         new_planner["x-kubernetes-preserve-unknown-fields"] = True
