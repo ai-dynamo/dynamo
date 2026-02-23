@@ -19,6 +19,11 @@ pub struct KvEventConsolidatorConfig {
 
     /// Engine source for events (vLLM or TensorRT-LLM)
     pub engine_source: EventSource,
+
+    /// Data parallel rank for this consolidator instance.
+    /// Used by KVBM events (which don't carry dp_rank) to match the engine's dp_rank.
+    /// With attention DP, each rank has its own consolidator.
+    pub data_parallel_rank: Option<i32>,
 }
 
 impl Default for KvEventConsolidatorConfig {
@@ -27,6 +32,7 @@ impl Default for KvEventConsolidatorConfig {
             engine_event_endpoint: "tcp://localhost:5557".to_string(),
             consolidated_event_endpoint: "tcp://*:5558".to_string(),
             engine_source: EventSource::Vllm,
+            data_parallel_rank: None,
         }
     }
 }
@@ -41,6 +47,7 @@ impl KvEventConsolidatorConfig {
             engine_event_endpoint,
             consolidated_event_endpoint,
             engine_source,
+            data_parallel_rank: None,
         }
     }
 
@@ -50,6 +57,7 @@ impl KvEventConsolidatorConfig {
             engine_event_endpoint,
             consolidated_event_endpoint,
             engine_source: EventSource::Vllm,
+            data_parallel_rank: None,
         }
     }
 
@@ -59,6 +67,13 @@ impl KvEventConsolidatorConfig {
             engine_event_endpoint,
             consolidated_event_endpoint,
             engine_source: EventSource::Trtllm,
+            data_parallel_rank: None,
         }
+    }
+
+    /// Set the data parallel rank for this consolidator instance
+    pub fn with_data_parallel_rank(mut self, dp_rank: Option<i32>) -> Self {
+        self.data_parallel_rank = dp_rank;
+        self
     }
 }

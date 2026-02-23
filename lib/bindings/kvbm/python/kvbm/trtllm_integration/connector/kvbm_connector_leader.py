@@ -102,7 +102,13 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 "KV Event Consolidator disabled via DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR"
             )
 
-        print(f"KvConnectorLeader initialized with rank: {mappings.rank}")
+        # Determine the data parallel rank for this consolidator instance.
+        # With attention DP, each rank is independent with its own KVBM/consolidator.
+        dp_rank = mappings.rank if mappings.enable_attention_dp else 0
+
+        print(
+            f"KvConnectorLeader initialized with rank: {mappings.rank}, dp_rank: {dp_rank}"
+        )
         self._connector = RustKvConnectorLeader(
             mappings.rank,
             self.drt,
@@ -110,6 +116,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             leader,
             consolidator_trtllm_endpoint=trtllm_ep,
             consolidator_output_endpoint=consolidator_output_ep,
+            data_parallel_rank=dp_rank,
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:

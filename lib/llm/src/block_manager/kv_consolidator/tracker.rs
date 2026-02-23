@@ -149,16 +149,19 @@ pub struct BlockMetadata {
     /// The first external block hash seen for this token sequence (for output events)
     /// Different sources may have different external hashes, but they all represent the same token content
     pub first_block_hash: String,
+    /// Data parallel rank this block belongs to (from the first event that stored it)
+    pub dp_rank: Option<i32>,
 }
 
 impl BlockMetadata {
-    pub fn new(source: EventSource, block_hash: String) -> Self {
+    pub fn new(source: EventSource, block_hash: String, dp_rank: Option<i32>) -> Self {
         let mut sources = HashSet::new();
         sources.insert(source);
 
         Self {
             sources,
             first_block_hash: block_hash,
+            dp_rank,
         }
     }
 
@@ -191,14 +194,18 @@ pub enum ConsolidatedEvent {
         block_size: usize,
         lora_id: Option<i32>,
         source: String, // The source where it was first stored (vllm or kvbm)
+        dp_rank: Option<i32>, // Data parallel rank this block belongs to
     },
     /// Block removed (removed from all sources)
     Remove {
         block_hash: String,
         source: String, // The source where it was last removed
+        dp_rank: Option<i32>, // Data parallel rank this block belonged to
     },
     /// All blocks cleared
-    ClearAll,
+    ClearAll {
+        dp_rank: Option<i32>, // Data parallel rank to clear (None = all ranks)
+    },
 }
 
 /// Cache Status Tracker
@@ -314,7 +321,7 @@ impl CacheStatusTracker {
             false
         } else {
             // First time seeing this block from any source - create metadata and queue STORE event
-            let metadata = BlockMetadata::new(source, block_hash.clone());
+            let metadata = BlockMetadata::new(source, block_hash.clone(), data_parallel_rank);
 
             tracing::debug!(
                 "New block {} (seq_hash={}) stored in source {:?} (tier={:?}): {} tokens, block_size={}, parent={}, lora={:?}, dp_rank={:?}\n  Token IDs: {:?}",
@@ -369,6 +376,7 @@ impl CacheStatusTracker {
                 block_size,
                 lora_id,
                 source: source.to_str().to_string(),
+                dp_rank: data_parallel_rank,
             });
 
             tracing::debug!(
@@ -433,6 +441,7 @@ impl CacheStatusTracker {
             if !metadata.exists_in_any_source() {
                 // Block is gone from all sources - remove from tracker and publish REMOVE
                 let first_block_hash = metadata.first_block_hash.clone();
+                let block_dp_rank = metadata.dp_rank;
                 self.blocks.remove(&sequence_hash);
 
                 // Double-check: clean up any stray hash mappings (should be empty by now)
@@ -454,6 +463,7 @@ impl CacheStatusTracker {
                 self.event_queue.push(ConsolidatedEvent::Remove {
                     block_hash: first_block_hash.clone(),
                     source: source.to_str().to_string(),
+                    dp_rank: block_dp_rank,
                 });
 
                 tracing::debug!(
@@ -490,11 +500,17 @@ impl CacheStatusTracker {
 
     /// Handle a CLEAR_ALL event
     pub fn handle_clear_all(&mut self) {
+        self.handle_clear_all_with_rank(None);
+    }
+
+    /// Handle a CLEAR_ALL event with an explicit dp_rank
+    pub fn handle_clear_all_with_rank(&mut self, dp_rank: Option<i32>) {
         let num_blocks = self.blocks.len();
         tracing::debug!("Clearing all {} blocks from tracker", num_blocks);
         self.blocks.clear();
         self.hash_mapping.clear();
-        self.event_queue.push(ConsolidatedEvent::ClearAll);
+        self.event_queue
+            .push(ConsolidatedEvent::ClearAll { dp_rank });
     }
 
     /// Drain all pending events to be published
@@ -872,6 +888,193 @@ mod tests {
 
         assert!(!should_publish);
         assert_eq!(tracker.num_blocks(), 0);
+    }
+
+    // ---------------------------------------------------------------
+    // dp_rank propagation tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_store_event_carries_dp_rank() {
+        let mut tracker = CacheStatusTracker::new();
+
+        tracker.handle_store(
+            "hash1".to_string(),
+            EventSource::Trtllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::Device),
+            Some(3), // dp_rank = 3
+        );
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Store { dp_rank, .. } => {
+                assert_eq!(*dp_rank, Some(3));
+            }
+            other => panic!("Expected Store event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_store_event_carries_none_dp_rank() {
+        let mut tracker = CacheStatusTracker::new();
+
+        tracker.handle_store(
+            "hash1".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::Device),
+            None, // dp_rank = None
+        );
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Store { dp_rank, .. } => {
+                assert_eq!(*dp_rank, None);
+            }
+            other => panic!("Expected Store event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_remove_event_carries_dp_rank_from_store() {
+        let mut tracker = CacheStatusTracker::new();
+
+        // Store with dp_rank=2
+        tracker.handle_store(
+            "hash1".to_string(),
+            EventSource::Trtllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::Device),
+            Some(2),
+        );
+        tracker.drain_events(); // Clear store event
+
+        // Remove - should carry dp_rank=2 from the original store
+        let should_publish = tracker.handle_remove("hash1", EventSource::Trtllm);
+        assert!(should_publish);
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Remove { dp_rank, .. } => {
+                assert_eq!(*dp_rank, Some(2));
+            }
+            other => panic!("Expected Remove event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_clear_all_carries_dp_rank() {
+        let mut tracker = CacheStatusTracker::new();
+
+        tracker.handle_store(
+            "hash1".to_string(),
+            EventSource::Trtllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::Device),
+            Some(5),
+        );
+        tracker.drain_events();
+
+        // Clear with explicit dp_rank
+        tracker.handle_clear_all_with_rank(Some(5));
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::ClearAll { dp_rank } => {
+                assert_eq!(*dp_rank, Some(5));
+            }
+            other => panic!("Expected ClearAll event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_clear_all_without_rank() {
+        let mut tracker = CacheStatusTracker::new();
+
+        // handle_clear_all (no rank) should produce ClearAll { dp_rank: None }
+        tracker.handle_clear_all();
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::ClearAll { dp_rank } => {
+                assert_eq!(*dp_rank, None);
+            }
+            other => panic!("Expected ClearAll event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_dedup_preserves_first_dp_rank() {
+        let mut tracker = CacheStatusTracker::new();
+
+        // First store from engine with dp_rank=1
+        tracker.handle_store(
+            "engine_hash".to_string(),
+            EventSource::Trtllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::Device),
+            Some(1),
+        );
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Store { dp_rank, .. } => {
+                assert_eq!(*dp_rank, Some(1));
+            }
+            other => panic!("Expected Store event, got {:?}", other),
+        }
+
+        // Second store from KVBM with dp_rank=1 (same tokens = dedup, no new event)
+        let should_publish = tracker.handle_store(
+            "kvbm_hash".to_string(),
+            EventSource::Kvbm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::HostPinned),
+            Some(1),
+        );
+        assert!(!should_publish);
+
+        // Remove from engine only - block still in KVBM, no event
+        let should_publish = tracker.handle_remove("engine_hash", EventSource::Trtllm);
+        assert!(!should_publish);
+
+        // Remove from KVBM - last source, should carry the original dp_rank=1
+        let should_publish = tracker.handle_remove("kvbm_hash", EventSource::Kvbm);
+        assert!(should_publish);
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Remove { dp_rank, .. } => {
+                assert_eq!(*dp_rank, Some(1));
+            }
+            other => panic!("Expected Remove event, got {:?}", other),
+        }
     }
 
     #[test]
