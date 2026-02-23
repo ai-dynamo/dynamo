@@ -20,7 +20,7 @@ Environment variables:
 Signals handled in checkpoint mode:
 - SIGUSR1: Checkpoint completed, exit process
 - SIGCONT: Restore completed, wake model and continue
-- SIGUSR2: Checkpoint/restore failed
+- SIGKILL (from watcher on failure): Process is terminated immediately (unhandleable)
 """
 
 import asyncio
@@ -47,7 +47,6 @@ class CheckpointConfig:
         self.is_checkpoint_job = bool(self.location)
         self._checkpoint_done = asyncio.Event()
         self._restore_done = asyncio.Event()
-        self._checkpoint_failed = asyncio.Event()
 
     def checkpoint_exists(self) -> bool:
         """Check if a completed checkpoint already exists (idempotency).
@@ -79,8 +78,8 @@ class CheckpointConfig:
         await engine_client.sleep(level=sleep_level)
 
         # Install signal handlers before writing the ready file so there is no
-        # window where the DaemonSet can send SIGUSR1/SIGUSR2/SIGCONT while the
-        # default signal disposition (terminate) is still in effect.
+        # window where the DaemonSet can send SIGUSR1/SIGCONT while the default
+        # signal disposition (terminate) is still in effect.
         self._install_signal_handlers()
 
         # Signal readiness
@@ -88,7 +87,7 @@ class CheckpointConfig:
             f.write("ready")
         logger.info(
             "Ready for checkpoint. Waiting for watcher signal "
-            "(SIGUSR1=checkpoint complete, SIGCONT=restore complete, SIGUSR2=failure)"
+            "(SIGUSR1=checkpoint complete, SIGCONT=restore complete)"
         )
 
         try:
@@ -99,11 +98,9 @@ class CheckpointConfig:
                 await engine_client.wake_up()
                 return True
 
-            if event == "checkpoint":
-                logger.info("Checkpoint completion signal detected (SIGUSR1)")
-                return False
-
-            raise RuntimeError("Checkpoint failed (received SIGUSR2 from watcher)")
+            # SIGUSR1: checkpoint complete
+            logger.info("Checkpoint completion signal detected (SIGUSR1)")
+            return False
         finally:
             self._remove_signal_handlers()
             # Remove the ready file so that a restarting pod does not leave a
@@ -116,24 +113,22 @@ class CheckpointConfig:
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGUSR1, self._checkpoint_done.set)
-        # SIGCONT is used as the restore-complete signal because SIGUSR1 and
-        # SIGUSR2 are already taken (checkpoint-complete and checkpoint-failed
-        # respectively). The chrek DaemonSet watcher is the only sender, so
-        # there is no conflict with POSIX job-control semantics in practice.
+        # SIGCONT is used as the restore-complete signal. The chrek DaemonSet
+        # watcher is the only sender, so there is no conflict with POSIX
+        # job-control semantics in practice.
         loop.add_signal_handler(signal.SIGCONT, self._restore_done.set)
-        loop.add_signal_handler(signal.SIGUSR2, self._checkpoint_failed.set)
+        # No handler for checkpoint failure: the watcher sends SIGKILL, which
+        # terminates the process immediately (cannot be caught).
 
     def _remove_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
         loop.remove_signal_handler(signal.SIGUSR1)
         loop.remove_signal_handler(signal.SIGCONT)
-        loop.remove_signal_handler(signal.SIGUSR2)
 
     async def _wait_for_watcher_signal(self) -> str:
         waiters = {
             asyncio.create_task(self._checkpoint_done.wait()): "checkpoint",
             asyncio.create_task(self._restore_done.wait()): "restore",
-            asyncio.create_task(self._checkpoint_failed.wait()): "failed",
         }
         try:
             done, pending = await asyncio.wait(
