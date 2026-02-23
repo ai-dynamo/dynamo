@@ -192,7 +192,6 @@ global-planner environment:
 | `global_planner_namespace` | Dynamo namespace of the DGD running GlobalPlanner |
 | `mode` | `"prefill"` or `"decode"` |
 | `throughput_metrics_source` | `"frontend"` (default) or `"router"` — see below |
-| `metric_pulling_prometheus_endpoint` | Prometheus URL (default: `$PROMETHEUS_ENDPOINT` env var, falls back to `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090`) |
 
 ### `throughput_metrics_source`
 
