@@ -31,110 +31,129 @@ jobs:
       - name: Validate approved contributor
         id: author_check
         if: steps.fork_check.outputs.is_fork == 'true'
-        uses: actions/github-script@v7
         env:
           APPROVED_EXTERNAL_CONTRIBUTORS: ${{ secrets.APPROVED_EXTERNAL_CONTRIBUTORS }}
-        with:
-          script: |
-            const approvedRaw = process.env.APPROVED_EXTERNAL_CONTRIBUTORS || "[]";
-            let approved = [];
-            try {
-              approved = JSON.parse(approvedRaw);
-            } catch (error) {
-              core.warning(`Invalid APPROVED_EXTERNAL_CONTRIBUTORS JSON: ${error.message}`);
-              return;
-            }
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 - <<'EOF'
+          import os, sys, json
 
-            if (!Array.isArray(approved)) {
-              core.warning("APPROVED_EXTERNAL_CONTRIBUTORS is not a JSON array.");
-              return;
-            }
+          approved_raw = os.environ.get("APPROVED_EXTERNAL_CONTRIBUTORS", "[]")
+          author = os.environ.get("PR_AUTHOR", "")
+          github_output = os.environ["GITHUB_OUTPUT"]
 
-            const author = context.payload.pull_request?.user?.login;
-            if (!author) {
-              core.warning("No PR author found.");
-              return;
-            }
+          def set_output(key, value):
+              with open(github_output, "a") as f:
+                  f.write(f"{key}={value}\n")
 
-            if (!approved.includes(author)) {
-              core.info(`Author ${author} is not in APPROVED_EXTERNAL_CONTRIBUTORS.`);
-              core.setOutput("is_approved", "false");
-              return;
-            }
+          if not author:
+              print("Warning: No PR author found.", file=sys.stderr)
+              set_output("is_approved", "false")
+              sys.exit(0)
 
-            core.setOutput("is_approved", "true");
+          try:
+              approved = json.loads(approved_raw)
+          except json.JSONDecodeError as e:
+              print(f"Warning: Invalid APPROVED_EXTERNAL_CONTRIBUTORS JSON: {e}", file=sys.stderr)
+              set_output("is_approved", "false")
+              sys.exit(0)
+
+          if not isinstance(approved, list):
+              print("Warning: APPROVED_EXTERNAL_CONTRIBUTORS is not a JSON array.", file=sys.stderr)
+              set_output("is_approved", "false")
+              sys.exit(0)
+
+          if author in approved:
+              print(f"Author {author} is in APPROVED_EXTERNAL_CONTRIBUTORS.")
+              set_output("is_approved", "true")
+          else:
+              print(f"Author {author} is not in APPROVED_EXTERNAL_CONTRIBUTORS.")
+              set_output("is_approved", "false")
+          EOF
       - name: Verify commit signatures
         id: signature_check
         if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const pull_number = context.payload.pull_request.number;
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'EOF'
+          import os, sys, json
+          import urllib.request
 
-            // Get all commits in the PR
-            const { data: commits } = await github.rest.pulls.listCommits({
-              owner,
-              repo,
-              pull_number,
-            });
+          token = os.environ["GH_TOKEN"]
+          owner = os.environ["REPO_OWNER"]
+          repo = os.environ["REPO_NAME"]
+          pr_number = os.environ["PR_NUMBER"]
+          github_output = os.environ["GITHUB_OUTPUT"]
 
-            if (commits.length === 0) {
-              core.warning("No commits found in PR.");
-              core.setOutput("all_signed", "false");
-              return;
-            }
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
 
-            let allSigned = true;
-            const unsigned = [];
+          def github_get(url):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read())
 
-            for (const commit of commits) {
-              const sha = commit.sha;
-              
-              // Get detailed commit info including verification
-              const { data: commitData } = await github.rest.repos.getCommit({
-                owner,
-                repo,
-                ref: sha,
-              });
+          def set_output(key, value):
+              with open(github_output, "a") as f:
+                  f.write(f"{key}={value}\n")
 
-              const verification = commitData.commit.verification;
-              
-              if (!verification || !verification.verified) {
-                allSigned = false;
-                unsigned.push({
-                  sha: sha.substring(0, 7),
-                  reason: verification?.reason || "not signed"
-                });
-                core.warning(`Commit ${sha} is not properly signed: ${verification?.reason || "not signed"}`);
-              } else {
-                core.info(`Commit ${sha} is verified with signature.`);
-              }
-            }
+          commits = github_get(
+              f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/commits"
+          )
 
-            if (!allSigned) {
-              core.warning(`${unsigned.length} commit(s) are not properly signed.`);
-              core.setOutput("all_signed", "false");
-              core.setOutput("unsigned_commits", JSON.stringify(unsigned));
-            } else {
-              core.info("All commits are properly signed and verified.");
-              core.setOutput("all_signed", "true");
-            }
+          if not commits:
+              print("Warning: No commits found in PR.", file=sys.stderr)
+              set_output("all_signed", "false")
+              sys.exit(0)
+
+          all_signed = True
+          unsigned = []
+
+          for commit in commits:
+              sha = commit["sha"]
+              commit_data = github_get(
+                  f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}"
+              )
+              verification = commit_data.get("commit", {}).get("verification", {})
+
+              if not verification or not verification.get("verified"):
+                  all_signed = False
+                  reason = verification.get("reason", "not signed") if verification else "not signed"
+                  unsigned.append({"sha": sha[:7], "reason": reason})
+                  print(f"Warning: Commit {sha} is not properly signed: {reason}", file=sys.stderr)
+              else:
+                  print(f"Commit {sha} is verified with signature.")
+
+          if not all_signed:
+              print(f"Warning: {len(unsigned)} commit(s) are not properly signed.", file=sys.stderr)
+              set_output("all_signed", "false")
+              set_output("unsigned_commits", json.dumps(unsigned))
+          else:
+              print("All commits are properly signed and verified.")
+              set_output("all_signed", "true")
+          EOF
       - name: Comment /ok to test
         if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
-          script: |
-            const sha = context.payload.pull_request?.head?.sha || context.sha;
-            const body = `/ok to test ${sha}`;
-
-            const { owner, repo } = context.repo;
-            const issue_number = context.payload.pull_request.number;
-
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number,
-              body,
-            });
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          FALLBACK_SHA: ${{ github.sha }}
+        run: |
+          sha="${PR_SHA:-${FALLBACK_SHA}}"
+          curl -s -f -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\": \"/ok to test ${sha}\"}"
