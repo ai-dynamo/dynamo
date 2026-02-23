@@ -56,14 +56,22 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
         pre_created_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
+
         if config.multimodal_encode_worker:
-            await self._create_multimodal_encode_worker(runtime, config, shutdown_event)
+            await self._create_multimodal_encode_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
         elif config.multimodal_worker or config.multimodal_decode_worker:
             await self._create_multimodal_worker(
-                runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                pre_created_engine=pre_created_engine,
             )
         else:
             raise ValueError(
@@ -75,6 +83,7 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
         pre_created_engine: Optional[EngineSetupResult] = None,
     ) -> None:
         """
@@ -93,13 +102,15 @@ class WorkerFactory:
         )
         component = generate_endpoint.component()
         clear_endpoint = component.endpoint("clear_kv_blocks")
-
+        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
         lora_enabled = config.engine_args.enable_lora
         if lora_enabled:
             load_lora_endpoint = component.endpoint("load_lora")
             unload_lora_endpoint = component.endpoint("unload_lora")
             list_loras_endpoint = component.endpoint("list_loras")
-
+            shutdown_endpoints.extend(
+                [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
+            )
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         if pre_created_engine is not None:
             (
@@ -226,11 +237,13 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
     ) -> None:
         """Initialize standalone multimodal encode worker."""
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
+        shutdown_endpoints[:] = [generate_endpoint]
 
         handler = EncodeWorkerHandler(config.engine_args)
         await handler.async_init(runtime)
