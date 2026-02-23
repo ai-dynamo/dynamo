@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if .Values.webhook.enabled }}
 ---
 apiVersion: v1
 kind: Service
@@ -34,5 +33,4 @@ spec:
   selector:
     control-plane: controller-manager
   {{- include "dynamo-operator.selectorLabels" . | nindent 4 }}
-{{- end }}
 

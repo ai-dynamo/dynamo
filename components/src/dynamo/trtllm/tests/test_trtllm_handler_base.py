@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from dataclasses import dataclass
 from unittest import mock
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -218,3 +220,51 @@ class TestGuidedDecodingFromToolChoice:
         # Downstream code (TRT-LLM sampling_params.py) accesses these attributes:
         assert result.guided_decoding.json_object is False
         assert result.guided_decoding.json == self.GUIDED_DECODING_DICT["json"]
+
+
+class _ConcreteHandler(HandlerBase):
+    """Concrete subclass of HandlerBase for testing (satisfies abstract method)."""
+
+    async def generate(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+class TestHandleCancellationAbortToggle:
+    """Tests for the disable_request_abort toggle in _handle_cancellation."""
+
+    def _make_handler(self, disable_request_abort: bool) -> HandlerBase:
+        """Create a HandlerBase with mocked config."""
+        config = MagicMock()
+        config.disable_request_abort = disable_request_abort
+        config.shutdown_event = None
+        return _ConcreteHandler(config)
+
+    @pytest.mark.asyncio
+    async def test_abort_called_by_default(self):
+        handler = self._make_handler(disable_request_abort=False)
+        generation_result = MagicMock()
+        context = MagicMock()
+        # async_killed_or_stopped returns an awaitable that resolves immediately
+        # (simulating the client cancelling the request)
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-id-1"
+
+        await handler._handle_cancellation(generation_result, context)
+
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_abort_not_called_when_disabled(self):
+        handler = self._make_handler(disable_request_abort=True)
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-id-2"
+
+        await handler._handle_cancellation(generation_result, context)
+
+        generation_result.abort.assert_not_called()

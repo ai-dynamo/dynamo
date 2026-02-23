@@ -8,17 +8,14 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "chrek.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: checkpoint-agent
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "chrek.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: checkpoint-agent
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "chrek.selectorLabels" . | nindent 8 }}
         {{- with .Values.daemonset.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -45,10 +42,8 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.daemonset.runtimeClassName }}
-      # Use specified runtime class for GPU access (e.g., nvidia for CUDA checkpointing)
-      runtimeClassName: {{ .Values.daemonset.runtimeClassName }}
-      {{- end }}
+      # CUDA checkpoint/restore requires the nvidia container runtime
+      runtimeClassName: nvidia
       {{- if .Values.seccomp.deploy }}
       initContainers:
         # Deploy seccomp profile to host before starting the agent
@@ -109,12 +104,15 @@ spec:
             - name: containerd-storage
               mountPath: /var/lib/containerd
               readOnly: true
-            # Mount host proc for CRIU and signal file writing
+            # Mount host proc for CRIU and runtime PID signaling
             - name: host-proc
               mountPath: /host/proc
-            # Mount host cgroup for CRIU
+            # Mount host cgroup for CRIU (write access needed for cgroup freezer)
             - name: host-cgroup
               mountPath: /sys/fs/cgroup
+            # Kubelet PodResources API socket (for GPU UUID discovery)
+            - name: kubelet-pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
               readOnly: true
             {{- if and (eq .Values.storage.type "oci") .Values.storage.oci.credentialsSecretRef }}
             # Mount docker config for OCI registry auth
@@ -165,7 +163,7 @@ spec:
           hostPath:
             path: /var/lib/containerd
             type: Directory
-        # Host proc (for CRIU and signal files - needs write access)
+        # Host proc (for CRIU and runtime signaling - needs write access)
         - name: host-proc
           hostPath:
             path: /proc
@@ -174,6 +172,11 @@ spec:
         - name: host-cgroup
           hostPath:
             path: /sys/fs/cgroup
+            type: Directory
+        # Kubelet PodResources API socket directory
+        - name: kubelet-pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
             type: Directory
         {{- if and (eq .Values.storage.type "oci") .Values.storage.oci.credentialsSecretRef }}
         - name: docker-config
@@ -184,4 +187,3 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-
