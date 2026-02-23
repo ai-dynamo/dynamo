@@ -291,6 +291,29 @@ class PrometheusAPIClient:
             model_name,
         )
 
+    def get_per_worker_latency_metrics(
+        self, worker_type: str
+    ) -> dict[str, dict[str, float]]:
+        """Query Prometheus for per-worker last-request latency metrics.
+
+        Returns {worker_id: {last_ttft, last_isl, last_itl}} for workers of
+        the given type.  Used to supply regression inputs to the load-based
+        planner without burdening DirectRouterMetricsClient with non-load data.
+        Returns an empty dict if Prometheus is unavailable or has no data.
+        """
+        result: dict[str, dict[str, float]] = {}
+        for key, metric_name in _WORKER_LATENCY_METRIC_NAMES.items():
+            try:
+                query = f'{metric_name}{{worker_type="{worker_type}"}}'
+                data = self.prom.custom_query(query=query)
+                for series in data:
+                    worker_id = series["metric"].get("worker_id", "unknown")
+                    value = float(series["value"][1])
+                    result.setdefault(worker_id, {})[key] = value
+            except Exception as e:
+                logger.warning(f"Failed to fetch {key} from Prometheus: {e}")
+        return result
+
 
 def parse_frontend_metric_containers(
     result: list[dict],
@@ -305,10 +328,16 @@ def parse_frontend_metric_containers(
     return metrics_containers
 
 
-# Metric names for per-worker load metrics (gauge-type, queried directly from router)
-_WORKER_METRIC_NAMES = {
+# Per-worker KV-cache load gauges — read directly from the router /metrics endpoint.
+# These drive the actual scale-up/scale-down decisions in the load-based planner.
+_WORKER_LOAD_METRIC_NAMES = {
     "active_prefill_tokens": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_ACTIVE_PREFILL_TOKENS}",
     "active_decode_blocks": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_ACTIVE_DECODE_BLOCKS}",
+}
+
+# Per-worker last-request latency gauges — read from cluster-wide Prometheus.
+# These are used only for regression model fitting, not for scaling decisions.
+_WORKER_LATENCY_METRIC_NAMES = {
     "last_ttft": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS}",
     "last_isl": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_INPUT_SEQUENCE_TOKENS}",
     "last_itl": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS}",
@@ -345,8 +374,8 @@ class DirectRouterMetricsClient:
             {"prefill": {worker_id: {metric: float, ...}},
              "decode":  {worker_id: {metric: float, ...}}}
         """
-        target_metrics = set(_WORKER_METRIC_NAMES.values())
-        reverse_map = {v: k for k, v in _WORKER_METRIC_NAMES.items()}
+        target_metrics = set(_WORKER_LOAD_METRIC_NAMES.values())
+        reverse_map = {v: k for k, v in _WORKER_LOAD_METRIC_NAMES.items()}
         result: dict[str, dict[str, dict[str, float]]] = {}
 
         for family in text_string_to_metric_families(text):
