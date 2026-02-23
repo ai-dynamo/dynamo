@@ -181,7 +181,7 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"prefill","throughput_metrics_source":"router","throughput_adjustment_interval":30,"ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","metric_pulling_prometheus_endpoint":"http://prometheus:9090","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"prefill","throughput_metrics_source":"router","throughput_adjustment_interval":30,"ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -249,7 +249,7 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"prefill","throughput_metrics_source":"router","throughput_adjustment_interval":30,"ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","metric_pulling_prometheus_endpoint":"http://prometheus:9090","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"prefill","throughput_metrics_source":"router","throughput_adjustment_interval":30,"ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -317,7 +317,7 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"decode","throughput_metrics_source":"router","throughput_adjustment_interval":30,"itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","metric_pulling_prometheus_endpoint":"http://prometheus:9090","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"decode","throughput_metrics_source":"router","throughput_adjustment_interval":30,"itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -385,4 +385,4 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"decode","throughput_metrics_source":"router","throughput_adjustment_interval":30,"itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","metric_pulling_prometheus_endpoint":"http://prometheus:9090","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"mocker","mode":"decode","throughput_metrics_source":"router","throughput_adjustment_interval":30,"itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"no_correction":true,"profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D","model_name":"nvidia/Llama-3.1-8B-Instruct-FP8"}'
