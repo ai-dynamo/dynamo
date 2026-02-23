@@ -87,6 +87,7 @@ jobs:
           target: frontend
           platform: ${{ env.PLATFORMS }}
           ci_token: ${{ secrets.CI_TOKEN }}
+          cuda_version: "12.9"
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}

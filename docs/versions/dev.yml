@@ -51,6 +51,8 @@ navigation:
             path: ../pages/kubernetes/deployment/dynamomodel-guide.md
           - page: Autoscaling
             path: ../pages/kubernetes/autoscaling.md
+          - page: Inference Gateway (GAIE)
+            path: ../pages/kubernetes/inference-gateway.md
           - section: Checkpointing
             path: ../pages/kubernetes/chrek/README.md
             contents:
@@ -206,6 +208,12 @@ navigation:
         path: ../pages/design-docs/kvbm-design.md
       - page: Planner Design
         path: ../pages/design-docs/planner-design.md
+
+  # ==================== Blog ====================
+  - section: Blog
+    path: ../blogs/index.mdx
+    slug: blog
+    contents: []
 
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.

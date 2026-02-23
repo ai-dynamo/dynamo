@@ -100,7 +100,7 @@ on:
         description: 'Timeout in minutes for the copy to ACR step'
         required: false
         type: number
-        default: 5
+        default: 10
     secrets:
       AWS_DEFAULT_REGION:
         required: true

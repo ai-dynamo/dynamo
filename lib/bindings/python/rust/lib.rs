@@ -149,8 +149,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
-    m.add_class::<CancellationToken>()?;
-    m.add_class::<Namespace>()?;
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
@@ -162,14 +160,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
-    m.add_class::<llm::model_card::ModelDeploymentCard>()?;
+    m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
-    m.add_class::<llm::kv::ZmqKvEventListener>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -464,13 +461,6 @@ struct CancellationToken {
 
 #[pyclass]
 #[derive(Clone)]
-struct Namespace {
-    inner: rs::component::Namespace,
-    event_loop: PyObject,
-}
-
-#[pyclass]
-#[derive(Clone)]
 struct Component {
     inner: rs::component::Component,
     event_loop: PyObject,
@@ -527,6 +517,10 @@ impl ModelType {
     #[classattr]
     const Images: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Images,
+    };
+    #[classattr]
+    const Audios: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Audios,
     };
     #[classattr]
     const Videos: Self = ModelType {
@@ -645,9 +639,34 @@ impl DistributedRuntime {
         })
     }
 
-    fn namespace(&self, name: String) -> PyResult<Namespace> {
-        Ok(Namespace {
-            inner: self.inner.namespace(name).map_err(to_pyerr)?,
+    /// Get an endpoint directly by path (e.g., "namespace.component.endpoint" or "dyn://...").
+    fn endpoint(&self, path: String) -> PyResult<Endpoint> {
+        let trimmed_path = path.trim_start_matches("dyn://");
+        let parts: Vec<&str> = trimmed_path.split('.').collect();
+
+        if parts.len() != 3 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid endpoint path '{}'. Expected format: 'namespace.component.endpoint' or 'dyn://namespace.component.endpoint'",
+                path
+            )));
+        }
+
+        let namespace_name = parts[0];
+        let component_name = parts[1];
+        let endpoint_name = parts[2];
+
+        // Get endpoint using existing chain
+        let namespace = self
+            .inner
+            .namespace(namespace_name.to_string())
+            .map_err(to_pyerr)?;
+        let component = namespace
+            .component(component_name.to_string())
+            .map_err(to_pyerr)?;
+        let endpoint = component.endpoint(endpoint_name.to_string());
+
+        Ok(Endpoint {
+            inner: endpoint,
             event_loop: self.event_loop.clone(),
         })
     }
@@ -658,11 +677,6 @@ impl DistributedRuntime {
 
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
-    }
-
-    fn child_token(&self) -> CancellationToken {
-        let inner = self.inner.runtime().child_token();
-        CancellationToken { inner }
     }
 
     /// Register an async Python callback for /engine/{route_name}
@@ -756,21 +770,6 @@ impl DistributedRuntime {
         let name = CString::new("dynamo.runtime.weak").expect("valid capsule name");
 
         PyCapsule::new(py, weak, Some(name))
-    }
-}
-
-#[pymethods]
-impl CancellationToken {
-    fn cancel(&self) {
-        self.inner.cancel();
-    }
-
-    fn cancelled<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let token = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            token.cancelled().await;
-            Ok(())
-        })
     }
 }
 
@@ -907,16 +906,16 @@ impl Endpoint {
             Ok(())
         })
     }
-}
 
-#[pymethods]
-impl Namespace {
-    fn component(&self, name: String) -> PyResult<Component> {
-        let inner = self.inner.component(name).map_err(to_pyerr)?;
-        Ok(Component {
-            inner,
+    /// Get the parent Component.
+    ///
+    /// Note: To avoid duplicate metrics registries, reuse the returned Component for
+    /// multiple endpoints: `component.endpoint("ep1")`, `component.endpoint("ep2")`.
+    fn component(&self) -> Component {
+        Component {
+            inner: self.inner.component().clone(),
             event_loop: self.event_loop.clone(),
-        })
+        }
     }
 }
 

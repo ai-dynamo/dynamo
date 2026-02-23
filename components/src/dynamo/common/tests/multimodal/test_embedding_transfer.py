@@ -25,9 +25,17 @@ logger = logging.getLogger(__name__)
 async def benchmark(sender, receiver, tensors=None):
     if tensors is None:
         tensors = [torch.randn(256, 8 * 1024) for _ in range(30)]
+    # warmup
+    request, send_future = await sender.send_embeddings(tensors[0])
+    tensor_id, response = await receiver.receive_embeddings(request)
+    receiver.release_tensor(tensor_id)
+    await send_future
+
+    # benchmark
     send_start = time.perf_counter()
     sender_tasks = [
-        asyncio.create_task(sender.send_embeddings(tensor)) for tensor in tensors
+        asyncio.create_task(sender.send_embeddings(tensor, stage_embeddings=True))
+        for tensor in tensors
     ]
     requests = await asyncio.gather(*sender_tasks)
     send_end = time.perf_counter()

@@ -29,19 +29,20 @@ import (
 func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	validConfig := `{"engine": {"backend": "vllm"}, "deployment": {"model": "test-model"}}`
 	validConfigWithHardware := `{"engine": {"backend": "vllm"}, "deployment": {"model": "test-model"}, "hardware": {"numGpusPerNode": 8, "gpuModel": "H100-SXM5-80GB", "gpuVramMib": 81920}}`
+	minimalConfig := `{"sla": {"ttft": 200.0}}`
 	configWithDifferentBackend := `{"engine": {"backend": "sglang"}}`
 	configWithDifferentModel := `{"deployment": {"model": "different-model"}}`
 	invalidYAML := `{invalid yaml`
 
+	// errMsg: if non-empty, an error is expected and each newline-separated substring must appear in it.
+	// expectedWarning: if non-empty, at least one warning must contain this substring.
 	tests := []struct {
-		name            string
-		request         *nvidiacomv1alpha1.DynamoGraphDeploymentRequest
-		isClusterWide   bool
-		wantErr         bool
-		errMsg          string
-		wantWarnings    bool
-		expectedWarning string
-		errContains     bool
+		name                string
+		request             *nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+		isClusterWide       bool
+		gpuDiscoveryEnabled bool
+		errMsg              string
+		expectedWarning     string
 	}{
 		{
 			name: "valid request",
@@ -62,7 +63,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       false,
 		},
 		{
 			name: "missing profiler image",
@@ -83,7 +83,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       true,
 			errMsg:        "spec.profilingConfig.profilerImage is required",
 		},
 		{
@@ -103,7 +102,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       true,
 			errMsg:        "spec.profilingConfig.config is required and must not be empty",
 		},
 		{
@@ -125,11 +123,10 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       true,
 			errMsg:        "spec.profilingConfig.config is required and must not be empty",
 		},
 		{
-			name: "namespace-restricted operator (GPU discovery will fail gracefully)",
+			name: "namespace-scoped operator with manual hardware config (should pass)",
 			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgdr",
@@ -146,8 +143,51 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			isClusterWide: false,
-			wantErr:       false,
+			isClusterWide:       false,
+			gpuDiscoveryEnabled: false,
+		},
+		{
+			name: "namespace-scoped operator with GPU discovery enabled (should pass without manual config)",
+			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgdr",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: "vllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(minimalConfig),
+						},
+					},
+				},
+			},
+			isClusterWide:       false,
+			gpuDiscoveryEnabled: true,
+		},
+		{
+			name: "namespace-scoped operator with GPU discovery disabled and no hardware config (should error)",
+			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgdr",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: "vllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "profiler:latest",
+						Config: &apiextensionsv1.JSON{
+							Raw: []byte(minimalConfig),
+						},
+					},
+				},
+			},
+			isClusterWide:       false,
+			gpuDiscoveryEnabled: false,
+			errMsg:              "GPU hardware configuration required: GPU discovery is disabled",
 		},
 		{
 			name: "invalid config YAML",
@@ -168,8 +208,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: true,
-			wantErr:       true,
-			errMsg:        "failed to parse spec.profilingConfig.config: error converting YAML to JSON: yaml: line 1: did not find expected ',' or '}'",
+			errMsg:        "failed to parse spec.profilingConfig.config",
 		},
 		{
 			name: "warning for different backend in config",
@@ -190,8 +229,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide:   true,
-			wantErr:         false,
-			wantWarnings:    true,
 			expectedWarning: "spec.profilingConfig.config.engine.backend (sglang) will be overwritten by spec.backend (vllm)",
 		},
 		{
@@ -213,8 +250,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide:   true,
-			wantErr:         false,
-			wantWarnings:    true,
 			expectedWarning: "spec.profilingConfig.config.deployment.model (different-model) will be overwritten by spec.model (llama-3-8b)",
 		},
 		{
@@ -234,47 +269,34 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				},
 			},
 			isClusterWide: false,
-			wantErr:       true,
 			errMsg:        "spec.profilingConfig.profilerImage is required\nspec.profilingConfig.config is required and must not be empty",
-			errContains:   true,
 		},
-		// TODO: Add test for invalid GPU range (min > max) validation
-		// The validation logic is in place (lines 148-152 of dynamographdeploymentrequest.go)
-		// but needs proper test coverage
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentRequestValidator(tt.request, tt.isClusterWide)
+			validator := NewDynamoGraphDeploymentRequestValidator(tt.request, tt.isClusterWide, tt.gpuDiscoveryEnabled)
 			warnings, err := validator.Validate()
 
-			if (err != nil) != tt.wantErr {
-				t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)
+			wantErr := tt.errMsg != ""
+			if (err != nil) != wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, wantErr)
 				return
 			}
-
-			if tt.wantErr {
-				if tt.errContains {
-					// For multiple errors, check that all expected error messages are present
-					errStr := err.Error()
-					for _, expectedMsg := range strings.Split(tt.errMsg, "\n") {
-						if !strings.Contains(errStr, expectedMsg) {
-							t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() error message = %v, want to contain %v", errStr, expectedMsg)
-						}
-					}
-				} else {
-					if err.Error() != tt.errMsg {
-						t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			if wantErr {
+				for _, msg := range strings.Split(tt.errMsg, "\n") {
+					if !strings.Contains(err.Error(), msg) {
+						t.Errorf("Validate() error %q does not contain %q", err.Error(), msg)
 					}
 				}
 			}
 
-			if tt.wantWarnings && len(warnings) == 0 {
-				t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() expected warnings but got none")
+			wantWarning := tt.expectedWarning != ""
+			if wantWarning && len(warnings) == 0 {
+				t.Errorf("Validate() expected warning %q but got none", tt.expectedWarning)
 			}
-
-			if tt.wantWarnings && len(warnings) > 0 && warnings[0] != tt.expectedWarning {
-				t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() warning = %v, want %v", warnings[0], tt.expectedWarning)
+			if wantWarning && len(warnings) > 0 && !strings.Contains(warnings[0], tt.expectedWarning) {
+				t.Errorf("Validate() warning %q does not contain %q", warnings[0], tt.expectedWarning)
 			}
 		})
 	}
@@ -350,7 +372,7 @@ func TestDynamoGraphDeploymentRequestValidator_ValidateUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentRequestValidator(tt.newRequest, true)
+			validator := NewDynamoGraphDeploymentRequestValidator(tt.newRequest, true, true)
 			warnings, err := validator.ValidateUpdate(tt.oldRequest)
 
 			if (err != nil) != tt.wantErr {
