@@ -304,13 +304,13 @@ async def init(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     # Setup metrics and KV events for ALL nodes (including non-leader)
     # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, component, generate_endpoint
+        engine, config, generate_endpoint
     )
 
     # Record model load time immediately after publisher setup (which creates the gauges)
@@ -327,7 +327,7 @@ async def init(
     ready_event = asyncio.Event()
 
     handler = DecodeWorkerHandler(
-        component, engine, config, publisher, generate_endpoint, shutdown_event
+        engine, config, publisher, generate_endpoint, shutdown_event
     )
     handler.register_engine_routes(runtime)
 
@@ -395,13 +395,13 @@ async def init_prefill(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     # Setup metrics and KV events for ALL nodes (including non-leader)
     # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, component, generate_endpoint
+        engine, config, generate_endpoint
     )
 
     # Handle non-leader nodes (multi-node parallelism)
@@ -415,7 +415,7 @@ async def init_prefill(
     await _warmup_prefill_engine(engine, server_args)
 
     handler = PrefillWorkerHandler(
-        component, engine, config, publisher, generate_endpoint, shutdown_event
+        engine, config, publisher, generate_endpoint, shutdown_event
     )
     handler.register_engine_routes(runtime)
 
@@ -487,13 +487,13 @@ async def init_diffusion(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     # Setup metrics and KV events for ALL nodes (including non-leader)
     # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, component, generate_endpoint
+        engine, config, generate_endpoint
     )
 
     # Handle non-leader nodes (multi-node parallelism)
@@ -506,7 +506,7 @@ async def init_diffusion(
     ready_event = asyncio.Event()
 
     handler = DiffusionWorkerHandler(
-        component, engine, config, publisher, generate_endpoint, shutdown_event
+        engine, config, publisher, generate_endpoint, shutdown_event
     )
     handler.register_engine_routes(runtime)
 
@@ -567,20 +567,18 @@ async def init_embedding(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     # publisher instantiates the metrics and kv event publishers
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, component, generate_endpoint
+        engine, config, generate_endpoint
     )
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = EmbeddingWorkerHandler(
-        component, engine, config, publisher, shutdown_event
-    )
+    handler = EmbeddingWorkerHandler(engine, config, publisher, shutdown_event)
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()
@@ -659,14 +657,13 @@ async def init_image_diffusion(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     # Image diffusion doesn't have metrics publisher like LLM
     # Could add custom metrics for images/sec, steps/sec later
 
     handler = ImageDiffusionWorkerHandler(
-        component,
         generator,
         config,
         publisher=None,
@@ -744,11 +741,10 @@ async def init_video_generation(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     handler = VideoGenerationWorkerHandler(
-        component,
         generator,
         config,
         publisher=None,
@@ -799,7 +795,7 @@ async def init_multimodal_processor(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     # For processor, we need to connect to the encode worker
@@ -809,9 +805,7 @@ async def init_multimodal_processor(
 
     ready_event = asyncio.Event()
 
-    handler = MultimodalProcessorHandler(
-        component, config, encode_worker_client, shutdown_event
-    )
+    handler = MultimodalProcessorHandler(config, encode_worker_client, shutdown_event)
 
     logging.info("Waiting for Encoder Worker Instances ...")
     await encode_worker_client.wait_for_instances()
@@ -858,7 +852,7 @@ async def init_multimodal_encode_worker(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     # For encode worker, we need to connect to the downstream LLM worker
@@ -866,9 +860,7 @@ async def init_multimodal_encode_worker(
         f"{dynamo_args.namespace}.backend.generate"
     ).client()
 
-    handler = MultimodalEncodeWorkerHandler(
-        component, config, pd_worker_client, shutdown_event
-    )
+    handler = MultimodalEncodeWorkerHandler(config, pd_worker_client, shutdown_event)
     await handler.async_init(runtime)
 
     await pd_worker_client.wait_for_instances()
@@ -912,7 +904,7 @@ async def init_multimodal_worker(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     engine = sgl.Engine(server_args=server_args)
@@ -923,12 +915,10 @@ async def init_multimodal_worker(
             f"{dynamo_args.namespace}.prefill.generate"
         ).client()
         handler = MultimodalWorkerHandler(
-            component, engine, config, prefill_client, shutdown_event
+            engine, config, prefill_client, shutdown_event
         )
     else:
-        handler = MultimodalWorkerHandler(
-            component, engine, config, None, shutdown_event
-        )
+        handler = MultimodalWorkerHandler(engine, config, None, shutdown_event)
 
     await handler.async_init()
 
@@ -968,10 +958,11 @@ async def init_multimodal_prefill_worker(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    component = generate_endpoint.component()
+
+    handler = MultimodalPrefillWorkerHandler(engine, config, shutdown_event)
+
     shutdown_endpoints[:] = [generate_endpoint]
 
-    handler = MultimodalPrefillWorkerHandler(component, engine, config, shutdown_event)
     await handler.async_init()
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
