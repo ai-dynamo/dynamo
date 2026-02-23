@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+from typing import Optional
 
 from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
@@ -46,7 +47,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
-from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -109,7 +110,10 @@ def build_kv_connector_config(config: Config):
 
 
 async def init_llm_worker(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    shutdown_endpoints: Optional[list] = None,
 ) -> None:
     """Initialize and run the LLM worker.
 
@@ -119,6 +123,7 @@ async def init_llm_worker(
         runtime: The Dynamo distributed runtime.
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
+        shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
 
     encode_client = None
@@ -294,7 +299,7 @@ async def init_llm_worker(
         # This overrides the skip_tokenizer_init=True set earlier
         engine_args["skip_tokenizer_init"] = False
 
-    if modality == "multimodal":
+    if modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
         model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
         multimodal_processor = MultimodalRequestProcessor(
@@ -337,6 +342,8 @@ async def init_llm_worker(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
         component = endpoint.component()
+        if shutdown_endpoints is not None:
+            shutdown_endpoints[:] = [endpoint]
 
         # should ideally call get_engine_runtime_config
         # this is because we don't have a good way to
