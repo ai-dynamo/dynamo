@@ -772,7 +772,7 @@ class BasePlanner:
         await self.connector.set_component_replicas(target_replicas, blocking=True)
 
     async def observe_engine_load_stats(self) -> None:
-        """Query DirectRouterMetricsClient for per-worker metrics, update regression."""
+        """Query DirectRouterMetricsClient for load metrics, Prometheus for latency metrics."""
         worker_type = self.component_type.value  # "prefill" or "decode"
         result = self.prometheus_engine_client.get_recent_and_averaged_metrics(
             worker_type
@@ -784,6 +784,21 @@ class BasePlanner:
             return
 
         recent, per_worker_averaged, cluster_averaged = result
+
+        # Merge per-worker latency metrics from Prometheus (regression inputs only,
+        # not used for scaling decisions).
+        latency = self.prometheus_traffic_client.get_per_worker_latency_metrics(
+            worker_type
+        )
+        for wid, lm in latency.items():
+            recent.setdefault(wid, {}).update(lm)
+            per_worker_averaged.setdefault(wid, {}).update(lm)
+        if latency:
+            for key in ("last_ttft", "last_isl", "last_itl"):
+                vals = [m[key] for m in latency.values() if key in m]
+                if vals:
+                    cluster_averaged[key] = sum(vals) / len(vals)
+
         self.cached_load_metrics = CachedLoadMetrics(
             recent=recent,
             per_worker_averaged=per_worker_averaged,
