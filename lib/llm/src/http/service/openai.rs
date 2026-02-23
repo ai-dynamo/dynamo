@@ -1816,6 +1816,17 @@ async fn video_stream(
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to start video stream"))?;
 
+    // Capture the context to cancel the stream if the client disconnects.
+    let ctx = stream.context();
+
+    // Create connection monitor. The connection_handle is disarmed immediately because
+    // video_stream returns the streaming body directly (graceful handler exit).
+    // The stream_handle is armed below and lives inside the monitored stream so that
+    // a client disconnect (body drop) signals the engine context to cancel.
+    let (mut connection_handle, mut stream_handle) =
+        create_connection_monitor(ctx.clone(), Some(state.metrics_clone())).await;
+    connection_handle.disarm();
+
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
         process_response_and_observe_metrics(
@@ -1856,7 +1867,33 @@ async fn video_stream(
         Some(Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)))
     });
 
-    inflight.mark_ok();
+    // Arm the stream handle and monitor for client disconnects or context cancellation.
+    // inflight.mark_ok() is deferred until the stream ends naturally. If the stream is
+    // dropped early (client disconnect), the armed stream_handle signals the connection
+    // monitor, which cancels the engine context.
+    stream_handle.arm();
+    let monitored_stream = async_stream::stream! {
+        tokio::pin!(mjpeg_stream);
+        loop {
+            tokio::select! {
+                frame = mjpeg_stream.next() => {
+                    match frame {
+                        Some(item) => yield item,
+                        None => {
+                            // Stream ended naturally: mark inflight OK and disarm the handle.
+                            inflight.mark_ok();
+                            stream_handle.disarm();
+                            break;
+                        }
+                    }
+                }
+                _ = ctx.stopped() => {
+                    tracing::trace!("Context stopped; breaking MJPEG stream");
+                    break;
+                }
+            }
+        }
+    };
 
     axum::http::Response::builder()
         .status(axum::http::StatusCode::OK)
@@ -1864,7 +1901,7 @@ async fn video_stream(
             axum::http::header::CONTENT_TYPE,
             "multipart/x-mixed-replace; boundary=frame",
         )
-        .body(Body::from_stream(mjpeg_stream))
+        .body(Body::from_stream(monitored_stream))
         .map(|r| r.into_response())
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!("Failed to build MJPEG response: {e}"))
