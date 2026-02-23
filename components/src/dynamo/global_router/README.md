@@ -62,14 +62,16 @@ python -m dynamo.global_router \
 
 ### Arguments
 
-| Argument | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `--config` | Yes | - | Path to JSON configuration file |
-| `--model-name` | Yes | - | Model name for registration (must match workers) |
-| `--namespace` | No | `DYN_NAMESPACE` env var or "dynamo" | Namespace for global router |
-| `--component-name` | No | "global_router" | Component name |
-| `--default-ttft-target` | No | None | Default TTFT target (ms) for prefill pool selection |
-| `--default-itl-target` | No | None | Default ITL target (ms) for decode pool selection |
+All options can be set via CLI flags or environment variables. CLI flags take precedence over environment variables.
+
+| Argument | Required (CLI or env) | Env var | Default | Description |
+|----------|----------------------|---------|---------|-------------|
+| `--config` | Yes | `DYN_GLOBAL_ROUTER_CONFIG` | - | Path to JSON configuration file |
+| `--model-name` | Yes | `DYN_GLOBAL_ROUTER_MODEL_NAME` | - | Model name for registration (must match workers) |
+| `--namespace` | No | `DYN_NAMESPACE` | "dynamo" | Namespace for global router |
+| `--component-name` | No | `DYN_GLOBAL_ROUTER_COMPONENT_NAME` | "global_router" | Component name |
+| `--default-ttft-target` | No | `DYN_GLOBAL_ROUTER_DEFAULT_TTFT_TARGET` | None | Default TTFT target (ms) for prefill pool selection |
+| `--default-itl-target` | No | `DYN_GLOBAL_ROUTER_DEFAULT_ITL_TARGET` | None | Default ITL target (ms) for decode pool selection |
 
 ## Configuration
 

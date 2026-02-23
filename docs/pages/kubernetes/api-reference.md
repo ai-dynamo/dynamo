@@ -10,6 +10,7 @@
 
 ## Packages
 - [nvidia.com/v1alpha1](#nvidiacomv1alpha1)
+- [nvidia.com/v1beta1](#nvidiacomv1beta1)
 
 
 ## nvidia.com/v1alpha1
@@ -112,6 +113,50 @@ _Appears in:_
 | `key` _string_ | Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml". | disagg.yaml |  |
 
 
+#### DGDRState
+
+_Underlying type:_ _string_
+
+
+
+_Validation:_
+- Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)
+
+| Field | Description |
+| --- | --- |
+| `Initializing` |  |
+| `Pending` |  |
+| `Profiling` |  |
+| `Deploying` |  |
+| `Ready` |  |
+| `DeploymentDeleted` |  |
+| `Failed` |  |
+
+
+#### DGDState
+
+_Underlying type:_ _string_
+
+
+
+_Validation:_
+- Enum: [initializing pending successful failed]
+
+_Appears in:_
+- [DeploymentStatus](#deploymentstatus)
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description |
+| --- | --- |
+| `initializing` |  |
+| `pending` |  |
+| `successful` |  |
+| `failed` |  |
+
+
 #### DeploymentOverridesSpec
 
 
@@ -149,7 +194,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the name of the created DynamoGraphDeployment. |  |  |
 | `namespace` _string_ | Namespace is the namespace of the created DynamoGraphDeployment. |  |  |
-| `state` _string_ | State is the current state of the DynamoGraphDeployment.<br />This value is mirrored from the DGD's status.state field. |  |  |
+| `state` _[DGDState](#dgdstate)_ | State is the current state of the DynamoGraphDeployment.<br />This value is mirrored from the DGD's status.state field. | initializing | Enum: [initializing pending successful failed] <br /> |
 | `created` _boolean_ | Created indicates whether the DGD has been successfully created.<br />Used to prevent recreation if the DGD is manually deleted by users. |  |  |
 
 
@@ -421,7 +466,7 @@ It serves as the primary interface for users to request model deployments with
 specific performance and resource constraints, enabling SLA-driven deployments.
 
 Lifecycle:
- 1. Initial → Pending: Validates spec and prepares for profiling
+ 1. Initializing → Pending: Validates spec and prepares for profiling
  2. Pending → Profiling: Creates and runs profiling job (online or AIC)
  3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
  4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
@@ -430,6 +475,10 @@ Lifecycle:
 
 The spec becomes immutable once profiling starts. Users must delete and recreate
 the DGDR to modify configuration after this point.
+
+DEPRECATION NOTICE: v1alpha1 DynamoGraphDeploymentRequest is deprecated.
+Please migrate to nvidia.com/v1beta1 DynamoGraphDeploymentRequest.
+v1alpha1 will be removed in a future release.
 
 
 
@@ -482,7 +531,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `state` _string_ | State is a high-level textual status of the deployment request lifecycle.<br />Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"<br />Empty string ("") represents the initial state before initialization. |  |  |
+| `state` _[DGDRState](#dgdrstate)_ | State is a high-level textual status of the deployment request lifecycle. | Initializing | Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed] <br /> |
 | `backend` _string_ | Backend is extracted from profilingConfig.config.engine.backend for display purposes.<br />This field is populated by the controller and shown in kubectl output. |  | Optional: \{\} <br /> |
 | `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
@@ -601,11 +650,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
+| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
+| `state` _[DGDState](#dgdstate)_ | State is a high-level textual status of the graph deployment lifecycle. | initializing | Enum: [initializing pending successful failed] <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
+| `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -950,6 +1001,7 @@ _Appears in:_
 | `Restarting` |  |
 | `Completed` |  |
 | `Failed` |  |
+| `Superseded` |  |
 
 
 #### RestartStatus
@@ -1002,6 +1054,45 @@ _Appears in:_
 | --- | --- |
 | `Sequential` |  |
 | `Parallel` |  |
+
+
+#### RollingUpdatePhase
+
+_Underlying type:_ _string_
+
+RollingUpdatePhase represents the current phase of a rolling update.
+
+_Validation:_
+- Enum: [Pending InProgress Completed Failed ]
+
+_Appears in:_
+- [RollingUpdateStatus](#rollingupdatestatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` |  |
+| `InProgress` |  |
+| `Completed` |  |
+| `` |  |
+
+
+#### RollingUpdateStatus
+
+
+
+RollingUpdateStatus tracks the progress of a rolling update.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[RollingUpdatePhase](#rollingupdatephase)_ | Phase indicates the current phase of the rolling update. |  | Enum: [Pending InProgress Completed Failed ] <br />Optional: \{\} <br /> |
+| `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when the rolling update began. |  | Optional: \{\} <br /> |
+| `endTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | EndTime is when the rolling update completed (successfully or failed). |  | Optional: \{\} <br /> |
+| `updatedServices` _string array_ | UpdatedServices is the list of services that have completed the rolling update.<br />A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.<br />Only services of componentType Worker (or Prefill/Decode) are considered. |  | Optional: \{\} <br /> |
 
 
 #### ScalingAdapter
@@ -1075,7 +1166,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
-| `componentName` _string_ | ComponentName is the name of the underlying resource. |  |  |
+| `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  |  |
+| `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -1117,6 +1209,416 @@ _Appears in:_
 | `name` _string_ | Name references a PVC name defined in the top-level PVCs map |  | Required: \{\} <br /> |
 | `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />a backend-specific default will be used. |  |  |
 | `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />When true, backend-specific environment variables will be set and default mount points may be used. | false |  |
+
+
+
+## nvidia.com/v1beta1
+
+Package v1beta1 contains API Schema definitions for the nvidia.com v1beta1 API group.
+
+### Resource Types
+- [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
+
+
+
+#### BackendType
+
+_Underlying type:_ _string_
+
+BackendType specifies the inference backend.
+
+_Validation:_
+- Enum: [auto sglang trtllm vllm]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description |
+| --- | --- |
+| `auto` |  |
+| `sglang` |  |
+| `trtllm` |  |
+| `vllm` |  |
+
+
+#### DGDRPhase
+
+_Underlying type:_ _string_
+
+DGDRPhase represents the lifecycle phase of a DynamoGraphDeploymentRequest.
+
+_Validation:_
+- Enum: [Pending Profiling Ready Deploying Deployed Failed]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` |  |
+| `Profiling` |  |
+| `Ready` |  |
+| `Deploying` |  |
+| `Deployed` |  |
+| `Failed` |  |
+
+
+#### DeploymentInfoStatus
+
+
+
+DeploymentInfoStatus tracks the state of the deployed DynamoGraphDeployment.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | Replicas is the desired number of replicas. |  | Optional: \{\} <br /> |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of replicas that are available and ready. |  | Optional: \{\} <br /> |
+
+
+#### v1beta1 DynamoGraphDeploymentRequest
+
+
+
+DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
+It provides a simplified, SLA-driven interface for deploying inference models on Dynamo.
+Users specify a model and optional performance targets; the controller handles profiling,
+configuration selection, and deployment.
+
+Lifecycle:
+ 1. Pending: Spec validated, preparing for profiling
+ 2. Profiling: Profiling job is running to discover optimal configurations
+ 3. Ready: Profiling complete, generated DGD spec available in status
+ 4. Deploying: DGD is being created and rolled out (when autoApply=true)
+ 5. Deployed: DGD is running and healthy
+ 6. Failed: An unrecoverable error occurred
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
+| `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  |  |
+| `status` _[DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)_ | Status reflects the current observed state of this deployment request. |  |  |
+
+
+#### v1beta1 DynamoGraphDeploymentRequestSpec
+
+
+
+DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+Only the Model field is required; all other fields are optional and have sensible defaults.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />Can be a HuggingFace ID or a private model name. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br />Optional: \{\} <br /> |
+| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/dynamo-runtime:latest"<br />backend type automatically; backend images can be overridden via overrides.dgd. |  | Optional: \{\} <br /> |
+| `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights.<br />When provided, weights are loaded from the PVC instead of downloading from HuggingFace. |  | Optional: \{\} <br /> |
+| `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment.<br />Typically auto-filled by the operator from cluster discovery. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the expected workload characteristics for SLA-based profiling. |  | Optional: \{\} <br /> |
+| `sla` _[SLASpec](#slaspec)_ | SLA defines service-level agreement targets that drive profiling optimization. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#overridesspec)_ | Overrides allows customizing the profiling job and the generated DynamoGraphDeployment. |  | Optional: \{\} <br /> |
+| `features` _[FeaturesSpec](#featuresspec)_ | Features controls optional Dynamo platform features in the generated deployment. |  | Optional: \{\} <br /> |
+| `searchStrategy` _[SearchStrategy](#searchstrategy)_ | SearchStrategy controls the profiling search depth.<br />"rapid" performs a fast sweep; "thorough" explores more configurations. | rapid | Enum: [rapid thorough] <br />Optional: \{\} <br /> |
+| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, the generated spec is stored in status<br />for manual review and application. | true | Optional: \{\} <br /> |
+
+
+#### v1beta1 DynamoGraphDeploymentRequestStatus
+
+
+
+DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[DGDRPhase](#dgdrphase)_ | Phase is the high-level lifecycle phase of the deployment request. |  | Enum: [Pending Profiling Ready Deploying Deployed Failed] <br />Optional: \{\} <br /> |
+| `profilingPhase` _[ProfilingPhase](#profilingphase)_ | ProfilingPhase indicates the current sub-phase of the profiling pipeline.<br />Only meaningful when Phase is "Profiling". Cleared when profiling completes or fails. |  | Enum: [Initializing SweepingPrefill SweepingDecode SelectingConfig BuildingCurves GeneratingDGD Done] <br />Optional: \{\} <br /> |
+| `dgdName` _string_ | DGDName is the name of the generated or created DynamoGraphDeployment. |  | Optional: \{\} <br /> |
+| `profilingJobName` _string_ | ProfilingJobName is the name of the Kubernetes Job running the profiler. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validated, ProfilingComplete, DeploymentReady. |  | Optional: \{\} <br /> |
+| `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the output of the profiling process including<br />Pareto-optimal configurations and the selected deployment configuration. |  | Optional: \{\} <br /> |
+| `deploymentInfo` _[DeploymentInfoStatus](#deploymentinfostatus)_ | DeploymentInfo tracks the state of the deployed DynamoGraphDeployment.<br />Populated when a DGD has been created (either via autoApply or manually). |  | Optional: \{\} <br /> |
+| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
+
+
+#### FeaturesSpec
+
+
+
+FeaturesSpec controls optional Dynamo platform features in the generated deployment.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `planner` _[PlannerSpec](#plannerspec)_ | Planner configures the SLA planner for autoscaling in the generated DGD. |  | Optional: \{\} <br /> |
+| `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
+
+
+#### HardwareSpec
+
+
+
+HardwareSpec describes the hardware resources available for profiling and deployment.
+These fields are typically auto-filled by the operator from cluster discovery.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `gpuSku` _string_ | GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB"). |  | Optional: \{\} <br /> |
+| `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
+| `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
+| `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
+
+
+
+
+#### MockerSpec
+
+
+
+MockerSpec configures the simulated (mocker) backend.
+
+
+
+_Appears in:_
+- [FeaturesSpec](#featuresspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled indicates whether to deploy mocker workers instead of real inference workers.<br />Useful for large-scale testing without GPUs. |  | Optional: \{\} <br /> |
+
+
+#### ModelCacheSpec
+
+
+
+ModelCacheSpec references a PVC containing pre-downloaded model weights.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pvcName` _string_ | PVCName is the name of the PersistentVolumeClaim containing model weights.<br />The PVC must exist in the same namespace as the DGDR. |  | Optional: \{\} <br /> |
+| `pvcModelPath` _string_ | PVCModelPath is the path to the model checkpoint directory within the PVC<br />(e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). |  | Optional: \{\} <br /> |
+| `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache | Optional: \{\} <br /> |
+
+
+#### OptimizationType
+
+_Underlying type:_ _string_
+
+OptimizationType specifies the profiling optimization strategy.
+
+_Validation:_
+- Enum: [latency throughput]
+
+_Appears in:_
+- [SLASpec](#slaspec)
+
+| Field | Description |
+| --- | --- |
+| `latency` |  |
+| `throughput` |  |
+
+
+#### OverridesSpec
+
+
+
+OverridesSpec allows customizing the profiling job and the generated DynamoGraphDeployment.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob allows overriding the profiling Job specification.<br />Fields set here are merged into the controller-generated Job spec. |  | Optional: \{\} <br /> |
+| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment<br />to use as the base for the generated deployment. Fields from profiling results<br />are merged on top. Use this to override backend worker images.<br />The field is stored as a raw embedded resource rather than a typed<br />*v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already<br />imports v1beta1 as the conversion hub and Go does not allow import cycles.<br />The EmbeddedResource marker tells the API server to validate that the value is a<br />well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it<br />is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,<br />kind, and field schema) is performed by the controller during reconciliation. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+
+
+#### ParetoConfig
+
+
+
+ParetoConfig represents a single Pareto-optimal deployment configuration
+discovered during profiling.
+
+
+
+_Appears in:_
+- [ProfilingResultsStatus](#profilingresultsstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `config` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Config is the full deployment configuration for this Pareto point. |  | Type: object <br /> |
+
+
+#### PlannerPreDeploymentSweepMode
+
+_Underlying type:_ _string_
+
+PlannerPreDeploymentSweepMode controls pre-deployment sweeping thoroughness for planner profiling.
+
+_Validation:_
+- Enum: [none rapid thorough]
+
+_Appears in:_
+- [PlannerSpec](#plannerspec)
+
+| Field | Description |
+| --- | --- |
+| `none` |  |
+| `rapid` |  |
+| `thorough` |  |
+
+
+#### PlannerSpec
+
+
+
+PlannerSpec configures the SLA planner for autoscaling in the generated DGD.
+
+
+
+_Appears in:_
+- [FeaturesSpec](#featuresspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled indicates whether the planner is enabled. |  | Optional: \{\} <br /> |
+| `plannerPreDeploymentSweeping` _[PlannerPreDeploymentSweepMode](#plannerpredeploymentsweepmode)_ | PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling.<br />"none" means no pre-deployment sweep (only load-based scaling).<br />"rapid" uses AI Configurator to simulate engine performance.<br />"thorough" uses real GPUs to measure engine performance (takes several hours). |  | Enum: [none rapid thorough] <br />Optional: \{\} <br /> |
+| `plannerArgsList` _string array_ | PlannerArgsList is a list of additional planner arguments. |  | Optional: \{\} <br /> |
+
+
+#### ProfilingPhase
+
+_Underlying type:_ _string_
+
+ProfilingPhase represents a sub-phase within the profiling pipeline.
+When the DGDR Phase is "Profiling", this value indicates which step
+of the profiling pipeline is currently executing.
+
+_Validation:_
+- Enum: [Initializing SweepingPrefill SweepingDecode SelectingConfig BuildingCurves GeneratingDGD Done]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+
+| Field | Description |
+| --- | --- |
+| `Initializing` | Profiler is loading the DGD template, detecting GPU hardware,<br />and resolving the model architecture from HuggingFace.<br /> |
+| `SweepingPrefill` | Sweeping parallelization strategies (TP/TEP/DEP) across GPU counts<br />for prefill, measuring TTFT at each configuration.<br /> |
+| `SweepingDecode` | Sweeping parallelization strategies and concurrency levels<br />for decode, measuring ITL at each configuration.<br /> |
+| `SelectingConfig` | Filtering results against SLA targets and selecting the most<br />cost-efficient configuration that meets TTFT/ITL requirements.<br /> |
+| `BuildingCurves` | Building detailed interpolation curves (ISL→TTFT for prefill,<br />KV-usage×context-length→ITL for decode) using the selected configs.<br /> |
+| `GeneratingDGD` | Packaging profiling data into a ConfigMap and generating<br />the final DGD YAML with planner integration.<br /> |
+| `Done` | Profiling pipeline finished successfully.<br /> |
+
+
+#### ProfilingResultsStatus
+
+
+
+ProfilingResultsStatus contains the output of the profiling process.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pareto` _[ParetoConfig](#paretoconfig) array_ | Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.<br />Each entry represents a different cost/performance trade-off. |  | Optional: \{\} <br /> |
+| `selectedConfig` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | SelectedConfig is the recommended configuration chosen by the profiler<br />based on the SLA targets. This is the configuration used for deployment<br />when autoApply is true. |  | Type: object <br />Optional: \{\} <br /> |
+
+
+#### SLASpec
+
+
+
+SLASpec defines the service-level agreement targets for profiling optimization.
+Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `optimizationType` _[OptimizationType](#optimizationtype)_ | OptimizationType controls the profiling optimization strategy.<br />Use when explicit SLA targets (ttft+itl or e2eLatency) are not known. |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
+| `ttft` _float_ | TTFT is the Time To First Token target in milliseconds. |  | Optional: \{\} <br /> |
+| `itl` _float_ | ITL is the Inter-Token Latency target in milliseconds. |  | Optional: \{\} <br /> |
+| `e2eLatency` _float_ | E2ELatency is the target end-to-end request latency in milliseconds.<br />Alternative to specifying TTFT + ITL. |  | Optional: \{\} <br /> |
+
+
+#### SearchStrategy
+
+_Underlying type:_ _string_
+
+SearchStrategy controls the profiling search depth.
+
+_Validation:_
+- Enum: [rapid thorough]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description |
+| --- | --- |
+| `rapid` |  |
+| `thorough` |  |
+
+
+#### WorkloadSpec
+
+
+
+WorkloadSpec defines the workload characteristics for SLA-based profiling.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `isl` _integer_ | ISL is the Input Sequence Length (number of tokens). | 4000 | Optional: \{\} <br /> |
+| `osl` _integer_ | OSL is the Output Sequence Length (number of tokens). | 1000 | Optional: \{\} <br /> |
+| `concurrency` _float_ | Concurrency is the target concurrency level.<br />Required (or RequestRate) when the planner is disabled. |  | Optional: \{\} <br /> |
+| `requestRate` _float_ | RequestRate is the target request rate (req/s).<br />Required (or Concurrency) when the planner is disabled. |  | Optional: \{\} <br /> |
 
 
 # Operator Default Values Injection

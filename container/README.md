@@ -227,7 +227,7 @@ Note: `uv` commands set `UV_CACHE_DIR` per `RUN` so `uv` always uses the same pa
 ```bash
 # Build vLLM dev image called dynamo:latest-vllm (default). This runs as root and is for development.
 python container/render.py --framework=vllm --target=dev --output-short-filename
-docker build -t dynamo:latest-vllm-dev -f rendered.Dockerfile .
+docker build -t dynamo:latest-vllm-dev -f container/rendered.Dockerfile .
 
 # Build a local-dev image. The local-dev image will run as `dynamo` with UID/GID matched to your host user,
 # which is useful when mounting partitions for development.
@@ -235,7 +235,7 @@ python container/render.py --framework=vllm --target=local-dev --output-short-fi
 docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
 
 # Build TensorRT-LLM development image called dynamo:latest-trtllm
-python container/render.py --framework=trtllm --target=runtime --output-short-filename
+python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
 docker build -t dynamo:latest-trtllm-runtime -f rendered.Dockerfile .
 ```
 
