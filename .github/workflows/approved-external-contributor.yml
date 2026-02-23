@@ -63,17 +63,70 @@ jobs:
             }
 
             core.setOutput("is_approved", "true");
-      - name: Comment /ok to test
+      - name: Verify commit signatures
+        id: signature_check
         if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.pull_request.number;
+
+            // Get all commits in the PR
+            const { data: commits } = await github.rest.pulls.listCommits({
+              owner,
+              repo,
+              pull_number,
+            });
+
+            if (commits.length === 0) {
+              core.warning("No commits found in PR.");
+              core.setOutput("all_signed", "false");
+              return;
+            }
+
+            let allSigned = true;
+            const unsigned = [];
+
+            for (const commit of commits) {
+              const sha = commit.sha;
+              
+              // Get detailed commit info including verification
+              const { data: commitData } = await github.rest.repos.getCommit({
+                owner,
+                repo,
+                ref: sha,
+              });
+
+              const verification = commitData.commit.verification;
+              
+              if (!verification || !verification.verified) {
+                allSigned = false;
+                unsigned.push({
+                  sha: sha.substring(0, 7),
+                  reason: verification?.reason || "not signed"
+                });
+                core.warning(`Commit ${sha} is not properly signed: ${verification?.reason || "not signed"}`);
+              } else {
+                core.info(`Commit ${sha} is verified with signature.`);
+              }
+            }
+
+            if (!allSigned) {
+              core.warning(`${unsigned.length} commit(s) are not properly signed.`);
+              core.setOutput("all_signed", "false");
+              core.setOutput("unsigned_commits", JSON.stringify(unsigned));
+            } else {
+              core.info("All commits are properly signed and verified.");
+              core.setOutput("all_signed", "true");
+            }
+      - name: Comment /ok to test
+        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           script: |
-            const sha = context.payload.pull_request?.head?.sha;
-            if (!sha) {
-              core.setFailed("Could not determine PR head SHA; aborting /ok to test comment.");
-              return;
-            }
+            const sha = context.payload.pull_request?.head?.sha || context.sha;
             const body = `/ok to test ${sha}`;
 
             const { owner, repo } = context.repo;
