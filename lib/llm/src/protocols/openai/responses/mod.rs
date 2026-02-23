@@ -5,10 +5,10 @@ pub mod stream_converter;
 
 use dynamo_async_openai::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, InputContent, InputItem, InputParam,
-    InputRole, Instructions, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent,
-    OutputStatus, OutputTextContent, Response, ResponseTextParam, Role as ResponseRole,
-    ServiceTier, Status, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
-    Truncation,
+    InputRole, InputTokenDetails, Instructions, Item, MessageItem, OutputItem, OutputMessage,
+    OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails, Response,
+    ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status,
+    TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -664,6 +664,27 @@ pub fn chat_completion_to_response(
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
+    // Convert CompletionUsage to ResponseUsage if available
+    let usage = chat_resp.usage.as_ref().map(|u| ResponseUsage {
+        input_tokens: u.prompt_tokens,
+        input_tokens_details: InputTokenDetails {
+            cached_tokens: u
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+                .unwrap_or(0),
+        },
+        output_tokens: u.completion_tokens,
+        output_tokens_details: OutputTokenDetails {
+            reasoning_tokens: u
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|d| d.reasoning_tokens)
+                .unwrap_or(0),
+        },
+        total_tokens: u.total_tokens,
+    });
+
     let choice = chat_resp.choices.into_iter().next();
     let mut output = Vec::new();
 
@@ -775,7 +796,7 @@ pub fn chat_completion_to_response(
         safety_identifier: None,
         service_tier: Some(ServiceTier::Auto),
         top_logprobs: Some(0),
-        usage: None,
+        usage,
     };
 
     Ok(NvResponse {

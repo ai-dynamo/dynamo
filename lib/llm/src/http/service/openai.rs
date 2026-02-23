@@ -1525,6 +1525,9 @@ async fn responses(
             let response_id = converter.response_id().to_string();
             let ttl = Some(std::time::Duration::from_secs(86400)); // 24 hour TTL
 
+            // NOTE: Streaming storage is best-effort. If this write fails, the client
+            // received the streamed response successfully but GET /v1/responses/{id}
+            // will return 404. This is documented behavior for streaming + store:true.
             converter = converter.with_storage_callback(move |response_json| {
                 tokio::spawn(async move {
                     match storage_for_callback
@@ -1546,6 +1549,8 @@ async fn responses(
                             );
                         }
                         Err(e) => {
+                            // Best-effort write: client already received 200 OK with the streamed
+                            // response. Warn here but do not surface the failure upstream.
                             tracing::warn!(
                                 tenant_id = %tenant_id,
                                 session_id = %session_id,
@@ -1948,9 +1953,9 @@ async fn handler_get_response(
                 error = %e,
                 "Failed to retrieve response"
             );
-            Err(ErrorMessage::internal_server_error(&format!(
-                "Failed to retrieve response: {e}"
-            )))
+            Err(ErrorMessage::internal_server_error(
+                "Failed to retrieve response",
+            ))
         }
     }
 }
@@ -2004,9 +2009,9 @@ async fn handler_delete_response(
                 error = %e,
                 "Failed to delete response"
             );
-            Err(ErrorMessage::internal_server_error(&format!(
-                "Failed to delete response: {e}"
-            )))
+            Err(ErrorMessage::internal_server_error(
+                "Failed to delete response",
+            ))
         }
     }
 }

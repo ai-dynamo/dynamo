@@ -546,11 +546,13 @@ async fn test_streaming_response_storage_callback() {
     let storage = Arc::new(InMemoryResponseStorage::new(0));
     let callback_invoked = Arc::new(AtomicBool::new(false));
     let stored_response = Arc::new(Mutex::new(None));
+    let done_notify = Arc::new(tokio::sync::Notify::new());
 
     // Create converter with storage callback
     let callback_invoked_clone = callback_invoked.clone();
     let stored_response_clone = stored_response.clone();
     let storage_clone = storage.clone();
+    let done_notify_clone = done_notify.clone();
     let tenant_id = "streaming_test_tenant";
     let session_id = "streaming_test_session";
 
@@ -563,8 +565,10 @@ async fn test_streaming_response_storage_callback() {
         let storage = storage_clone.clone();
         let response_json_clone = response_json.clone();
         let response_id = response_id.clone();
+        let stored_response = stored_response_clone.clone();
+        let notify = done_notify_clone.clone();
 
-        // Store the response
+        // Store the response and capture for test verification, then notify completion
         tokio::spawn(async move {
             let _ = storage
                 .store_response(
@@ -575,12 +579,8 @@ async fn test_streaming_response_storage_callback() {
                     Some(Duration::from_secs(3600)),
                 )
                 .await;
-        });
-
-        // Also capture for test verification
-        let stored_response = stored_response_clone.clone();
-        tokio::spawn(async move {
             *stored_response.lock().await = Some(response_json);
+            notify.notify_one();
         });
     });
 
@@ -650,8 +650,8 @@ async fn test_streaming_response_storage_callback() {
     // Emit end events (this should invoke the storage callback)
     let _end_events = converter.emit_end_events();
 
-    // Give the spawned tasks time to complete
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the spawned task to signal completion
+    done_notify.notified().await;
 
     // Verify callback was invoked
     assert!(

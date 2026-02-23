@@ -13,13 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_async_openai::types::responses::{
-    AssistantRole, FunctionToolCall, Instructions, OutputContent, OutputItem, OutputMessage,
-    OutputMessageContent, OutputStatus, OutputTextContent, Response, ResponseCompletedEvent,
-    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
-    ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    AssistantRole, FunctionToolCall, InputTokenDetails, Instructions, OutputContent, OutputItem,
+    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+    Response, ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
+    ResponseCreatedEvent, ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, ResponseTextParam, ServiceTier, Status, TextResponseFormatConfiguration,
+    ResponseOutputItemDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent,
+    ResponseTextParam, ResponseUsage, ServiceTier, Status, TextResponseFormatConfiguration,
     ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use uuid::Uuid;
@@ -45,6 +45,8 @@ pub struct ResponseStreamConverter {
     function_call_items: Vec<FunctionCallState>,
     // Output index counter
     next_output_index: u32,
+    // Accumulated usage from final streaming chunk
+    accumulated_usage: Option<ResponseUsage>,
     // Optional callback for storing completed response
     storage_callback: Option<Box<dyn FnOnce(serde_json::Value) + Send>>,
 }
@@ -77,6 +79,7 @@ impl ResponseStreamConverter {
             accumulated_text: String::new(),
             function_call_items: Vec::new(),
             next_output_index: 0,
+            accumulated_usage: None,
             storage_callback: None,
         }
     }
@@ -202,7 +205,7 @@ impl ResponseStreamConverter {
             safety_identifier: None,
             service_tier: Some(ServiceTier::Auto),
             top_logprobs: Some(0),
-            usage: None,
+            usage: self.accumulated_usage.clone(),
         }
     }
 
@@ -370,6 +373,29 @@ impl ResponseStreamConverter {
                     }
                 }
             }
+        }
+
+        // Capture usage from the chunk (typically present only on the final chunk)
+        if let Some(usage) = &chunk.usage {
+            self.accumulated_usage = Some(ResponseUsage {
+                input_tokens: usage.prompt_tokens,
+                input_tokens_details: InputTokenDetails {
+                    cached_tokens: usage
+                        .prompt_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.cached_tokens)
+                        .unwrap_or(0),
+                },
+                output_tokens: usage.completion_tokens,
+                output_tokens_details: OutputTokenDetails {
+                    reasoning_tokens: usage
+                        .completion_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.reasoning_tokens)
+                        .unwrap_or(0),
+                },
+                total_tokens: usage.total_tokens,
+            });
         }
 
         events
