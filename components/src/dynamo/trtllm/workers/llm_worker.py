@@ -166,7 +166,6 @@ async def init_llm_worker(
     )
     kv_connector_config = build_kv_connector_config(config)
 
-    modality = getattr(config, "modality", None) or "text"
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,
@@ -299,7 +298,7 @@ async def init_llm_worker(
         # This overrides the skip_tokenizer_init=True set earlier
         engine_args["skip_tokenizer_init"] = False
 
-    if modality == Modality.MULTIMODAL:
+    if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
         model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
         multimodal_processor = MultimodalRequestProcessor(
