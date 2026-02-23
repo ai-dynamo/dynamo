@@ -29,6 +29,7 @@ pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
 pub mod config;
+pub mod indexer_standalone;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
@@ -41,6 +42,7 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use config::{KvRouterConfig, RouterConfigOverride};
+pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
@@ -77,6 +79,9 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
+
+// for standalone indexer query
+pub const KV_INDEXER_QUERY_ENDPOINT: &str = "kv_indexer_query";
 
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
