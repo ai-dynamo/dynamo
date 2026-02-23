@@ -347,8 +347,9 @@ pub struct VllmConnectorSlot {
     /// The number of blocks cached from the disk
     tokens_cached_from_disk: usize,
 
-    /// Phantom data to ensure the storage type is correct.
-    block_manager: VllmBlockManager,
+    /// Block manager for device pool operations (cache lookup, onboarding).
+    /// `None` only in unit tests where these operations are not exercised.
+    block_manager: Option<VllmBlockManager>,
 
     block_size: usize,
 
@@ -408,10 +409,48 @@ impl VllmConnectorSlot {
         Self {
             request_id,
             sequence,
-            block_manager,
+            block_manager: Some(block_manager),
             block_size,
             xfer_tx,
             // default values
+            state: SlotState::Initialized,
+            iteration_first_scheduled: None,
+            current_position: 0,
+            evaluated_blocks: 0,
+            device_blocks: Vec::new(),
+            staging_from_host: None,
+            staging_from_disk: None,
+            pending_operations: None,
+            tokens_cached_from_device: 0,
+            tokens_cached_from_host: 0,
+            tokens_cached_from_disk: 0,
+            performed_cache_lookup: false,
+            total_blocks_queried: 0,
+            cache_stats,
+            offload_min_priority,
+            offload_terminated_at_block: None,
+            stored_block_priorities: HashMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        request_id: String,
+        tokens: Tokens,
+        salt_hash: SaltHash,
+        block_size: usize,
+        xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
+        cache_stats: Arc<CacheStatsTracker>,
+        offload_min_priority: u32,
+    ) -> Self {
+        assert!(!tokens.is_empty(), "tokens must be non-empty");
+        let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
+        Self {
+            request_id,
+            sequence,
+            block_manager: None,
+            block_size,
+            xfer_tx,
             state: SlotState::Initialized,
             iteration_first_scheduled: None,
             current_position: 0,
@@ -953,7 +992,7 @@ impl Slot for VllmConnectorSlot {
             tracing::info!("slot is in the Preempted state; we get another chance to match");
         }
 
-        let block_size = self.block_manager.block_size();
+        let block_size = self.block_size;
         let num_computed_blocks = num_computed_tokens / block_size;
         debug_assert!(num_computed_tokens.is_multiple_of(block_size));
 
@@ -1008,7 +1047,8 @@ impl Slot for VllmConnectorSlot {
 
         let mut host_blocks = self
             .block_manager
-            .host()
+            .as_ref()
+            .and_then(|bm| bm.host())
             .map(|host| host.match_sequence_hashes_blocking(blocks_to_lookup))
             .transpose()?
             .unwrap_or_default();
@@ -1022,7 +1062,8 @@ impl Slot for VllmConnectorSlot {
         // start at host offset
         let mut disk_blocks = self
             .block_manager
-            .disk()
+            .as_ref()
+            .and_then(|bm| bm.disk())
             .map(|disk| disk.match_sequence_hashes_blocking(&sequence_hashes[search_offset..]))
             .transpose()?
             .unwrap_or_default();
@@ -1834,5 +1875,250 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AnyBlocks for AnyImmutab
 
     fn block_ids(&self) -> Vec<BlockId> {
         self.block_ids()
+    }
+}
+
+#[cfg(test)]
+mod connector_tests {
+    use super::*;
+    use crate::block_manager::cache_stats::CacheStatsTracker;
+    use dynamo_llm::tokens::{SaltHash, Tokens};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    const BLOCK_SIZE: usize = 32;
+    const SALT_HASH: SaltHash = 12345;
+
+    /// Creates a test slot with `num_tokens` tokens and the given priority threshold.
+    /// Returns the slot and the receiving end of the transfer channel for inspecting offload requests.
+    fn create_test_slot(
+        num_tokens: usize,
+        offload_min_priority: u32,
+    ) -> (VllmConnectorSlot, mpsc::UnboundedReceiver<LocalTransferRequest>) {
+        let tokens: Vec<u32> = (1..=num_tokens as u32).collect();
+        let (xfer_tx, xfer_rx) = mpsc::unbounded_channel();
+        let cache_stats = Arc::new(CacheStatsTracker::new(None));
+        let slot = VllmConnectorSlot::new_for_test(
+            "test-req".to_string(),
+            Tokens::from(tokens),
+            SALT_HASH,
+            BLOCK_SIZE,
+            xfer_tx,
+            cache_stats,
+            offload_min_priority,
+        );
+        (slot, xfer_rx)
+    }
+
+    /// Generates block IDs starting from `start`.
+    fn block_ids(start: usize, count: usize) -> Vec<usize> {
+        (start..start + count).collect()
+    }
+
+    /// Drains all pending offload requests from the channel and returns their block IDs.
+    fn drain_offload_block_ids(
+        rx: &mut mpsc::UnboundedReceiver<LocalTransferRequest>,
+    ) -> Vec<Vec<usize>> {
+        let mut results = Vec::new();
+        while let Ok(req) = rx.try_recv() {
+            if let LocalTransferRequest::Offload(offload) = req {
+                results.push(offload.block_ids);
+            }
+        }
+        results
+    }
+
+    // ---------------------------------------------------------------
+    // Test 1: vLLM pattern — append_mutable then apply with empty blocks
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_vllm_pattern_no_double_add() {
+        let num_tokens = 96; // 3 blocks of 32
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 3);
+
+        // Step 1: append_mutable (from update_state_after_alloc)
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+
+        // Step 2: apply_scheduler_output with empty blocks (vLLM pattern)
+        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
+            .unwrap();
+
+        // device_blocks should still be exactly 3 — no double-add
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 2: TRT-LLM pattern — append_mutable then apply with SAME blocks
+    //         The dedup guard must prevent device_blocks from doubling.
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_trtllm_pattern_no_double_add() {
+        let num_tokens = 96; // 3 blocks of 32
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 3);
+
+        // Step 1: append_mutable (from update_state_after_alloc)
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+
+        // Step 2: apply_scheduler_output with THE SAME blocks (TRT-LLM pattern)
+        // Without the dedup guard, this doubles device_blocks to len=6.
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, None)
+            .unwrap();
+
+        // device_blocks must still be exactly 3 — dedup guard prevented the double-add
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 3: Decode adds a new block correctly
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_decode_block_added_correctly() {
+        let num_tokens = 96; // 3 blocks
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+        let prefill_blocks = block_ids(100, 3);
+
+        // Prefill: append + apply with empty blocks (vLLM pattern)
+        slot.append_mutable_device_blocks(&prefill_blocks).unwrap();
+        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
+            .unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+
+        // Decode: new block at boundary (token 96 = block 3)
+        let decode_block = block_ids(200, 1);
+        let decode_token: Vec<u32> = vec![9999];
+        slot.apply_scheduler_output(&decode_token, &decode_block, 95, 1, None)
+            .unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 4);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 3: Multiple append_mutable calls accumulate
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_append_mutable_is_additive() {
+        let (mut slot, _rx) = create_test_slot(128, 0);
+
+        slot.append_mutable_device_blocks(&block_ids(100, 2))
+            .unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 2);
+
+        slot.append_mutable_device_blocks(&block_ids(200, 1))
+            .unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 4: Offload sends correct block IDs through channel
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_offload_sends_correct_block_ids() {
+        let num_tokens = 96; // 3 blocks
+        let (mut slot, mut rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 3);
+
+        // Prefill with blocks
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        // apply_scheduler_output triggers offload of floor(96/32)-0 = 3 candidate blocks,
+        // but only the first 2 are full (block at index 2 holds tokens 64-95).
+        // Actually: num_candidate = 96/32 - 0 = 3, so all 3 are candidates.
+        // But wait — with empty tokens, state becomes Prefilling and early-return fires
+        // because next_position(96) > sequence.total_tokens(96) is false, so offload runs.
+        slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
+            .unwrap();
+
+        let offloads = drain_offload_block_ids(&mut rx);
+        assert_eq!(offloads.len(), 1, "expected exactly one offload batch");
+        assert_eq!(offloads[0], vec![100, 101, 102]);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 5: Priority filtering offloads only blocks above threshold
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_priority_filtering_offloads_correct_count() {
+        let num_tokens = 96; // 3 blocks
+        let (mut slot, mut rx) = create_test_slot(num_tokens, 30);
+        let blocks = block_ids(100, 3);
+        let priorities: Vec<u32> = vec![80, 80, 10]; // 2 above threshold, 1 below
+
+        // Use the TRT-LLM pattern: append_mutable first, then apply with same blocks + priorities.
+        // The dedup guard prevents the double-add, but priorities are still processed.
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities))
+            .unwrap();
+
+        // device_blocks should be 3 (dedup prevented doubling)
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+
+        let offloads = drain_offload_block_ids(&mut rx);
+        assert_eq!(offloads.len(), 1);
+        // Only blocks with priority >= 30 should be offloaded (first 2)
+        assert_eq!(offloads[0], vec![100, 101]);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 6: Priority filtering terminates further offloading
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_priority_filtering_terminates_offload() {
+        let num_tokens = 128; // 4 blocks
+        let (mut slot, mut rx) = create_test_slot(num_tokens, 30);
+        let blocks = block_ids(100, 4);
+        // First 2 high, then 2 low — offload terminates at block 2
+        let priorities: Vec<u32> = vec![80, 80, 10, 10];
+
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+        slot.apply_scheduler_output(&[], &blocks, 0, num_tokens, Some(&priorities))
+            .unwrap();
+
+        let offloads = drain_offload_block_ids(&mut rx);
+        assert_eq!(offloads[0], vec![100, 101]); // only 2 offloaded
+
+        // Now simulate a decode iteration that crosses a block boundary.
+        // Because offload was terminated, no further offloading should happen.
+        let decode_block = block_ids(200, 1);
+        let decode_token: Vec<u32> = vec![9999];
+        slot.apply_scheduler_output(&decode_token, &decode_block, 127, 1, None)
+            .unwrap();
+
+        let further_offloads = drain_offload_block_ids(&mut rx);
+        assert!(
+            further_offloads.is_empty(),
+            "no offloads should occur after termination"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 7: evaluated_blocks advances correctly across iterations
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_evaluated_blocks_advances_correctly() {
+        // 128 tokens = 4 blocks. We'll process in 2 chunks of 64 tokens.
+        let num_tokens = 128;
+        let (mut slot, mut rx) = create_test_slot(num_tokens, 0);
+        let blocks = block_ids(100, 4);
+
+        slot.append_mutable_device_blocks(&blocks).unwrap();
+
+        // Chunk 1: schedule first 64 tokens → evaluates blocks 0,1
+        slot.apply_scheduler_output(&[], &[], 0, 64, None)
+            .unwrap();
+        let offloads_1 = drain_offload_block_ids(&mut rx);
+        assert_eq!(offloads_1.len(), 1);
+        assert_eq!(offloads_1[0], vec![100, 101]); // blocks 0,1
+
+        // Chunk 2: schedule next 64 tokens → evaluates blocks 2,3
+        // (uses cached_request pattern: empty tokens, empty blocks)
+        slot.apply_scheduler_output(&[], &[], 64, 64, None)
+            .unwrap();
+        let offloads_2 = drain_offload_block_ids(&mut rx);
+        assert_eq!(offloads_2.len(), 1);
+        assert_eq!(offloads_2[0], vec![102, 103]); // blocks 2,3
+
+        assert_eq!(slot.num_device_blocks_allocated(), 4);
     }
 }
