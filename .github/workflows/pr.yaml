@@ -32,11 +32,27 @@ env:
 jobs:
 
   test2:
-    name: interesing
-    runs-on: 'ubuntu-slim'
+    name: interesting
+    runs-on: ubuntu-slim
     outputs:
       test_image: ${{ steps.calculate-target-tag.outputs.test_image }}
+      ecr_password: ${{ steps.ecr-login.outputs.ecr_password }}   # ← add this
     steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Get ECR password
+        id: ecr-login
+        run: |
+          PASSWORD=$(aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }})
+          echo "::add-mask::$PASSWORD"   # masks it from all future log output
+          echo "ecr_password=$PASSWORD" >> $GITHUB_OUTPUT
+
+
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
@@ -50,6 +66,9 @@ jobs:
     needs: [test2]
     container:
       image: ${{ needs.test2.outputs.test_image }}
+      credentials:
+        username: AWS                                             # ← always "AWS" for ECR
+        password: ${{ needs.test2.outputs.ecr_password }}        # ← token from test2
     steps:
       - name: Run test
         run: |
