@@ -194,9 +194,9 @@ async fn anthropic_messages(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
+        .get_chat_completions_engine_with_parsing(&model)
         .map_err(|_| {
             anthropic_error(
                 StatusCode::NOT_FOUND,
@@ -204,8 +204,6 @@ async fn anthropic_messages(
                 &format!("Model '{}' not found", model),
             )
         })?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
