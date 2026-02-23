@@ -117,7 +117,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.3.0rc3"
 # TensorRT-LLM wheels on PyPI might not be compatible with the NGC PyTorch.
 # For incompatible versions, we install the wheel from the NGC image during the Docker build.
 # The following versions are not ABI compatible with the NGC PyTorch.
-TRTLLM_ABI_INCOMPATIBLE_VERSIONS=("1.3.0rc3")
+TRTLLM_ABI_INCOMPATIBLE_VERSIONS=("1.3.0rc1")
 TENSORRTLLM_PIP_WHEEL=""
 TRTLLM_WHEEL_IMAGE=""
 
