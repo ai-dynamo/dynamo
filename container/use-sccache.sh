@@ -15,7 +15,7 @@ usage() {
 Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
-    install         Install sccache binary (requires ARCH_ALT environment variable)
+    install         Install sccache binary (architecture auto-detected via uname -m)
     setup-env       Print export statements to configure sccache for compilation
     show-stats      Display sccache statistics with optional build name
     help            Show this help message
@@ -33,10 +33,9 @@ Environment variables:
     SCCACHE_BUCKET          S3 bucket name (fallback if not passed as parameter)
     SCCACHE_REGION          S3 region (fallback if not passed as parameter)
     ARCH                    Architecture for S3 key prefix (fallback if not passed as parameter)
-    ARCH_ALT                Alternative architecture name for downloads (e.g., x86_64, aarch64)
 
 Examples:
-    ARCH_ALT=x86_64 $0 install
+    $0 install                     # architecture auto-detected via uname -m
     eval \$($0 setup-env)          # autotools / Meson
     eval \$($0 setup-env cmake)    # CMake builds
     $0 show-stats "UCX"
@@ -44,16 +43,15 @@ EOF
 }
 
 install_sccache() {
-    if [ -z "${ARCH_ALT:-}" ]; then
-        echo "Error: ARCH_ALT environment variable is required for sccache installation"
-        exit 1
-    fi
-    echo "Installing sccache ${SCCACHE_VERSION} for architecture ${ARCH_ALT}..."
+    # Auto-detect architecture via uname -m (returns x86_64 or aarch64)
+    local arch_alt
+    arch_alt=$(uname -m)
+    echo "Installing sccache ${SCCACHE_VERSION} for architecture ${arch_alt}..."
     # Download and install sccache
     wget --tries=3 --waitretry=5 \
-        "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz"
-    tar -xzf "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz"
-    mv "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl/sccache" /usr/local/bin/
+        "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl.tar.gz"
+    tar -xzf "sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl.tar.gz"
+    mv "sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl/sccache" /usr/local/bin/
     # Cleanup
     rm -rf sccache*
 
