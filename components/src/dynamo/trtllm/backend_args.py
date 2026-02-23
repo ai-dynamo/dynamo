@@ -152,6 +152,13 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="If set, publish events and metrics to Dynamo components.",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--disable-request-abort",
+            env_var="DYN_TRTLLM_DISABLE_REQUEST_ABORT",
+            default=True,
+            help="Disable calling abort() on the TRT-LLM engine when a request is cancelled.",
+        )
         add_argument(
             g,
             flag_name="--disaggregation-mode",
@@ -194,13 +201,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
         diffusion_group = parser.add_argument_group(
             "Diffusion Options [Experimental]",
             "Options for video_diffusion modality",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--output-dir",
-            env_var="DYN_TRTLLM_OUTPUT_DIR",
-            default="/tmp/dynamo_videos",
-            help="Directory to store generated videos/images.",
         )
         add_argument(
             diffusion_group,
@@ -370,6 +370,7 @@ class DynamoTrtllmConfig(ConfigBase):
     extra_engine_args: str
     override_engine_args: str
     publish_events_and_metrics: bool
+    disable_request_abort: bool
 
     disaggregation_mode: DisaggregationMode
     modality: Modality
@@ -377,7 +378,6 @@ class DynamoTrtllmConfig(ConfigBase):
     allowed_local_media_path: str
     max_file_size_mb: int
 
-    output_dir: str
     default_height: int
     default_width: int
     default_num_frames: int

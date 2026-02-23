@@ -138,6 +138,145 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
         )
 
+        # Video encoding
+        add_argument(
+            g,
+            flag_name="--default-video-fps",
+            env_var="DYN_VLLM_DEFAULT_VIDEO_FPS",
+            default=16,
+            arg_type=int,
+            help="Default frames per second for generated videos.",
+        )
+
+        # Diffusion engine-level args (passed to AsyncOmni constructor)
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-layerwise-offload",
+            env_var="DYN_VLLM_ENABLE_LAYERWISE_OFFLOAD",
+            default=False,
+            help="Enable layerwise (blockwise) offloading on DiT modules to reduce GPU memory.",
+        )
+        add_argument(
+            g,
+            flag_name="--layerwise-num-gpu-layers",
+            env_var="DYN_VLLM_LAYERWISE_NUM_GPU_LAYERS",
+            default=1,
+            arg_type=int,
+            help="Number of ready layers (blocks) to keep on GPU during generation.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--vae-use-slicing",
+            env_var="DYN_VLLM_VAE_USE_SLICING",
+            default=False,
+            help="Enable VAE slicing for memory optimization in diffusion models.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--vae-use-tiling",
+            env_var="DYN_VLLM_VAE_USE_TILING",
+            default=False,
+            help="Enable VAE tiling for memory optimization in diffusion models.",
+        )
+        add_argument(
+            g,
+            flag_name="--boundary-ratio",
+            env_var="DYN_VLLM_BOUNDARY_RATIO",
+            default=0.875,
+            arg_type=float,
+            help=(
+                "Boundary split ratio for low/high DiT transformers. "
+                "Default 0.875 uses both transformers for best quality. "
+                "Set to 1.0 to load only the low-noise transformer (saves memory). "
+                "Only used with --omni."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--flow-shift",
+            env_var="DYN_VLLM_FLOW_SHIFT",
+            default=None,
+            arg_type=float,
+            help="Scheduler flow_shift parameter (5.0 for 720p, 12.0 for 480p). Only used with --omni.",
+        )
+        add_argument(
+            g,
+            flag_name="--diffusion-cache-backend",
+            env_var="DYN_VLLM_DIFFUSION_CACHE_BACKEND",
+            default=None,
+            choices=["cache_dit", "tea_cache"],
+            help=(
+                "Cache backend for diffusion acceleration. "
+                "'cache_dit' enables DBCache + SCM + TaylorSeer. "
+                "'tea_cache' enables TeaCache. Only used with --omni."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--diffusion-cache-config",
+            env_var="DYN_VLLM_DIFFUSION_CACHE_CONFIG",
+            default=None,
+            help="Cache configuration as JSON string (overrides defaults). Only used with --omni.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-cache-dit-summary",
+            env_var="DYN_VLLM_ENABLE_CACHE_DIT_SUMMARY",
+            default=False,
+            help="Enable cache-dit summary logging after diffusion forward passes.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-cpu-offload",
+            env_var="DYN_VLLM_ENABLE_CPU_OFFLOAD",
+            default=False,
+            help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enforce-eager",
+            env_var="DYN_VLLM_ENFORCE_EAGER",
+            default=False,
+            help="Disable torch.compile and force eager execution for diffusion models.",
+        )
+        # Diffusion parallel configuration
+        add_argument(
+            g,
+            flag_name="--ulysses-degree",
+            env_var="DYN_VLLM_ULYSSES_DEGREE",
+            default=1,
+            arg_type=int,
+            help="Number of GPUs used for Ulysses sequence parallelism in diffusion.",
+        )
+        add_argument(
+            g,
+            flag_name="--ring-degree",
+            env_var="DYN_VLLM_RING_DEGREE",
+            default=1,
+            arg_type=int,
+            help="Number of GPUs used for ring sequence parallelism in diffusion.",
+        )
+        add_argument(
+            g,
+            flag_name="--cfg-parallel-size",
+            env_var="DYN_VLLM_CFG_PARALLEL_SIZE",
+            default=1,
+            arg_type=int,
+            choices=[1, 2],
+            help="Number of GPUs used for classifier free guidance parallelism.",
+        )
+
+        # Headless mode for multi-node TP/PP
+        add_negatable_bool_argument(
+            g,
+            flag_name="--headless",
+            env_var="DYN_VLLM_HEADLESS",
+            default=False,
+            help="Run in headless mode for multi-node TP/PP. "
+            "Secondary nodes run vLLM workers only, no dynamo endpoints. "
+            "See vLLM multi-node data parallel documentation for more details.",
+        )
+
         # ModelExpress P2P
         add_argument(
             g,
@@ -170,6 +309,29 @@ class DynamoVllmConfig(ConfigBase):
     # vLLM-Omni
     omni: bool
     stage_configs_path: Optional[str] = None
+
+    # Video encoding
+    default_video_fps: int = 16
+
+    # Diffusion engine-level parameters (passed to AsyncOmni constructor)
+    enable_layerwise_offload: bool = False
+    layerwise_num_gpu_layers: int = 1
+    vae_use_slicing: bool = False
+    vae_use_tiling: bool = False
+    boundary_ratio: float = 0.875
+    flow_shift: Optional[float] = None
+    diffusion_cache_backend: Optional[str] = None
+    diffusion_cache_config: Optional[str] = None
+    enable_cache_dit_summary: bool = False
+    enable_cpu_offload: bool = False
+
+    # Diffusion parallel configuration
+    ulysses_degree: int = 1
+    ring_degree: int = 1
+    cfg_parallel_size: int = 1
+
+    # Headless mode for multi-node TP/PP
+    headless: bool = False
 
     # ModelExpress P2P
     model_express_url: Optional[str] = None

@@ -9,6 +9,7 @@ workers using diffusion models (Wan, Flux, Cosmos, etc.).
 
 import asyncio
 import logging
+from typing import Optional
 
 from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
@@ -16,7 +17,10 @@ from dynamo.trtllm.args import Config
 
 
 async def init_video_diffusion_worker(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    shutdown_endpoints: Optional[list] = None,
 ) -> None:
     """Initialize and run the video diffusion worker.
 
@@ -27,6 +31,7 @@ async def init_video_diffusion_worker(
         runtime: The Dynamo distributed runtime.
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
+        shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
     # Check visual_gen availability early with a clear error message.
     # visual_gen is part of TensorRT-LLM but only available on the feat/visual_gen
@@ -60,7 +65,8 @@ async def init_video_diffusion_worker(
         event_plane=config.event_plane,
         model_path=config.model,
         served_model_name=config.served_model_name,
-        output_dir=config.output_dir,
+        media_output_fs_url=config.media_output_fs_url,
+        media_output_http_url=config.media_output_http_url,
         default_height=config.default_height,
         default_width=config.default_width,
         default_num_frames=config.default_num_frames,
@@ -86,6 +92,8 @@ async def init_video_diffusion_worker(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
     component = endpoint.component()
+    if shutdown_endpoints is not None:
+        shutdown_endpoints[:] = [endpoint]
 
     # Initialize the diffusion engine (auto-detects pipeline from model_index.json)
     engine = DiffusionEngine(diffusion_config)

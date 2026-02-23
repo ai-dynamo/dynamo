@@ -85,12 +85,6 @@ class DistributedRuntime:
         """
         ...
 
-    def child_token(self) -> CancellationToken:
-        """
-        Get a child cancellation token that can be passed to async tasks
-        """
-        ...
-
     def register_engine_route(
         self,
         route_name: str,
@@ -116,20 +110,6 @@ class DistributedRuntime:
         For GET requests or empty bodies, an empty dict {} is passed.
         """
         ...
-
-class CancellationToken:
-    def cancel(self) -> None:
-        """
-        Cancel the token and all its children
-        """
-        ...
-
-    async def cancelled(self) -> None:
-        """
-        Await until the token is cancelled
-        """
-        ...
-
 
 class Component:
     """
@@ -742,6 +722,7 @@ class KvEventPublisher:
         block_hashes: List[int],
         lora_id: int,
         parent_hash: Optional[int] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -754,6 +735,9 @@ class KvEventPublisher:
             block_hashes: List of block hashes (signed 64-bit integers)
             lora_id: The LoRA ID
             parent_hash: Optional parent hash (signed 64-bit integer)
+            block_mm_infos: Optional list of multimodal info for each block.
+                Each item is either None or a dict with "mm_objects" key containing
+                a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
         """
         ...
 
@@ -780,7 +764,29 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    ...
+    def __init__(self, port: Optional[int] = None) -> None:
+        """
+        Create a new HTTP service.
+
+        Args:
+            port: Optional port number to bind the service to (default: 8080)
+        """
+        ...
+
+    async def run(self, runtime: DistributedRuntime) -> None:
+        """
+        Run the HTTP service.
+
+        Args:
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the HTTP service by cancelling its internal token.
+        """
+        ...
 
 class PythonAsyncEngine:
     """
@@ -921,12 +927,18 @@ class KserveGrpcService:
         """
         ...
 
-    async def run(self, token: CancellationToken) -> None:
+    async def run(self, runtime: DistributedRuntime) -> None:
         """
         Run the KServe gRPC service.
 
         Args:
-            token: Cancellation token to stop the service
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the KServe gRPC service by cancelling its internal token.
         """
         ...
 
