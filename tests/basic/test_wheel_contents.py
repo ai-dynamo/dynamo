@@ -13,10 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Test that the ai-dynamo-runtime wheel does not bundle shared libraries."""
+"""Test that ai-dynamo-runtime does not bundle shared libraries."""
 
-import glob
-import zipfile
+from importlib.metadata import files
 
 import pytest
 
@@ -27,28 +26,24 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-WHEEL_DIR = "/opt/dynamo/wheelhouse"
-
 
 def test_no_bundled_shared_libraries():
-    """Ensure ai-dynamo-runtime wheel does not bundle any shared libraries.
+    """Ensure ai-dynamo-runtime does not bundle any shared libraries.
 
     All .so dependencies should come from system installs or pip packages,
     not be bundled inside the wheel by auditwheel.  If this test fails,
     add --exclude flags to the auditwheel repair command in
     container/templates/wheel_builder.Dockerfile.
     """
-    matches = glob.glob(f"{WHEEL_DIR}/ai_dynamo_runtime-*.whl")
-    assert matches, f"ai-dynamo-runtime wheel not found in {WHEEL_DIR}"
-    whl_path = matches[0]
+    installed_files = files("ai-dynamo-runtime")
+    assert installed_files is not None, "ai-dynamo-runtime is not installed"
 
-    with zipfile.ZipFile(whl_path) as zf:
-        bundled_libs = [
-            name for name in zf.namelist() if ".libs/" in name and ".so" in name
-        ]
+    bundled_libs = [
+        str(f) for f in installed_files if ".libs/" in str(f) and ".so" in str(f)
+    ]
 
     assert not bundled_libs, (
-        f"Unexpected shared libraries bundled in {whl_path}:\n"
+        "Unexpected shared libraries bundled in ai-dynamo-runtime:\n"
         + "\n".join(f"  {lib}" for lib in bundled_libs)
         + "\nAdd --exclude flags to auditwheel repair in "
         "container/templates/wheel_builder.Dockerfile"
