@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          image: docker.io/lambda108/epp-inference-extension-dynamo:align-interface
       eppConfig:
         # This config uses the same disagg-profile-handler as disaggregated deployments.
         # The handler's graceful degradation feature makes this possible:
@@ -57,7 +57,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:align-interface
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -94,7 +94,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:align-interface
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:

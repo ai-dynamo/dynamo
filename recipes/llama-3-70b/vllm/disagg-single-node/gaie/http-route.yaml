@@ -18,10 +18,10 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: llama3-70b-agg-route
+  name: llama3-70b-disagg-route
 spec:
   hostnames:
-    - llama3-70b-agg.example.com
+    - llama3-70b-disagg.example.com
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
@@ -31,7 +31,7 @@ spec:
     - backendRefs:
         - group: inference.networking.k8s.io
           kind: InferencePool
-          name: llama3-70b-agg-pool
+          name: llama3-70b-disagg-pool
           port: 8000
           weight: 1
       matches:

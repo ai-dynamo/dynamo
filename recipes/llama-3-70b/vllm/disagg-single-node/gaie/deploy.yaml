@@ -3,7 +3,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: llama3-70b-disagg-sn
+  name: llama3-70b-disagg
 spec:
   backendFramework: vllm
   pvcs:
@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          image: docker.io/lambda108/epp-inference-extension-dynamo:align-interface
       eppConfig:
         config:
           plugins:
@@ -54,19 +54,6 @@ spec:
             - pluginRef: dyn-decode
               weight: 1.0
             - pluginRef: picker
-    Frontend:
-      componentType: frontend
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
-          workingDir: /workspace/examples/backends/vllm
-      envs:
-        - name: HF_HOME
-          value: /opt/models
-      replicas: 1
     VllmPrefillWorker:
       componentType: worker
       subComponentType: prefill
@@ -102,8 +89,66 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: docker.io/lambda108/dynamo:align-interface
           workingDir: /workspace/examples/backends/vllm
+        # Frontend sidecar: receives requests from kGateway on port 8000
+        # and routes them to the vLLM worker in the same pod
+        containers:
+          - name: frontend
+            image: docker.io/lambda108/dynamo:align-interface
+            command:
+              - python3
+            args:
+              - -m
+              - dynamo.frontend
+              - --router-mode
+              - direct
+            ports:
+              - containerPort: 8000
+                name: http
+                protocol: TCP
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
+            env:
+              - name: DYNAMO_PORT
+                value: "8000"
+              - name: DYN_HTTP_PORT
+                value: "8000"
+              - name: DYN_NAMESPACE
+                value: a-epp-vllm-disagg
+              - name: DYN_COMPONENT
+                value: frontend
+              - name: DYN_DISCOVERY_BACKEND
+                value: kubernetes
+              - name: DYN_PARENT_DGD_K8S_NAME
+                value: llama3-70b-disagg
+              - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                value: a-epp
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: POD_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_UID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.uid
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
       replicas: 2
       resources:
         limits:
@@ -145,8 +190,66 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: docker.io/lambda108/dynamo:align-interface
           workingDir: /workspace/examples/backends/vllm
+        # Frontend sidecar: receives requests from kGateway on port 8000
+        # and routes them to the vLLM worker in the same pod
+        containers:
+          - name: frontend
+            image: docker.io/lambda108/dynamo:align-interface
+            command:
+              - python3
+            args:
+              - -m
+              - dynamo.frontend
+              - --router-mode
+              - direct
+            ports:
+              - containerPort: 8000
+                name: http
+                protocol: TCP
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
+            env:
+              - name: DYNAMO_PORT
+                value: "8000"
+              - name: DYN_HTTP_PORT
+                value: "8000"
+              - name: DYN_NAMESPACE
+                value: a-epp-vllm-disagg
+              - name: DYN_COMPONENT
+                value: frontend
+              - name: DYN_DISCOVERY_BACKEND
+                value: kubernetes
+              - name: DYN_PARENT_DGD_K8S_NAME
+                value: llama3-70b-disagg
+              - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                value: a-epp
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: POD_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_UID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.uid
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
       replicas: 1
       resources:
         limits:

@@ -130,13 +130,18 @@ you could deploy it as a standalone pod
 
 #### 5.a. Deploy as a DGD component (recommended)
 
-We provide an example for llama-3-70b vLLM below.
+
 
 ```bash
-# Deploy PVC, first Update `storageClassName` in recipes/llama-3-70b/model-cache/model-cache.yaml to match your cluster before deploying
-kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml
-kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml
-# Deploy your model
+# Deploy PVC, having first Update `storageClassName` in recipes/llama-3-70b/model-cache/model-cache.yaml to match your cluster before deploying
+kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml  -n ${NAMESPACE}
+kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml  -n ${NAMESPACE}
+```
+We provide examples for llama-3-70b vLLM under the `recipes/llama-3-70b/vllm/agg/gaie/` for aggregated and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/` for disaggregated serving.
+Use the proper folder in commands below.
+
+```bash
+# Deploy your Dynamo Graph.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
 # Deploy the GAIE http-route CR.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
