@@ -217,7 +217,7 @@ impl ResponseStorage for InMemoryResponseStorage {
             // Find the cursor response to get its position
             if let Some(cursor_pos) = responses.iter().position(|r| r.response_id == cursor_id) {
                 // Skip all responses up to and including the cursor
-                responses = responses.into_iter().skip(cursor_pos + 1).collect();
+                responses.drain(..=cursor_pos);
             }
             // If cursor not found, return all responses (cursor may have been deleted)
         }

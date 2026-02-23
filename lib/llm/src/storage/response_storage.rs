@@ -43,11 +43,15 @@ pub enum StorageError {
     #[error("Response not found")]
     NotFound,
 
-    /// Session mismatch - attempted to access response from different session
+    /// Reserved for custom storage backends that enforce session boundaries.
+    /// Built-in backends return [`NotFound`](StorageError::NotFound) instead
+    /// (see trait-level isolation contract).
     #[error("Session mismatch: response belongs to different session")]
     SessionMismatch,
 
-    /// Tenant mismatch - attempted to access response from different tenant
+    /// Reserved for custom storage backends that enforce session boundaries.
+    /// Built-in backends return [`NotFound`](StorageError::NotFound) instead
+    /// (see trait-level isolation contract).
     #[error("Tenant mismatch: response belongs to different tenant")]
     TenantMismatch,
 
@@ -248,7 +252,7 @@ pub trait ResponseStorage: Send + Sync {
             .unwrap_or_default()
             .as_secs();
 
-        let mut cloned = 0;
+        let mut copied_count = 0;
         for response in responses {
             // Compute remaining TTL from the source response so forked
             // entries expire at the same wall-clock time as the originals.
@@ -273,7 +277,7 @@ pub trait ResponseStorage: Send + Sync {
                     remaining_ttl,
                 )
                 .await?;
-                cloned += 1;
+                copied_count += 1;
                 break;
             }
 
@@ -285,10 +289,10 @@ pub trait ResponseStorage: Send + Sync {
                 remaining_ttl,
             )
             .await?;
-            cloned += 1;
+            copied_count += 1;
         }
 
-        Ok(cloned)
+        Ok(copied_count)
     }
 }
 

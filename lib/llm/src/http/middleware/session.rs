@@ -39,6 +39,12 @@ pub struct RequestSession {
     pub session_id: String,
 }
 
+/// Default tenant identifier used when no `x-tenant-id` header is provided.
+pub const DEFAULT_TENANT_ID: &str = "default";
+
+/// Default session identifier used when no `x-session-id` header is provided.
+pub const DEFAULT_SESSION_ID: &str = "default";
+
 /// Maximum allowed length for header values (tenant_id, session_id)
 const MAX_HEADER_LENGTH: usize = 256;
 
@@ -117,7 +123,7 @@ pub async fn extract_session_middleware(
                 .map_err(|(code, msg)| (code, msg).into_response())?;
             value
         }
-        None => "default".to_string(),
+        None => DEFAULT_SESSION_ID.to_string(),
     };
 
     // Insert context into request extensions for downstream handlers
