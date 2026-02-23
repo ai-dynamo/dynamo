@@ -24,6 +24,8 @@ import (
 )
 
 // SetDefaults_OperatorConfiguration sets default values for OperatorConfiguration.
+// IMPORTANT: When changing defaults here, also update the corresponding
+// +kubebuilder:default= markers in types.go to keep API docs in sync.
 func SetDefaults_OperatorConfiguration(obj *OperatorConfiguration) {
 	// Server defaults
 	if obj.Server.Metrics.Port == 0 {

@@ -77,10 +77,13 @@ type OperatorConfiguration struct {
 // ServerConfiguration holds server bind addresses and ports.
 type ServerConfiguration struct {
 	// Metrics server configuration
+	// +kubebuilder:default={port: 8080}
 	Metrics MetricsServer `json:"metrics"`
 	// Health probe server configuration
+	// +kubebuilder:default={port: 8081}
 	HealthProbe Server `json:"healthProbe"`
 	// Webhook server configuration
+	// +kubebuilder:default={host: "0.0.0.0", port: 9443, certDir: "/tmp/k8s-webhook-server/serving-certs"}
 	Webhook WebhookServer `json:"webhook"`
 }
 
@@ -129,8 +132,10 @@ type NamespaceConfiguration struct {
 // NamespaceScopeConfiguration holds lease settings for namespace-restricted mode.
 type NamespaceScopeConfiguration struct {
 	// LeaseDuration is the duration of namespace scope marker lease before expiration
+	// +kubebuilder:default="30s"
 	LeaseDuration metav1.Duration `json:"leaseDuration"`
 	// LeaseRenewInterval is the interval for renewing namespace scope marker lease
+	// +kubebuilder:default="10s"
 	LeaseRenewInterval metav1.Duration `json:"leaseRenewInterval"`
 }
 
@@ -149,6 +154,7 @@ type GroveConfiguration struct {
 	// Enabled overrides auto-detection. nil = auto-detect.
 	Enabled *bool `json:"enabled,omitempty"`
 	// TerminationDelay configures the termination delay for Grove PodCliqueSets
+	// +kubebuilder:default="15m"
 	TerminationDelay metav1.Duration `json:"terminationDelay"`
 }
 
@@ -218,10 +224,13 @@ type CheckpointConfiguration struct {
 	// Enabled indicates if checkpoint functionality is enabled
 	Enabled bool `json:"enabled"`
 	// InitContainerImage is the image used for init containers
+	// +kubebuilder:default="busybox:latest"
 	InitContainerImage string `json:"initContainerImage"`
 	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
+	// +kubebuilder:default="/tmp/ready-for-checkpoint"
 	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
 	// RestoreMarkerFilePath is the marker file written after successful restore
+	// +kubebuilder:default="/tmp/dynamo-restored"
 	RestoreMarkerFilePath string `json:"restoreMarkerFilePath"`
 	// Storage holds storage backend configuration
 	Storage CheckpointStorageConfiguration `json:"storage"`
@@ -230,8 +239,10 @@ type CheckpointConfiguration struct {
 // CheckpointStorageConfiguration holds storage backend configuration for checkpoints.
 type CheckpointStorageConfiguration struct {
 	// Type is the storage backend type: pvc, s3, or oci
+	// +kubebuilder:default="pvc"
 	Type string `json:"type"`
 	// SignalHostPath is the host path for signal files
+	// +kubebuilder:default="/var/lib/chrek/signals"
 	SignalHostPath string `json:"signalHostPath"`
 	// PVC configuration (used when Type=pvc)
 	PVC CheckpointPVCConfig `json:"pvc"`
@@ -244,8 +255,10 @@ type CheckpointStorageConfiguration struct {
 // CheckpointPVCConfig holds PVC storage configuration.
 type CheckpointPVCConfig struct {
 	// PVCName is the name of the PVC
+	// +kubebuilder:default="chrek-pvc"
 	PVCName string `json:"pvcName"`
 	// BasePath is the base directory within the PVC
+	// +kubebuilder:default="/checkpoints"
 	BasePath string `json:"basePath"`
 }
 
@@ -268,6 +281,7 @@ type CheckpointOCIConfig struct {
 // DiscoveryConfiguration holds discovery backend settings.
 type DiscoveryConfiguration struct {
 	// Backend is the discovery backend: "kubernetes" or "etcd"
+	// +kubebuilder:default="kubernetes"
 	Backend DiscoveryBackend `json:"backend"`
 }
 
@@ -284,14 +298,17 @@ const (
 // GPUConfiguration holds GPU discovery settings.
 type GPUConfiguration struct {
 	// DiscoveryEnabled indicates whether GPU discovery is enabled
+	// +kubebuilder:default=true
 	DiscoveryEnabled bool `json:"discoveryEnabled"`
 }
 
 // LoggingConfiguration holds logging settings.
 type LoggingConfiguration struct {
 	// Level is the log level (e.g., "info", "debug")
+	// +kubebuilder:default="info"
 	Level string `json:"level"`
 	// Format is the log format (e.g., "json", "text")
+	// +kubebuilder:default="json"
 	Format string `json:"format"`
 }
 

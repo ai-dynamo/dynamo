@@ -392,7 +392,9 @@ func main() {
 		runtimeConfig.KaiSchedulerEnabled = kaiSchedulerDetected
 	case *operatorCfg.Orchestrators.KaiScheduler.Enabled:
 		if !kaiSchedulerDetected {
-			setupLog.Error(nil, "Kai-scheduler is explicitly enabled in config but the scheduling.run.ai API group was not detected in the cluster")
+			setupLog.Error(nil,
+				"Kai-scheduler is explicitly enabled in config but the scheduling.run.ai API group was not detected in the cluster",
+			)
 			os.Exit(1)
 		}
 		runtimeConfig.KaiSchedulerEnabled = true
