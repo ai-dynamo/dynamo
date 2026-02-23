@@ -59,6 +59,15 @@ fn is_unsupported_transfer(src_kind: StorageKind, dst_kind: StorageKind) -> bool
     )
 }
 
+/// Probe whether a NIXL backend is available by attempting to add it to a temporary agent.
+fn is_nixl_backend_available(backend: &str) -> bool {
+    let mut agent = match NixlAgent::new("__backend_probe__") {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    agent.add_backend(backend).is_ok()
+}
+
 fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result<NixlAgent> {
     let mut agent = NixlAgent::new("agent")?;
     let mut added_backends = Vec::new();
@@ -127,7 +136,7 @@ async fn test_p2p(
     }
 
     // Device ↔ Disk direct transfers require GDS_MT
-    if requires_gds(src_kind, dst_kind) && !NixlAgent::is_backend_available("GDS_MT") {
+    if requires_gds(src_kind, dst_kind) && !is_nixl_backend_available("GDS_MT") {
         eprintln!("Skipping Device ↔ Disk test - GDS_MT backend unavailable");
         return Ok(());
     }
