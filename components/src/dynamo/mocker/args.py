@@ -404,9 +404,17 @@ def parse_args():
         "--kv-cache-dtype",
         type=str,
         default="auto",
+        choices=[
+            "auto",
+            "bfloat16",
+            "fp8",
+            "fp8_ds_mla",
+            "fp8_e4m3",
+            "fp8_e5m2",
+            "fp8_inc",
+        ],
         help="Data type for KV cache, used to compute kv_bytes_per_token. "
-        "'auto' uses the model's torch_dtype (default). "
-        "Options: auto, float16, bfloat16, float32, float8_e4m3fn, float8_e5m2.",
+        "'auto' uses the model's dtype (default).",
     )
     parser.add_argument(
         "--kv-bytes-per-token",

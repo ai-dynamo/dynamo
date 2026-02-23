@@ -9,20 +9,38 @@ from dynamo.profiler.utils.model_info import get_model_info
 
 logger = logging.getLogger(__name__)
 
-# Mapping from torch dtype strings to byte sizes for KV cache.
-# Used when --kv-cache-dtype is "auto" to infer from model config's dtype.
+# Mapping from dtype strings to byte sizes for KV cache.
+# Used when --kv-cache-dtype is "auto" to infer from model config's dtype,
+# or when explicitly set via CLI (matching vLLM's --kv-cache-dtype choices).
 TORCH_DTYPE_BYTES = {
+    # auto-detected from model config (torch.dtype str representations)
     "float16": 2,
     "bfloat16": 2,
     "float32": 4,
     "float8_e4m3fn": 1,
     "float8_e5m2": 1,
+    # vLLM CLI choices
+    "fp8": 1,
+    "fp8_ds_mla": 1,
+    "fp8_e4m3": 1,
+    "fp8_inc": 1,
 }
 
 # Default KV transfer bandwidth in GB/s.
 # 64 GB/s corresponds to inter-node InfiniBand.
 # For intra-node NVLink, typical value is ~450 GB/s.
 DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS = 64.0
+
+
+def _normalize_dtype_str(dtype) -> str:
+    """Normalize a dtype to a plain string like 'float16'.
+
+    Handles torch.dtype objects (str() gives 'torch.float16') and plain strings.
+    """
+    s = str(dtype)
+    if s.startswith("torch."):
+        s = s[len("torch.") :]
+    return s
 
 
 def get_kv_cache_dtype_bytes(config, kv_cache_dtype: str = "auto") -> int:
@@ -32,7 +50,7 @@ def get_kv_cache_dtype_bytes(config, kv_cache_dtype: str = "auto") -> int:
     Follows vLLM's --kv-cache-dtype convention.
     """
     if kv_cache_dtype == "auto":
-        dtype = str(getattr(config, "dtype", "float16"))
+        dtype = _normalize_dtype_str(getattr(config, "dtype", "float16"))
         return TORCH_DTYPE_BYTES.get(dtype, 2)
     return TORCH_DTYPE_BYTES.get(kv_cache_dtype, 2)
 

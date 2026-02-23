@@ -192,6 +192,7 @@ pub struct MockEngineArgs {
     /// Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay.
     /// For intra-node NVLink, typical value is ~450.
     #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
 
     /// Reasoning/thinking token configuration.

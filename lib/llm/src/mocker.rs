@@ -565,10 +565,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
                         // Simulate KV transfer delay before prefill's first (and only) token.
                         // This models the time to transfer KV cache to the decode worker.
-                        if token_count == 0 {
-                            if let Some(delay) = kv_transfer_delay {
-                                sleep_precise(delay).await;
-                            }
+                        if token_count == 0
+                            && let Some(delay) = kv_transfer_delay
+                        {
+                            sleep_precise(delay).await;
                         }
 
                         // Generate a token (with thinking boundaries if configured)

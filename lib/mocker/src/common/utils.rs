@@ -44,6 +44,8 @@ pub async fn sleep_until_precise(deadline: Instant) {
     {
         if let Ok(delay) = tokio_timerfd::Delay::new(deadline) {
             let _ = delay.await;
+        } else {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
         }
     }
     #[cfg(not(target_os = "linux"))]

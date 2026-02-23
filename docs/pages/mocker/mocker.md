@@ -167,7 +167,7 @@ For disaggregated prefill/decode deployments, prefill and decode workers coordin
 
 The mocker simulates KV cache transfer time between prefill and decode workers. Before the prefill worker emits its first (and only) token, it sleeps for a duration based on:
 
-- **kv_bytes_per_token** (auto-computed from model config): `num_layers * 2 * num_kv_heads * head_dim * dtype_bytes`. The `dtype_bytes` is determined by `--kv-cache-dtype`: when set to `auto` (default), it uses the model's `dtype` from config; when explicitly set (e.g., `fp8`), it uses the specified dtype instead. Can also be overridden directly with `--kv-bytes-per-token`.
+- **kv_bytes_per_token** (auto-computed from model config): `num_layers * 2 * num_kv_heads * head_dim * dtype_bytes`. The `dtype_bytes` is determined by `--kv-cache-dtype`: when set to `auto` (default), it uses the model's `dtype` from config; when explicitly set (e.g., `fp8`), it uses the specified dtype instead. It can also be overridden directly with `--kv-bytes-per-token`.
 - **kv_transfer_bandwidth** (default: 64.0 GB/s, inter-node InfiniBand)
 - **Transfer time**: `num_input_tokens * kv_bytes_per_token / bandwidth`
 
