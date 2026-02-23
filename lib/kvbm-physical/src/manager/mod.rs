@@ -485,7 +485,10 @@ impl LayoutRegistry {
         // Check before incrementing to prevent wrapping
         let current = self.next_layout_id.load(Ordering::SeqCst);
         if current == u16::MAX {
-            bail!("Layout ID overflow: maximum number of layouts ({}) reached", u16::MAX);
+            bail!(
+                "Layout ID overflow: maximum number of layouts ({}) reached",
+                u16::MAX
+            );
         }
         let layout_id = self.next_layout_id.fetch_add(1, Ordering::SeqCst);
 

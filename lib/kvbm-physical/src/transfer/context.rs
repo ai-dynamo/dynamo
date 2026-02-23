@@ -422,7 +422,10 @@ impl TransferContext {
 
         // Send to background handler — log error if channel is full or closed
         if let Err(e) = self.tx_nixl_status.try_send(notification) {
-            tracing::error!("Failed to enqueue NIXL status notification: channel full or closed: {}", e);
+            tracing::error!(
+                "Failed to enqueue NIXL status notification: channel full or closed: {}",
+                e
+            );
         }
 
         TransferCompleteNotification::from_awaiter(awaiter)
@@ -451,7 +454,10 @@ impl TransferContext {
 
         // Send to background handler — log error if channel is full or closed
         if let Err(e) = self.tx_cuda_event.try_send(notification) {
-            tracing::error!("Failed to enqueue CUDA event notification: channel full or closed: {}", e);
+            tracing::error!(
+                "Failed to enqueue CUDA event notification: channel full or closed: {}",
+                e
+            );
         }
 
         TransferCompleteNotification::from_awaiter(awaiter)
@@ -485,7 +491,10 @@ impl TransferContext {
 
         // Send to background handler — log error if channel is full or closed
         if let Err(e) = self.tx_nixl_events.try_send(notification) {
-            tracing::error!("Failed to enqueue NIXL event notification: channel full or closed: {}", e);
+            tracing::error!(
+                "Failed to enqueue NIXL event notification: channel full or closed: {}",
+                e
+            );
         }
 
         TransferCompleteNotification::from_awaiter(awaiter)
