@@ -83,7 +83,7 @@ class KVRouterProcess(ManagedProcess):
             )
 
         if durable_kv_events:
-            command.append("--durable-kv-events")
+            command.append("--router-durable-kv-events")
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
@@ -1389,9 +1389,9 @@ def _test_router_indexers_sync(
         # Create first runtime and endpoint for router 1
         logger.info("Creating first KV router with its own runtime")
         runtime1 = get_runtime(store_backend, request_plane)
-        namespace1 = runtime1.namespace(engine_workers.namespace)
-        component1 = namespace1.component(engine_workers.component_name)
-        endpoint1 = component1.endpoint("generate")
+        endpoint1 = runtime1.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+        )
 
         kv_router1 = KvRouter(
             endpoint=endpoint1,
@@ -1442,9 +1442,9 @@ def _test_router_indexers_sync(
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
         runtime2 = get_runtime(store_backend, request_plane)
-        namespace2 = runtime2.namespace(engine_workers.namespace)
-        component2 = namespace2.component(engine_workers.component_name)
-        endpoint2 = component2.endpoint("generate")
+        endpoint2 = runtime2.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+        )
 
         kv_router2 = KvRouter(
             endpoint=endpoint2,

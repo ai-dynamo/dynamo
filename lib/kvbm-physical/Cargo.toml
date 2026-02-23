@@ -17,9 +17,8 @@ velo-events = { workspace = true }
 
 aligned-vec = "0.6.4"
 anyhow = { workspace = true }
-bincode = { version = "2.0.1", features = ["serde", "derive"] }
+bincode = { version = "2.0.0", features = ["serde", "derive"] }
 blake3 = { version = "1" }
-bytes = { version = "1" }
 cudarc = { workspace = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }

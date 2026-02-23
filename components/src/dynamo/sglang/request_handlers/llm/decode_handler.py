@@ -109,6 +109,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        priority = (request.get("routing") or {}).get("priority")
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -144,6 +145,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._priority_kwargs(priority),
             )
 
             if self.skip_tokenizer_init:
@@ -182,6 +184,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._priority_kwargs(priority),
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
@@ -232,11 +235,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
-                # If request is not finished yet, but there are no outputs, return an error.
+                # Empty, non-final chunks can happen during scheduler idle ticks.
+                # Keep waiting for the next chunk unless cancellation was requested.
                 if not output_ids and not finish_reason:
-                    if not context.is_stopped():
-                        yield {"finish_reason": "error", "token_ids": []}
-                    break
+                    if context.is_stopped():
+                        break
+                    continue
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids

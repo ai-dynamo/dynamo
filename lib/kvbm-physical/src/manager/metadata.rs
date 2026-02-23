@@ -7,7 +7,6 @@ use super::handle::LayoutHandle;
 use crate::layout::LayoutDescriptor;
 use anyhow::Result;
 use bincode::{Decode, Encode};
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use kvbm_common::LogicalLayoutHandle;
@@ -35,13 +34,15 @@ impl WorkerAddress {
 ///
 /// This includes the logical layout type (G1, G2, G3, G4) so that remote instances
 /// know which physical handle corresponds to which tier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct LogicalLayoutDescriptor {
     /// Unique handle for this layout
     pub handle: LayoutHandle,
     /// The logical layout type (G1, G2, G3, G4)
+    #[bincode(with_serde)]
     pub logical_type: LogicalLayoutHandle,
     /// Serialized layout data (uses Serde, bridged via bincode)
+    #[bincode(with_serde)]
     pub layout: LayoutDescriptor,
 }
 
@@ -97,9 +98,9 @@ pub struct RdmaLayoutDescriptors {
 /// This is the wire format for transmitting layout metadata between workers.
 /// It contains everything needed to reconstruct remote layouts and load their
 /// NIXL registration data.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Encode, Decode)]
 #[serde(transparent)]
-pub struct SerializedLayout(Bytes);
+pub struct SerializedLayout(Vec<u8>);
 
 impl SerializedLayout {
     /// Pack metadata into a serialized form.
@@ -123,7 +124,7 @@ impl SerializedLayout {
         };
         let bytes = bincode::encode_to_vec(&inner, bincode::config::standard())
             .map_err(|e| anyhow::anyhow!("failed to encode managed memory metadata: {}", e))?;
-        Ok(Self(Bytes::from(bytes)))
+        Ok(Self(bytes))
     }
 
     /// Unpack metadata from serialized form.
@@ -137,12 +138,12 @@ impl SerializedLayout {
     }
 
     /// Get the raw bytes.
-    pub fn as_bytes(&self) -> &Bytes {
+    pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
     /// Create from raw bytes.
-    pub fn from_bytes(bytes: Bytes) -> Self {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 
@@ -170,7 +171,7 @@ mod tests {
     use super::*;
     use crate::layout::{
         BlockFormat, FullyContiguousDetails, KvBlockLayout, LayoutConfig, LayoutDescriptor,
-        LayoutTypeDetails, physical::NixlMetadata,
+        LayoutTypeDetails, NixlMetadata,
     };
     use dynamo_memory::{MemoryRegion, StorageKind, nixl};
     use kvbm_common::LogicalLayoutHandle;
@@ -291,7 +292,7 @@ mod tests {
         let layouts = vec![];
 
         let packed = SerializedLayout::pack(worker_address, nixl_metadata, layouts).unwrap();
-        let bytes = packed.as_bytes().clone();
+        let bytes = packed.as_bytes().to_vec();
 
         let restored = SerializedLayout::from_bytes(bytes);
         let unpacked = restored.unpack().unwrap();

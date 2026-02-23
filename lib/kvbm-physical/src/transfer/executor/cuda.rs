@@ -270,16 +270,8 @@ fn execute_fc_lw_vectorized(
     }
 
     // Allocate device memory for pointer arrays
-    unsafe {
-        let src_ptrs_device = pool.alloc_async_raw(
-            total_chunks * std::mem::size_of::<usize>(),
-            stream.cu_stream(),
-        )?;
-        let dst_ptrs_device = pool.alloc_async_raw(
-            total_chunks * std::mem::size_of::<usize>(),
-            stream.cu_stream(),
-        )?;
-    }
+    let src_ptrs_device = pool.alloc_async(total_chunks * std::mem::size_of::<usize>(), stream)?;
+    let dst_ptrs_device = pool.alloc_async(total_chunks * std::mem::size_of::<usize>(), stream)?;
 
     // Upload pointer arrays to device
     unsafe {
@@ -318,7 +310,7 @@ fn execute_fc_lw_vectorized(
     pool.free_async(src_ptrs_device, stream)?;
     pool.free_async(dst_ptrs_device, stream)?;
 
-    if status != cuda_result::cudaError::cudaSuccess {
+    if status != cudarc::runtime::sys::cudaError::cudaSuccess {
         return Err(anyhow!("vectorized_copy failed: {:?}", status));
     }
 

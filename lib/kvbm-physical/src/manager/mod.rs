@@ -841,7 +841,7 @@ mod tests {
         let mut dest_manager = LayoutRegistry::new(dest_agent, 20);
 
         // First import succeeds
-        let metadata_clone = SerializedLayout::from_bytes(metadata.as_bytes().clone());
+        let metadata_clone = SerializedLayout::from_bytes(metadata.as_bytes().to_vec());
         dest_manager.import_metadata(metadata).unwrap();
 
         // Second import should fail

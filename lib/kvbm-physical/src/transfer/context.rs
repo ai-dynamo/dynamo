@@ -30,7 +30,7 @@ pub use super::notifications::TransferCompleteNotification;
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"), public)]
 #[allow(dead_code)] // Fields are used in build() but derive macros confuse dead code analysis
 pub struct TransferConfig {
-    #[builder(default = "EventManager::local()")]
+    #[builder(default = "Arc::new(EventManager::local())")]
     event_system: Arc<EventManager>,
 
     /// Optional custom name for the NIXL agent. If not provided, defaults to "worker-{worker_id}"
@@ -114,7 +114,7 @@ impl TransferConfigBuilder {
     pub fn build(self) -> Result<TransferManager> {
         let mut config = self.build_internal()?;
 
-        let worker_id = config.event_system.worker_id();
+        let worker_id = config.event_system.system_id();
 
         // Merge environment backends if not explicitly configured
         if config.nixl_backend_config.backends().is_empty() {
