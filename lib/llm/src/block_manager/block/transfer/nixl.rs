@@ -433,7 +433,7 @@ where
     use crate::block_manager::config::{DISK_FLAG_GDS_READ, DISK_FLAG_GDS_WRITE};
     let flags = ctx.disk_transfer_flags();
     let gds_write = flags & DISK_FLAG_GDS_WRITE != 0;
-    let gds_read  = flags & DISK_FLAG_GDS_READ  != 0;
+    let gds_read = flags & DISK_FLAG_GDS_READ != 0;
 
     // Resolve the GDS_MT backend handle once (None if not loaded in agent).
     let gds_backend = agent.get_backend("GDS_MT");
@@ -528,9 +528,17 @@ where
         // Onboard: GDS_MT if available, else let NIXL fall through to POSIX.
         let opt_args: Option<OptArgs> = {
             let backend_name = if create_files {
-                if gds_write { Some("GDS_MT") } else { Some("POSIX") }
+                if gds_write {
+                    Some("GDS_MT")
+                } else {
+                    Some("POSIX")
+                }
             } else if gds_read {
-                if gds_backend.is_some() { Some("GDS_MT") } else { Some("POSIX") }
+                if gds_backend.is_some() {
+                    Some("GDS_MT")
+                } else {
+                    Some("POSIX")
+                }
             } else {
                 Some("POSIX")
             };
@@ -585,9 +593,8 @@ where
     // the committed data.  This is a no-op for GDS writes and for onboard.
     if create_files && !gds_write {
         for ds in &disk_storages {
-            ds.fdatasync().map_err(|e| {
-                TransferError::ExecutionError(format!("fdatasync failed: {:?}", e))
-            })?;
+            ds.fdatasync()
+                .map_err(|e| TransferError::ExecutionError(format!("fdatasync failed: {:?}", e)))?;
         }
     }
 
@@ -752,7 +759,9 @@ mod tests {
         // Cancel before starting
         cancel_token.cancel();
 
-        let descriptors = vec![RemoteBlockDescriptor::disk_from_hash("/tmp", 0x1234, 1024, 0, 1)];
+        let descriptors = vec![RemoteBlockDescriptor::disk_from_hash(
+            "/tmp", 0x1234, 1024, 0, 1,
+        )];
 
         let mut layout = create_test_layout(1);
         layout

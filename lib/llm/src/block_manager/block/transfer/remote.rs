@@ -94,7 +94,12 @@ impl DiskKey {
     /// Create from sequence hash with topology suffix for uniqueness.
     ///
     /// Format: `<sequence_hash_hex>_<worker_id>_<world_size>`.
-    pub fn from_hash(path: impl Into<String>, hash: u64, worker_id: usize, world_size: usize) -> Self {
+    pub fn from_hash(
+        path: impl Into<String>,
+        hash: u64,
+        worker_id: usize,
+        world_size: usize,
+    ) -> Self {
         Self {
             path: path.into(),
             key: format!("{:016x}_{}_{}", hash, worker_id, world_size),
@@ -168,7 +173,12 @@ impl RemoteKey {
     }
 
     /// Create disk key from sequence hash with topology suffix.
-    pub fn disk_from_hash(path: impl Into<String>, hash: u64, worker_id: usize, world_size: usize) -> Self {
+    pub fn disk_from_hash(
+        path: impl Into<String>,
+        hash: u64,
+        worker_id: usize,
+        world_size: usize,
+    ) -> Self {
         RemoteKey::Disk(DiskKey::from_hash(path, hash, worker_id, world_size))
     }
 }

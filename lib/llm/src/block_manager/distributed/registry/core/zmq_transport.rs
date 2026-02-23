@@ -6,19 +6,18 @@
 //! Uses DEALER/ROUTER for queries and PUSH/PULL for registrations.
 //!
 //! Each query is prefixed with a 4-byte monotonic request ID. The hub echoes
-//! the ID back in the response. The client loops on `recv`, discarding any
-//! response whose ID does not match the current request, which eliminates
-//! the desynchronization spiral caused by timed-out requests leaving stale
-//! responses in the socket buffer.
+//! the ID back in the response. A dedicated socket task multiplexes all
+//! concurrent callers over a single DEALER socket, routing responses back
+//! via oneshot channels keyed by request ID.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use tmq::{Context, Message, Multipart, dealer, push};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot};
 
 use super::transport::RegistryTransport;
 
@@ -30,6 +29,26 @@ pub const REQUEST_ID_SIZE: usize = 4;
 /// This limits the number of messages that can be queued before
 /// sends start blocking or dropping messages.
 pub const DEFAULT_HWM: i32 = 10_000;
+
+/// Channel buffer size for the DEALER socket task.
+const DEALER_CHANNEL_SIZE: usize = 256;
+
+/// Channel buffer size for the PUSH socket task.
+const PUSH_CHANNEL_SIZE: usize = 256;
+
+/// Command sent from callers to the DEALER socket task.
+struct DealerCommand {
+    request_id: u32,
+    /// Raw payload WITHOUT request ID prefix.
+    payload: Vec<u8>,
+    reply: oneshot::Sender<Result<Vec<u8>>>,
+}
+
+/// Command sent from callers to the PUSH socket task.
+struct PushCommand {
+    payload: Vec<u8>,
+    reply: Option<oneshot::Sender<Result<()>>>,
+}
 
 /// Configuration for ZMQ transport.
 #[derive(Clone, Debug)]
@@ -90,16 +109,20 @@ impl Default for ZmqTransportConfig {
 
 /// ZMQ-based transport for distributed registry.
 ///
-/// Uses two sockets:
+/// Uses two sockets, each owned by a dedicated tokio task:
 /// - DEALER for request/response queries (with request-ID correlation)
 /// - PUSH for fire-and-forget registrations
+///
+/// Callers submit requests via mpsc channels and receive responses via
+/// oneshot channels. This allows concurrent callers to pipeline requests
+/// over a single DEALER socket without mutex serialization.
 ///
 /// Both sockets have configurable high-water marks to prevent
 /// unbounded memory growth under load.
 pub struct ZmqTransport {
     config: ZmqTransportConfig,
-    dealer: Mutex<dealer::Dealer>,
-    pusher: Mutex<push::Push>,
+    dealer_tx: mpsc::Sender<DealerCommand>,
+    push_tx: mpsc::Sender<PushCommand>,
     /// Monotonically increasing request ID for correlating responses.
     next_request_id: AtomicU32,
 }
@@ -136,10 +159,18 @@ impl ZmqTransport {
             "ZMQ transport connected"
         );
 
+        // Create channels for the socket tasks
+        let (dealer_tx, dealer_rx) = mpsc::channel::<DealerCommand>(DEALER_CHANNEL_SIZE);
+        let (push_tx, push_rx) = mpsc::channel::<PushCommand>(PUSH_CHANNEL_SIZE);
+
+        // Spawn dedicated socket tasks
+        tokio::spawn(Self::dealer_task(dealer, dealer_rx));
+        tokio::spawn(Self::push_task(pusher, push_rx));
+
         Ok(Self {
             config,
-            dealer: Mutex::new(dealer),
-            pusher: Mutex::new(pusher),
+            dealer_tx,
+            push_tx,
             next_request_id: AtomicU32::new(1),
         })
     }
@@ -172,104 +203,209 @@ impl ZmqTransport {
         .with_hwm(hwm);
         Self::connect(config)
     }
+
+    /// Dedicated task that owns the DEALER socket.
+    ///
+    /// Multiplexes concurrent callers over a single socket:
+    /// - Receives commands from mpsc channel, sends on DEALER
+    /// - Receives responses from DEALER, routes to callers via oneshot
+    /// - Stale responses (caller timed out) are discarded silently
+    async fn dealer_task(
+        mut dealer: dealer::Dealer,
+        mut rx: mpsc::Receiver<DealerCommand>,
+    ) {
+        let mut in_flight: HashMap<u32, oneshot::Sender<Result<Vec<u8>>>> = HashMap::new();
+
+        loop {
+            tokio::select! {
+                // New request from a caller
+                cmd = rx.recv() => {
+                    let Some(cmd) = cmd else {
+                        // All senders dropped — transport is being dropped
+                        tracing::debug!("DEALER task: channel closed, shutting down");
+                        break;
+                    };
+
+                    // Prepend request ID to payload
+                    let mut payload = Vec::with_capacity(REQUEST_ID_SIZE + cmd.payload.len());
+                    payload.extend_from_slice(&cmd.request_id.to_le_bytes());
+                    payload.extend_from_slice(&cmd.payload);
+
+                    let mut msg = VecDeque::new();
+                    msg.push_back(Message::from(payload));
+
+                    if let Err(e) = dealer.send(Multipart(msg)).await {
+                        // Send failed — notify caller
+                        let _ = cmd.reply.send(Err(anyhow!("Failed to send request: {}", e)));
+                        continue;
+                    }
+
+                    // Track this request for response routing
+                    in_flight.insert(cmd.request_id, cmd.reply);
+                }
+
+                // Response from the hub
+                result = dealer.next() => {
+                    match result {
+                        Some(Ok(msg)) => {
+                            let frames: Vec<_> = msg.iter().collect();
+                            if frames.is_empty() {
+                                tracing::warn!("DEALER task: empty response");
+                                continue;
+                            }
+
+                            let resp_bytes = &frames[0][..];
+                            if resp_bytes.len() < REQUEST_ID_SIZE {
+                                tracing::warn!(
+                                    len = resp_bytes.len(),
+                                    "DEALER task: response too short for request ID"
+                                );
+                                continue;
+                            }
+
+                            let resp_id = u32::from_le_bytes(
+                                resp_bytes[..REQUEST_ID_SIZE].try_into().unwrap(),
+                            );
+                            let payload = resp_bytes[REQUEST_ID_SIZE..].to_vec();
+
+                            if let Some(reply_tx) = in_flight.remove(&resp_id) {
+                                // Route response to caller. If send fails, the caller
+                                // already timed out / dropped the receiver — discard.
+                                let _ = reply_tx.send(Ok(payload));
+                            } else {
+                                // No in-flight entry. This shouldn't happen since we always
+                                // insert before sending, but could if a response arrives
+                                // after the in_flight map was drained on shutdown.
+                                tracing::warn!(
+                                    resp_id,
+                                    "DEALER task: response for unknown request ID"
+                                );
+                            }
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!(error = %e, "DEALER task: receive error");
+                            // Drain all in-flight requests with errors
+                            for (_, reply_tx) in in_flight.drain() {
+                                let _ = reply_tx.send(Err(anyhow!("Socket error: {}", e)));
+                            }
+                            break;
+                        }
+                        None => {
+                            tracing::warn!("DEALER task: socket closed");
+                            for (_, reply_tx) in in_flight.drain() {
+                                let _ = reply_tx.send(Err(anyhow!("Socket closed")));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Drain any remaining in-flight requests
+        for (_, reply_tx) in in_flight.drain() {
+            let _ = reply_tx.send(Err(anyhow!("DEALER task shutting down")));
+        }
+    }
+
+    /// Dedicated task that owns the PUSH socket.
+    ///
+    /// Simple fire-and-forget loop: receives commands, sends on PUSH socket.
+    async fn push_task(
+        mut pusher: push::Push,
+        mut rx: mpsc::Receiver<PushCommand>,
+    ) {
+        while let Some(cmd) = rx.recv().await {
+            let mut msg = VecDeque::new();
+            msg.push_back(Message::from(cmd.payload));
+
+            let result = pusher
+                .send(Multipart(msg))
+                .await
+                .map_err(|e| anyhow!("Failed to push: {}", e));
+
+            if let Some(reply) = cmd.reply {
+                let _ = reply.send(result);
+            }
+        }
+
+        tracing::debug!("PUSH task: channel closed, shutting down");
+    }
 }
 
 #[async_trait]
 impl RegistryTransport for ZmqTransport {
     async fn request(&self, data: &[u8]) -> Result<Vec<u8>> {
         let t0 = std::time::Instant::now();
-        let mut socket = self.dealer.lock().await;
-        let lock_ms = t0.elapsed().as_millis();
 
-        // Generate a monotonic request ID and prepend it to the payload.
-        // The hub echoes this ID back in the response so we can correlate
-        // responses to requests and discard stale ones from timed-out requests.
+        // Generate a monotonic request ID
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let mut payload = Vec::with_capacity(REQUEST_ID_SIZE + data.len());
-        payload.extend_from_slice(&request_id.to_le_bytes());
-        payload.extend_from_slice(data);
 
-        let mut msg = VecDeque::new();
-        msg.push_back(Message::from(payload));
+        // Create oneshot for response routing
+        let (reply_tx, reply_rx) = oneshot::channel();
 
-        let send_start = std::time::Instant::now();
-        socket
-            .send(Multipart(msg))
+        // Submit to the DEALER socket task
+        self.dealer_tx
+            .send(DealerCommand {
+                request_id,
+                payload: data.to_vec(),
+                reply: reply_tx,
+            })
             .await
-            .map_err(|e| anyhow!("Failed to send request: {}", e))?;
-        let send_ms = send_start.elapsed().as_millis();
+            .map_err(|_| anyhow!("DEALER socket task has shut down"))?;
 
         tracing::info!(
             request_id,
-            lock_ms,
-            send_ms,
             data_len = data.len(),
-            "ZMQ request sent"
+            "ZMQ request submitted"
         );
 
-        // Read responses in a loop, discarding any whose request ID doesn't
-        // match ours. This handles stale responses from previously timed-out
-        // requests without needing a drain loop or fragile timing.
-        //
+        // Wait for response from the socket task.
         // There is no transport-level timeout here. The caller (RemoteHandle)
         // wraps every operation in REGISTRY_TIMEOUT. When that fires, this
-        // future is dropped (releasing the socket lock). The late response
-        // will be discarded by ID on the next request.
-        loop {
-            match socket.next().await {
-                Some(Ok(msg)) => {
-                    let frames: Vec<_> = msg.iter().collect();
-                    if frames.is_empty() {
-                        return Err(anyhow!("Empty response"));
-                    }
-                    let resp_bytes = &frames[0][..];
-                    if resp_bytes.len() < REQUEST_ID_SIZE {
-                        return Err(anyhow!(
-                            "Response too short ({} bytes, need at least {})",
-                            resp_bytes.len(),
-                            REQUEST_ID_SIZE
-                        ));
-                    }
+        // future is dropped, the oneshot Receiver is dropped, and the socket
+        // task will discard the late response when it arrives.
+        let result = reply_rx
+            .await
+            .map_err(|_| anyhow!("DEALER socket task dropped response channel"))?;
 
-                    let resp_id =
-                        u32::from_le_bytes(resp_bytes[..REQUEST_ID_SIZE].try_into().unwrap());
-
-                    if resp_id == request_id {
-                        let total_ms = t0.elapsed().as_millis();
-                        tracing::info!(
-                            request_id,
-                            total_ms,
-                            resp_len = resp_bytes.len() - REQUEST_ID_SIZE,
-                            "ZMQ response received"
-                        );
-                        // This is our response — strip the request ID prefix.
-                        return Ok(resp_bytes[REQUEST_ID_SIZE..].to_vec());
-                    }
-
-                    // Stale response from a previous request — discard and keep reading.
-                    tracing::debug!(
-                        expected = request_id,
-                        got = resp_id,
-                        "Discarding stale response (request ID mismatch)"
-                    );
-                }
-                Some(Err(e)) => return Err(anyhow!("Receive error: {}", e)),
-                None => return Err(anyhow!("Socket closed")),
+        let total_ms = t0.elapsed().as_millis();
+        match &result {
+            Ok(payload) => {
+                tracing::info!(
+                    request_id,
+                    total_ms,
+                    resp_len = payload.len(),
+                    "ZMQ response received"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    request_id,
+                    total_ms,
+                    error = %e,
+                    "ZMQ request failed"
+                );
             }
         }
+
+        result
     }
 
     async fn publish(&self, data: &[u8]) -> Result<()> {
-        let mut socket = self.pusher.lock().await;
+        let (reply_tx, reply_rx) = oneshot::channel();
 
-        let mut msg = VecDeque::new();
-        msg.push_back(Message::from(data.to_vec()));
-        socket
-            .send(Multipart(msg))
+        self.push_tx
+            .send(PushCommand {
+                payload: data.to_vec(),
+                reply: Some(reply_tx),
+            })
             .await
-            .map_err(|e| anyhow!("Failed to push: {}", e))?;
+            .map_err(|_| anyhow!("PUSH socket task has shut down"))?;
 
-        Ok(())
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("PUSH socket task dropped response channel"))?
     }
 
     fn name(&self) -> &'static str {

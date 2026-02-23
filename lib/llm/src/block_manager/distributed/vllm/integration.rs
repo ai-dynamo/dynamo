@@ -234,11 +234,7 @@ pub fn create_descriptors(
             .iter()
             .map(|&hash| {
                 RemoteBlockDescriptor::disk_from_hash(
-                    base_path,
-                    hash,
-                    block_size,
-                    worker_id,
-                    world_size,
+                    base_path, hash, block_size, worker_id, world_size,
                 )
             })
             .collect(),

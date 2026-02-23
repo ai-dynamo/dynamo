@@ -1,15 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{any::Any, cmp::max, sync::Arc, time::{Duration, Instant}};
+use std::{
+    any::Any,
+    cmp::max,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use dynamo_runtime::config::environment_names::kvbm::remote_storage as env_g4;
 use once_cell::sync::Lazy;
 use tokio::sync::{Semaphore, oneshot};
 
-/// Default maximum concurrent H2O (host-to-object) transfers.
-const DEFAULT_MAX_CONCURRENT_H2O: usize = 8;
-const DEFAULT_QUEUE_CAP: usize = 256;
+/// Default maximum concurrent H2R (host-to-remote) transfers.
+const DEFAULT_MAX_CONCURRENT_H2R: usize = 8;
 const DEFAULT_DRAIN_QUEUE_CAP: usize = 512;
 const DEFAULT_MAX_REMOTE_INFLIGHT: usize = 64;
 const DEFAULT_REMOTE_HIGH_QUEUE_CAP: usize = 256;
@@ -23,12 +27,12 @@ const DEFAULT_G4_TRANSFER_TIMEOUT_SECS: u64 = 30;
 /// lookup overhead for tiny potential gains.
 const DEFAULT_G4_MIN_CANDIDATE_BLOCKS: usize = 8;
 
-/// Maximum concurrent H2O transfers - cached from env var.
-static MAX_CONCURRENT_H2O: Lazy<usize> = Lazy::new(|| {
-    std::env::var(env_g4::DYN_KVBM_MAX_CONCURRENT_H2O)
+/// Maximum concurrent H2R transfers - cached from env var.
+static MAX_CONCURRENT_H2R: Lazy<usize> = Lazy::new(|| {
+    std::env::var(env_g4::DYN_KVBM_G4_MAX_CONCURRENT_H2R)
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_CONCURRENT_H2O)
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_H2R)
 });
 
 /// Timeout for G4 transfers - cached from env var.
@@ -49,43 +53,29 @@ static G4_MIN_CANDIDATE_BLOCKS: Lazy<usize> = Lazy::new(|| {
         .unwrap_or(DEFAULT_G4_MIN_CANDIDATE_BLOCKS)
 });
 
-static ONBOARD_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("DYN_KVBM_ONBOARD_QUEUE_CAP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_QUEUE_CAP)
-});
-
-static OFFLOAD_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("DYN_KVBM_OFFLOAD_QUEUE_CAP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_QUEUE_CAP)
-});
-
 static DRAIN_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("DYN_KVBM_DRAIN_QUEUE_CAP")
+    std::env::var("DYN_KVBM_G4_DRAIN_QUEUE_CAP")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_DRAIN_QUEUE_CAP)
 });
 
 static MAX_REMOTE_INFLIGHT: Lazy<usize> = Lazy::new(|| {
-    std::env::var("DYN_KVBM_MAX_REMOTE_INFLIGHT")
+    std::env::var("DYN_KVBM_G4_MAX_REMOTE_INFLIGHT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MAX_REMOTE_INFLIGHT)
 });
 
 static REMOTE_HIGH_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("DYN_KVBM_REMOTE_HIGH_QUEUE_CAP")
+    std::env::var("DYN_KVBM_G4_REMOTE_HIGH_QUEUE_CAP")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_REMOTE_HIGH_QUEUE_CAP)
 });
 
 static REMOTE_LOW_QUEUE_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("DYN_KVBM_REMOTE_LOW_QUEUE_CAP")
+    std::env::var("DYN_KVBM_G4_REMOTE_LOW_QUEUE_CAP")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_REMOTE_LOW_QUEUE_CAP)
@@ -96,7 +86,7 @@ const DEFAULT_FLUSH_BATCH_SIZE: usize = 512;
 
 /// Flush batch size - cached from env var.
 /// Controls how many blocks are offloaded per D2H transfer during the
-/// post-request flush. Smaller batches allow D2H and H2O to pipeline.
+/// post-request flush. Smaller batches allow D2H and H2R to pipeline.
 static FLUSH_BATCH_SIZE: Lazy<usize> = Lazy::new(|| {
     std::env::var("DYN_KVBM_FLUSH_BATCH_SIZE")
         .ok()
@@ -110,11 +100,11 @@ use dynamo_llm::{
         block::{BlockMetadata, locality::LocalityProvider, transfer::remote::RemoteKey},
         config::{RemoteStorageConfig, should_bypass_cpu_cache, should_disable_cpu_cache_lookup},
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
+        distributed::registry::{NoMetadata, PositionalKey},
         distributed::{
             BlockTransferPool, BlockTransferRequest, KvbmLeader, RemoteHashOperationsSync,
             vllm as vllm_int,
         },
-        distributed::registry::{NoMetadata, PositionalKey},
         pool::{PinGuard, PinRegistry},
         transfer_orchestrator::{TransferPriority, priority_channel, run_priority_worker},
     },
@@ -398,7 +388,9 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
                     device.reset_blocking()?;
                     tracing::info!("clear_pool: device (GPU) pool wiped");
                 } else {
-                    return Err(SlotError::InvalidOperation("device pool is not configured".into()));
+                    return Err(SlotError::InvalidOperation(
+                        "device pool is not configured".into(),
+                    ));
                 }
             }
             "cpu" | "host" => {
@@ -406,7 +398,9 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
                     host.reset_blocking()?;
                     tracing::info!("clear_pool: host (CPU) pool wiped");
                 } else {
-                    return Err(SlotError::InvalidOperation("host pool is not configured".into()));
+                    return Err(SlotError::InvalidOperation(
+                        "host pool is not configured".into(),
+                    ));
                 }
             }
             "disk" => {
@@ -414,7 +408,9 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
                     disk.reset_blocking()?;
                     tracing::info!("clear_pool: disk pool wiped");
                 } else {
-                    return Err(SlotError::InvalidOperation("disk pool is not configured".into()));
+                    return Err(SlotError::InvalidOperation(
+                        "disk pool is not configured".into(),
+                    ));
                 }
             }
             other => {
@@ -1871,13 +1867,10 @@ impl VllmConnectorSlot {
     /// connector's scheduler interface. This method is called from `request_finished`
     /// with ALL block_ids vLLM allocated, and offloads any blocks that were missed.
     ///
-    /// Blocks are flushed in batches (FLUSH_BATCH_SIZE) to allow D2H and H2O to pipeline.
+    /// Blocks are flushed in batches (FLUSH_BATCH_SIZE) to allow D2H and H2R to pipeline.
     /// GPU blocks are held until all D2H transfers complete (via pending_operations),
-    /// then freed by vLLM. H2O to object storage continues from CPU blocks in the background.
-    pub fn flush_remaining_blocks(
-        &mut self,
-        all_block_ids: &[BlockId],
-    ) -> Result<(), SlotError> {
+    /// then freed by vLLM. H2R to remote storage continues from CPU blocks in the background.
+    pub fn flush_remaining_blocks(&mut self, all_block_ids: &[BlockId]) -> Result<(), SlotError> {
         let already_offloaded = self.evaluated_blocks;
         let total_sequence_blocks = self.sequence.blocks().len();
 
@@ -1921,15 +1914,13 @@ impl VllmConnectorSlot {
         let saved_state = self.state;
         self.state = SlotState::Prefilling;
 
-        // Split into batches for D2H/H2O pipelining
+        // Split into batches for D2H/H2R pipelining
         let mut offset = already_offloaded;
         while offset < flush_end {
             let batch_end = std::cmp::min(offset + batch_size, flush_end);
             let batch_block_ids = &all_block_ids[offset..batch_end];
-            let batch_token_blocks: Vec<TokenBlock> = self
-                .sequence
-                .blocks()[offset..batch_end]
-                .to_vec();
+            let batch_token_blocks: Vec<TokenBlock> =
+                self.sequence.blocks()[offset..batch_end].to_vec();
 
             // Flushed blocks don't have priority info; use default priority 0
             let batch_priorities = vec![0u32; batch_block_ids.len()];
@@ -2151,7 +2142,7 @@ impl RemoteTransferRequest {
 }
 
 /// Item pushed to the drain queue after D2H completes.
-/// Holds Arc references to host blocks, preventing eviction until H2O finishes.
+/// Holds Arc references to host blocks, preventing eviction until H2R finishes.
 struct DrainItem {
     request_id: String,
     sequence_hashes: Vec<u64>,
@@ -2201,23 +2192,27 @@ impl LocalTransferEngine {
         task_token: CancellationToken,
         kvbm_metrics: KvbmMetrics,
     ) -> anyhow::Result<()> {
-        let (onboard_tx, mut onboard_rx) = mpsc::channel::<LocalOnboardRequest>(*ONBOARD_QUEUE_CAP);
-        let (offload_tx, mut offload_rx) = mpsc::channel::<LocalOffloadRequest>(*OFFLOAD_QUEUE_CAP);
-        let (remote_tx, remote_rx) =
-            priority_channel::<RemoteTransferRequest>(*REMOTE_HIGH_QUEUE_CAP, *REMOTE_LOW_QUEUE_CAP);
+        // Local (CPU/disk) onboard/offload paths must not drop under queue pressure.
+        // Keep queue-pressure/drop behavior restricted to G4 remote transfer lanes.
+        let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel::<LocalOnboardRequest>();
+        let (offload_tx, mut offload_rx) = mpsc::unbounded_channel::<LocalOffloadRequest>();
+        let (remote_tx, remote_rx) = priority_channel::<RemoteTransferRequest>(
+            *REMOTE_HIGH_QUEUE_CAP,
+            *REMOTE_LOW_QUEUE_CAP,
+        );
         let (drain_tx, mut drain_rx) = mpsc::channel::<DrainItem>(*DRAIN_QUEUE_CAP);
 
-        // Pin registry for preventing host block eviction during H2O transfers.
+        // Pin registry for preventing host block eviction during H2R transfers.
         // Shared between drain task (creates pins) and remote task (releases pins).
         let pin_registry = PinRegistry::new();
         let pin_registry_drain = pin_registry.clone();
         let pin_registry_remote = pin_registry.clone();
 
-        // Semaphore to cap concurrent H2O transfers. The drain task acquires a permit
-        // before sending each H2O request. Permits are released when the remote task
-        // completes the H2O and drops the pin from the registry.
-        let h2o_semaphore = Arc::new(Semaphore::new(*MAX_CONCURRENT_H2O));
-        let h2o_semaphore_remote = h2o_semaphore.clone();
+        // Semaphore to cap concurrent H2R transfers. The drain task acquires a permit
+        // before sending each H2R request. Permits are released when the remote task
+        // completes the H2R and drops the pin from the registry.
+        let h2r_semaphore = Arc::new(Semaphore::new(*MAX_CONCURRENT_H2R));
+        let h2r_semaphore_remote = h2r_semaphore.clone();
 
         // Clone resources needed for tasks
         let block_manager_offload = self.block_manager.clone();
@@ -2228,7 +2223,7 @@ impl LocalTransferEngine {
 
         // Clone drain_tx for the offload task to push items after D2H
         let drain_tx_for_offload = drain_tx.clone();
-        // Drain traffic is low-priority background H2O.
+        // Drain traffic is low-priority background H2R.
         let remote_tx_for_drain = remote_tx.clone();
 
         let kvbm_metrics_onboard = kvbm_metrics.clone();
@@ -2324,7 +2319,7 @@ impl LocalTransferEngine {
                         let leader = Arc::clone(&leader_remote);
                         let metrics = kvbm_metrics_remote.clone();
                         let pin_reg = pin_registry_remote.clone();
-                        let semaphore = h2o_semaphore_remote.clone();
+                        let semaphore = h2r_semaphore_remote.clone();
 
                         async move {
                             if let Err(e) = process_remote_transfer_request(
@@ -2354,13 +2349,13 @@ impl LocalTransferEngine {
         )
         .unwrap();
 
-        // Drain task: event-driven H2O offload from CPU (G2) to object storage (G4).
+        // Drain task: event-driven H2R offload from CPU (G2) to remote storage (G4).
         // Consumes DrainItems pushed by the offload task after each D2H completion.
-        // Uses a semaphore to cap concurrent H2O transfers at MAX_CONCURRENT_H2O.
+        // Uses a semaphore to cap concurrent H2R transfers at MAX_CONCURRENT_H2R.
         let drain_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token_drain| async move {
                 tracing::info!(
-                    max_concurrent_h2o = *MAX_CONCURRENT_H2O,
+                    max_concurrent_h2r = *MAX_CONCURRENT_H2R,
                     "DrainTask started: event-driven G2->G4 offload"
                 );
 
@@ -2384,23 +2379,23 @@ impl LocalTransferEngine {
                     let num_blocks = item.host_block_ids.len();
                     let request_id = item.request_id.clone();
 
-                    // Validate block integrity before H2O
+                    // Validate block integrity before H2R
                     tracing::debug!(
                         target: "kvbm-g4",
                         request_id = %request_id,
                         num_blocks = num_blocks,
-                        "DrainTask: received item, acquiring H2O permit"
+                        "DrainTask: received item, acquiring H2R permit"
                     );
 
-                    // Never block this task waiting for permit; drop low-priority H2O on pressure.
-                    let _permit = match h2o_semaphore.clone().try_acquire_owned() {
+                    // Never block this task waiting for permit; drop low-priority H2R on pressure.
+                    let _permit = match h2r_semaphore.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(_) => {
                             tracing::warn!(
                                 target: "kvbm-g4",
                                 request_id = %request_id,
                                 num_blocks = num_blocks,
-                                "DrainTask: dropping H2O request due to concurrency pressure"
+                                "DrainTask: dropping H2R request due to concurrency pressure"
                             );
                             continue;
                         }
@@ -2408,9 +2403,9 @@ impl LocalTransferEngine {
 
                     let h2o_operation_id = uuid::Uuid::new_v4();
 
-                    // Insert pin guard into registry (prevents host block eviction during H2O).
+                    // Insert pin guard into registry (prevents host block eviction during H2R).
                     // The pin_guard was created in process_offload_to_storage and transferred
-                    // here via the DrainItem. The remote task will release it on H2O completion.
+                    // here via the DrainItem. The remote task will release it on H2R completion.
                     pin_registry_drain.insert(h2o_operation_id, item.pin_guard);
 
                     tracing::debug!(
@@ -2436,7 +2431,7 @@ impl LocalTransferEngine {
                             tracing::warn!(
                                 target: "kvbm-g4",
                                 request_id = %request_id,
-                                "DrainTask: dropping H2O request due to remote queue pressure"
+                                "DrainTask: dropping H2R request due to remote queue pressure"
                             );
                             pin_registry_drain.remove(&h2o_operation_id);
                             continue;
@@ -2445,7 +2440,7 @@ impl LocalTransferEngine {
                             tracing::error!(
                                 target: "kvbm-g4",
                                 request_id = %request_id,
-                                "DrainTask: remote queue closed, dropping H2O request"
+                                "DrainTask: remote queue closed, dropping H2R request"
                             );
                             pin_registry_drain.remove(&h2o_operation_id);
                             continue;
@@ -2457,14 +2452,14 @@ impl LocalTransferEngine {
                         request_id = %request_id,
                         operation_id = %h2o_operation_id,
                         num_blocks = num_blocks,
-                        "DrainTask: H2O request sent"
+                        "DrainTask: H2R request sent"
                     );
 
-                    // Transfer ownership of the semaphore permit to the H2O lifecycle.
+                    // Transfer ownership of the semaphore permit to the H2R lifecycle.
                     // We forget the permit here to prevent it from being released when
                     // this scope exits. The remote task's release_pin calls
-                    // semaphore.add_permits(1) when the H2O completes, restoring the
-                    // permit. This ensures the semaphore correctly limits concurrent H2O.
+                    // semaphore.add_permits(1) when the H2R completes, restoring the
+                    // permit. This ensures the semaphore correctly limits concurrent H2R.
                     std::mem::forget(_permit);
                 }
 
@@ -2488,30 +2483,24 @@ impl LocalTransferEngine {
                         Some(req) => {
                             match req {
                                 LocalTransferRequest::Offload(offload_req) => {
-                                    match offload_tx.try_send(offload_req) {
+                                    match offload_tx.send(offload_req) {
                                         Ok(()) => {}
-                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                            tracing::warn!("LocalTransferEngine: dropping offload request due to queue pressure");
-                                        }
-                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        Err(_e) => {
                                             tracing::error!("LocalTransferEngine: offload queue closed");
                                         }
                                     }
                                 }
                                 LocalTransferRequest::Onboard(onboard_req) => {
-                                    match onboard_tx.try_send(onboard_req) {
+                                    match onboard_tx.send(onboard_req) {
                                         Ok(()) => {}
-                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                            tracing::warn!("LocalTransferEngine: dropping onboard request due to queue pressure");
-                                        }
-                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        Err(_e) => {
                                             tracing::error!("LocalTransferEngine: onboard queue closed");
                                         }
                                     }
                                 }
                                 LocalTransferRequest::Remote(remote_req) => {
                                     // Read-path remote operations (onboard) are high priority.
-                                    // Background write-path operations (offload/H2O) are low priority.
+                                    // Background write-path operations (offload/H2R) are low priority.
                                     let priority = if remote_req.is_onboard {
                                         TransferPriority::High
                                     } else {
@@ -2739,7 +2728,7 @@ where
         storage_name
     );
 
-    // Push to drain queue for async H2O (G2 -> G4) if host transfer and G4 is enabled
+    // Push to drain queue for async H2R (G2 -> G4) if host transfer and G4 is enabled
     let is_host_transfer = transfer_pool == BlockTransferPool::Host;
     if is_host_transfer && leader.remote_registry_enabled() {
         if let Some(drain_tx) = drain_tx {
@@ -2747,7 +2736,7 @@ where
                 immutable_blocks.iter().map(|b| b.block_id()).collect();
             let num_blocks = host_block_ids.len();
 
-            // Create PinGuard to prevent host block eviction while in drain queue and during H2O.
+            // Create PinGuard to prevent host block eviction while in drain queue and during H2R.
             // The guard holds Arc references to the immutable blocks, keeping their refcount > 0.
             let pin_guard = PinGuard::new(immutable_blocks);
 
@@ -2858,16 +2847,19 @@ async fn process_remote_transfer_request(
     let pin_id = req.pin_id;
     let is_h2o = req.is_h2o();
 
-    // Helper to release pin guard and H2O semaphore permit (called on all exit paths)
-    let release_pin = |pin_registry: &PinRegistry, pin_id: Option<uuid::Uuid>, is_h2o: bool, semaphore: &Arc<Semaphore>| {
+    // Helper to release pin guard and H2R semaphore permit (called on all exit paths)
+    let release_pin = |pin_registry: &PinRegistry,
+                       pin_id: Option<uuid::Uuid>,
+                       is_h2o: bool,
+                       semaphore: &Arc<Semaphore>| {
         if let Some(guard) = pin_id.and_then(|id| pin_registry.remove(&id)) {
             tracing::debug!(
                 pin_id = ?pin_id,
                 num_blocks = guard.count(),
-                "Released pin guard after H2O transfer"
+                "Released pin guard after H2R transfer"
             );
             // Release the semaphore permit that was forgotten by the drain task.
-            // This allows the drain task to send the next H2O request.
+            // This allows the drain task to send the next H2R request.
             if is_h2o {
                 semaphore.add_permits(1);
             }
@@ -2931,7 +2923,11 @@ async fn process_remote_transfer_request(
         RemoteStorageConfig::Object { .. } => "object",
         RemoteStorageConfig::Disk { transfer_flags, .. } => {
             use dynamo_llm::block_manager::config::DISK_FLAG_GDS_WRITE;
-            if transfer_flags & DISK_FLAG_GDS_WRITE != 0 { "gds_mt" } else { "posix" }
+            if transfer_flags & DISK_FLAG_GDS_WRITE != 0 {
+                "gds_mt"
+            } else {
+                "posix"
+            }
         }
     };
 
@@ -2950,9 +2946,9 @@ async fn process_remote_transfer_request(
     // Build transfer pipeline
     let hashes: Vec<u64> = hashes_with_positions.iter().map(|&(h, _)| h).collect();
     let (bounce, device) = if req.is_h2o() {
-        // H2O: use existing host blocks as bounce buffers
+        // H2R: use existing host blocks as bounce buffers
         let bounce = filtered_host_ids
-            .ok_or_else(|| anyhow::anyhow!("H2O transfer requires host_block_ids"))?;
+            .ok_or_else(|| anyhow::anyhow!("H2R transfer requires host_block_ids"))?;
         (bounce, vec![])
     } else {
         // Allocate bounce buffers from host pool
@@ -2979,7 +2975,7 @@ async fn process_remote_transfer_request(
     // Create wire-format request for ZMQ transport
     //
     // Chained flag determines if this operation increments the completion counter:
-    // - H2O (offload to object): chained=true, follows D2H which is already tracked
+    // - H2R (offload to remote): chained=true, follows D2H which is already tracked
     // - O2D (onboard from object): chained=false, standalone operation that must be tracked
     let is_chained = !req.is_onboard;
 
@@ -3112,7 +3108,7 @@ async fn process_remote_transfer_request(
 
     // Release pin guard after transfer completes (success or failure).
     // This allows the host blocks to be returned to the inactive pool.
-    // For H2O transfers from the drain task, this also releases the semaphore permit.
+    // For H2R transfers from the drain task, this also releases the semaphore permit.
     release_pin(pin_registry, pin_id, is_h2o, h2o_semaphore);
 
     result
@@ -3206,13 +3202,13 @@ mod tests {
         assert!(req.is_h2o());
         assert_eq!(req.sequence_hashes, sequence_hashes);
         assert_eq!(req.host_block_ids, Some(host_block_ids));
-        assert!(req.device_block_ids.is_empty()); // H2O doesn't use device blocks
+        assert!(req.device_block_ids.is_empty()); // H2R doesn't use device blocks
         assert_eq!(req.block_size, block_size);
         assert_eq!(req.request_id, request_id);
         assert_eq!(req.pin_id, Some(pin_id));
     }
 
-    /// Test that H2O pipeline uses offload_with_bounce correctly.
+    /// Test that H2R pipeline uses offload_with_bounce correctly.
     #[test]
     fn test_h2o_pipeline_uses_host_block_ids() {
         let host_block_ids = vec![42, 17, 88];
@@ -3222,11 +3218,11 @@ mod tests {
             RemoteBlockDescriptor::object_from_hash("test-bucket", 0x9ABC, 4096),
         ];
 
-        // This is what process_remote_transfer_request does for H2O
+        // This is what process_remote_transfer_request does for H2R
         let pipeline = RemoteTransferPipeline::offload_with_bounce(
             descriptors,
             host_block_ids.clone(),
-            vec![], // Empty device_block_ids for H2O
+            vec![], // Empty device_block_ids for H2R
         );
 
         assert!(pipeline.has_bounce());
@@ -3260,7 +3256,7 @@ mod tests {
         assert_eq!(req.block_ids.len(), 3);
     }
 
-    /// Test H2O filtering logic: already-stored hashes are removed.
+    /// Test H2R filtering logic: already-stored hashes are removed.
     #[test]
     fn test_h2o_filtering_removes_already_stored() {
         // Simulate g4_can_offload response
@@ -3280,7 +3276,7 @@ mod tests {
         assert_eq!(can_offload_hashes, vec![0x1111, 0x3333]);
     }
 
-    /// Test H2O host block ID filtering matches hash filtering.
+    /// Test H2R host block ID filtering matches hash filtering.
     #[test]
     fn test_h2o_host_block_id_filtering() {
         let sequence_hashes: Vec<u64> = vec![0x1111, 0x2222, 0x3333, 0x4444];
@@ -3301,7 +3297,7 @@ mod tests {
         assert_eq!(filtered_host_ids, vec![10, 30]);
     }
 
-    /// Test that empty can_offload result means skip H2O entirely.
+    /// Test that empty can_offload result means skip H2R entirely.
     #[test]
     fn test_h2o_skip_when_all_stored() {
         let all_hashes: Vec<u64> = vec![0x1111, 0x2222];
@@ -3315,7 +3311,7 @@ mod tests {
             .copied()
             .collect();
 
-        // When can_offload_hashes is empty, H2O should be skipped
+        // When can_offload_hashes is empty, H2R should be skipped
         assert!(can_offload_hashes.is_empty());
 
         // This matches the logic in process_remote_transfer_request:

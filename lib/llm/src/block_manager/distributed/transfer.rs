@@ -249,7 +249,11 @@ impl BlockTransferHandler {
         let backend = match remote_ctx.config() {
             crate::block_manager::config::RemoteStorageConfig::Object { .. } => "object",
             crate::block_manager::config::RemoteStorageConfig::Disk { transfer_flags, .. } => {
-                if transfer_flags & DISK_FLAG_GDS_WRITE != 0 { "gds_mt" } else { "posix" }
+                if transfer_flags & DISK_FLAG_GDS_WRITE != 0 {
+                    "gds_mt"
+                } else {
+                    "posix"
+                }
             }
         };
 

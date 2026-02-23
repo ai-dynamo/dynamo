@@ -13,6 +13,7 @@ pub mod hub_transport;
 pub mod key;
 pub mod lease;
 pub mod metadata;
+pub mod metrics;
 pub mod persistence;
 pub mod registry;
 pub mod storage;
@@ -34,6 +35,7 @@ pub use error::{RegistryError, RegistryResult};
 
 // Lease management
 pub use lease::{LeaseInfo, LeaseManager};
+pub use metrics::{NoopRegistryMetricsSink, RegistryMetricsSink};
 
 // Storage & Eviction
 pub use eviction::{Eviction, NoEviction, PositionalEviction, TailEviction};

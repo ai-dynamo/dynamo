@@ -270,9 +270,7 @@ where
 
         match decoded {
             ResponseType::Match(entries) => Ok(entries),
-            _ => Err(anyhow::anyhow!(
-                "unexpected response type for match_prefix"
-            )),
+            _ => Err(anyhow::anyhow!("unexpected response type for match_prefix")),
         }
     }
 

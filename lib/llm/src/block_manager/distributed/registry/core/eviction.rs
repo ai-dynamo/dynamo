@@ -364,10 +364,106 @@ where
     }
 
     fn maybe_evict(&self) {
-        while self.inner.len() > self.capacity {
-            if self.evict_one().is_none() {
-                break;
+        self.evict_to_capacity();
+    }
+
+    /// Find the index of the LRU key in a list, using access time and count.
+    /// Falls back to insertion order (FIFO, index 0) if no access tracking.
+    fn find_lru_key(
+        keys: &[K],
+        last_access: &HashMap<K, std::time::Instant>,
+        access_count: &HashMap<K, u64>,
+    ) -> usize {
+        let mut best_idx = 0;
+        let mut best_time: Option<std::time::Instant> = None;
+        let mut best_count: u64 = u64::MAX;
+
+        for (idx, key) in keys.iter().enumerate() {
+            let time = last_access.get(key).copied();
+            let count = access_count.get(key).copied().unwrap_or(0);
+
+            let is_better = match (best_time, time) {
+                (None, None) => count < best_count,
+                (None, Some(_)) => false, // Prefer keys without access tracking
+                (Some(_), None) => true,  // Keys without tracking are evicted first
+                (Some(bt), Some(t)) => t < bt || (t == bt && count < best_count),
+            };
+
+            if is_better {
+                best_idx = idx;
+                best_time = time;
+                best_count = count;
             }
+        }
+
+        best_idx
+    }
+
+    /// Evict entries down to capacity in a single batched operation.
+    ///
+    /// Acquires locks once for the entire eviction pass instead of per-entry.
+    /// This reduces lock acquisitions from ~6×N to a constant number.
+    fn evict_to_capacity(&self) {
+        let excess = self.inner.len().saturating_sub(self.capacity);
+        if excess == 0 {
+            return;
+        }
+
+        // Phase 1: Find all victims under a single lock acquisition
+        let victims = {
+            let mut positions = self.positions.write();
+            let mut insertion_order = self.insertion_order.write();
+            let last_access = self.last_access.read();
+            let access_count = self.access_count.read();
+
+            let mut victims = Vec::with_capacity(excess);
+            let mut remaining = excess;
+
+            while remaining > 0 {
+                let highest_pos = match positions.iter().next() {
+                    Some(r) => r.0,
+                    None => break,
+                };
+
+                let keys = match insertion_order.get_mut(&highest_pos) {
+                    Some(keys) if !keys.is_empty() => keys,
+                    _ => break,
+                };
+
+                // Take up to `remaining` keys from this position (LRU order)
+                while remaining > 0 && !keys.is_empty() {
+                    let best_idx = Self::find_lru_key(keys, &last_access, &access_count);
+                    victims.push(keys.remove(best_idx));
+                    remaining -= 1;
+                }
+
+                if keys.is_empty() {
+                    insertion_order.remove(&highest_pos);
+                    positions.remove(&std::cmp::Reverse(highest_pos));
+                }
+            }
+
+            victims
+        };
+        // All read/write locks dropped here
+
+        if victims.is_empty() {
+            return;
+        }
+
+        // Phase 2: Clean up access tracking outside of position locks
+        {
+            let mut la = self.last_access.write();
+            let mut ac = self.access_count.write();
+            for key in &victims {
+                la.remove(key);
+                ac.remove(key);
+            }
+        }
+
+        // Phase 3: Remove from RadixStorage (DashMap handles its own shard locking)
+        for key in &victims {
+            self.inner.remove(key);
         }
     }
 
@@ -385,35 +481,10 @@ where
         }
 
         // Find the least-recently-used key at this position
-        // Falls back to insertion order (FIFO) if no access tracking
         let key = {
             let last_access = self.last_access.read();
             let access_count = self.access_count.read();
-
-            // Find key with oldest access time (or lowest access count as tiebreaker)
-            // If no access tracking, use first key (insertion order)
-            let mut best_idx = 0;
-            let mut best_time: Option<std::time::Instant> = None;
-            let mut best_count: u64 = u64::MAX;
-
-            for (idx, key) in keys.iter().enumerate() {
-                let time = last_access.get(key).copied();
-                let count = access_count.get(key).copied().unwrap_or(0);
-
-                let is_better = match (best_time, time) {
-                    (None, None) => count < best_count,
-                    (None, Some(_)) => false, // Prefer keys without access tracking
-                    (Some(_), None) => true,  // Keys without tracking are evicted first
-                    (Some(bt), Some(t)) => t < bt || (t == bt && count < best_count),
-                };
-
-                if is_better {
-                    best_idx = idx;
-                    best_time = time;
-                    best_count = count;
-                }
-            }
-
+            let best_idx = Self::find_lru_key(keys, &last_access, &access_count);
             keys.remove(best_idx)
         };
 
@@ -496,6 +567,28 @@ where
         self.last_access.write().clear();
         self.access_count.write().clear();
         self.inner.clear();
+    }
+
+    fn insert_batch(&self, entries: Vec<(K, V)>) {
+        // Phase 1: Update tracking under a single lock acquisition
+        {
+            let mut positions = self.positions.write();
+            let mut insertion_order = self.insertion_order.write();
+            for &(ref key, _) in &entries {
+                let position = key.position();
+                positions.insert(std::cmp::Reverse(position));
+                insertion_order.entry(position).or_default().push(*key);
+            }
+        }
+        // Locks dropped here
+
+        // Phase 2: Insert into RadixStorage (DashMap handles its own shard locking)
+        for (key, value) in entries {
+            self.inner.insert(key, value);
+        }
+
+        // Phase 3: Evict once for the whole batch
+        self.maybe_evict();
     }
 }
 
@@ -697,5 +790,38 @@ mod tests {
         assert_eq!(evictable.len(), 1);
         assert!(!evictable.contains(&key1));
         assert!(evictable.contains(&key2));
+    }
+
+    #[test]
+    fn test_positional_eviction_insert_batch() {
+        let evictable: PositionalEviction<TestPosKey, u64> = PositionalEviction::with_capacity(100);
+
+        let entries: Vec<(TestPosKey, u64)> = (0..10)
+            .map(|i| (TestPosKey { position: i % 3, id: i }, i * 100))
+            .collect();
+
+        evictable.insert_batch(entries);
+
+        assert_eq!(evictable.len(), 10);
+        assert_eq!(evictable.get(&TestPosKey { position: 0, id: 0 }), Some(0));
+        assert_eq!(evictable.get(&TestPosKey { position: 1, id: 1 }), Some(100));
+        assert_eq!(evictable.get(&TestPosKey { position: 2, id: 2 }), Some(200));
+    }
+
+    #[test]
+    fn test_positional_eviction_insert_batch_triggers_eviction() {
+        let evictable: PositionalEviction<TestPosKey, u64> = PositionalEviction::with_capacity(5);
+
+        // Batch insert 10 entries — should evict down to capacity
+        let entries: Vec<(TestPosKey, u64)> = (0..10)
+            .map(|i| (TestPosKey { position: i, id: i }, i * 100))
+            .collect();
+
+        evictable.insert_batch(entries);
+
+        assert_eq!(evictable.len(), 5);
+        // Lowest positions should survive (highest evicted first)
+        assert!(evictable.contains(&TestPosKey { position: 0, id: 0 }));
+        assert!(evictable.contains(&TestPosKey { position: 1, id: 1 }));
     }
 }

@@ -181,8 +181,7 @@ pub mod kvbm {
     pub const DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER: &str = "DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER";
 
     /// Disable CPU cache lookup for cache hits (dev/testing)
-    pub const DYN_KVBM_DISABLE_CPU_CACHE_LOOKUP: &str =
-        "DYN_KVBM_DISABLE_CPU_CACHE_LOOKUP";
+    pub const DYN_KVBM_DISABLE_CPU_CACHE_LOOKUP: &str = "DYN_KVBM_DISABLE_CPU_CACHE_LOOKUP";
 
     /// Enable KVBM dev mode (allows destructive operations like pool wiping)
     pub const KVBM_DEV_MODE: &str = "KVBM_DEV_MODE";
@@ -275,8 +274,7 @@ pub mod kvbm {
         ///     Works on any filesystem (tmpfs, NFS, Lustre, bind mounts).
         ///   - Onboard (read): GDS_MT if available, falls back to POSIX otherwise.
         /// Default: false (both directions use GDS_MT, existing behaviour).
-        pub const DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY: &str =
-            "DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY";
+        pub const DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY: &str = "DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY";
 
         /// Timeout in seconds for G4 (remote storage) transfers.
         pub const DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS: &str = "DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS";
@@ -286,8 +284,7 @@ pub mod kvbm {
         /// Smaller candidate sets are skipped to avoid object lookup overhead.
         /// Set to 0 to disable this gate and always query object storage.
         /// Default: 8
-        pub const DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS: &str =
-            "DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS";
+        pub const DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS: &str = "DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS";
 
         /// Enable checksum validation for G4 (remote storage) transfers.
         ///
@@ -297,13 +294,25 @@ pub mod kvbm {
         /// Default: false
         pub const DYN_KVBM_G4_CHECKSUM_VALIDATION: &str = "DYN_KVBM_G4_CHECKSUM_VALIDATION";
 
-        /// Maximum concurrent H2O (host-to-object) transfers for backpressure control.
+        /// Maximum concurrent H2R (host-to-remote) transfers for backpressure control.
         ///
-        /// Limits how many H2O transfers can be pending at once to prevent host memory
-        /// exhaustion when object storage is slow. If the limit is reached, new H2O
+        /// Limits how many H2R transfers can be pending at once to prevent host memory
+        /// exhaustion when remote storage is slow. If the limit is reached, new H2R
         /// transfers are skipped and blocks are evicted from host normally.
         /// Default: 8
-        pub const DYN_KVBM_MAX_CONCURRENT_H2O: &str = "DYN_KVBM_MAX_CONCURRENT_H2O";
+        pub const DYN_KVBM_G4_MAX_CONCURRENT_H2R: &str = "DYN_KVBM_G4_MAX_CONCURRENT_H2R";
+
+        /// Capacity of the G4 drain queue.
+        pub const DYN_KVBM_G4_DRAIN_QUEUE_CAP: &str = "DYN_KVBM_G4_DRAIN_QUEUE_CAP";
+
+        /// Maximum in-flight G4 remote operations.
+        pub const DYN_KVBM_G4_MAX_REMOTE_INFLIGHT: &str = "DYN_KVBM_G4_MAX_REMOTE_INFLIGHT";
+
+        /// Capacity of the high-priority G4 remote queue.
+        pub const DYN_KVBM_G4_REMOTE_HIGH_QUEUE_CAP: &str = "DYN_KVBM_G4_REMOTE_HIGH_QUEUE_CAP";
+
+        /// Capacity of the low-priority G4 remote queue.
+        pub const DYN_KVBM_G4_REMOTE_LOW_QUEUE_CAP: &str = "DYN_KVBM_G4_REMOTE_LOW_QUEUE_CAP";
     }
 
     /// KVBM leader (distributed mode) configuration
@@ -528,6 +537,11 @@ mod tests {
             kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_GDS_READS_ONLY,
             kvbm::remote_storage::DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS,
             kvbm::remote_storage::DYN_KVBM_G4_MIN_CANDIDATE_BLOCKS,
+            kvbm::remote_storage::DYN_KVBM_G4_MAX_CONCURRENT_H2R,
+            kvbm::remote_storage::DYN_KVBM_G4_DRAIN_QUEUE_CAP,
+            kvbm::remote_storage::DYN_KVBM_G4_MAX_REMOTE_INFLIGHT,
+            kvbm::remote_storage::DYN_KVBM_G4_REMOTE_HIGH_QUEUE_CAP,
+            kvbm::remote_storage::DYN_KVBM_G4_REMOTE_LOW_QUEUE_CAP,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_LORA_ENABLED,

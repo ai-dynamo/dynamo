@@ -13,8 +13,8 @@ use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
 use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
 use dynamo_runtime::config::parse_bool;
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use prometheus::Registry;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[derive(Debug, Clone)]
 pub enum NixlOptions {
@@ -483,7 +483,10 @@ impl RemoteTransferContext {
         let tx = spawn_notification_handler(base.async_rt_handle());
         Self {
             base,
-            config: RemoteStorageConfig::Disk { base_path, transfer_flags },
+            config: RemoteStorageConfig::Disk {
+                base_path,
+                transfer_flags,
+            },
             worker_id: 0,
             tx_notifications: Some(tx),
         }
@@ -665,7 +668,10 @@ mod tests {
         fn test_disk_config_posix() {
             let config = RemoteStorageConfig::disk("/mnt/kv-cache", DISK_FLAGS_POSIX_BOTH);
             match config {
-                RemoteStorageConfig::Disk { base_path, transfer_flags } => {
+                RemoteStorageConfig::Disk {
+                    base_path,
+                    transfer_flags,
+                } => {
                     assert_eq!(base_path, "/mnt/kv-cache");
                     assert_eq!(transfer_flags, DISK_FLAGS_POSIX_BOTH);
                 }
@@ -677,7 +683,10 @@ mod tests {
         fn test_disk_config_gds() {
             let config = RemoteStorageConfig::disk("/mnt/nvme", DISK_FLAGS_GDS_BOTH);
             match config {
-                RemoteStorageConfig::Disk { base_path, transfer_flags } => {
+                RemoteStorageConfig::Disk {
+                    base_path,
+                    transfer_flags,
+                } => {
                     assert_eq!(base_path, "/mnt/nvme");
                     assert_eq!(transfer_flags, DISK_FLAGS_GDS_BOTH);
                 }
@@ -689,7 +698,10 @@ mod tests {
         fn test_disk_config_gds_reads_only() {
             let config = RemoteStorageConfig::disk("/mnt/nfs", DISK_FLAGS_GDS_READS_ONLY);
             match config {
-                RemoteStorageConfig::Disk { base_path, transfer_flags } => {
+                RemoteStorageConfig::Disk {
+                    base_path,
+                    transfer_flags,
+                } => {
                     assert_eq!(base_path, "/mnt/nfs");
                     assert_eq!(transfer_flags & DISK_FLAG_GDS_READ, DISK_FLAG_GDS_READ);
                     assert_eq!(transfer_flags & DISK_FLAG_GDS_WRITE, 0);
@@ -747,12 +759,18 @@ mod tests {
         #[test]
         fn test_remote_context_config_disk() {
             let config = RemoteContextConfig {
-                remote_storage_config: RemoteStorageConfig::disk("/data/cache", DISK_FLAGS_GDS_BOTH),
+                remote_storage_config: RemoteStorageConfig::disk(
+                    "/data/cache",
+                    DISK_FLAGS_GDS_BOTH,
+                ),
                 worker_id: 7,
             };
             assert_eq!(config.worker_id, 7);
             match config.remote_storage_config {
-                RemoteStorageConfig::Disk { base_path, transfer_flags } => {
+                RemoteStorageConfig::Disk {
+                    base_path,
+                    transfer_flags,
+                } => {
                     assert_eq!(base_path, "/data/cache");
                     assert_eq!(transfer_flags, DISK_FLAGS_GDS_BOTH);
                 }

@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::sync::OnceCell;
-use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 
@@ -113,12 +112,6 @@ pub struct KvbmLeaderState {
     pub workers_ready_notify: Arc<Notify>,
 }
 
-struct MatchPrefixRequest {
-    handle: Option<PositionalRemoteHandle>,
-    keys: Vec<PositionalKey>,
-    reply: oneshot::Sender<Vec<(PositionalKey, RemoteKey, NoMetadata)>>,
-}
-
 /// The leader of the KVBM.
 ///
 /// This is responsible for:
@@ -132,9 +125,6 @@ pub struct KvbmLeader {
     /// Handle for remote registry operations (e.g., G4 object storage).
     /// Uses channels to avoid blocking Tokio worker threads.
     remote_handle: RwLock<Option<PositionalRemoteHandle>>,
-    /// Leader-local worker queue for async match-prefix lookups.
-    /// This avoids per-request tokio::spawn in synchronous caller paths.
-    match_prefix_tx: mpsc::UnboundedSender<MatchPrefixRequest>,
     /// Tracks request IDs with failed G4 transfers for explicit failure detection.
     failed_g4_requests: RwLock<HashSet<String>>,
 }
@@ -142,36 +132,19 @@ pub struct KvbmLeader {
 impl KvbmLeader {
     pub async fn new(config: KvbmLeaderConfig) -> anyhow::Result<Self> {
         let leader_sockets = new_leader_sockets(&config.leader_pub_url, &config.leader_ack_url)?;
-        let (match_prefix_tx, match_prefix_rx) = mpsc::unbounded_channel();
 
         let leader = Self {
             state: Arc::new(KvbmLeaderState::default()),
             zmq_leader: Arc::new(tokio::sync::OnceCell::new()),
             config,
             remote_handle: RwLock::new(None),
-            match_prefix_tx,
             failed_g4_requests: RwLock::new(HashSet::new()),
         };
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         leader.spawn_zmq_task(leader_sockets, cancel_token);
-        leader.spawn_match_prefix_worker(match_prefix_rx);
 
         Ok(leader)
-    }
-
-    fn spawn_match_prefix_worker(&self, mut rx: mpsc::UnboundedReceiver<MatchPrefixRequest>) {
-        tokio::spawn(async move {
-            while let Some(req) = rx.recv().await {
-                let result = if let Some(handle) = req.handle {
-                    handle.match_prefix(req.keys).await
-                } else {
-                    vec![]
-                };
-                let _ = req.reply.send(result);
-            }
-            tracing::debug!("KvbmLeader match-prefix worker shutting down");
-        });
     }
 
     /// Set the remote registry by spawning a RemoteHandle task.
@@ -209,8 +182,10 @@ impl KvbmLeader {
 
     /// Schedule an async match-prefix query against the remote registry.
     ///
-    /// This keeps synchronous caller paths (e.g., vLLM connector slot logic)
-    /// non-blocking without extending the registry handle API surface.
+    /// Each lookup is spawned as an independent Tokio task on the Dynamo
+    /// runtime, allowing concurrent G4 lookups across requests. This is
+    /// safe to call from any thread (sync Python/vLLM paths included)
+    /// because it uses the runtime handle captured at RemoteHandle::spawn.
     pub fn schedule_match_prefix(
         &self,
         keys: Vec<PositionalKey>,
@@ -222,17 +197,13 @@ impl KvbmLeader {
             return rx;
         }
 
-        let req = MatchPrefixRequest {
-            handle: self.remote_handle(),
-            keys,
-            reply: tx,
-        };
-
-        if let Err(err) = self.match_prefix_tx.send(req) {
-            tracing::warn!(
-                "schedule_match_prefix: worker queue closed; returning empty lookup result"
-            );
-            let _ = err.0.reply.send(vec![]);
+        if let Some(handle) = self.remote_handle() {
+            handle.runtime_handle().spawn(async move {
+                let result = handle.match_prefix(keys).await;
+                let _ = tx.send(result);
+            });
+        } else {
+            let _ = tx.send(vec![]);
         }
 
         rx

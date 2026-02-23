@@ -9,6 +9,8 @@
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
@@ -18,7 +20,9 @@ use tracing::{debug, error, info, warn};
 
 use super::codec::{OffloadStatus, QueryType, RegistryCodec, ResponseType};
 use super::key::RegistryKey;
+use super::lease::LeaseManager;
 use super::metadata::RegistryMetadata;
+use super::metrics::{NoopRegistryMetricsSink, RegistryMetricsSink};
 use super::storage::Storage;
 use super::value::RegistryValue;
 use super::zmq_transport::REQUEST_ID_SIZE;
@@ -29,6 +33,8 @@ pub struct ZmqHubConfig {
     pub query_addr: String,
     pub pull_addr: String,
     pub capacity: u64,
+    pub lease_ttl: Duration,
+    pub lease_cleanup_interval: Duration,
 }
 
 impl ZmqHubConfig {
@@ -37,6 +43,8 @@ impl ZmqHubConfig {
             query_addr: query_addr.into(),
             pull_addr: pull_addr.into(),
             capacity: 100_000,
+            lease_ttl: Duration::from_secs(30),
+            lease_cleanup_interval: Duration::from_secs(5),
         }
     }
 
@@ -70,6 +78,8 @@ where
     config: ZmqHubConfig,
     storage: Arc<S>,
     codec: Arc<C>,
+    lease_manager: Arc<LeaseManager<K>>,
+    metrics_sink: Arc<dyn RegistryMetricsSink>,
     _phantom: PhantomData<(K, V, M)>,
 }
 
@@ -82,10 +92,22 @@ where
     C: RegistryCodec<K, V, M> + Send + Sync + 'static,
 {
     pub fn new(config: ZmqHubConfig, storage: S, codec: C) -> Self {
+        Self::with_metrics_sink(config, storage, codec, Arc::new(NoopRegistryMetricsSink))
+    }
+
+    /// Create a hub with an explicit metrics sink plugin.
+    pub fn with_metrics_sink(
+        config: ZmqHubConfig,
+        storage: S,
+        codec: C,
+        metrics_sink: Arc<dyn RegistryMetricsSink>,
+    ) -> Self {
         Self {
+            lease_manager: Arc::new(LeaseManager::new(config.lease_ttl)),
             config,
             storage: Arc::new(storage),
             codec: Arc::new(codec),
+            metrics_sink,
             _phantom: PhantomData,
         }
     }
@@ -93,6 +115,11 @@ where
     /// Get reference to storage for seeding data.
     pub fn storage(&self) -> &S {
         &self.storage
+    }
+
+    /// Returns the configured metrics sink.
+    pub fn metrics_sink(&self) -> Arc<dyn RegistryMetricsSink> {
+        self.metrics_sink.clone()
     }
 
     /// Run the hub until cancelled.
@@ -108,10 +135,20 @@ where
         let query_cancel = cancel.clone();
         let query_storage = self.storage.clone();
         let query_codec = self.codec.clone();
+        let query_lease_manager = self.lease_manager.clone();
+        let query_metrics_sink = self.metrics_sink.clone();
         let query_addr = self.config.query_addr.clone();
 
         let query_handle = tokio::spawn(async move {
-            Self::run_query_handler(query_storage, query_codec, query_addr, query_cancel).await
+            Self::run_query_handler(
+                query_storage,
+                query_codec,
+                query_lease_manager,
+                query_metrics_sink,
+                query_addr,
+                query_cancel,
+            )
+            .await
         });
 
         // Spawn registration handler on a DEDICATED tokio runtime.
@@ -123,6 +160,8 @@ where
         let pull_cancel = cancel.clone();
         let pull_storage = self.storage.clone();
         let pull_codec = self.codec.clone();
+        let pull_lease_manager = self.lease_manager.clone();
+        let pull_metrics_sink = self.metrics_sink.clone();
         let pull_addr = self.config.pull_addr.clone();
 
         let pull_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -134,12 +173,44 @@ where
 
         let pull_join = std::thread::spawn(move || {
             pull_runtime.block_on(async move {
-                if let Err(e) =
-                    Self::run_pull_handler(pull_storage, pull_codec, pull_addr, pull_cancel).await
+                if let Err(e) = Self::run_pull_handler(
+                    pull_storage,
+                    pull_codec,
+                    pull_lease_manager,
+                    pull_metrics_sink,
+                    pull_addr,
+                    pull_cancel,
+                )
+                .await
                 {
                     error!(error = %e, "Pull handler failed");
                 }
             });
+        });
+
+        // Spawn periodic lease cleanup on the main runtime so expired leases
+        // are observable and don't block new claimants.
+        let lease_cleanup_manager = self.lease_manager.clone();
+        let lease_cleanup_sink = self.metrics_sink.clone();
+        let lease_cleanup_interval = self.config.lease_cleanup_interval;
+        let lease_cleanup_cancel = cancel.clone();
+        let lease_cleanup_handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(lease_cleanup_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = lease_cleanup_cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        let expired = lease_cleanup_manager.cleanup_expired();
+                        if expired > 0 {
+                            lease_cleanup_sink.on_leases_expired(
+                                expired,
+                                lease_cleanup_manager.active_count(),
+                            );
+                        }
+                    }
+                }
+            }
         });
 
         // Wait for query handler to finish or cancellation
@@ -153,6 +224,8 @@ where
                 info!("Hub received shutdown signal");
             }
         }
+
+        let _ = lease_cleanup_handle.await;
 
         // Wait for PULL runtime thread to finish
         let _ = pull_join.join();
@@ -170,6 +243,8 @@ where
     async fn run_query_handler(
         storage: Arc<S>,
         codec: Arc<C>,
+        lease_manager: Arc<LeaseManager<K>>,
+        metrics_sink: Arc<dyn RegistryMetricsSink>,
         addr: String,
         cancel: CancellationToken,
     ) -> Result<()> {
@@ -221,7 +296,14 @@ where
                                 "Query request received"
                             );
 
-                            let query_response = Self::handle_query(&storage, &codec, query_data);
+                            let query_response = Self::handle_query(
+                                &storage,
+                                &codec,
+                                &lease_manager,
+                                metrics_sink.as_ref(),
+                                Self::client_id_from_identity(&identity),
+                                query_data,
+                            );
 
                             // Prepend the request ID to the response.
                             let mut response = Vec::with_capacity(
@@ -258,6 +340,8 @@ where
     async fn run_pull_handler(
         storage: Arc<S>,
         codec: Arc<C>,
+        lease_manager: Arc<LeaseManager<K>>,
+        metrics_sink: Arc<dyn RegistryMetricsSink>,
         addr: String,
         cancel: CancellationToken,
     ) -> Result<()> {
@@ -285,7 +369,13 @@ where
                                 "Registration request received"
                             );
                             for frame in msg.iter() {
-                                Self::handle_registration(&storage, &codec, frame.as_ref());
+                                Self::handle_registration(
+                                    &storage,
+                                    &codec,
+                                    &lease_manager,
+                                    metrics_sink.as_ref(),
+                                    frame.as_ref(),
+                                );
                             }
                         }
                         Some(Err(e)) => {
@@ -304,11 +394,33 @@ where
     }
 
     /// Handle a query and return response bytes.
-    fn handle_query(storage: &S, codec: &C, data: &[u8]) -> Vec<u8> {
+    fn client_id_from_identity(identity: &[u8]) -> u64 {
+        if identity.len() >= 8 {
+            u64::from_le_bytes(identity[0..8].try_into().unwrap_or([0; 8]))
+        } else {
+            let mut hash = 0u64;
+            for (i, b) in identity.iter().enumerate() {
+                hash ^= (*b as u64) << ((i % 8) * 8);
+            }
+            hash
+        }
+    }
+
+    /// Handle a query and return response bytes.
+    fn handle_query(
+        storage: &S,
+        codec: &C,
+        lease_manager: &LeaseManager<K>,
+        metrics_sink: &dyn RegistryMetricsSink,
+        client_id: u64,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let started = Instant::now();
         let mut response = Vec::new();
 
         let Some(query) = codec.decode_query(data) else {
             warn!("Failed to decode query");
+            metrics_sink.on_query_decode_failure();
             return response;
         };
 
@@ -319,8 +431,10 @@ where
                     .map(|k| {
                         if storage.contains(k) {
                             OffloadStatus::AlreadyStored
-                        } else {
+                        } else if lease_manager.try_acquire(*k, client_id).is_some() {
                             OffloadStatus::Granted
+                        } else {
+                            OffloadStatus::Leased
                         }
                     })
                     .collect();
@@ -329,7 +443,14 @@ where
                     .iter()
                     .filter(|s| **s == OffloadStatus::Granted)
                     .count();
-                let already_stored_count = statuses.len() - granted_count;
+                let already_stored_count = statuses
+                    .iter()
+                    .filter(|s| **s == OffloadStatus::AlreadyStored)
+                    .count();
+                let leased_count = statuses
+                    .iter()
+                    .filter(|s| **s == OffloadStatus::Leased)
+                    .count();
 
                 debug!(
                     query_type = "CanOffload",
@@ -337,6 +458,7 @@ where
                     keys_count = keys.len(),
                     granted = granted_count,
                     already_stored = already_stored_count,
+                    leased = leased_count,
                     storage_size = storage.len(),
                     "Query processed"
                 );
@@ -346,12 +468,21 @@ where
                 {
                     warn!("Failed to encode response: {}", e);
                 }
+                metrics_sink.on_query_processed("can_offload", keys.len(), started.elapsed());
+                metrics_sink.on_can_offload_result(
+                    granted_count,
+                    already_stored_count,
+                    leased_count,
+                    lease_manager.active_count(),
+                );
             }
             QueryType::Match(keys) => {
                 let entries: Vec<_> = keys
                     .iter()
                     .filter_map(|k| storage.get(k).map(|v| (*k, v, M::default())))
                     .collect();
+                let hits = entries.len();
+                let misses = keys.len().saturating_sub(hits);
 
                 debug!(
                     query_type = "Match",
@@ -368,6 +499,8 @@ where
                 {
                     warn!("Failed to encode response: {}", e);
                 }
+                metrics_sink.on_match_result(hits, misses);
+                metrics_sink.on_query_processed("match", keys.len(), started.elapsed());
             }
             QueryType::Remove(keys) => {
                 let mut removed_count = 0usize;
@@ -391,6 +524,8 @@ where
                 {
                     warn!("Failed to encode response: {}", e);
                 }
+                metrics_sink.on_record_count_change(storage.len());
+                metrics_sink.on_query_processed("remove", keys.len(), started.elapsed());
             }
             QueryType::Touch(keys) => {
                 // Touch is a no-op for now - just acknowledge
@@ -409,6 +544,7 @@ where
                 {
                     warn!("Failed to encode response: {}", e);
                 }
+                metrics_sink.on_query_processed("touch", keys.len(), started.elapsed());
             }
         }
 
@@ -416,7 +552,14 @@ where
     }
 
     /// Handle a registration message.
-    fn handle_registration(storage: &S, codec: &C, data: &[u8]) {
+    fn handle_registration(
+        storage: &S,
+        codec: &C,
+        lease_manager: &LeaseManager<K>,
+        metrics_sink: &dyn RegistryMetricsSink,
+        data: &[u8],
+    ) {
+        let started = Instant::now();
         let Some(entries) = codec.decode_register(data) else {
             warn!(data_len = data.len(), "Failed to decode registration");
             return;
@@ -425,9 +568,17 @@ where
         let count = entries.len();
         let prev_total = storage.len();
 
-        for (key, value, _metadata) in entries {
-            storage.insert(key, value);
-        }
+        let mut released_count = 0usize;
+        let batch: Vec<(K, V)> = entries
+            .into_iter()
+            .map(|(key, value, _metadata)| {
+                if lease_manager.release(&key) {
+                    released_count += 1;
+                }
+                (key, value)
+            })
+            .collect();
+        storage.insert_batch(batch);
         let new_total = storage.len();
 
         // Only log the batch summary, not individual entries. Per-entry logging
@@ -441,6 +592,10 @@ where
             data_bytes = data.len(),
             "Registration batch processed"
         );
+        metrics_sink.on_register_batch(count, started.elapsed(), new_total);
+        if released_count > 0 {
+            metrics_sink.on_leases_released(released_count, lease_manager.active_count());
+        }
     }
 }
 

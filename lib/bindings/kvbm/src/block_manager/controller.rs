@@ -57,11 +57,9 @@ impl BlockManagerClient {
     /// Requires KVBM_DEV_MODE=TRUE. Raises an exception if dev-mode is not enabled
     /// or if the pool name is invalid.
     fn clear_pool(&self, pool: String) -> PyResult<()> {
-        let is_dev = std::env::var(
-            dynamo_runtime::config::environment_names::kvbm::KVBM_DEV_MODE,
-        )
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        let is_dev = std::env::var(dynamo_runtime::config::environment_names::kvbm::KVBM_DEV_MODE)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         if !is_dev {
             return Err(to_pyerr(

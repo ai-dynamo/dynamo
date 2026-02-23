@@ -6,7 +6,7 @@ pub mod slot;
 
 use super::*;
 use dynamo_llm::block_manager::config::{
-    cpu_cache_lookup_disabled, cpu_cache_lookup_dirty, set_cpu_cache_lookup_disabled,
+    cpu_cache_lookup_dirty, cpu_cache_lookup_disabled, set_cpu_cache_lookup_disabled,
 };
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
@@ -411,9 +411,7 @@ impl Leader for KvConnectorLeader {
             let to_clean: Vec<String> = self.finishing_requests.drain().collect();
             for request_id in &to_clean {
                 if self.slot_manager().has_slot(request_id) {
-                    tracing::debug!(
-                        "Cleaning up Finishing slot for request {request_id}"
-                    );
+                    tracing::debug!("Cleaning up Finishing slot for request {request_id}");
                     let _ = self.slot_manager().remove_slot(request_id);
                 }
             }
@@ -677,10 +675,7 @@ impl Leader for KvConnectorLeader {
                 state = ?slot.state(),
                 "Request cancelled during onboarding - discarding pending operations"
             );
-            if let Some(vllm_slot) = slot
-                .as_any_mut()
-                .downcast_mut::<VllmConnectorSlot>()
-            {
+            if let Some(vllm_slot) = slot.as_any_mut().downcast_mut::<VllmConnectorSlot>() {
                 vllm_slot.discard_pending_operations();
             }
         }
@@ -689,10 +684,7 @@ impl Leader for KvConnectorLeader {
         // vLLM v1 only calls apply_scheduler_output for the first chunk (~512 blocks).
         // The remaining blocks are computed by vLLM but never seen by the connector.
         // Flush them now using the full block_ids vLLM provides.
-        if let Some(vllm_slot) = slot
-            .as_any_mut()
-            .downcast_mut::<VllmConnectorSlot>()
-        {
+        if let Some(vllm_slot) = slot.as_any_mut().downcast_mut::<VllmConnectorSlot>() {
             if let Err(e) = vllm_slot.flush_remaining_blocks(&block_ids) {
                 tracing::error!(
                     request_id = %request_id,
@@ -879,9 +871,7 @@ impl PyKvConnectorLeader {
     /// Requires KVBM_DEV_MODE=TRUE. Raises an exception if dev-mode is not enabled
     /// or if the pool name is invalid.
     fn clear_pool(&mut self, pool: String) -> PyResult<()> {
-        self.connector_leader
-            .clear_pool(pool)
-            .map_err(to_pyerr)
+        self.connector_leader.clear_pool(pool).map_err(to_pyerr)
     }
 
     /// Enable/disable CPU cache lookup for cache hits (dev-only).

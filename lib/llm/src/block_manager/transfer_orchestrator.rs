@@ -40,7 +40,6 @@ impl<T> PrioritySender<T> {
             TransferPriority::Low => self.low.try_send(value),
         }
     }
-
 }
 
 /// Receiver side of a priority queue (high + low).

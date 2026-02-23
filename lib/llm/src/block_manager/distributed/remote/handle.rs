@@ -149,10 +149,7 @@ where
 
         tokio::spawn(Self::run_task(registry, rx));
 
-        Self {
-            tx,
-            runtime_handle,
-        }
+        Self { tx, runtime_handle }
     }
 
     /// Block the current thread on a future using the Dynamo runtime.

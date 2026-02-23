@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -20,6 +21,14 @@ pub trait Storage<K, V>: Send + Sync {
         self.len() == 0
     }
     fn clear(&self);
+
+    /// Insert a batch of entries. Default implementation inserts one at a time.
+    /// Override for batch-optimized locking (e.g., PositionalEviction).
+    fn insert_batch(&self, entries: Vec<(K, V)>) {
+        for (key, value) in entries {
+            self.insert(key, value);
+        }
+    }
 }
 
 /// HashMap-based storage.
@@ -112,6 +121,8 @@ pub trait PositionalStorageKey: Eq + Hash + Clone + Send + Sync {
 pub struct RadixStorage<K, V> {
     /// Two-level map: position -> (key -> value)
     map: DashMap<u64, DashMap<K, V>>,
+    /// O(1) length counter, maintained atomically on insert/remove/clear.
+    len_counter: AtomicUsize,
 }
 
 impl<K, V> RadixStorage<K, V>
@@ -121,6 +132,7 @@ where
     pub fn new() -> Self {
         Self {
             map: DashMap::new(),
+            len_counter: AtomicUsize::new(0),
         }
     }
 
@@ -164,7 +176,12 @@ where
 {
     fn insert(&self, key: K, value: V) {
         let position = key.position();
-        self.map.entry(position).or_default().insert(key, value);
+        let sub_map = self.map.entry(position).or_default();
+        let old = sub_map.insert(key, value);
+        if old.is_none() {
+            // Key was new — increment counter
+            self.len_counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn get(&self, key: &K) -> Option<V> {
@@ -185,6 +202,10 @@ where
         let inner = self.map.get(&position)?;
         let removed = inner.remove(key).map(|(_, v)| v);
 
+        if removed.is_some() {
+            self.len_counter.fetch_sub(1, Ordering::Relaxed);
+        }
+
         // Clean up empty position maps
         if inner.is_empty() {
             drop(inner);
@@ -195,11 +216,12 @@ where
     }
 
     fn len(&self) -> usize {
-        self.map.iter().map(|entry| entry.len()).sum()
+        self.len_counter.load(Ordering::Relaxed)
     }
 
     fn clear(&self) {
         self.map.clear();
+        self.len_counter.store(0, Ordering::Relaxed);
     }
 }
 
@@ -340,5 +362,36 @@ mod tests {
         storage.clear();
         assert!(storage.is_empty());
         assert!(storage.positions().is_empty());
+    }
+
+    #[test]
+    fn test_radix_storage_overwrite_preserves_len() {
+        let storage: RadixStorage<TestPositionalKey, u64> = RadixStorage::new();
+
+        let key = TestPositionalKey {
+            position: 0,
+            hash: 100,
+        };
+
+        storage.insert(key, 1);
+        assert_eq!(storage.len(), 1);
+
+        // Overwrite same key — len should stay 1
+        storage.insert(key, 2);
+        assert_eq!(storage.len(), 1);
+        assert_eq!(storage.get(&key), Some(2));
+    }
+
+    #[test]
+    fn test_insert_batch_default() {
+        let storage: HashMapStorage<u64, u64> = HashMapStorage::new();
+
+        let entries = vec![(1, 100), (2, 200), (3, 300)];
+        storage.insert_batch(entries);
+
+        assert_eq!(storage.len(), 3);
+        assert_eq!(storage.get(&1), Some(100));
+        assert_eq!(storage.get(&2), Some(200));
+        assert_eq!(storage.get(&3), Some(300));
     }
 }

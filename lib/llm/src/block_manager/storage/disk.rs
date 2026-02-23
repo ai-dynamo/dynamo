@@ -557,7 +557,12 @@ impl RemoteDiskStorage {
     /// * `use_odirect` — when `true`, opens with `O_DIRECT` and pre-allocates space
     ///   (required for GDS_MT). When `false`, skips both (POSIX write path: any
     ///   filesystem, no pre-allocation; caller must `fdatasync` before GDS reads).
-    pub fn open(path: &str, size: usize, create: bool, use_odirect: bool) -> Result<Self, StorageError> {
+    pub fn open(
+        path: &str,
+        size: usize,
+        create: bool,
+        use_odirect: bool,
+    ) -> Result<Self, StorageError> {
         use nix::fcntl::{OFlag, open};
         use nix::sys::stat::Mode;
 
@@ -601,7 +606,11 @@ impl RemoteDiskStorage {
 
         tracing::debug!(
             "RemoteDiskStorage opened: fd={}, file={}, size={} bytes, create={}, odirect={}",
-            raw_fd, path, size, create, use_odirect
+            raw_fd,
+            path,
+            size,
+            create,
+            use_odirect
         );
 
         Ok(Self {
@@ -675,7 +684,11 @@ impl Drop for RemoteDiskStorage {
         // Deregister from NIXL before OwnedFd closes the fd.
         self.handles.release();
         // OwnedFd::drop() closes the fd here.
-        tracing::trace!("RemoteDiskStorage dropped: file={}, size={}", self.file_name, self.size);
+        tracing::trace!(
+            "RemoteDiskStorage dropped: file={}, size={}",
+            self.file_name,
+            self.size
+        );
     }
 }
 
