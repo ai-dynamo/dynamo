@@ -792,8 +792,8 @@ impl Slot for VllmConnectorSlot {
                 num_candidate_blocks,
                 num_blocks_to_offload,
                 self.offload_min_priority,
-                &candidate_block_ids[..std::cmp::min(10, candidate_block_ids.len())],
-                &candidate_priorities[..std::cmp::min(10, candidate_priorities.len())]
+                &candidate_block_ids,
+                &candidate_priorities
             );
 
             if num_blocks_to_offload > 0 {
