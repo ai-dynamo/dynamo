@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use super::WorkerSelector;
 use super::protocols::WorkerWithDpRank;
-use super::scheduler::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
+use super::scheduler::{SchedulingRequest, SchedulingResponse};
 use super::sequence::{ActiveSequencesMultiWorker, SequenceRequest};
 use crate::discovery::RuntimeConfigWatch;
 
