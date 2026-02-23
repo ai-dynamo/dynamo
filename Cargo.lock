@@ -2030,6 +2030,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-runtime",
  "dynamo-tokens",
+ "kvbm-logical",
  "ndarray",
  "ndarray-interp",
  "ndarray-npy",
