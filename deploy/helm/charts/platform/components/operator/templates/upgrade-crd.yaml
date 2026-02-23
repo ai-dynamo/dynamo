@@ -92,7 +92,7 @@ spec:
         - name: crd-apply
           image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
           imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | default "IfNotPresent" }}
-          command: ["crd-apply"]
+          command: ["/crd-apply"]
           args:
             - "--crds-dir=/opt/dynamo-operator/crds/"
             - "--version={{ .Chart.AppVersion }}"

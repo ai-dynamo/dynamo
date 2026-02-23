@@ -54,7 +54,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cm
 FROM nvcr.io/nvidia/distroless/go:v3.1.13
 WORKDIR /
 COPY --from=builder /workspace/manager .
-COPY --from=builder /workspace/crd-apply /usr/local/bin/crd-apply
+COPY --from=builder /workspace/crd-apply .
 COPY --from=builder /workspace/config/crd/bases/ /opt/dynamo-operator/crds/
 USER 65532:65532
 
