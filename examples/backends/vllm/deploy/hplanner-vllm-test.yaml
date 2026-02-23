@@ -64,6 +64,23 @@
 #   kubectl delete -f hplanner-vllm-test.yaml -n <namespace>
 
 # =============================================================================
+# RBAC — grant default SA permission to get/update DynamoGraphDeployments
+# Required by GlobalPlanner's KubernetesConnector for scaling operations.
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: <namespace>-planner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dynamo-platform-dynamo-operator-planner
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: <namespace>
+---
+# =============================================================================
 # GlobalRouter ConfigMap — 2 prefill pools + 2 decode pools
 # =============================================================================
 apiVersion: v1
