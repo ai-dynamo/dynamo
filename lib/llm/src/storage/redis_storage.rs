@@ -236,7 +236,7 @@ impl ResponseStorage for RedisResponseStorage {
             if let Err(e) = redis::Script::new(
                 r#"
                 local cur = redis.call('TTL', KEYS[1])
-                if cur < 0 or tonumber(ARGV[1]) > cur then
+                if cur == -2 or (cur >= 0 and tonumber(ARGV[1]) > cur) then
                     redis.call('EXPIRE', KEYS[1], ARGV[1])
                 end
                 return 1

@@ -253,6 +253,7 @@ pub trait ResponseStorage: Send + Sync {
             .as_secs();
 
         let mut copied_count = 0;
+        let mut found_stop = false;
         for response in responses {
             // Compute remaining TTL from the source response so forked
             // entries expire at the same wall-clock time as the originals.
@@ -278,6 +279,7 @@ pub trait ResponseStorage: Send + Sync {
                 )
                 .await?;
                 copied_count += 1;
+                found_stop = true;
                 break;
             }
 
@@ -290,6 +292,10 @@ pub trait ResponseStorage: Send + Sync {
             )
             .await?;
             copied_count += 1;
+        }
+
+        if up_to_response_id.is_some() && !found_stop {
+            return Err(StorageError::NotFound);
         }
 
         Ok(copied_count)

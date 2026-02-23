@@ -651,7 +651,12 @@ async fn test_streaming_response_storage_callback() {
     let _end_events = converter.emit_end_events();
 
     // Wait for the spawned task to signal completion
-    done_notify.notified().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        done_notify.notified(),
+    )
+    .await
+    .expect("Storage callback was not invoked within 5 seconds");
 
     // Verify callback was invoked
     assert!(
