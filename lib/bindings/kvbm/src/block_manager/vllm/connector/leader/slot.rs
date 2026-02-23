@@ -1996,13 +1996,11 @@ mod connector_tests {
         let (mut slot, mut rx) = create_test_slot(num_tokens, 0);
         let blocks = block_ids(100, 3);
 
-        // Prefill with blocks
+        // Prefill: append blocks, then apply with num_scheduled_tokens=96.
+        // All 3 blocks (96/32) become offload candidates since evaluated_blocks starts at 0.
+        // Empty tokens → Prefilling state, and next_position(96) == total_tokens(96)
+        // so the early-return does not fire and offload proceeds.
         slot.append_mutable_device_blocks(&blocks).unwrap();
-        // apply_scheduler_output triggers offload of floor(96/32)-0 = 3 candidate blocks,
-        // but only the first 2 are full (block at index 2 holds tokens 64-95).
-        // Actually: num_candidate = 96/32 - 0 = 3, so all 3 are candidates.
-        // But wait — with empty tokens, state becomes Prefilling and early-return fires
-        // because next_position(96) > sequence.total_tokens(96) is false, so offload runs.
         slot.apply_scheduler_output(&[], &[], 0, num_tokens, None)
             .unwrap();
 
