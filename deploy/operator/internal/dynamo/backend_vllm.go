@@ -163,13 +163,15 @@ func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serv
 // The worker waits until the leader's master port (used by PyTorch TCPStore for distributed init)
 // is accepting connections before starting the vLLM process.
 // Uses Python's socket module since nc/netcat may not be available in the container image.
+// Errors are redirected to /tmp/mp-leader-wait.log for debugging (e.g. DNS failures)
+// without flooding pod logs with expected connection-refused errors every 2s.
 func injectMpWorkerPortWait(container *corev1.Container, leaderHostname string) {
 	if len(container.Args) == 0 {
 		return
 	}
 
 	waitPrefix := fmt.Sprintf(
-		`echo 'Waiting for leader master port at %s:%s...' && until python3 -c 'import socket; s=socket.create_connection(("%s", %s), timeout=2); s.close()' 2>/dev/null; do sleep 2; done && echo 'Leader master port ready' && `,
+		`echo 'Waiting for leader master port at %s:%s...' && until python3 -c 'import socket; s=socket.create_connection(("%s", %s), timeout=2); s.close()' 2>>/tmp/mp-leader-wait.log; do sleep 2; done && echo 'Leader master port ready' && `,
 		leaderHostname, commonconsts.VLLMMpMasterPort, leaderHostname, commonconsts.VLLMMpMasterPort,
 	)
 

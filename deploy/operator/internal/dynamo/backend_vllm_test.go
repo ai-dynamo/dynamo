@@ -15,7 +15,7 @@ import (
 // mpWorkerWaitPrefix returns the expected port-wait loop prefix for mp worker commands in tests.
 func mpWorkerWaitPrefix(leaderHostname string) string {
 	return fmt.Sprintf(
-		`echo 'Waiting for leader master port at %s:%s...' && until python3 -c 'import socket; s=socket.create_connection(("%s", %s), timeout=2); s.close()' 2>/dev/null; do sleep 2; done && echo 'Leader master port ready' && `,
+		`echo 'Waiting for leader master port at %s:%s...' && until python3 -c 'import socket; s=socket.create_connection(("%s", %s), timeout=2); s.close()' 2>>/tmp/mp-leader-wait.log; do sleep 2; done && echo 'Leader master port ready' && `,
 		leaderHostname, commonconsts.VLLMMpMasterPort, leaderHostname, commonconsts.VLLMMpMasterPort,
 	)
 }
