@@ -53,24 +53,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
-	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	rbacv1 "k8s.io/api/rbac/v1"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
-type State string
 type Reason string
 type Message string
-
-const (
-	DGDStateFailed  State = "failed"
-	DGDStateReady   State = "successful"
-	DGDStatePending State = "pending"
-)
-
-type etcdStorage interface {
-	DeleteKeys(ctx context.Context, prefix string) error
-}
 
 // rbacManager interface for managing RBAC resources
 type rbacManager interface {
@@ -112,7 +100,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	reason := Reason("undefined")
 	message := Message("")
-	state := DGDStatePending
+	state := nvidiacomv1alpha1.DGDStatePending
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
@@ -127,14 +115,14 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 
 		if err != nil {
-			state = DGDStateFailed
+			state = nvidiacomv1alpha1.DGDStateFailed
 			message = Message(err.Error())
 			logger.Error(err, "Reconciliation failed")
 		}
-		dynamoDeployment.SetState(string(state))
+		dynamoDeployment.SetState(state)
 
 		readyStatus := metav1.ConditionFalse
-		if state == DGDStateReady {
+		if state == nvidiacomv1alpha1.DGDStateSuccessful {
 			readyStatus = metav1.ConditionTrue
 		}
 
@@ -146,6 +134,12 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			Message:            string(message),
 			LastTransitionTime: metav1.Now(),
 		})
+
+		// Only set ObservedGeneration when reconciliation succeeded (no error),
+		// so it accurately reflects the last successfully processed generation.
+		if err == nil {
+			dynamoDeployment.Status.ObservedGeneration = dynamoDeployment.Generation
+		}
 
 		updateErr := r.Status().Update(ctx, dynamoDeployment)
 		if updateErr != nil {
@@ -169,25 +163,37 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Validate the DynamoGraphDeployment spec (defense in depth - only when webhooks are disabled)
-	if !r.Config.WebhooksEnabled {
-		validator := webhookvalidation.NewDynamoGraphDeploymentValidator(dynamoDeployment)
-		if _, validationErr := validator.Validate(ctx); validationErr != nil {
-			logger.Error(validationErr, "DynamoGraphDeployment validation failed, refusing to reconcile")
+	if r.supportsManagedRollingUpdate(dynamoDeployment) {
+		if err = r.initializeWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
+			logger.Error(err, "Failed to initialize worker hash")
+			reason = "failed_to_initialize_worker_hash"
+			return ctrl.Result{}, err
+		}
 
-			// Set validation error state and reason (defer will update status)
-			state = DGDStateFailed
-			reason = Reason("ValidationFailed")
-			message = Message(fmt.Sprintf("Validation failed: %v", validationErr))
+		if r.isRollingUpdateInProgress(dynamoDeployment) || r.shouldTriggerRollingUpdate(dynamoDeployment) {
+			if err = r.reconcileRollingUpdate(ctx, dynamoDeployment); err != nil {
+				logger.Error(err, "Failed to reconcile rolling update")
+				state = nvidiacomv1alpha1.DGDStateFailed
+				reason = Reason("RollingUpdateFailed")
+				message = Message(err.Error())
+				return ctrl.Result{}, err
+			}
+		}
+	} else {
+		// For unsupported pathways, log if a rolling update would have been triggered
+		if r.shouldTriggerRollingUpdate(dynamoDeployment) {
+			logger.Info("Worker spec change detected but rolling update not supported for this pathway",
+				"isGrove", r.isGrovePathway(dynamoDeployment),
+				"hasMultinode", dynamoDeployment.HasAnyMultinodeService())
+			r.Recorder.Event(dynamoDeployment, corev1.EventTypeWarning, "RollingUpdateNotSupported",
+				"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments")
 
-			// Record event for visibility
-			r.Recorder.Event(dynamoDeployment, corev1.EventTypeWarning, "ValidationFailed", validationErr.Error())
-
-			// Don't requeue - user must fix the spec
-			logger.Info("DynamoGraphDeployment is invalid, not reconciling until spec is fixed")
-
-			// Return without error so defer updates status but doesn't requeue
-			return ctrl.Result{}, nil
+			// Update the hash to prevent repeated warnings
+			hash := dynamo.ComputeDGDWorkersSpecHash(dynamoDeployment)
+			r.setCurrentWorkerHash(dynamoDeployment, hash)
+			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
+				logger.Error(updateErr, "Failed to update worker hash for unsupported pathway")
+			}
 		}
 	}
 
@@ -205,6 +211,21 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// Override state based on rolling update status if a rolling update is in progress
+	if dynamoDeployment.Status.RollingUpdate != nil {
+		switch dynamoDeployment.Status.RollingUpdate.Phase {
+		case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
+			// Keep the reconcileResult state (should be Ready if resources are ready)
+		case nvidiacomv1alpha1.RollingUpdatePhasePending, nvidiacomv1alpha1.RollingUpdatePhaseInProgress:
+			// Rolling update in progress - resources are being transitioned
+			if state != nvidiacomv1alpha1.DGDStateFailed {
+				state = nvidiacomv1alpha1.DGDStatePending
+				reason = "rolling_update_in_progress"
+				message = "Rolling update in progress"
+			}
+		}
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -215,7 +236,7 @@ type Resource interface {
 }
 
 type ReconcileResult struct {
-	State         State
+	State         nvidiacomv1alpha1.DGDState
 	Reason        Reason
 	Message       Message
 	ServiceStatus map[string]nvidiacomv1alpha1.ServiceReplicaStatus
@@ -407,7 +428,8 @@ func isRestartAlreadyProcessed(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) boo
 
 	if dgd.Spec.Restart.ID == dgd.Status.Restart.ObservedID &&
 		(dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted ||
-			dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed) {
+			dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed ||
+			dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseSuperseded) {
 		return true
 	}
 
@@ -584,7 +606,18 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		// else, only create for the frontend component
 		isK8sDiscoveryEnabled := r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations)
 		if isK8sDiscoveryEnabled || component.ComponentType == consts.ComponentTypeFrontend {
-			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName, isK8sDiscoveryEnabled)
+			if component.DynamoNamespace == nil {
+				return ReconcileResult{}, fmt.Errorf("expected component %s to have a dynamoNamespace", componentName)
+			}
+			mainComponentService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+				ServiceName:     dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""),
+				Namespace:       dynamoDeployment.Namespace,
+				ComponentType:   component.ComponentType,
+				DynamoNamespace: *component.DynamoNamespace,
+				ComponentName:   componentName,
+				Labels:          component.Labels,
+				IsK8sDiscovery:  isK8sDiscoveryEnabled,
+			})
 			if err != nil {
 				logger.Error(err, "failed to generate the main component service")
 				return ReconcileResult{}, fmt.Errorf("failed to generate the main component service: %w", err)
@@ -614,7 +647,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 			if component.Ingress != nil {
 				ingressSpec = *component.Ingress
 			}
-			mainComponentIngress := dynamo.GenerateComponentIngress(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
+			mainComponentIngress := dynamo.GenerateComponentIngress(ctx, dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""), dynamoDeployment.Namespace, ingressSpec)
 			_, syncedMainComponentIngress, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
 				if !ingressSpec.Enabled || ingressSpec.IngressControllerClassName == nil {
 					logger.Info("Ingress is not enabled")
@@ -638,7 +671,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 			}
 			// generate the main component virtual service
 			if r.Config.IngressConfig.UseVirtualService() {
-				mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
+				mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""), dynamoDeployment.Namespace, ingressSpec)
 				_, syncedMainComponentVirtualService, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
 					if !ingressSpec.IsVirtualServiceEnabled() {
 						logger.Info("VirtualService is not enabled")
@@ -830,15 +863,25 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 	// No restart requested
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
 		// Preserve existing terminal status
-		if dgd.Status.Restart != nil && (dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted || dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed) {
+		if dgd.Status.Restart != nil && (dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted || dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed || dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseSuperseded) {
 			return dgd.Status.Restart
 		}
 		return nil
 	}
 
-	// If restart was already processed (completed or failed), return existing status
+	// If restart was already processed (completed, failed, or superseded), return existing status
 	if isRestartAlreadyProcessed(dgd) {
 		return dgd.Status.Restart
+	}
+
+	// Supersede restart if a rolling update is in progress
+	if r.isRollingUpdateInProgress(dgd) {
+		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "RestartSuperseded",
+			"Restart %s superseded by rolling update", dgd.Spec.Restart.ID)
+		return &nvidiacomv1alpha1.RestartStatus{
+			ObservedID: dgd.Spec.Restart.ID,
+			Phase:      nvidiacomv1alpha1.RestartPhaseSuperseded,
+		}
 	}
 
 	order := dynamo.GetRestartOrder(dgd)
@@ -852,7 +895,7 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 
 // checkComponentServiceFullyUpdated checks if a DynamoComponentDeployment is fully updated.
 func (r *DynamoGraphDeploymentReconciler) checkComponentServiceFullyUpdated(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) (bool, string) {
-	resourceName := dynamo.GetDynamoComponentName(dgd, serviceName)
+	resourceName := dynamo.GetDCDResourceName(dgd, serviceName, r.getCurrentWorkerHash(dgd))
 	return checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
 }
 
@@ -947,14 +990,14 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 
 	if len(notReadyResources) == 0 {
 		return ReconcileResult{
-			State:         DGDStateReady,
+			State:         nvidiacomv1alpha1.DGDStateSuccessful,
 			Reason:        "all_resources_are_ready",
 			Message:       Message("All resources are ready"),
 			ServiceStatus: serviceStatuses,
 		}
 	}
 	return ReconcileResult{
-		State:         DGDStatePending,
+		State:         nvidiacomv1alpha1.DGDStatePending,
 		Reason:        "some_resources_are_not_ready",
 		Message:       Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))),
 		ServiceStatus: serviceStatuses,
@@ -965,44 +1008,79 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
+	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
+
+	rollingUpdateCtx := r.buildRollingUpdateContext(ctx, dynamoDeployment)
+
 	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
+	if rollingUpdateCtx.InProgress() {
+		logger.Info("Rolling update in progress",
+			"newWorkerHash", rollingUpdateCtx.NewWorkerHash,
+			"oldWorkerReplicas", rollingUpdateCtx.OldWorkerReplicas)
+	}
 
-	// generate the dynamoComponentsDeployments from the config
-	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
-	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, &defaultIngressSpec, restartState, existingRestartAnnotations)
+	// Generate all DCDs (handles both normal and rolling update cases)
+	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(
+		ctx, dynamoDeployment, &defaultIngressSpec, restartState, existingRestartAnnotations, rollingUpdateCtx,
+	)
 	if err != nil {
 		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the DynamoComponentsDeployments: %w", err)
 	}
 
-	// reconcile the dynamoComponentsDeployments
-	for serviceName, dynamoComponentDeployment := range dynamoComponentsDeployments {
-		logger.Info("Reconciling the DynamoComponentDeployment", "serviceName", serviceName, "dynamoComponentDeployment", dynamoComponentDeployment)
-		_, dynamoComponentDeployment, err = commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoComponentDeployment, bool, error) {
-			return dynamoComponentDeployment, false, nil
+	// Sync all generated DCDs
+	for key, dcd := range dynamoComponentsDeployments {
+		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
+		_, syncedDCD, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoComponentDeployment, bool, error) {
+			return dcd, false, nil
 		})
 		if err != nil {
-			logger.Error(err, "failed to sync the DynamoComponentDeployment")
+			logger.Error(err, "failed to sync the DynamoComponentDeployment", "name", dcd.Name)
 			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
 		}
-		resources = append(resources, dynamoComponentDeployment)
+		resources = append(resources, syncedDCD)
+	}
+
+	// During rolling update, scale old worker DCDs via direct patching.
+	// This is done separately from DCD generation to avoid overwriting the old spec
+	// with the new spec (which would trigger an unwanted rolling update on old workers).
+	if rollingUpdateCtx.InProgress() {
+		if err := r.scaleOldWorkerDCDs(ctx, dynamoDeployment, rollingUpdateCtx); err != nil {
+			logger.Error(err, "failed to scale old worker DCDs")
+			return ReconcileResult{}, fmt.Errorf("failed to scale old worker DCDs: %w", err)
+		}
 	}
 
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
+
+	// During rolling updates, aggregate old worker service statuses into the result
+	// so that Replicas, ReadyReplicas, etc. reflect the total across old and new DCDs.
+	if rollingUpdateCtx.InProgress() {
+		oldWorkerStatuses, err := r.aggregateOldWorkerServiceStatuses(ctx, dynamoDeployment, rollingUpdateCtx)
+		if err != nil {
+			logger.Error(err, "failed to aggregate old worker service statuses")
+			// Non-fatal: continue with partial status
+		} else if len(oldWorkerStatuses) > 0 {
+			mergeWorkerServiceStatuses(result.ServiceStatus, oldWorkerStatuses)
+		}
+	}
+
 	return result, nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]string, error) {
 	logger := log.FromContext(ctx)
 
+	computedHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
+
 	restartAnnotations := make(map[string]string)
 	for serviceName := range dgd.Spec.Services {
-		dcdName := dynamo.GetDynamoComponentName(dgd, serviceName)
+		dcdName := dynamo.GetDCDResourceName(dgd, serviceName, computedHash)
 		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace}, existingDCD)
 
@@ -1441,7 +1519,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// 2. Reconcile InferencePool
 	// Note: EPP Service is created automatically by the standard component reconciliation
 	// via GenerateComponentService() in graph.go (see ComponentTypeEPP case)
-	eppServiceName := dynamo.GetDynamoComponentName(dgd, componentName)
+	eppServiceName := dynamo.GetDCDResourceName(dgd, componentName, "")
 	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName, eppService.EPPConfig)
 	if err != nil {
 		logger.Error(err, "Failed to generate EPP InferencePool")

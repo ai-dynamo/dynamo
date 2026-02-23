@@ -32,10 +32,17 @@ from typing import Awaitable, Callable, Dict, Optional, Union
 
 import msgpack
 import zmq
+from prometheus_client import CollectorRegistry
 
+from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 
 logging.basicConfig(level=logging.DEBUG)
+
+# Create a dedicated registry for dynamo_component metrics
+# This ensures these metrics are isolated and can be exposed via their own callback
+DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
+
 
 # Use non-blocking RPC calls; control overhead with backoff sleeps.
 _STATS_TIMEOUT_SEC = 0.01
@@ -111,6 +118,7 @@ class ZmqKvEventPublisher:
         block_hashes: list[int],
         lora_id: int = 0,
         parent_hash: Optional[int] = None,
+        block_mm_infos: Optional[list[dict | None]] = None,
         attention_dp_rank: int = 0,
     ):
         """Publish a BlockStored event.
@@ -133,6 +141,10 @@ class ZmqKvEventPublisher:
             "block_size": self.kv_block_size,
             "lora_id": lora_id if lora_id != 0 else None,
         }
+
+        # Add multimodal info if present
+        if block_mm_infos is not None:
+            event["block_mm_infos"] = block_mm_infos
 
         self._publish_event(event, attention_dp_rank)
 
@@ -290,6 +302,7 @@ class Publisher:
         worker_id,
         kv_block_size,
         metrics_labels,
+        component_gauges: LLMBackendMetrics,
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
     ):
@@ -300,6 +313,7 @@ class Publisher:
         self.kv_block_size = kv_block_size
         self.max_window_size = None
         self.metrics_labels = metrics_labels
+        self.component_gauges = component_gauges
         self.enable_local_indexer = enable_local_indexer
         self.attention_dp_size = engine.get_attention_dp_size()
 
@@ -391,7 +405,10 @@ class Publisher:
             return
 
         # Publish initial metrics with 0 active blocks
+        # TRT-LLM doesn't use data parallelism currently (dp_rank="0")
         self.metrics_publisher.publish(None, 0)
+        self.component_gauges.set_total_blocks("0", 0)
+        self.component_gauges.set_gpu_cache_usage("0", 0.0)
 
         # Prepare threads for publishing stats but don't start them yet.
         # TRTLLM needs to start generating tokens first before stats
@@ -453,9 +470,19 @@ class Publisher:
 
         def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
+            kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
-            # TRT-LLM doesn't use data parallelism currently (dp_rank=None)
+            # TRT-LLM doesn't use data parallelism currently (dp_rank=None for NATS, "0" for Prometheus)
             self.metrics_publisher.publish(None, kv_active_blocks)
+
+            # Publish Prometheus metrics
+            self.component_gauges.set_total_blocks("0", kv_total_blocks)
+
+            # Calculate and publish GPU cache usage percentage
+            gpu_cache_usage = (
+                kv_active_blocks / kv_total_blocks if kv_total_blocks > 0 else 0.0
+            )
+            self.component_gauges.set_gpu_cache_usage("0", gpu_cache_usage)
 
         await self._polling_loop(
             lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
@@ -515,6 +542,7 @@ class Publisher:
             token_ids: list[int] = []
             num_block_tokens: list[int] = []
             block_hashes: list[int] = []
+            block_mm_infos: list[dict | None] = []
             for block in data["blocks"]:
                 token_num_in_block = len(block["tokens"])
                 block_hash = _to_signed_i64(block["block_hash"])
@@ -539,6 +567,26 @@ class Publisher:
                 for token in block["tokens"]:
                     token_ids.append(int(token["token_id"]))
 
+                # Extract multimodal hash info for this block
+                # {"mm_keys": [{"type":"mm_key","hash":"<hex>","start_offset":N}]}
+                mm_keys = block.get("mm_keys", [])
+                mm_hashes = [
+                    int(mm_key["hash"][:16], 16)
+                    for mm_key in mm_keys
+                    if mm_key.get("type") == "mm_key" and mm_key.get("hash")
+                ]
+                if mm_hashes:
+                    block_mm_infos.append(
+                        {
+                            "mm_objects": [
+                                {"mm_hash": mm_hash, "offsets": []}
+                                for mm_hash in mm_hashes
+                            ]
+                        }
+                    )
+                else:
+                    block_mm_infos.append(None)
+
             # Note: Currently data does not have lora_id.
             # Using 0 as default value. If later data has
             # lora_id, we need to verify if this is correct.
@@ -561,6 +609,7 @@ class Publisher:
                     block_hashes,
                     lora_id,
                     parent_hash,
+                    block_mm_infos,
                     attention_dp_rank,
                 )
             elif self.kv_event_publishers:
@@ -574,6 +623,7 @@ class Publisher:
                         block_hashes,
                         lora_id,
                         parent_hash,
+                        block_mm_infos,
                     )
                 else:
                     logging.warning(
@@ -716,6 +766,7 @@ async def get_publisher(
     worker_id,
     kv_block_size,
     metrics_labels,
+    component_gauges: LLMBackendMetrics,
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
 ):
@@ -726,6 +777,7 @@ async def get_publisher(
         worker_id,
         kv_block_size,
         metrics_labels,
+        component_gauges=component_gauges,
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
     )

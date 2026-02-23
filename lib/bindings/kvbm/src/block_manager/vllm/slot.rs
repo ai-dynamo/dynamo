@@ -719,7 +719,7 @@ mod tests {
             // Prefill count should remain unchanged
             assert_eq!(slot.num_tokens(SlotPosition::Prefill), 4);
 
-            if expected_total % BLOCK_SIZE == 0 {
+            if expected_total.is_multiple_of(BLOCK_SIZE) {
                 assert_eq!(slot.mutable.len(), 0);
                 assert_eq!(slot.immutable.len(), expected_total / BLOCK_SIZE);
             } else {

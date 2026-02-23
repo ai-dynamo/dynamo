@@ -12,7 +12,7 @@ Production-ready deployments for **Llama-3.3-70B-Instruct** using vLLM with FP8 
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/pages/kubernetes/README.md)
 2. **GPU cluster** with H100 or H200 GPUs matching the configuration requirements
 3. **HuggingFace token** with access to Llama models
 

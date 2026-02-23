@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.14.1"
+VLLM_VER="0.15.1"
 VLLM_REF="v${VLLM_VER}"
 
 # Basic Configurations
@@ -23,8 +23,8 @@ INSTALLATION_DIR=/tmp
 TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to add 12.0+PTX
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
-FLASHINF_REF="v0.5.3"
-LMCACHE_REF="0.3.12"
+FLASHINF_REF="v0.6.1"
+LMCACHE_REF="0.3.13"
 
 while [[ $# -gt 0 ]]; do
     case $1 in

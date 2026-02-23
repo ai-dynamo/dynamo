@@ -80,10 +80,9 @@ type Config struct {
 	// DiscoveryBackend is the discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery.
 	DiscoveryBackend string
 
-	// WebhooksEnabled indicates whether admission webhooks are enabled
-	// When true, controllers skip validation (webhooks handle it)
-	// When false, controllers perform validation (defense in depth)
-	WebhooksEnabled bool
+	// GPUDiscoveryEnabled indicates whether Helm provisioned node read access for the namespace-scoped operator.
+	// Only relevant for namespace-scoped operators (RestrictedNamespace != "").
+	GPUDiscoveryEnabled bool
 
 	// Checkpoint configuration for checkpoint/restore functionality
 	Checkpoint CheckpointConfig
@@ -105,11 +104,8 @@ type CheckpointConfig struct {
 	Enabled bool
 	// Storage holds storage backend configuration
 	Storage CheckpointStorageConfig
-	// CRIUTimeout is the CRIU timeout in seconds (required for CUDA checkpoints/restores)
-	CRIUTimeout string
-	// InitContainerImage is the image used for init containers (e.g., signal file cleanup)
-	// Defaults to "busybox:latest" if not specified
-	InitContainerImage string
+	// ReadyForCheckpointFilePath is the file path used to signal model readiness for checkpoint jobs
+	ReadyForCheckpointFilePath string
 }
 
 // Checkpoint storage type constants
@@ -123,8 +119,6 @@ const (
 type CheckpointStorageConfig struct {
 	// Type is the storage backend type: pvc, s3, or oci
 	Type string
-	// SignalHostPath is the host path for signal files (used for checkpoint job coordination)
-	SignalHostPath string
 	// PVC configuration (used when Type=pvc)
 	PVC CheckpointPVCConfig
 	// S3 configuration (used when Type=s3)

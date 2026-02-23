@@ -270,7 +270,7 @@ impl DeltaGenerator {
         stop_reason: Option<dynamo_async_openai::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: text,
+            content: text.map(dynamo_async_openai::types::ChatCompletionMessageContent::Text),
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
@@ -428,11 +428,6 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             logprobs,
             delta.stop_reason,
         );
-
-        // Record first token time (only succeeds on first call due to OnceLock)
-        if let Some(ref tracker) = self.tracker {
-            tracker.record_first_token();
-        }
 
         // Get worker_id info from tracker (set by KvPushRouter based on phase)
         let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());

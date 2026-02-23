@@ -20,6 +20,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -550,8 +551,8 @@ async def main():
     parser.add_argument(
         "--log-dir",
         "-l",
-        default="/tmp/dynamo_logs",
-        help="Base directory for logs (default: /tmp/dynamo_logs)",
+        default=os.path.join(tempfile.gettempdir(), "dynamo_logs"),
+        help=f"Base directory for logs (default: {tempfile.gettempdir()}/dynamo_logs)",
     )
     parser.add_argument(
         "--service-name",
@@ -597,6 +598,6 @@ async def main():
 
 
 # run with:
-# uv run benchmarks/profiler/utils/dynamo_deployment.py -n mo-dyn -f ./examples/vllm/deploy/agg.yaml -l ./client_logs
+# uv run components/src/dynamo/profiler/utils/dynamo_deployment.py -n mo-dyn -f ./examples/vllm/deploy/agg.yaml -l ./client_logs
 if __name__ == "__main__":
     asyncio.run(main())

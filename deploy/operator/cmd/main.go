@@ -29,7 +29,7 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
-	clientv3 "go.etcd.io/etcd/client/v3"
+
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/discovery/cached/memory"
@@ -54,11 +54,12 @@ import (
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/etcd"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -66,6 +67,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
@@ -122,6 +124,7 @@ func init() {
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 
 	utilruntime.Must(gaiev1.Install(scheme))
+	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -154,19 +157,17 @@ func main() {
 	var namespaceScopeLeaseRenewInterval time.Duration
 	var operatorVersion string
 	var discoveryBackend string
-	var enableWebhooks bool
+	var gpuDiscoveryEnabled bool
 	// Checkpoint configuration
 	var checkpointEnabled bool
 	var checkpointStorageType string
-	var checkpointSignalHostPath string
-	var checkpointCRIUTimeout string
 	var checkpointPVCName string
 	var checkpointPVCBasePath string
 	var checkpointS3URI string
 	var checkpointS3CredentialsSecret string
 	var checkpointOCIURI string
 	var checkpointOCICredentialsSecret string
-	var checkpointInitContainerImage string
+	var checkpointReadyForCheckpointFilePath string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -176,9 +177,9 @@ func main() {
 		"If set the metrics endpoint is served securely")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
-		"Enable admission webhooks for validation. When enabled, controllers skip validation "+
-			"(webhooks handle it). When disabled, controllers perform validation.")
+	flag.BoolVar(&gpuDiscoveryEnabled, "gpu-discovery-enabled", true,
+		"Whether GPU discovery is enabled for namespace-scoped operators. When true (default), "+
+			"the Helm chart has provisioned a ClusterRole granting node read access for GPU hardware discovery.")
 	flag.StringVar(&restrictedNamespace, "restrictedNamespace", "",
 		"Enable resources filtering, only the resources belonging to the given namespace will be handled.")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "", "Leader election id"+
@@ -227,11 +228,7 @@ func main() {
 		"Enable checkpoint/restore functionality")
 	flag.StringVar(&checkpointStorageType, "checkpoint-storage-type", commonController.CheckpointStorageTypePVC,
 		"Checkpoint storage backend type: pvc, s3, or oci")
-	flag.StringVar(&checkpointSignalHostPath, "checkpoint-signal-host-path", "",
-		"Host path for signal files used for checkpoint job coordination")
-	flag.StringVar(&checkpointCRIUTimeout, "checkpoint-criu-timeout", "21600",
-		"CRIU timeout in seconds (required for CUDA checkpoints/restores, default: 21600 = 6 hours)")
-	flag.StringVar(&checkpointPVCName, "checkpoint-pvc-name", "checkpoint-storage",
+	flag.StringVar(&checkpointPVCName, "checkpoint-pvc-name", "chrek-pvc",
 		"Name of the PVC for checkpoint storage (used when storage-type=pvc)")
 	flag.StringVar(&checkpointPVCBasePath, "checkpoint-pvc-base-path", "/checkpoints",
 		"Base path within the PVC for storing checkpoints (used when storage-type=pvc)")
@@ -243,8 +240,9 @@ func main() {
 		"OCI URI for checkpoint storage: oci://registry/repository (used when storage-type=oci)")
 	flag.StringVar(&checkpointOCICredentialsSecret, "checkpoint-oci-credentials-secret", "",
 		"Docker config secret name for OCI registry auth (used when storage-type=oci)")
-	flag.StringVar(&checkpointInitContainerImage, "checkpoint-init-container-image", "busybox:latest",
-		"Image to use for checkpoint init containers (e.g., signal file cleanup)")
+	flag.StringVar(&checkpointReadyForCheckpointFilePath,
+		"checkpoint-ready-for-checkpoint-file-path", "/tmp/ready-for-checkpoint",
+		"Path written by the worker container when the model is loaded and ready for checkpointing")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -256,6 +254,14 @@ func main() {
 		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
 		os.Exit(1)
 	}
+
+	// Validate and normalize operator version to semver
+	if _, err := semver.NewVersion(operatorVersion); err != nil {
+		setupLog.Info("WARNING: operator-version is not valid semver, falling back to 0.0.0-unknown",
+			"provided", operatorVersion, "error", err.Error())
+		operatorVersion = "0.0.0-unknown"
+	}
+	setupLog.Info("Operator version configured", "version", operatorVersion)
 
 	// Validate discoveryBackend value
 	if discoveryBackend != "kubernetes" && discoveryBackend != "etcd" {
@@ -315,12 +321,10 @@ func main() {
 		},
 		DiscoveryBackend: discoveryBackend,
 		Checkpoint: commonController.CheckpointConfig{
-			Enabled:            checkpointEnabled,
-			CRIUTimeout:        checkpointCRIUTimeout,
-			InitContainerImage: checkpointInitContainerImage,
+			Enabled:                    checkpointEnabled,
+			ReadyForCheckpointFilePath: checkpointReadyForCheckpointFilePath,
 			Storage: commonController.CheckpointStorageConfig{
-				Type:           checkpointStorageType,
-				SignalHostPath: checkpointSignalHostPath,
+				Type: checkpointStorageType,
 				PVC: commonController.CheckpointPVCConfig{
 					PVCName:  checkpointPVCName,
 					BasePath: checkpointPVCBasePath,
@@ -507,18 +511,6 @@ func main() {
 		"kai-scheduler", kaiSchedulerEnabled,
 	)
 
-	// Create etcd client
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:            []string{etcdAddr},
-		DialTimeout:          5 * time.Second,
-		DialKeepAliveTime:    10 * time.Second,
-		DialKeepAliveTimeout: 3 * time.Second,
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to create etcd client")
-		os.Exit(1)
-	}
-
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetClient())
 	// refresh whenever a secret is created/deleted/updated
 	// Set up informer
@@ -617,7 +609,6 @@ func main() {
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
 		Config:                ctrlConfig,
-		EtcdStorage:           etcd.NewStorage(cli),
 		DockerSecretRetriever: dockerSecretRetriever,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
@@ -685,61 +676,68 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set webhooks enabled flag in config
-	ctrlConfig.WebhooksEnabled = enableWebhooks
+	ctrlConfig.GPUDiscoveryEnabled = gpuDiscoveryEnabled
 
-	if enableWebhooks {
-		setupLog.Info("Webhooks are enabled - webhooks will validate, controllers will skip validation")
-	} else {
-		setupLog.Info("Webhooks are disabled - controllers will validate (defense in depth)")
-	}
-
-	// Configure webhooks with lease-based namespace exclusion (only if enabled)
+	// Configure webhooks with lease-based namespace exclusion
 	// In cluster-wide mode, inject ctrlConfig.ExcludedNamespaces (leaseWatcher) so webhooks can defer
 	// to namespace-restricted operators. In namespace-restricted mode, webhooks validate without checking
 	// leases (ExcludedNamespaces is nil). The webhooks use LeaseAwareValidator wrapper to add coordination.
-	if enableWebhooks {
-		if ctrlConfig.RestrictedNamespace == "" {
-			// Cluster-wide mode: inject the same ExcludedNamespaces used by controllers
-			setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
-			internalwebhook.SetExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
-		} else {
-			// Namespace-restricted mode: no exclusion checking needed (validators not wrapped)
-			setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
-				"restrictedNamespace", ctrlConfig.RestrictedNamespace)
-			internalwebhook.SetExcludedNamespaces(nil)
-		}
-
-		// Register validation webhook handlers
-		setupLog.Info("Registering validation webhooks")
-
-		dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
-		if err = dcdHandler.RegisterWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoComponentDeployment")
-			os.Exit(1)
-		}
-
-		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
-		if err = dgdHandler.RegisterWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
-			os.Exit(1)
-		}
-
-		dmHandler := webhookvalidation.NewDynamoModelHandler()
-		if err = dmHandler.RegisterWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoModel")
-			os.Exit(1)
-		}
-
-		isClusterWide := ctrlConfig.RestrictedNamespace == ""
-		dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(isClusterWide)
-		if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
-			os.Exit(1)
-		}
-
-		setupLog.Info("Validation webhooks registered successfully")
+	isClusterWide := ctrlConfig.RestrictedNamespace == ""
+	if isClusterWide {
+		setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
+		internalwebhook.SetExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
+	} else {
+		setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
+			"restrictedNamespace", ctrlConfig.RestrictedNamespace)
+		internalwebhook.SetExcludedNamespaces(nil)
 	}
+
+	// Register validation webhook handlers
+	setupLog.Info("Registering validation webhooks")
+
+	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
+	if err = dcdHandler.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoComponentDeployment")
+		os.Exit(1)
+	}
+
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
+	if err = dgdHandler.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
+		os.Exit(1)
+	}
+
+	dmHandler := webhookvalidation.NewDynamoModelHandler()
+	if err = dmHandler.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoModel")
+		os.Exit(1)
+	}
+
+	dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(isClusterWide, gpuDiscoveryEnabled)
+	if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
+		os.Exit(1)
+	}
+
+	if err = ctrl.NewWebhookManagedBy(mgr).
+		For(&nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}).
+		Complete(); err != nil {
+		setupLog.Error(err, "unable to register conversion webhook", "webhook", "DynamoGraphDeploymentRequest-conversion")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Validation webhooks registered successfully")
+
+	// Register defaulting (mutating) webhook handlers
+	setupLog.Info("Registering defaulting webhooks")
+
+	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
+	if err = dgdDefaulter.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment-defaulting")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Defaulting webhooks registered successfully")
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

@@ -3,6 +3,7 @@
 
 import enum
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
@@ -139,10 +140,28 @@ class TensorRTLLMEngine:
 async def get_llm_engine(
     engine_args,
     disaggregation_mode: Optional[DisaggregationMode] = None,
+    component_gauges=None,
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
+    """Get TensorRT-LLM engine instance with load time tracking.
+
+    Args:
+        engine_args: Engine configuration arguments.
+        disaggregation_mode: Optional disaggregation mode configuration.
+        component_gauges: Optional LLMBackendGauges instance for recording load time.
+    """
+    # Time engine initialization
+    start_time = time.time()
+
     engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
         await engine.initialize()
+        load_time = time.time() - start_time
+        logger.debug(f"TensorRT-LLM engine initialized in {load_time:.2f}s")
+
+        # Record model load time immediately after measurement
+        if component_gauges:
+            component_gauges.set_model_load_time(load_time)
+
         yield engine
     except Exception as e:
         logging.error(f"Error in engine context: {e}")

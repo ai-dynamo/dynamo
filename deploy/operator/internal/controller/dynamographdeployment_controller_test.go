@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -157,7 +156,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
 						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						},
 						OwnerReferences: []metav1.OwnerReference{
 							{
@@ -181,7 +180,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						Name:      "test-dgd-removed",
 						Namespace: "default",
 						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						},
 						OwnerReferences: []metav1.OwnerReference{
 							{
@@ -230,7 +229,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
 						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						},
 						OwnerReferences: []metav1.OwnerReference{
 							{
@@ -405,13 +404,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
+						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        2,
 						UpdatedReplicas: 2,
 						ReadyReplicas:   ptr.To(int32(2)),
@@ -467,13 +467,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
+						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
@@ -481,6 +482,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"decode": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-decode",
+						ComponentNames:  []string{"test-dgd-0-decode"},
 						Replicas:        2,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
@@ -542,13 +544,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"decode": {
 						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-decode",
+						ComponentNames:    []string{"test-dgd-0-decode"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
@@ -556,6 +559,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"prefill": {
 						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-prefill",
+						ComponentNames:    []string{"test-dgd-0-prefill"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
@@ -614,13 +618,14 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:   v1alpha1.ComponentKindPodClique,
 						ComponentName:   "test-dgd-0-frontend",
+						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
@@ -628,6 +633,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 					"aggregated": {
 						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
 						ComponentName:     "test-dgd-0-aggregated",
+						ComponentNames:    []string{"test-dgd-0-aggregated"},
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						AvailableReplicas: ptr.To(int32(1)),
@@ -1336,6 +1342,114 @@ func Test_computeRestartStatus(t *testing.T) {
 				InProgress: []string{"frontend"}, // Reset to FIRST service
 			},
 		},
+		{
+			name: "rolling update in progress + new restart request - superseded",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				RollingUpdate: &v1alpha1.RollingUpdateStatus{
+					Phase: v1alpha1.RollingUpdatePhaseInProgress,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
+		{
+			name: "rolling update pending + restart already in progress - superseded",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend"},
+				},
+				RollingUpdate: &v1alpha1.RollingUpdateStatus{
+					Phase: v1alpha1.RollingUpdatePhasePending,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
+		{
+			name: "rolling update completed + restart request - normal processing",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				RollingUpdate: &v1alpha1.RollingUpdateStatus{
+					Phase: v1alpha1.RollingUpdatePhaseCompleted,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
+			name: "restart already processed as superseded - returns existing status",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseSuperseded,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
+		{
+			name: "no restart requested but has superseded status - preserves status",
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseSuperseded,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: oldID,
+				Phase:      v1alpha1.RestartPhaseSuperseded,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1445,7 +1559,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1505,7 +1619,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1577,7 +1691,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode",
+						Name:      "test-dgd-decode-e1f2a6fe",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1596,7 +1710,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-decode-deployment",
+							ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   2,
 							ReadyReplicas:     ptr.To(int32(2)),
@@ -1606,7 +1720,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-prefill",
+						Name:      "test-dgd-prefill-e1f2a6fe",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1625,7 +1739,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-prefill-deployment",
+							ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
@@ -1635,7 +1749,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1649,7 +1763,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-decode-deployment",
+						ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						ReadyReplicas:     ptr.To(int32(2)),
@@ -1657,7 +1771,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"prefill": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-prefill-deployment",
+						ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -1723,7 +1837,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode",
+						Name:      "test-dgd-decode-e1f2a6fe",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1742,7 +1856,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-decode-deployment",
+							ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -1752,7 +1866,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-prefill",
+						Name:      "test-dgd-prefill-e1f2a6fe",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1771,7 +1885,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-prefill-deployment",
+							ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
@@ -1781,9 +1895,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode-e1f2a6fe: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
@@ -1795,7 +1909,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-decode-deployment",
+						ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -1803,7 +1917,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"prefill": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-prefill-deployment",
+						ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -1863,7 +1977,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				&v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode",
+						Name:      "test-dgd-decode-5f3d46ba",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -1882,7 +1996,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-decode-deployment",
+							ComponentName:     "test-dgd-decode-5f3d46ba-deployment",
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -1892,9 +2006,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode-5f3d46ba: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
@@ -1906,7 +2020,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-decode-deployment",
+						ComponentName:     "test-dgd-decode-5f3d46ba-deployment",
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),

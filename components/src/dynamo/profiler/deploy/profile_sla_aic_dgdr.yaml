@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DynamoGraphDeploymentRequest for AI Configurator-based profiling
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: sla-aic
+spec:
+  model: Qwen/Qwen3-32B
+  backend: trtllm
+
+  # ProfilingConfig maps directly to the profile_sla.py config format
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag"
+
+    # NOTE: any image built before January 10 and any release prior to 0.8.1
+    # will need to use snake_case within profilingConfig.config
+    config:
+      searchStrategy: rapid
+      sla:
+        isl: 3000
+        osl: 150
+        ttft: 500.0
+        itl: 30.0
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag"
+  autoApply: true

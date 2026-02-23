@@ -11,16 +11,12 @@ pub use crate::protocols::common::timing::TimingInfo;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
-/// Header to disable local bookkeeping updates (for GAIE Stage 2)
-/// When set to "false", the router skips add_request, mark_prefill_completed, and free calls.
-pub const HEADER_ENABLE_LOCAL_UPDATES: &str = "x-enable-local-updates";
 
 /// Apply routing overrides from HTTP headers to nvext.
 ///
 /// Header mappings:
 /// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
-/// - `x-enable-local-updates` -> `enable_local_updates` (set to false to disable router bookkeeping)
 ///
 /// Headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -35,17 +31,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
-    // Parse enable_local_updates header: "true" or "false"
-    let enable_local_updates = headers
-        .get(HEADER_ENABLE_LOCAL_UPDATES)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| match s.to_lowercase().as_str() {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        });
-
-    if worker_id.is_none() && prefill_id.is_none() && enable_local_updates.is_none() {
+    if worker_id.is_none() && prefill_id.is_none() {
         return nvext;
     }
 
@@ -56,9 +42,6 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     }
     if let Some(id) = prefill_id {
         ext.prefill_worker_id = Some(id);
-    }
-    if let Some(enabled) = enable_local_updates {
-        ext.enable_local_updates = Some(enabled);
     }
     Some(ext)
 }
@@ -169,22 +152,42 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
 
-    /// Controls whether the router should manage local bookkeeping (add_request,
-    /// mark_prefill_completed, free) for this request.
-    ///
-    /// - `None` or `true`: Router handles bookkeeping locally (default behavior)
-    /// - `false`: External caller (e.g., GAIE sidecar) handles bookkeeping via C FFI
-    ///
-    /// Set to `false` for GAIE Stage 2 when the EPP/sidecar manages request lifecycle.
+    /// Agent-provided hints for request handling.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enable_local_updates: Option<bool>,
+    pub agent_hints: Option<AgentHints>,
+}
 
-    /// Expected number of output tokens for this request.
-    /// Used as a hint for routing decisions to estimate resource requirements.
+/// Hints from the agent/caller about request characteristics.
+#[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone, Default, PartialEq)]
+pub struct AgentHints {
+    /// Latency sensitivity in seconds for queue ordering.
+    /// Higher values cause the request to be scheduled sooner when the router queue is enabled.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_output_tokens: Option<u32>,
+    pub latency_sensitivity: Option<f64>,
+
+    /// Expected output sequence length (number of output tokens).
+    /// Used as a hint for routing decisions to estimate resource requirements
+    /// and for output block tracking decay.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osl: Option<u32>,
+
+    /// When true, after the assistant turn completes, the system will speculatively
+    /// prefill the predicted next-turn prefix (conversation history with thinking
+    /// content stripped) on a worker to warm the KV cache for the next request.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculative_prefill: Option<bool>,
+
+    /// Backend engine scheduling priority.
+    /// Forwarded to the engine's generate call for queue ordering, KV cache eviction,
+    /// and preemption decisions. Interpretation is backend-specific:
+    /// vLLM uses lower-is-higher, SGLang uses higher-is-higher (configurable).
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 impl Default for NvExt {
@@ -233,8 +236,7 @@ mod tests {
         assert_eq!(nv_ext.extra_fields, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
-        assert_eq!(nv_ext.enable_local_updates, None);
-        assert_eq!(nv_ext.expected_output_tokens, None);
+        assert_eq!(nv_ext.agent_hints, None);
     }
 
     // Test valid builder configurations

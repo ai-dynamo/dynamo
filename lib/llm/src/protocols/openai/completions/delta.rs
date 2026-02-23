@@ -323,11 +323,6 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         let index = delta.index.unwrap_or(0);
         let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
 
-        // Record first token time (only succeeds on first call due to OnceLock)
-        if let Some(ref tracker) = self.tracker {
-            tracker.record_first_token();
-        }
-
         // Get worker_id info from tracker (set by KvPushRouter based on phase)
         let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
 

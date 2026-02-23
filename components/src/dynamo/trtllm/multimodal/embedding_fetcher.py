@@ -14,7 +14,10 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import torch
 from tensorrt_llm.llmapi import DisaggregatedParams
 
-from dynamo.common.multimodal.async_encoder_cache import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles
 from dynamo.trtllm.multimodal.hasher import MultimodalHasher
 
@@ -25,7 +28,7 @@ async def fetch_embeddings_from_encoder(
     image_urls: List[str],
     request: Dict[str, Any],
     encode_client: Any,
-    encoder_cache: Optional[EncoderCacheManager] = None,
+    encoder_cache: Optional[MultimodalEmbeddingCacheManager] = None,
 ) -> Union[List[torch.Tensor], DisaggregatedParams]:
     """
     Fetch embeddings from remote encode worker.
@@ -112,7 +115,7 @@ async def _remote_encode_full_epd(
 async def _fetch_embeddings_with_cache(
     image_urls: List[str],
     request: Dict[str, Any],
-    cache: EncoderCacheManager,
+    cache: MultimodalEmbeddingCacheManager,
     encode_fn: Callable[[Dict[str, Any]], DisaggregatedParams],
 ) -> List[torch.Tensor]:
     """
@@ -146,7 +149,7 @@ async def _fetch_embeddings_with_cache(
         cached = cache.get(url_hash)
         if cached is not None:
             logger.info(f"fetch_embeddings_with_cache: cache hit for URL: {url}")
-            embeddings_with_index.append((i, cached))
+            embeddings_with_index.append((i, cached.tensor))
         else:
             logger.info(f"fetch_embeddings_with_cache: cache miss for URL: {url}")
             uncached_urls.append(url)
@@ -187,7 +190,7 @@ async def _fetch_embeddings_with_cache(
 
     # Cache new tensors (reuse hashes computed during cache lookup)
     for url, url_hash, tensor in zip(uncached_urls, uncached_hashes, new_tensors):
-        cache.set(url_hash, tensor)
+        cache.set(url_hash, CachedEmbedding(tensor=tensor))
         logger.info(
             f"fetch_embeddings_with_cache: cached embedding for URL: {url}, shape: {tensor.shape}"
         )

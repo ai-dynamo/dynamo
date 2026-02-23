@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import os
 import shutil
@@ -20,6 +21,11 @@ from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
+
+pytestmark = [
+    pytest.mark.fault_tolerance,
+    pytest.mark.vllm,
+]
 
 
 class DynamoWorkerProcess(ManagedProcess):
@@ -64,7 +70,19 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = port
 
         if is_prefill:
-            env["DYN_VLLM_KV_EVENT_PORT"] = "20082"
+            command.extend(
+                [
+                    "--kv-events-config",
+                    json.dumps(
+                        {
+                            "publisher": "zmq",
+                            "topic": "kv-events",
+                            "endpoint": "tcp://*:20082",
+                            "enable_kv_cache_events": True,
+                        }
+                    ),
+                ]
+            )
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
 
         # Set log directory based on worker type
@@ -112,7 +130,6 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -184,7 +201,6 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
                         etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
@@ -262,7 +278,6 @@ def test_etcd_ha_failover_vllm_disaggregated(
                             etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
@@ -318,7 +333,6 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
                     )
 
 
-@pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly

@@ -6,11 +6,13 @@ use std::sync::OnceLock;
 mod base_parser;
 mod gpt_oss_parser;
 mod granite_parser;
+mod minimax_append_think_parser;
 
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
 pub use gpt_oss_parser::GptOssReasoningParser;
 pub use granite_parser::GraniteReasoningParser;
+pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
 
 static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ReasoningParserType>> = OnceLock::new();
 
@@ -28,6 +30,11 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("mistral", ReasoningParserType::Mistral);
         map.insert("granite", ReasoningParserType::Granite);
         map.insert("nemotron_nano", ReasoningParserType::NemotronDeci); // nemotron nano is <think>...</think>
+        map.insert("glm45", ReasoningParserType::NemotronDeci); // GLM-4.5/5 is <think>...</think>, no force_reasoning
+        map.insert(
+            "minimax_append_think",
+            ReasoningParserType::MiniMaxAppendThink,
+        );
         map
     })
 }
@@ -92,6 +99,7 @@ pub enum ReasoningParserType {
     Kimi,
     Mistral,
     Granite,
+    MiniMaxAppendThink,
 }
 
 #[derive(std::fmt::Debug)]
@@ -173,6 +181,9 @@ impl ReasoningParserType {
             ReasoningParserType::Granite => ReasoningParserWrapper {
                 parser: Box::new(GraniteReasoningParser::new()),
             },
+            ReasoningParserType::MiniMaxAppendThink => ReasoningParserWrapper {
+                parser: Box::new(MiniMaxAppendThinkParser::new()),
+            },
         }
     }
 
@@ -215,6 +226,8 @@ mod tests {
             "mistral",
             "granite",
             "nemotron_nano",
+            "glm45",
+            "minimax_append_think",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));

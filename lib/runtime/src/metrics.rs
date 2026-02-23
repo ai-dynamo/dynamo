@@ -34,10 +34,6 @@ use crate::protocols::annotated::Annotated;
 use crate::stream;
 use crate::stream::StreamExt;
 
-// If set to true, then metrics will be labeled with the namespace, component, and endpoint labels.
-// These labels are prefixed with "dynamo_" to avoid collisions with Kubernetes and other monitoring system labels.
-pub const USE_AUTO_LABELS: bool = true;
-
 // Prometheus imports
 use prometheus::Encoder;
 
@@ -224,43 +220,47 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     // Build updated_labels: auto-labels first, then `labels` + stored labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
 
-    if USE_AUTO_LABELS {
-        // Validate that user-provided labels don't conflict with auto-generated labels
-        for (key, _) in labels {
-            if *key == labels::NAMESPACE || *key == labels::COMPONENT || *key == labels::ENDPOINT {
-                return Err(anyhow::anyhow!(
-                    "Label '{}' is automatically added by auto_label feature and cannot be manually set",
-                    key
-                ));
-            }
-        }
+    // Auto-label injection: Always add dynamo_namespace, dynamo_component, dynamo_endpoint labels
+    // based on the hierarchy. Label constants defined in prometheus_names.rs labels module.
+    //
+    // Python counterpart: components/src/dynamo/common/utils/prometheus.py register_engine_metrics_callback()
 
-        // Add auto-generated labels with sanitized values
-        if hierarchy_names.len() > 1 {
-            let namespace = &hierarchy_names[1];
-            if !namespace.is_empty() {
-                let valid_namespace = sanitize_prometheus_label(namespace)?;
-                if !valid_namespace.is_empty() {
-                    updated_labels.push((labels::NAMESPACE.to_string(), valid_namespace));
-                }
+    // Validate that user-provided labels don't conflict with auto-generated labels
+    for (key, _) in labels {
+        if *key == labels::NAMESPACE || *key == labels::COMPONENT || *key == labels::ENDPOINT {
+            return Err(anyhow::anyhow!(
+                "Label '{}' is automatically added by auto-label injection and cannot be manually set",
+                key
+            ));
+        }
+    }
+
+    // Add auto-generated labels with sanitized values
+    // Hierarchy: [drt, namespace, component, endpoint]
+    if hierarchy_names.len() > 1 {
+        let namespace = &hierarchy_names[1];
+        if !namespace.is_empty() {
+            let valid_namespace = sanitize_prometheus_label(namespace)?;
+            if !valid_namespace.is_empty() {
+                updated_labels.push((labels::NAMESPACE.to_string(), valid_namespace));
             }
         }
-        if hierarchy_names.len() > 2 {
-            let component = &hierarchy_names[2];
-            if !component.is_empty() {
-                let valid_component = sanitize_prometheus_label(component)?;
-                if !valid_component.is_empty() {
-                    updated_labels.push((labels::COMPONENT.to_string(), valid_component));
-                }
+    }
+    if hierarchy_names.len() > 2 {
+        let component = &hierarchy_names[2];
+        if !component.is_empty() {
+            let valid_component = sanitize_prometheus_label(component)?;
+            if !valid_component.is_empty() {
+                updated_labels.push((labels::COMPONENT.to_string(), valid_component));
             }
         }
-        if hierarchy_names.len() > 3 {
-            let endpoint = &hierarchy_names[3];
-            if !endpoint.is_empty() {
-                let valid_endpoint = sanitize_prometheus_label(endpoint)?;
-                if !valid_endpoint.is_empty() {
-                    updated_labels.push((labels::ENDPOINT.to_string(), valid_endpoint));
-                }
+    }
+    if hierarchy_names.len() > 3 {
+        let endpoint = &hierarchy_names[3];
+        if !endpoint.is_empty() {
+            let valid_endpoint = sanitize_prometheus_label(endpoint)?;
+            if !valid_endpoint.is_empty() {
+                updated_labels.push((labels::ENDPOINT.to_string(), valid_endpoint));
             }
         }
     }
