@@ -191,6 +191,7 @@ pub struct RouterRequestMetrics {
     pub inter_token_latency_seconds: prometheus::Histogram,
     pub input_sequence_tokens: prometheus::Histogram,
     pub output_sequence_tokens: prometheus::Histogram,
+    pub kv_hit_rate: prometheus::Histogram,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -202,6 +203,7 @@ impl RouterRequestMetrics {
         inter_token_latency_seconds: prometheus::Histogram,
         input_sequence_tokens: prometheus::Histogram,
         output_sequence_tokens: prometheus::Histogram,
+        kv_hit_rate: prometheus::Histogram,
     ) -> Self {
         Self {
             requests_total,
@@ -209,6 +211,7 @@ impl RouterRequestMetrics {
             inter_token_latency_seconds,
             input_sequence_tokens,
             output_sequence_tokens,
+            kv_hit_rate,
         }
     }
 
@@ -256,12 +259,21 @@ impl RouterRequestMetrics {
                         Some(generate_log_buckets(50.0, 32000.0, 10)),
                     )
                     .expect("failed to create router_output_sequence_tokens");
+                let kv_hit_rate = metrics
+                    .create_histogram(
+                        "router_kv_hit_rate",
+                        "Predicted KV cache hit rate at routing time (0.0-1.0)",
+                        &[],
+                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+                    )
+                    .expect("failed to create router_kv_hit_rate");
                 Arc::new(Self::new(
                     requests_total,
                     time_to_first_token_seconds,
                     inter_token_latency_seconds,
                     input_sequence_tokens,
                     output_sequence_tokens,
+                    kv_hit_rate,
                 ))
             })
             .clone()
