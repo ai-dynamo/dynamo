@@ -119,7 +119,6 @@ class ScaleRequestHandler:
                     k8s_namespace=request.k8s_namespace,
                     parent_dgd_name=request.graph_deployment_name,
                 )
-                await connector._async_init()
                 self.connectors[connector_key] = connector
                 logger.debug(f"Created new connector for {connector_key}")
             else:
