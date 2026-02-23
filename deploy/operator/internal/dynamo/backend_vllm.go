@@ -81,15 +81,28 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 
 	waitScript := fmt.Sprintf(`import socket, time
 host, port = "%s", %s
-print(f"Waiting for leader master port at {host}:{port}...")
+print(f"Waiting for leader master port at {host}:{port}...", flush=True)
+start = time.monotonic()
+last_status = start
+first_unexpected_logged = False
 while True:
     try:
         s = socket.create_connection((host, port), timeout=2)
         s.close()
-        print("Leader master port ready")
+        elapsed = time.monotonic() - start
+        print(f"Leader master port ready (waited {elapsed:.1f}s)", flush=True)
         break
-    except Exception:
-        time.sleep(2)
+    except (ConnectionRefusedError, ConnectionResetError):
+        pass
+    except Exception as e:
+        if not first_unexpected_logged:
+            print(f"Unexpected error connecting to {host}:{port}: {type(e).__name__}: {e}", flush=True)
+            first_unexpected_logged = True
+    now = time.monotonic()
+    if now - last_status >= 30:
+        print(f"Still waiting for {host}:{port}... ({now - start:.0f}s elapsed)", flush=True)
+        last_status = now
+    time.sleep(2)
 `, leaderHostname, commonconsts.VLLMMpMasterPort)
 
 	initContainer := corev1.Container{
