@@ -10,6 +10,7 @@
 
 use super::skip_if_stubs_and_device;
 use super::*;
+#[cfg(feature = "testing-cuda")]
 use crate::transfer::TransferCapabilities;
 use crate::transfer::executor::TransferOptionsInternal;
 use crate::transfer::executor::execute_transfer;
@@ -245,6 +246,7 @@ async fn test_roundtrip(
     Ok(())
 }
 
+#[cfg(feature = "testing-cuda")]
 #[rstest]
 #[case(StorageKind::Device(0), StorageKind::Disk(0))]
 #[case(StorageKind::Disk(0), StorageKind::Device(0))]
@@ -288,6 +290,7 @@ async fn test_gds(
     Ok(())
 }
 
+#[cfg(feature = "testing-cuda")]
 #[rstest]
 #[case(1024)]
 #[case(2048)]
@@ -421,6 +424,7 @@ async fn test_bounce_with_guards_lw_lw_full(
     .unwrap();
 }
 
+#[cfg(feature = "testing-cuda")]
 #[rstest]
 #[case(StorageKind::Pinned, StorageKind::Device(0), "pin_dev")]
 #[tokio::test]
@@ -441,6 +445,7 @@ async fn test_bounce_with_guards_fc_fc_layer0(
     .unwrap();
 }
 
+#[cfg(feature = "testing-cuda")]
 #[rstest]
 #[case(StorageKind::Pinned, StorageKind::Device(0), "pin_dev")]
 #[tokio::test]
@@ -470,6 +475,8 @@ async fn test_bounce_with_guards_impl(
     mode: TransferMode,
     name_suffix: &str,
 ) -> Result<()> {
+    skip_if_stubs_and_device!(host_storage, bounce_storage);
+
     let num_blocks = 6;
     let test_name = format!(
         "bounce_{}_{:?}_{:?}_{}_{}",
@@ -1014,6 +1021,7 @@ async fn test_layer_composition_equals_full_block(
     Ok(())
 }
 
+#[cfg(feature = "testing-cuda")]
 /// Test that FC↔LW CUDA transfers through Pinned↔Device correctly use the
 /// vectorized path and preserve data integrity through a roundtrip.
 ///

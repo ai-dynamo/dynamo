@@ -38,6 +38,8 @@ validator = { workspace = true }
 default = []
 # collectives = ["dep:nixl-sys"]
 collectives = []
+testing-cuda = []
+testing-nixl = []
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
