@@ -129,41 +129,6 @@ impl ResponseStorage for RedisResponseStorage {
                 StorageError::BackendError(format!("Failed to get connection: {}", e))
             })?;
 
-        // Enforce max_responses_per_session (0 = unlimited).
-        // Uses a Lua script to atomically check SCARD and conditionally SADD,
-        // avoiding a TOCTOU race between separate SCARD and SADD commands.
-        let session_added_atomically = if self.max_responses_per_session > 0 {
-            let index_key = Self::session_index_key(tenant_id, session_id);
-            let script = redis::Script::new(
-                r#"
-                local count = redis.call('SCARD', KEYS[1])
-                if count >= tonumber(ARGV[1]) then
-                    return 0
-                end
-                redis.call('SADD', KEYS[1], ARGV[2])
-                return 1
-                "#,
-            );
-            let result: i32 = script
-                .key(&index_key)
-                .arg(self.max_responses_per_session)
-                .arg(&response_id)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| {
-                    StorageError::BackendError(format!(
-                        "Failed to check/add session response: {}",
-                        e
-                    ))
-                })?;
-            if result == 0 {
-                return Err(StorageError::SessionFull);
-            }
-            true
-        } else {
-            false
-        };
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| StorageError::BackendError(format!("System time error: {}", e)))?
@@ -186,44 +151,100 @@ impl ResponseStorage for RedisResponseStorage {
         let response_key = Self::response_key(tenant_id, &response_id);
         let index_key = Self::session_index_key(tenant_id, session_id);
 
-        // Store the response data with optional TTL
-        if let Some(ttl) = ttl {
-            conn.set_ex::<_, _, ()>(&response_key, &json_data, ttl.as_secs())
+        // Enforce max_responses_per_session (0 = unlimited).
+        //
+        // Both paths atomically write the session-index SADD and the response
+        // SET together so a crash between them cannot leave a ghost index entry.
+        //
+        // Limited path: a Lua script atomically checks SCARD, conditionally
+        // SADDs, SETs the data, and optionally EXPIREs it — all in one
+        // round-trip.  ARGV[4] carries the TTL (0 = no expiry).
+        //
+        // Unlimited path: a MULTI/EXEC pipeline groups SADD + SET so they are
+        // applied atomically from the server's perspective.
+        let ttl_secs = ttl.map(|d| d.as_secs()).unwrap_or(0);
+
+        if self.max_responses_per_session > 0 {
+            // Single Lua script: KEYS[1]=index_key, KEYS[2]=response_key
+            // ARGV[1]=max, ARGV[2]=response_id, ARGV[3]=json_data, ARGV[4]=ttl (0=none)
+            let script = redis::Script::new(
+                r#"
+                local count = redis.call('SCARD', KEYS[1])
+                if count >= tonumber(ARGV[1]) then
+                    return 0
+                end
+                redis.call('SADD', KEYS[1], ARGV[2])
+                redis.call('SET', KEYS[2], ARGV[3])
+                if tonumber(ARGV[4]) > 0 then
+                    redis.call('EXPIRE', KEYS[2], ARGV[4])
+                end
+                return 1
+                "#,
+            );
+
+            let result: i32 = script
+                .key(&index_key)
+                .key(&response_key)
+                .arg(self.max_responses_per_session)
+                .arg(&response_id)
+                .arg(&json_data)
+                .arg(ttl_secs)
+                .invoke_async(&mut conn)
                 .await
                 .map_err(|e| {
-                    StorageError::BackendError(format!("Failed to store response: {}", e))
+                    StorageError::BackendError(format!(
+                        "Failed to check/add session response: {}",
+                        e
+                    ))
                 })?;
-        } else {
-            conn.set::<_, _, ()>(&response_key, &json_data)
-                .await
-                .map_err(|e| {
-                    StorageError::BackendError(format!("Failed to store response: {}", e))
-                })?;
-        }
 
-        // Add response ID to the session index (skip if already added atomically
-        // by the Lua script during max_responses_per_session enforcement)
-        if !session_added_atomically {
-            conn.sadd::<_, _, ()>(&index_key, &response_id)
-                .await
-                .map_err(|e| {
-                    StorageError::BackendError(format!("Failed to add to index: {}", e))
-                })?;
-        }
-
-        // Keep index TTL aligned with response TTLs
-        if let Some(ttl) = ttl {
-            // Only set expire if it would extend the current TTL
-            let current_ttl: i64 = conn.ttl(&index_key).await.unwrap_or(-1);
-
-            let new_ttl = ttl.as_secs() as i64;
-            if current_ttl < 0 || new_ttl > current_ttl {
-                conn.expire::<_, ()>(&index_key, new_ttl)
-                    .await
-                    .map_err(|e| {
-                        StorageError::BackendError(format!("Failed to set index TTL: {}", e))
-                    })?;
+            if result == 0 {
+                return Err(StorageError::SessionFull);
             }
+        } else {
+            // Unlimited path: atomically SADD the index entry and SET the response
+            // data in a single MULTI/EXEC pipeline so a crash between the two
+            // cannot leave a ghost index entry pointing to missing data.
+            let mut pipe = redis::pipe();
+            pipe.atomic();
+            pipe.cmd("SADD").arg(&index_key).arg(&response_id);
+            if ttl_secs > 0 {
+                pipe.cmd("SET")
+                    .arg(&response_key)
+                    .arg(&json_data)
+                    .arg("EX")
+                    .arg(ttl_secs);
+            } else {
+                pipe.cmd("SET").arg(&response_key).arg(&json_data);
+            }
+            pipe.query_async::<Vec<redis::Value>>(&mut conn)
+                .await
+                .map_err(|e| {
+                    StorageError::BackendError(format!("Failed to store response: {}", e))
+                })?;
+        }
+
+        // Keep index TTL aligned with response TTLs.  Uses a Lua script so
+        // the TTL read and conditional EXPIRE are atomic — no race where a
+        // concurrent writer can reset the TTL between our read and our write.
+        if let Some(ttl) = ttl {
+            let new_ttl = ttl.as_secs() as i64;
+            redis::Script::new(
+                r#"
+                local cur = redis.call('TTL', KEYS[1])
+                if cur < 0 or tonumber(ARGV[1]) > cur then
+                    redis.call('EXPIRE', KEYS[1], ARGV[1])
+                end
+                return 1
+                "#,
+            )
+            .key(&index_key)
+            .arg(new_ttl)
+            .invoke_async::<i32>(&mut conn)
+            .await
+            .map_err(|e| {
+                StorageError::BackendError(format!("Failed to set index TTL: {}", e))
+            })?;
         } else {
             // Remove any existing TTL so non-expiring responses remain listable
             redis::cmd("PERSIST")
