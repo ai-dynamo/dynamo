@@ -132,24 +132,19 @@ const (
 	// deploy/chrek/pkg/config/constants.go. If you change a value here, update there too.
 
 	// Kubernetes labels
-	KubeLabelCheckpointSource = "nvidia.com/checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
-	KubeLabelCheckpointHash   = "nvidia.com/checkpoint-hash"   // Checkpoint identity hash for deduplication
-	KubeLabelCheckpointName   = "nvidia.com/checkpoint-name"   // DynamoCheckpoint CR name reference
+	KubeLabelIsCheckpointSource = "nvidia.com/chrek-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
+	KubeLabelCheckpointHash     = "nvidia.com/chrek-checkpoint-hash"      // Checkpoint identity hash (= DynamoCheckpoint CR name)
+	KubeLabelIsRestoreTarget    = "nvidia.com/chrek-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
 
 	// Environment variables injected into pods
 	EnvCheckpointStorageType  = "DYN_CHECKPOINT_STORAGE_TYPE"   // Storage backend (pvc, s3, oci) — checkpoint job pods only
 	EnvCheckpointLocation     = "DYN_CHECKPOINT_LOCATION"       // Full checkpoint URI — future S3/OCI; for PVC, use PATH+HASH instead
 	EnvCheckpointPath         = "DYN_CHECKPOINT_PATH"           // Base checkpoint directory (e.g., /checkpoints) — PVC restored pods
 	EnvCheckpointHash         = "DYN_CHECKPOINT_HASH"           // Identity hash — all checkpoint-related pods
-	EnvCheckpointSignalFile   = "DYN_CHECKPOINT_SIGNAL_FILE"    // Signal file path — checkpoint job pods
 	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
-	EnvRestoreMarkerFile      = "DYN_RESTORE_MARKER_FILE"       // Restore marker path — injected into restore and checkpoint job pods
 	EnvSkipWaitForCheckpoint  = "SKIP_WAIT_FOR_CHECKPOINT"      // Skip polling, check once — restored/DGD pods
 	// Checkpoint pod-internal constants
-	CheckpointVolumeName               = "checkpoint-storage"  // Pod-internal volume name for checkpoint PVC
-	CheckpointSignalVolumeName         = "checkpoint-signal"   // Pod-internal volume name for signal hostPath
-	CheckpointSignalMountPath          = "/checkpoint-signal"  // Mount path for signal volume inside pods
-	SignalFileCleanupInitContainerName = "cleanup-signal-file" // Init container that removes stale signal files before job starts
+	CheckpointVolumeName = "checkpoint-storage" // Pod-internal volume name for checkpoint PVC
 
 	// SeccompProfilePath is the localhost seccomp profile that blocks io_uring syscalls.
 	// Deployed to nodes by the chrek DaemonSet init container.

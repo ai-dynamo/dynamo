@@ -193,3 +193,26 @@ def test_endpoint_invalid_format_raises(mock_vllm_cli):
     )
     with pytest.raises(ValueError, match="Invalid endpoint format"):
         parse_args()
+
+
+def test_headless_namespace_has_required_fields(mock_vllm_cli):
+    """Test that build_headless_namespace produces a Namespace with fields
+    required by vLLM's run_headless(), including the api_server_count fallback."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--headless",
+    )
+    config = parse_args()
+    assert config.headless is True
+
+    from dynamo.vllm.main import build_headless_namespace
+
+    ns = build_headless_namespace(config)
+
+    # Required by run_headless()
+    assert hasattr(ns, "api_server_count")
+    assert ns.api_server_count == 0
+    # Core engine fields must survive the round-trip
+    assert hasattr(ns, "model")
+    assert hasattr(ns, "tensor_parallel_size")
