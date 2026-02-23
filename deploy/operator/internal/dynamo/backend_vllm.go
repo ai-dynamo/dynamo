@@ -34,7 +34,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "status.hostIP",
+						FieldPath: "status.podIP",
 					},
 				},
 			})
