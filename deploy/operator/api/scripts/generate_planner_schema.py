@@ -37,11 +37,38 @@ Or via the Makefile::
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import types
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+def _resolve_repo_root(start: Path) -> Path:
+    """Return the repository root via git, falling back to go.mod traversal."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=start,
+        )
+        return Path(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    # Fallback: walk up until we find go.mod
+    p = start
+    while p != p.parent:
+        if (p / "go.mod").exists():
+            return p
+        p = p.parent
+    raise RuntimeError(
+        f"Could not locate repository root from {start}. "
+        "Ensure the script is run inside the dynamo repository."
+    )
+
+
+_REPO_ROOT = _resolve_repo_root(Path(__file__).resolve().parent)
 _COMPONENTS_SRC = _REPO_ROOT / "components" / "src"
 
 # ---------------------------------------------------------------------------
