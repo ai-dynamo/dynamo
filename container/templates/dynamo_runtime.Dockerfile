@@ -12,8 +12,6 @@ FROM dynamo_base AS runtime
 ARG ARCH_ALT
 ARG PYTHON_VERSION
 
-LABEL ci.cache-test="2026-02-19-layer-change-timing"
-
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
