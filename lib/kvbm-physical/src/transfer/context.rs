@@ -405,7 +405,7 @@ impl TransferContext {
             .event_system
             .new_event()
             .expect("Failed to allocate event");
-        let handle = event.handle();
+        let handle = event.into_handle();
         let awaiter = self
             .event_system
             .awaiter(handle)
@@ -435,7 +435,7 @@ impl TransferContext {
             .event_system
             .new_event()
             .expect("Failed to allocate event");
-        let handle = new_event.handle();
+        let handle = new_event.into_handle();
         let awaiter = self
             .event_system
             .awaiter(handle)
@@ -467,7 +467,7 @@ impl TransferContext {
             .event_system
             .new_event()
             .expect("Failed to allocate event");
-        let handle = event.handle();
+        let handle = event.into_handle();
         let awaiter = self
             .event_system
             .awaiter(handle)

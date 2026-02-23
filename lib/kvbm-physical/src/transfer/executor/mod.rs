@@ -488,7 +488,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
     } = params;
 
     let event = ctx.event_system().new_event()?;
-    let handle = event.handle();
+    let handle = event.into_handle();
     let awaiter = ctx.event_system().awaiter(handle)?;
     let system = ctx.event_system().clone();
 

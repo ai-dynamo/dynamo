@@ -20,7 +20,6 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/config",
-    "lib/velo-events",
 ]
 resolver = "3"
 

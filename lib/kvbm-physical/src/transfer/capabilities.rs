@@ -40,7 +40,7 @@ use dynamo_memory::nixl::NixlAgent;
 /// # Example
 ///
 /// ```
-/// # use dynamo_kvbm_physical::transfer::TransferCapabilities;
+/// # use kvbm_physical::transfer::TransferCapabilities;
 /// // Default conservative policy
 /// let caps = TransferCapabilities::default();
 /// assert!(!caps.allow_gds);
