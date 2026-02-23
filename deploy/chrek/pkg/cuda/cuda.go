@@ -21,6 +21,8 @@ const (
 )
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from the kubelet PodResources API.
+// All nvidia.com/gpu device entries are accumulated in case the kubelet splits them
+// across multiple entries (observed in some runtimes with multi-GPU pods).
 func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName string) ([]string, error) {
 	if podName == "" || podNamespace == "" {
 		return nil, nil
@@ -43,6 +45,7 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 		return nil, err
 	}
 
+	var uuids []string
 	for _, pod := range resp.GetPodResources() {
 		if pod.GetName() != podName || pod.GetNamespace() != podNamespace {
 			continue
@@ -53,36 +56,46 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 			}
 			for _, device := range container.GetDevices() {
 				if device.GetResourceName() == nvidiaGPUResource {
-					return device.GetDeviceIds(), nil
+					uuids = append(uuids, device.GetDeviceIds()...)
 				}
 			}
 		}
 	}
 
-	return nil, nil
+	return uuids, nil
 }
 
-// FilterProcesses returns the subset of candidate PIDs that report CUDA state.
+// FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
+// Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
+// --get-state, because --get-state incorrectly matches coordinator processes like
+// cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
+// don't hold CUDA contexts themselves.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {
 		if pid <= 0 {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, cudaCheckpointBinary, "--get-state", "--pid", strconv.Itoa(pid))
-		if err := cmd.Run(); err != nil {
+		cmd := exec.CommandContext(ctx, cudaCheckpointBinary, "--get-restore-tid", "--pid", strconv.Itoa(pid))
+		output, err := cmd.CombinedOutput()
+		if err != nil {
 			if ctx.Err() != nil {
 				break
 			}
-			log.V(1).Info("CUDA state probe failed", "pid", pid, "error", err)
+			log.V(1).Info("CUDA restore-tid probe negative", "pid", pid)
 			continue
 		}
+		tid := strings.TrimSpace(string(output))
+		log.V(1).Info("CUDA restore-tid probe positive", "pid", pid, "tid", tid)
 		cudaPIDs = append(cudaPIDs, pid)
 	}
 	return cudaPIDs
 }
 
 // BuildDeviceMap creates a cuda-checkpoint --device-map value from source and target GPU UUID lists.
+// When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
+// unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
+// Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
 func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
 	if len(sourceUUIDs) != len(targetUUIDs) {
 		return "", fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
@@ -90,9 +103,40 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string) (string, error) {
 	if len(sourceUUIDs) == 0 {
 		return "", fmt.Errorf("GPU UUID list is empty")
 	}
+
+	targetSet := make(map[string]bool, len(targetUUIDs))
+	for _, t := range targetUUIDs {
+		targetSet[t] = true
+	}
+
+	// First pass: identity-map any source UUID that exists in the target set
+	mapping := make(map[string]string, len(sourceUUIDs))
+	usedTargets := make(map[string]bool, len(targetUUIDs))
+	for _, src := range sourceUUIDs {
+		if targetSet[src] {
+			mapping[src] = src
+			usedTargets[src] = true
+		}
+	}
+
+	// Second pass: pair remaining source UUIDs with remaining target UUIDs positionally
+	var remainingTargets []string
+	for _, t := range targetUUIDs {
+		if !usedTargets[t] {
+			remainingTargets = append(remainingTargets, t)
+		}
+	}
+	idx := 0
+	for _, src := range sourceUUIDs {
+		if _, ok := mapping[src]; !ok {
+			mapping[src] = remainingTargets[idx]
+			idx++
+		}
+	}
+
 	pairs := make([]string, len(sourceUUIDs))
-	for i := range sourceUUIDs {
-		pairs[i] = sourceUUIDs[i] + "=" + targetUUIDs[i]
+	for i, src := range sourceUUIDs {
+		pairs[i] = src + "=" + mapping[src]
 	}
 	return strings.Join(pairs, ","), nil
 }
