@@ -77,10 +77,10 @@ trtllm:
   python_version: "3.12"
   index_url: https://pypi.nvidia.com/
   pip_wheel_dir: /tmp/trtllm_wheel/
-  pip_wheel: tensorrt-llm==1.3.0rc5
+  pip_wheel: tensorrt-llm==1.3.0rc3
   trtllm_wheel_image: nvcr.io/nvidia/tensorrt-llm/release:${TENSORRTLLM_PIP_WHEEL#*==}
 
-  github_trtllm_commit: v1.3.0rc5
+  github_trtllm_commit: v1.3.0rc3
   torch_version: 2.10.0a0+b4e4ee81d3.nv25.12
   torch_tensorrt_version: 2.10.0a0
   torchvision_version: 0.25.0a0+ca221243
