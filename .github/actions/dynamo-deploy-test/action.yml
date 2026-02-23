@@ -103,5 +103,5 @@ runs:
         name: pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}
         path: |
           test-results/pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
-          test_deployment*/
+          test_deployment[${{ inputs.framework }}-${{ inputs.profile }}]/
         retention-days: 7
