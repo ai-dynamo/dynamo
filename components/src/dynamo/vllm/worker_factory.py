@@ -49,7 +49,6 @@ class WorkerFactory:
             config.multimodal_encode_worker
             or config.multimodal_worker
             or config.multimodal_decode_worker
-            or config.route_to_encoder
         )
 
     async def create(
@@ -66,11 +65,7 @@ class WorkerFactory:
             await self._create_multimodal_encode_worker(
                 runtime, config, shutdown_event, shutdown_endpoints
             )
-        elif (
-            config.multimodal_worker
-            or config.multimodal_decode_worker
-            or config.route_to_encoder
-        ):
+        elif config.multimodal_worker or config.multimodal_decode_worker:
             await self._create_multimodal_worker(
                 runtime,
                 config,
