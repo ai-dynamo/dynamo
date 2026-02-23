@@ -280,7 +280,7 @@ pub(crate) async fn start_kv_router_background(
     // Watch for router deletions to clean up orphaned consumers via discovery
     let generate_endpoint = component.endpoint("generate");
     let discovery_client = component.drt().discovery();
-    let router_discovery_key = router_discovery_query(component.namespace().name());
+    let router_discovery_key = router_discovery_query(component.namespace().name(), component.name().to_string());
     let mut router_event_stream = discovery_client
         .list_and_watch(router_discovery_key, Some(cancellation_token.clone()))
         .await?;
@@ -440,7 +440,7 @@ async fn cleanup_orphaned_consumers(
     // Get active routers from discovery
     let discovery = component.drt().discovery();
     let Ok(router_instances) = discovery
-        .list(router_discovery_query(component.namespace().name()))
+        .list(router_discovery_query(component.namespace().name(), component.name().to_string()))
         .await
     else {
         tracing::debug!("Failed to list router instances from discovery, skipping cleanup");
