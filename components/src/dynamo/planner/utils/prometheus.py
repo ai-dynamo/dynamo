@@ -98,87 +98,79 @@ class PrometheusAPIClient:
         self.dynamo_namespace = dynamo_namespace
         self.metrics_source = metrics_source  # "frontend" | "router"
 
-    def _get_router_average_histogram(
-        self, base_name: str, interval: str, operation_name: str
-    ) -> float:
-        """Query router histogram average: sum(increase(base_name_sum[interval])) /
-        sum(increase(base_name_count[interval])).
-
-        No dynamo_namespace filter: router pods are already isolated by the
-        Kubernetes namespace via PodMonitor own_namespace=true.
-        """
-        try:
-            query = (
-                f"sum(increase({base_name}_sum[{interval}])) / "
-                f"sum(increase({base_name}_count[{interval}]))"
-            )
-            result = self.prom.custom_query(query=query)
-            if not result:
-                logger.warning(
-                    f"No prometheus metric data available for {base_name}, use 0 instead"
-                )
-                return 0
-            value = float(result[0]["value"][1])
-            return 0 if math.isnan(value) else value
-        except Exception as e:
-            logger.error(f"Error getting {operation_name}: {e}")
-            return 0
-
     def _get_average_metric(
-        self, full_metric_name: str, interval: str, operation_name: str, model_name: str
+        self,
+        full_metric_name: str,
+        interval: str,
+        operation_name: str,
+        model_name: Optional[str] = None,
     ) -> float:
-        """
-        Helper method to get average metrics using the pattern:
-        increase(metric_sum[interval])/increase(metric_count[interval])
+        """Query average histogram metric.
 
-        Args:
-            full_metric_name: Full metric name (e.g., 'dynamo_frontend_inter_token_latency_seconds')
-            interval: Time interval for the query (e.g., '60s')
-            operation_name: Human-readable name for error logging
+        When model_name is None (router source): queries aggregate metrics via
+        sum(increase(metric_sum[interval])) / sum(increase(metric_count[interval])).
+        No label filtering — router pods are already isolated by the Kubernetes
+        namespace via PodMonitor own_namespace=true.
+
+        When model_name is provided (frontend source): queries per-model metrics
+        via increase(metric_sum)/increase(metric_count), filtered by model and
+        dynamo_namespace labels. The dynamo_frontend_ prefix is prepended
+        automatically if absent.
 
         Returns:
-            Average metric value or 0 if no data/error
+            Average metric value, or 0 if no data/error.
         """
         try:
-            # Prepend the frontend metric prefix if not already present
-            if not full_metric_name.startswith(prometheus_names.name_prefix.FRONTEND):
-                full_metric_name = (
-                    f"{prometheus_names.name_prefix.FRONTEND}_{full_metric_name}"
+            if model_name is None:
+                # Router aggregate path: sum() across all pods, no label filtering
+                query = (
+                    f"sum(increase({full_metric_name}_sum[{interval}])) / "
+                    f"sum(increase({full_metric_name}_count[{interval}]))"
                 )
-            query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
-            result = self.prom.custom_query(query=query)
-            if not result:
-                # No data available yet (no requests made) - return 0 silently
-                logger.warning(
-                    f"No prometheus metric data available for {full_metric_name}, use 0 instead"
-                )
-                return 0
-            metrics_containers = parse_frontend_metric_containers(result)
-
-            values = []
-            for container in metrics_containers:
-                # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
-                if (
-                    container.metric.model
-                    and container.metric.model.lower() == model_name.lower()
-                    and container.metric.dynamo_namespace == self.dynamo_namespace
-                ):
-                    values.append(container.value[1])
-
-            if not values:
-                logger.warning(
-                    f"No prometheus metric data available for {full_metric_name} with model {model_name} and dynamo namespace {self.dynamo_namespace}, use 0 instead"
-                )
-                return 0
-            return sum(values) / len(values)
-
+                result = self.prom.custom_query(query=query)
+                if not result:
+                    logger.warning(
+                        f"No prometheus metric data available for {full_metric_name}, use 0 instead"
+                    )
+                    return 0
+                value = float(result[0]["value"][1])
+                return 0 if math.isnan(value) else value
+            else:
+                # Frontend per-model path: filter by model and dynamo_namespace labels
+                if not full_metric_name.startswith(prometheus_names.name_prefix.FRONTEND):
+                    full_metric_name = (
+                        f"{prometheus_names.name_prefix.FRONTEND}_{full_metric_name}"
+                    )
+                query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
+                result = self.prom.custom_query(query=query)
+                if not result:
+                    logger.warning(
+                        f"No prometheus metric data available for {full_metric_name}, use 0 instead"
+                    )
+                    return 0
+                metrics_containers = parse_frontend_metric_containers(result)
+                values = []
+                for container in metrics_containers:
+                    # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
+                    if (
+                        container.metric.model
+                        and container.metric.model.lower() == model_name.lower()
+                        and container.metric.dynamo_namespace == self.dynamo_namespace
+                    ):
+                        values.append(container.value[1])
+                if not values:
+                    logger.warning(
+                        f"No prometheus metric data available for {full_metric_name} with model {model_name} and dynamo namespace {self.dynamo_namespace}, use 0 instead"
+                    )
+                    return 0
+                return sum(values) / len(values)
         except Exception as e:
             logger.error(f"Error getting {operation_name}: {e}")
             return 0
 
     def get_avg_inter_token_latency(self, interval: str, model_name: str):
         if self.metrics_source == "router":
-            return self._get_router_average_histogram(
+            return self._get_average_metric(
                 f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.INTER_TOKEN_LATENCY_SECONDS}",
                 interval,
                 "avg inter token latency",
@@ -192,7 +184,7 @@ class PrometheusAPIClient:
 
     def get_avg_time_to_first_token(self, interval: str, model_name: str):
         if self.metrics_source == "router":
-            return self._get_router_average_histogram(
+            return self._get_average_metric(
                 f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.TIME_TO_FIRST_TOKEN_SECONDS}",
                 interval,
                 "avg time to first token",
@@ -206,7 +198,7 @@ class PrometheusAPIClient:
 
     def get_avg_request_duration(self, interval: str, model_name: str):
         if self.metrics_source == "router":
-            return self._get_router_average_histogram(
+            return self._get_average_metric(
                 f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.work_handler.REQUEST_DURATION_SECONDS}",
                 interval,
                 "avg request duration",
@@ -265,7 +257,7 @@ class PrometheusAPIClient:
 
     def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
         if self.metrics_source == "router":
-            return self._get_router_average_histogram(
+            return self._get_average_metric(
                 f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.INPUT_SEQUENCE_TOKENS}",
                 interval,
                 "avg input sequence tokens",
@@ -279,7 +271,7 @@ class PrometheusAPIClient:
 
     def get_avg_output_sequence_tokens(self, interval: str, model_name: str):
         if self.metrics_source == "router":
-            return self._get_router_average_histogram(
+            return self._get_average_metric(
                 f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.OUTPUT_SEQUENCE_TOKENS}",
                 interval,
                 "avg output sequence tokens",
