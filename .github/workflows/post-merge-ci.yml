@@ -109,9 +109,9 @@ jobs:
       - name: Notify Slack
         uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
         with:
-          method: chat.postMessage
+          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
           payload: |
-            channel: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
             text: "THIS IS A TEST :alert: Github Post-merge Build Failure"
             blocks:
               - type: "section"
