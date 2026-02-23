@@ -546,6 +546,7 @@ impl Slot for VllmConnectorSlot {
         self.performed_cache_lookup = false;
         self.total_blocks_queried = 0;
         self.offload_terminated_at_block = None;
+        self.stored_block_priorities.clear();
     }
 
     fn reset(&mut self) {
@@ -630,8 +631,7 @@ impl Slot for VllmConnectorSlot {
         // apply new block_ids — with dedup guard to prevent double-add
         // when update_state_after_alloc already registered the same blocks via append_mutable_device_blocks
         if !block_ids.is_empty() {
-            let already_present = block_ids.len() <= self.device_blocks.len()
-                && self.device_blocks[self.device_blocks.len() - block_ids.len()..] == *block_ids;
+            let already_present = self.device_blocks.ends_with(block_ids);
             if already_present {
                 tracing::debug!(
                     "DEDUP: skipping extend: {} block_ids already at tail, device_blocks_len={}",
@@ -2009,7 +2009,7 @@ mod connector_tests {
     }
 
     // ---------------------------------------------------------------
-    // Test 3: Multiple append_mutable calls accumulate
+    // Test 4: Multiple append_mutable calls accumulate
     // ---------------------------------------------------------------
     #[test]
     fn test_append_mutable_is_additive() {
@@ -2025,7 +2025,7 @@ mod connector_tests {
     }
 
     // ---------------------------------------------------------------
-    // Test 4: Offload sends correct block IDs through channel
+    // Test 5: Offload sends correct block IDs through channel
     // ---------------------------------------------------------------
     #[test]
     fn test_offload_sends_correct_block_ids() {
@@ -2049,7 +2049,7 @@ mod connector_tests {
     }
 
     // ---------------------------------------------------------------
-    // Test 5: Priority filtering offloads only blocks above threshold
+    // Test 6: Priority filtering offloads only blocks above threshold
     // ---------------------------------------------------------------
     #[test]
     fn test_priority_filtering_offloads_correct_count() {
@@ -2074,7 +2074,7 @@ mod connector_tests {
     }
 
     // ---------------------------------------------------------------
-    // Test 6: Priority filtering terminates further offloading
+    // Test 7: Priority filtering terminates further offloading
     // ---------------------------------------------------------------
     #[test]
     fn test_priority_filtering_terminates_offload() {
@@ -2106,7 +2106,7 @@ mod connector_tests {
     }
 
     // ---------------------------------------------------------------
-    // Test 7: evaluated_blocks advances correctly across iterations
+    // Test 8: evaluated_blocks advances correctly across iterations
     // ---------------------------------------------------------------
     #[test]
     fn test_evaluated_blocks_advances_correctly() {
