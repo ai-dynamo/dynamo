@@ -12,11 +12,6 @@ on:
   # Note: During daylight saving time (PDT), this will be 10 AM local time
   schedule:
     - cron: '0 17 * * 1-5'
-  # Allow manual trigger for testing
-  workflow_dispatch:
-  push:
-    branches:
-      - pvijayakrish/automate-release-announcement
 
 permissions:
   contents: read
@@ -40,7 +35,7 @@ jobs:
           IFS=',' read -ra VERSIONS <<< "$RELEASE_VERSIONS"
           for VERSION in "${VERSIONS[@]}"; do
             VERSION=$(echo "$VERSION" | xargs)  # trim whitespace
-            MSG="Next RC for dynamo ${VERSION} will be started at 3 pm PST today. Ensure the CPs are mergeable and updated in release canvas for QA verification. cc: <!subteam^${SLACK_GROUP_ID}>"
+            MSG=":robot_face: *[Automated Reminder]* Next RC for dynamo *${VERSION}* will be started at 3 pm PST today. Ensure the CPs are mergeable and updated in release canvas for QA verification. cc: <!subteam^${SLACK_GROUP_ID}>"
             if curl -sSf -X POST -H "Content-Type: application/json" \
               -d "$(jq -n --arg t "$MSG" '{text:$t}')" "$SLACK_WEBHOOK_URL" 2>/dev/null; then
               echo "Sent announcement for ${VERSION}"
