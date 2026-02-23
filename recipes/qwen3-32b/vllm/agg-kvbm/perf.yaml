@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agg-kvbm-benchmark
+  labels:
+    app: benchmark
+spec:
+  containers:
+  - name: python
+    image: python:3.11
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        # Setup
+        ulimit -n 1048576
+        ulimit -u 65536
+        apt update && apt install tmux wget curl jq -y
+
+        # Wait for model to be ready
+        echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
+        until curl -s "http://${FRONTEND}:8000/v1/models" | jq -e --arg model "${MODEL_NAME}" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+          echo "[$(date '+%H:%M:%S')] Model not ready, retrying in 5s..."
+          sleep 5
+        done
+        echo "Model '${MODEL_NAME}' is ready!"
+
+        # git clone LMBenchmark repo if not already present
+        if [ ! -d ${BASE_DIR}/LMBenchmark ]; then
+          git clone https://github.com/LMCache/LMBenchmark.git ${BASE_DIR}/LMBenchmark
+        fi
+
+        # Run Benchmark
+        python3 ${BASE_DIR}/LMBenchmark/synthetic-multi-round-qa/long_input_short_output_run.sh ${MODEL_NAME} http://${FRONTEND}:8000 "test_lmcache" 0.25
+    env:
+      - name: MODEL_NAME
+        value: Qwen/Qwen3-32B
+      - name: FRONTEND
+        value: agg-kvbm-frontend
+    resources:
+      requests:
+        cpu: "8"
+        memory: 16Gi
+      limits:
+        cpu: "16"
+        memory: 32Gi
+    volumeMounts:
+    - name: model-cache
+      mountPath: /home/dynamo/.cache/huggingface
+    - name: perf-cache
+      mountPath: /perf-cache
+    workingDir: /workspace
+  volumes:
+  - name: model-cache
+    persistentVolumeClaim:
+      claimName: model-cache
+  - name: perf-cache
+    persistentVolumeClaim:
+      claimName: perf-cache
+  restartPolicy: Never
