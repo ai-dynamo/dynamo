@@ -190,10 +190,13 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}
           push_image: true
           extra_build_args: |
             EPP_IMAGE=${{ steps.calculate-target-tag.outputs.epp_image_uri }}
+          extra_tags: |
+            ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}
+            ${{ github.ref_name == 'main' && format('main-frontend-{0}', matrix.arch) || '' }}
+            ${{ github.ref_name == 'main' && format('main-frontend-{0}-{1}', github.sha, matrix.arch) || '' }}
 
       - name: Show summary
         shell: bash
