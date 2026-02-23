@@ -115,15 +115,20 @@ class MultiModalInput(BaseModel):
     video_url: Optional[str] = None
 
 
-class SglangMultimodalRequest(BaseModel):
+class MultiModalGroup(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    request: PreprocessedRequest
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
         Union[Tuple[int, int], Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
+
+
+class SglangMultimodalRequest(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    request: PreprocessedRequest
+    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
     # Processor metadata (e.g. image_grid_thw) carried from encode worker
     # to PD/prefill worker for building the format="processor_output" mm_item.
     processor_output: Optional[Dict[str, Any]] = None
