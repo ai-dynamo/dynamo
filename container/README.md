@@ -33,7 +33,7 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/rustup/ | Installed via rustup-init (→ wheel_builder, dev) |
 |  /usr/local/cargo/ | Installed via rustup-init (→ wheel_builder, dev) |
 |  /usr/local/cuda/ | Inherited from BASE_IMAGE (→ wheel_builder, runtime) |
-| **STAGE: wheel_builder** | **FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}** |
+| **STAGE: wheel_builder** | **FROM quay.io/pypa/manylinux_2_28_{x86_64\|aarch64} (auto-selected via BuildKit TARGETARCH)** |
 |  /usr/local/ucx/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/lib64/ | Built from source (→ runtime)
@@ -114,12 +114,18 @@ The `run.sh` script and rendering scripts are convenience that simplify common D
 
 ### 1. runtime target (runs as non-root dynamo user):
 ```bash
-# Build runtime image
+# Render once — the same Dockerfile works for both architectures
 python container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t dynamo:latest-vllm-runtime -f rendered.Dockerfile .
+
+# Build for a specific platform (BuildKit injects the target arch automatically)
+docker buildx build --platform linux/amd64 -t dynamo:latest-vllm-runtime-amd64 -f container/rendered.Dockerfile .
+docker buildx build --platform linux/arm64 -t dynamo:latest-vllm-runtime-arm64 -f container/rendered.Dockerfile .
+
+# Or build and push a combined multi-arch manifest in one command (requires a remote/multi-node builder)
+docker buildx build --platform linux/amd64,linux/arm64 -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile . --push
 
 # Run runtime container
-container/run.sh --image dynamo:latest-vllm-runtime -it
+container/run.sh --image dynamo:latest-vllm-runtime-amd64 -it
 ```
 
 ### 2. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
@@ -227,16 +233,16 @@ Note: `uv` commands set `UV_CACHE_DIR` per `RUN` so `uv` always uses the same pa
 ```bash
 # Build vLLM dev image called dynamo:latest-vllm (default). This runs as root and is for development.
 python container/render.py --framework=vllm --target=dev --output-short-filename
-docker build -t dynamo:latest-vllm-dev -f container/rendered.Dockerfile .
+docker buildx build --platform linux/amd64 -t dynamo:latest-vllm-dev -f container/rendered.Dockerfile .
 
 # Build a local-dev image. The local-dev image will run as `dynamo` with UID/GID matched to your host user,
 # which is useful when mounting partitions for development.
 python container/render.py --framework=vllm --target=local-dev --output-short-filename
-docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
+docker buildx build --platform linux/amd64 --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile -t dynamo:latest-vllm-local-dev .
 
-# Build TensorRT-LLM development image called dynamo:latest-trtllm
+# Build TensorRT-LLM runtime image (amd64 or arm64 — same Dockerfile for both)
 python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
-docker build -t dynamo:latest-trtllm-runtime -f rendered.Dockerfile .
+docker buildx build --platform linux/amd64 -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 ```
 
 ### Building the Frontend Image

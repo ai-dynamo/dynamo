@@ -81,13 +81,14 @@ docker compose -f deploy/docker-compose.yml up -d
 # TensorRT-LLM uses git-lfs, which needs to be installed in advance.
 apt-get update && apt-get -y install git git-lfs
 
-# On an x86 machine:
+# The same Dockerfile works for both architectures — specify the target platform at build time
 python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
-docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 
-# On an ARM machine:
-python container/render.py --framework=trtllm --target=runtime --platform=arm64 --output-short-filename --cuda-version=13.1
-docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
+# For x86:
+docker buildx build --platform linux/amd64 -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
+
+# For ARM:
+docker buildx build --platform linux/arm64 -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 ```
 
 ### Run container
