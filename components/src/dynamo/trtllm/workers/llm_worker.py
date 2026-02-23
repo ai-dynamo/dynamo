@@ -166,7 +166,6 @@ async def init_llm_worker(
     )
     kv_connector_config = build_kv_connector_config(config)
 
-    modality = getattr(config, "modality", None) or "text"
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,
@@ -295,7 +294,7 @@ async def init_llm_worker(
         # This overrides the skip_tokenizer_init=True set earlier
         engine_args["skip_tokenizer_init"] = False
 
-    if modality == Modality.MULTIMODAL:
+    if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
         model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
         multimodal_processor = MultimodalRequestProcessor(
@@ -337,7 +336,7 @@ async def init_llm_worker(
         endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
-        component = endpoint.component()
+
         if shutdown_endpoints is not None:
             shutdown_endpoints[:] = [endpoint]
 
@@ -420,7 +419,6 @@ async def init_llm_worker(
 
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
-            component=component,
             engine=engine,
             default_sampling_params=default_sampling_params,
             publisher=None,
@@ -457,7 +455,6 @@ async def init_llm_worker(
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
-            kv_listener = endpoint.component()
             # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [
@@ -477,7 +474,7 @@ async def init_llm_worker(
             if consolidator_output_endpoint:
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_publisher = KvEventPublisher(
-                    component,
+                    endpoint=endpoint,
                     kv_block_size=config.kv_block_size,
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",
@@ -488,9 +485,8 @@ async def init_llm_worker(
                 )
 
             async with get_publisher(
-                component,
+                endpoint,
                 engine,
-                kv_listener,
                 int(endpoint.connection_id()),
                 config.kv_block_size,
                 metrics_labels,

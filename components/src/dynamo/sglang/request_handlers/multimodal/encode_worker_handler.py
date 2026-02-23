@@ -16,7 +16,7 @@ from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
 import dynamo.nixl_connect as connect
-from dynamo._core import Client, Component, Context
+from dynamo._core import Client, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import SglangMultimodalRequest
@@ -46,14 +46,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         config: Config,
         pd_worker_client: Client,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
-        super().__init__(
-            component, engine=None, config=config, shutdown_event=shutdown_event
-        )
+        super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
         self.pd_worker_client = pd_worker_client
         self.model = config.server_args.model_path
 

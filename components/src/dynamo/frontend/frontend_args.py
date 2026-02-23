@@ -54,6 +54,7 @@ class FrontendConfig(ConfigBase):
     router_max_tree_size: int
     router_prune_target_ratio: float
     namespace: Optional[str] = None
+    namespace_prefix: Optional[str] = None
     router_replica_sync: bool
     router_snapshot_threshold: int
     router_reset_states: bool
@@ -128,9 +129,8 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_NAMESPACE",
             default=None,
             help=(
-                "Dynamo namespace for model discovery scoping. If specified, models will "
-                "only be discovered from this namespace. If not specified, discovers models "
-                "from all namespaces (global discovery)."
+                "Dynamo namespace for model discovery scoping. Use for exact namespace matching. "
+                "If --namespace-prefix is also specified, prefix takes precedence."
             ),
         )
 
@@ -254,6 +254,18 @@ class FrontendArgGroup(ArgGroup):
                 "Only used when --no-router-kv-events is set."
             ),
             arg_type=float,
+        )
+
+        add_argument(
+            g,
+            flag_name="--namespace-prefix",
+            env_var="DYN_NAMESPACE_PREFIX",
+            default=None,
+            help=(
+                "Dynamo namespace prefix for model discovery scoping. Discovers models from "
+                "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
+                "'ns-def456'). Takes precedence over --namespace if both are specified."
+            ),
         )
 
         add_negatable_bool_argument(

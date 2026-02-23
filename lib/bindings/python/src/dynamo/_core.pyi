@@ -111,19 +111,6 @@ class DistributedRuntime:
         """
         ...
 
-class Component:
-    """
-    A component is a collection of endpoints
-    """
-
-    ...
-
-    def endpoint(self, name: str) -> Endpoint:
-        """
-        Create an endpoint
-        """
-        ...
-
 
 class Endpoint:
     """
@@ -189,25 +176,6 @@ class Endpoint:
         and should start receiving requests.
         """
         ...
-
-    def component(self) -> Component:
-        """
-        Get the parent Component that this endpoint belongs to.
-
-        Returns:
-            Component: The parent component
-
-        Note:
-            To avoid duplicate metrics registries, reuse the returned Component for
-            multiple endpoints: component.endpoint("ep1"), component.endpoint("ep2")
-
-        Example:
-            endpoint = runtime.endpoint("demo.backend.generate")
-            component = endpoint.component()
-            health_endpoint = component.endpoint("health")  # Reuse component
-        """
-        ...
-
 
 class Client:
     """
@@ -404,14 +372,15 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    async def create_endpoint(self, component: Component) -> None:
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Create the NATS endpoint for metrics publishing. Must be awaited.
+        Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
 
-        Only service created through this method will interact with KV router of the same component.
+        Extracts component information from the endpoint to set up metrics publishing
+        on the correct NATS subject for routing decisions.
 
         Args:
-            component: The component to create the endpoint for
+            endpoint: The endpoint to extract component information from for metrics publishing
         """
 
     def publish(
@@ -575,7 +544,7 @@ class KvIndexer:
 
     ...
 
-    def __init__(self, component: Component, block_size: int) -> None:
+    def __init__(self, endpoint: Endpoint, block_size: int) -> None:
         """
         Create a `KvIndexer` object
         """
@@ -622,7 +591,7 @@ class ApproxKvIndexer:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: int,
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
@@ -689,7 +658,7 @@ class KvEventPublisher:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         worker_id: int = 0,
         kv_block_size: int = 0,
         dp_rank: int = 0,
@@ -706,8 +675,8 @@ class KvEventPublisher:
         When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
-            component: The component to publish events for
-            worker_id: The worker ID (unused, inferred from component)
+            endpoint: The endpoint to extract component information from for event publishing
+            worker_id: The worker ID (unused, inferred from endpoint)
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
             enable_local_indexer: Enable worker-local KV indexer
@@ -1612,7 +1581,6 @@ class VirtualConnectorClient:
 
 __all__ = [
     "Client",
-    "Component",
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",

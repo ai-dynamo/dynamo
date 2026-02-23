@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 from transformers import AutoTokenizer
 
-from dynamo._core import Client, Component, Context
+from dynamo._core import Client, Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.multimodal_utils import (
     multimodal_request_to_sglang,
@@ -34,14 +34,11 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         config: Config,
         encode_worker_client: Client,
         shutdown_event: Optional[asyncio.Event] = None,
     ):
-        super().__init__(
-            component, engine=None, config=config, shutdown_event=shutdown_event
-        )
+        super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
         self.encode_worker_client = encode_worker_client
         self.chat_template = getattr(config.server_args, "chat_template", "qwen2-vl")
         self.model = config.server_args.model_path
