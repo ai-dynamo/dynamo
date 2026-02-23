@@ -79,7 +79,7 @@ impl AnnotationsProvider for NvCreateResponse {
         self.nvext
             .as_ref()
             .and_then(|nvext| nvext.annotations.as_ref())
-            .map(|annotations| annotations.contains(&annotation.to_string()))
+            .map(|annotations| annotations.iter().any(|a| a == annotation))
             .unwrap_or(false)
     }
 }

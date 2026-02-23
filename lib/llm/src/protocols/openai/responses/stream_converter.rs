@@ -504,10 +504,9 @@ impl ResponseStreamConverter {
 
         // Invoke storage callback if set
         if let Some(callback) = self.storage_callback.take() {
-            if let Ok(response_json) = serde_json::to_value(&final_response) {
-                callback(response_json);
-            } else {
-                tracing::warn!("Failed to serialize streaming response for storage");
+            match serde_json::to_value(&final_response) {
+                Ok(response_json) => callback(response_json),
+                Err(e) => tracing::warn!("Failed to serialize streaming response for storage: {e}"),
             }
         }
 

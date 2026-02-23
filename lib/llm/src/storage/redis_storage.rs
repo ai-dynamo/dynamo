@@ -227,9 +227,13 @@ impl ResponseStorage for RedisResponseStorage {
         // Keep index TTL aligned with response TTLs.  Uses a Lua script so
         // the TTL read and conditional EXPIRE are atomic — no race where a
         // concurrent writer can reset the TTL between our read and our write.
+        //
+        // This is fire-and-forget: the response data is already persisted above,
+        // so a TTL update failure should not cause the caller to retry (which
+        // would create duplicates).
         if let Some(ttl) = ttl {
             let new_ttl = ttl.as_secs() as i64;
-            redis::Script::new(
+            if let Err(e) = redis::Script::new(
                 r#"
                 local cur = redis.call('TTL', KEYS[1])
                 if cur < 0 or tonumber(ARGV[1]) > cur then
@@ -242,18 +246,18 @@ impl ResponseStorage for RedisResponseStorage {
             .arg(new_ttl)
             .invoke_async::<i32>(&mut conn)
             .await
-            .map_err(|e| {
-                StorageError::BackendError(format!("Failed to set index TTL: {}", e))
-            })?;
+            {
+                tracing::warn!("Failed to set session index TTL (non-fatal): {e}");
+            }
         } else {
             // Remove any existing TTL so non-expiring responses remain listable
-            redis::cmd("PERSIST")
+            if let Err(e) = redis::cmd("PERSIST")
                 .arg(&index_key)
                 .query_async::<i32>(&mut conn)
                 .await
-                .map_err(|e| {
-                    StorageError::BackendError(format!("Failed to persist index: {}", e))
-                })?;
+            {
+                tracing::warn!("Failed to persist session index TTL (non-fatal): {e}");
+            }
         }
 
         Ok(response_id)
@@ -422,7 +426,11 @@ impl ResponseStorage for RedisResponseStorage {
         let mut responses: Vec<StoredResponse> = values
             .into_iter()
             .filter_map(|v| v)
-            .filter_map(|json_data| serde_json::from_str::<StoredResponse>(&json_data).ok())
+            .filter_map(|json_data| {
+                serde_json::from_str::<StoredResponse>(&json_data)
+                    .inspect_err(|e| tracing::warn!("Skipping corrupt stored response: {e}"))
+                    .ok()
+            })
             .filter(|stored| {
                 // Filter out expired responses
                 if let Some(expires_at) = stored.expires_at {
@@ -447,7 +455,7 @@ impl ResponseStorage for RedisResponseStorage {
             // Find the cursor response to get its position
             if let Some(cursor_pos) = responses.iter().position(|r| r.response_id == cursor_id) {
                 // Skip all responses up to and including the cursor
-                responses = responses.into_iter().skip(cursor_pos + 1).collect();
+                responses.drain(..=cursor_pos);
             }
             // If cursor not found, return all responses (cursor may have been deleted)
         }
@@ -460,65 +468,6 @@ impl ResponseStorage for RedisResponseStorage {
         Ok(responses)
     }
 
-    async fn fork_session(
-        &self,
-        tenant_id: &str,
-        source_session_id: &str,
-        target_session_id: &str,
-        up_to_response_id: Option<&str>,
-    ) -> Result<usize, StorageError> {
-        // Get all responses from source session
-        let responses = self
-            .list_responses(tenant_id, source_session_id, None, None)
-            .await?;
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| StorageError::BackendError(format!("System time error: {}", e)))?
-            .as_secs();
-
-        let mut cloned = 0;
-        for response in responses {
-            // Compute remaining TTL from the source response so forked
-            // entries expire at the same wall-clock time as the originals.
-            let remaining_ttl = response.expires_at.and_then(|exp| {
-                if exp > now {
-                    Some(Duration::from_secs(exp - now))
-                } else {
-                    None
-                }
-            });
-
-            // Stop at rewind point if specified
-            if let Some(stop_id) = up_to_response_id {
-                if response.response_id == stop_id {
-                    // Clone this one and stop
-                    self.store_response(
-                        tenant_id,
-                        target_session_id,
-                        Some(&response.response_id),
-                        response.response.clone(),
-                        remaining_ttl,
-                    )
-                    .await?;
-                    cloned += 1;
-                    break;
-                }
-            }
-
-            self.store_response(
-                tenant_id,
-                target_session_id,
-                Some(&response.response_id),
-                response.response.clone(),
-                remaining_ttl,
-            )
-            .await?;
-            cloned += 1;
-        }
-
-        Ok(cloned)
-    }
 }
 
 #[cfg(test)]
@@ -528,10 +477,7 @@ mod tests {
 
     /// Helper to check if Redis is available
     async fn redis_available() -> bool {
-        match RedisResponseStorage::new("redis://localhost:6379", 0).await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        RedisResponseStorage::new("redis://localhost:6379", 0).await.is_ok()
     }
 
     #[tokio::test]

@@ -40,7 +40,9 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
-use crate::http::middleware::session::{RequestSession, extract_session_middleware};
+use crate::http::middleware::session::{
+    DEFAULT_SESSION_ID, DEFAULT_TENANT_ID, RequestSession, extract_session_middleware,
+};
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
@@ -66,6 +68,9 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+
+/// Default time-to-live for stored Responses API responses (24 hours).
+const DEFAULT_RESPONSE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
@@ -1171,10 +1176,10 @@ async fn handler_responses_stateless(
     // Delegate to the stateful handler with a placeholder session.
     // SAFETY: The early returns above guarantee that `store` is false and
     // `previous_response_id` is None, so no storage reads or writes will
-    // execute with this "default" tenant/session value.
+    // execute with these default tenant/session values.
     let default_session = RequestSession {
-        tenant_id: "default".to_string(),
-        session_id: "default".to_string(),
+        tenant_id: DEFAULT_TENANT_ID.to_string(),
+        session_id: DEFAULT_SESSION_ID.to_string(),
     };
 
     // Process normally — store is false, so no storage writes will happen
@@ -1237,7 +1242,7 @@ fn extract_session_from_headers(
                     .to_string(),
             }));
         }
-        None => "default".to_string(),
+        None => DEFAULT_TENANT_ID.to_string(),
     };
 
     let session_id = match headers.get("x-session-id") {
@@ -1256,7 +1261,7 @@ fn extract_session_from_headers(
             })?;
             value.to_string()
         }
-        None => "default".to_string(),
+        None => DEFAULT_SESSION_ID.to_string(),
     };
 
     Ok(RequestSession {
@@ -1523,7 +1528,7 @@ async fn responses(
             let tenant_id = session.tenant_id.clone();
             let session_id = session.session_id.clone();
             let response_id = converter.response_id().to_string();
-            let ttl = Some(std::time::Duration::from_secs(86400)); // 24 hour TTL
+            let ttl = Some(DEFAULT_RESPONSE_TTL);
 
             // NOTE: Streaming storage is best-effort. If this write fails, the client
             // received the streamed response successfully but GET /v1/responses/{id}
@@ -1599,7 +1604,13 @@ async fn responses(
                         return None;
                     }
                     let stream_resp = annotated_chunk.data?;
-                    let mut conv = converter.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut conv = match converter.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            tracing::error!("Response stream converter mutex poisoned, dropping chunk");
+                            return None;
+                        }
+                    };
                     let events = conv.process_chunk(&stream_resp);
                     Some(stream::iter(events))
                 }
@@ -1610,7 +1621,13 @@ async fn responses(
         let start_stream = stream::iter(start_events);
 
         let done_stream = stream::once(async move {
-            let mut conv = converter_end.lock().unwrap_or_else(|e| e.into_inner());
+            let mut conv = match converter_end.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    tracing::error!("Response stream converter mutex poisoned, dropping end events");
+                    return stream::iter(vec![]);
+                }
+            };
             let end_events = if saw_error_end.load(Ordering::Acquire) {
                 conv.emit_error_events()
             } else {
@@ -1691,7 +1708,7 @@ async fn responses(
                             &session.session_id,
                             Some(&response.inner.id), // Use the response's existing ID
                             response_json,
-                            Some(std::time::Duration::from_secs(86400)), // 24 hour TTL
+                            Some(DEFAULT_RESPONSE_TTL),
                         )
                         .await;
 
@@ -1804,7 +1821,7 @@ async fn list_models_openai(
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
     let mut data = Vec::new();
 
