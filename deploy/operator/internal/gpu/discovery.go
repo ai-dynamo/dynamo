@@ -40,6 +40,11 @@ const (
 	LabelGPUCount   = "nvidia.com/gpu.count"
 	LabelGPUProduct = "nvidia.com/gpu.product"
 	LabelGPUMemory  = "nvidia.com/gpu.memory"
+	// DCGM exporter label constants
+	LabelApp                     = "app"
+	LabelAppKubernetesName       = "app.kubernetes.io/name"
+	LabelValueNvidiaDCGMExporter = "nvidia-dcgm-exporter"
+	LabelValueDCGMExporter       = "dcgm-exporter"
 )
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
@@ -96,25 +101,42 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 	c.expiresAt = time.Now().Add(ttl)
 }
 
-// DiscoverGPUsFromDCGM retrieves GPU info from NVIDIA DCGM exporters in the cluster.
+// DiscoverGPUsFromDCGM discovers GPU information by scraping metrics directly
+// from DCGM exporter pods running in the cluster.
 //
-// Returns cached data if valid. Otherwise, it discovers DCGM exporters by querying the
-// "nvidia-dcgm-exporter" or "dcgm-exporter" Service and scraping metrics from
-// http://<ClusterIP>:9400/metrics.
+// The function performs the following:
 //
-// Metrics are parsed from Prometheus format. GPUInfo is returned for the node with the
-// most GPUs, breaking ties by VRAM per GPU. Results are cached for 60s.
+//  1. Returns cached GPU information if still valid.
+//  2. Lists DCGM exporter pods across all namespaces using supported labels.
+//  3. If no pods are found, attempts to enable DCGM via Helm.
+//  4. Waits for DCGM exporter pods to become ready.
+//  5. Scrapes each running pods metrics endpoint (http://<podIP>:9400/metrics).
+//  6. Selects the "best" GPU node based on:
+//     - Highest GPU count
+//     - Highest VRAM per GPU (tie-breaker)
+//  7. Caches the result for a short duration to avoid repeated scraping.
 //
-// Parameters:
-//   - ctx: request context
-//   - k8sClient: Kubernetes client
-//   - cache: in-memory GPU info cache
+// Behavior Notes:
+//
+//   - Scrapes pods directly instead of using a Service ClusterIP to avoid
+//     load-balancing ambiguity in multi-node clusters.
+//   - If at least one pod is successfully scraped, partial failures are tolerated.
+//   - If all pods fail to scrape, an aggregated error is returned.
+//   - Assumes DCGM exporter runs as a DaemonSet (one pod per GPU node).
+//   - Designed for homogeneous clusters; heterogeneous cluster aggregation
+//     is not yet implemented.
 //
 // Returns:
-//   - *GPUInfo with GPU count, model, VRAM, MIG info, node name
-//   - error if no GPU info is found or scraping fails
+//   - *GPUInfo for the selected node
+//   - error if no GPU data can be retrieved
 //
-// Expects standard DCGM metrics on port 9400 and standard metric names.
+// TODO: Current implementation selects a single "best" GPU node (highest GPU count,
+// tie-broken by VRAM). This works for homogeneous clusters where all GPU
+// nodes are identical.
+// For Heterogeneous GPU Support (mixed GPU models or capacities), this logic
+// does not represent full cluster GPU inventory. Future improvements should
+// aggregate and return GPU information for all nodes instead of selecting
+// only one.
 func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *GPUDiscoveryCache) (*GPUInfo, error) {
 
 	// Return cached result if still valid
@@ -122,93 +144,132 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *G
 		return cached, nil
 	}
 
-	// Known DCGM service names
-	serviceNames := []string{
-		"nvidia-dcgm-exporter", // GPU Operator default
-		"dcgm-exporter",        // Standalone Helm chart
+	// List ALL pods (we'll filter manually to support OR label logic)
+	podList := &corev1.PodList{}
+	if err := k8sClient.List(ctx, podList); err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
 	}
 
-	var foundService *corev1.Service
+	var dcgmPods []corev1.Pod
 
-	// Search cluster-wide for DCGM Service
-	svcList := &corev1.ServiceList{}
-	if err := k8sClient.List(ctx, svcList); err != nil {
-		return nil, fmt.Errorf("list services: %w", err)
-	}
+	// Filter pods matching ANY of the supported DCGM label combinations
+	for _, pod := range podList.Items {
 
-	for _, svc := range svcList.Items {
-		for _, name := range serviceNames {
-			if svc.Name == name {
-				foundService = svc.DeepCopy()
-				break
-			}
+		labels := pod.GetLabels()
+
+		if labels == nil {
+			continue
 		}
-		if foundService != nil {
-			break
+
+		// Supported label combinations:
+		if labels[LabelApp] == LabelValueNvidiaDCGMExporter ||
+			labels[LabelApp] == LabelValueDCGMExporter ||
+			labels[LabelAppKubernetesName] == LabelValueDCGMExporter {
+
+			dcgmPods = append(dcgmPods, pod)
 		}
 	}
 
-	// If not found → install DCGM exporter
-	if foundService == nil {
+	// If no pods found → attempt enablement
+	if len(dcgmPods) == 0 {
 
 		if err := EnsureDCGMEnabled(ctx); err != nil {
 			return nil, fmt.Errorf("install dcgm via helm: %w", err)
 		}
 
-		if err := WaitForDCGMService(ctx, k8sClient, 3*time.Minute); err != nil {
+		if err := WaitForDCGMPods(ctx, k8sClient, 3*time.Minute); err != nil {
 			return nil, err
 		}
 
-		// Re-query after installation
-		if err := k8sClient.List(ctx, svcList); err != nil {
+		// Re-list and re-filter
+		if err := k8sClient.List(ctx, podList); err != nil {
 			return nil, err
 		}
 
-		for _, svc := range svcList.Items {
-			for _, name := range serviceNames {
-				if svc.Name == name {
-					foundService = svc.DeepCopy()
-					break
-				}
+		dcgmPods = nil
+
+		for _, pod := range podList.Items {
+			labels := pod.GetLabels()
+			if labels == nil {
+				continue
 			}
-			if foundService != nil {
-				break
+
+			if labels[LabelApp] == LabelValueNvidiaDCGMExporter ||
+				labels[LabelApp] == LabelValueDCGMExporter ||
+				labels[LabelAppKubernetesName] == LabelValueDCGMExporter {
+
+				dcgmPods = append(dcgmPods, pod)
 			}
 		}
 	}
 
-	// If still not found, fail
-	if foundService == nil {
-		return nil, fmt.Errorf("dcgm exporter service cannot be installed")
+	if len(dcgmPods) == 0 {
+		return nil, fmt.Errorf("no dcgm exporter pods found")
 	}
 
-	// Scrape DCGM metrics via Service ClusterIP, more stable than scraping individual pods.
-	// Default DCGM metrics port is 9400.
-	clusterIP := foundService.Spec.ClusterIP
-	if clusterIP == "" || clusterIP == "None" {
-		return nil, fmt.Errorf("dcgm service has no cluster IP")
+	var bestNode *GPUInfo
+	var scrapeErrors []error
+	// Scrape each running pod individually
+	for _, pod := range dcgmPods {
+
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+
+		if pod.Status.PodIP == "" {
+			continue
+		}
+
+		endpoint := fmt.Sprintf("http://%s:9400/metrics", pod.Status.PodIP)
+
+		info, err := scrapeMetricsEndpoint(ctx, endpoint)
+		if err != nil {
+			scrapeErrors = append(scrapeErrors, fmt.Errorf("pod %s (%s): %w", pod.Name, pod.Status.PodIP, err))
+			continue
+		}
+
+		// Select best node:
+		// 1. Highest GPU count
+		// 2. Highest VRAM per GPU (tie-breaker)
+		if bestNode == nil ||
+			info.GPUsPerNode > bestNode.GPUsPerNode ||
+			(info.GPUsPerNode == bestNode.GPUsPerNode &&
+				info.VRAMPerGPU > bestNode.VRAMPerGPU) {
+
+			bestNode = info
+		}
 	}
 
-	endpoint := fmt.Sprintf("http://%s:9400/metrics", clusterIP)
-
-	info, err := scrapeMetricsEndpoint(ctx, endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("scrape dcgm metrics: %w", err)
+	if bestNode == nil {
+		if len(scrapeErrors) > 0 {
+			return nil, fmt.Errorf("failed to scrape any dcgm exporter pod: %v", scrapeErrors)
+		}
+		return nil, fmt.Errorf("no GPU metrics could be parsed from any dcgm pod")
 	}
 
-	// Cache result to reduce load during reconcile loops
-	cache.Set(info, 60*time.Second)
+	// Cache result for 60 seconds
+	cache.Set(bestNode, 60*time.Second)
 
-	return info, nil
+	return bestNode, nil
 }
 
-// scrapeMetricsEndpoint retrieves and parses Prometheus metrics from a DCGM exporter endpoint.
+// scrapeMetricsEndpoint retrieves and parses Prometheus metrics from a
+// DCGM exporter pod endpoint.
 //
-// It performs an HTTP GET request against the provided metrics endpoint
-// (e.g., "http://<clusterIP>:9400/metrics"), parses the Prometheus text format,
-// and extracts GPU information using parseMetrics.
+// The function performs an HTTP GET request against the provided endpoint
+// (expected format: http://<podIP>:9400/metrics), validates the response,
+// and parses the Prometheus text exposition format into metric families.
 //
-// Returns an error if the metrics endpoint is unreachable or parsing fails.
+// Parsed metric families are passed to parseMetrics to extract high-level
+// GPU information.
+//
+// Returns:
+//   - *GPUInfo derived from the parsed metrics
+//   - error if the HTTP request fails, the response is non-200,
+//     or metric parsing fails
+//
+// This function does not implement retries or fallback logic.
+// Error handling and multi-pod aggregation are managed by the caller.
 func scrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -222,7 +283,11 @@ func scrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("metrics endpoint %s returned status %d", endpoint, resp.StatusCode)
+		return nil, fmt.Errorf(
+			"metrics endpoint %s returned status %d",
+			endpoint,
+			resp.StatusCode,
+		)
 	}
 
 	parser := expfmt.NewTextParser(model.UTF8Validation)

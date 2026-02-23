@@ -439,7 +439,7 @@ func TestParseMetrics(t *testing.T) {
 func TestScrapeMetricsEndpoint(t *testing.T) {
 	// Create a test HTTP server to simulate DCGM exporter
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `
+		fmt.Fprint(w, `
 # HELP DCGM_FI_DEV_GPU_TEMP Dummy temperature metric
 # TYPE DCGM_FI_DEV_GPU_TEMP gauge
 DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="H100-SXM5-80GB",Hostname="node1"} 50
@@ -515,6 +515,72 @@ func TestDiscoverGPUsFromDCGM_NoService(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, info)
 	assert.Contains(t, err.Error(), "install dcgm via helm")
+}
+
+func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
+	ctx := context.Background()
+
+	// Fake pod representing DCGM exporter
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcgm-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				LabelApp: LabelValueNvidiaDCGMExporter,
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.1",
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pod).
+		Build()
+
+	cache := &GPUDiscoveryCache{}
+
+	// Track number of times scrape is called
+	callCount := 0
+
+	// Override scrape function
+	originalScrape := scrapeMetricsFunc
+	defer func() { scrapeMetricsFunc = originalScrape }()
+
+	scrapeMetricsFunc = func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+		callCount++
+		return &GPUInfo{
+			NodeName:    "node-a",
+			GPUsPerNode: 4,
+			Model:       "A100",
+			VRAMPerGPU:  40960,
+			MIGEnabled:  false,
+			MIGProfiles: map[string]int{},
+			System:      "DGX",
+		}, nil
+	}
+
+	// First call → should scrape
+	info1, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	require.NoError(t, err)
+	require.NotNil(t, info1)
+	require.Equal(t, 1, callCount)
+
+	// Second call → should hit cache
+	info2, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	require.NoError(t, err)
+	require.NotNil(t, info2)
+
+	// Scrape should NOT be called again
+	require.Equal(t, 1, callCount)
+
+	// Results should be identical
+	require.Equal(t, info1, info2)
 }
 
 // --- Helper functions ---

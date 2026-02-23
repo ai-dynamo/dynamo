@@ -1017,26 +1017,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 	// Refine the logger message
 	var reason string = "unknown"
 	switch {
-	case strings.Contains(err.Error(), "list services"):
-		reason = "failed to list DCGM services (RBAC/cluster connectivity issue)"
+	case strings.Contains(err.Error(), "list pods"):
+		reason = "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
 	case strings.Contains(err.Error(), "install dcgm via helm"):
 		reason = "failed to install DCGM exporter via Helm (check Helm/namespace privileges)"
 	case strings.Contains(err.Error(), "gpu operator is not installed"):
-		reason = "GPU Operator not installed in expected namespace)"
+		reason = "GPU Operator not installed in expected namespace"
 	case strings.Contains(err.Error(), "helm init failed"):
 		reason = "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
-	case strings.Contains(err.Error(), "context deadline exceeded"):
-		reason = "timeout while waiting for DCGM service to become ready)"
-	case strings.Contains(err.Error(), "wait"):
-		reason = "DCGM service did not become ready within timeout)"
-	case strings.Contains(err.Error(), "dcgm exporter service cannot be installed"):
-		reason = "DCGM exporter service could not be installed"
-	case strings.Contains(err.Error(), "dcgm service has no cluster IP"):
-		reason = "DCGM service has no ClusterIP (service misconfiguration)"
+	case strings.Contains(err.Error(), "timeout waiting for DCGM exporter pods"):
+		reason = "timeout while waiting for DCGM exporter pods to become ready"
 	case strings.Contains(err.Error(), "GET"):
-		reason = "failed to reach DCGM metrics endpoint (network/port issue)"
+		reason = "failed to reach DCGM metrics endpoint on pod (network/port issue)"
 	case strings.Contains(err.Error(), "metrics endpoint") && strings.Contains(err.Error(), "status"):
-		reason = "DCGM metrics endpoint returned non-200 status"
+		reason = "DCGM pod metrics endpoint returned non-200 status"
 	case strings.Contains(err.Error(), "parse prometheus metrics"):
 		reason = "failed to parse DCGM Prometheus metrics (invalid format)"
 	case strings.Contains(err.Error(), "no GPUs detected"):
@@ -1124,32 +1118,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// Refine the logger message
 		var reason string = "unknown"
 		switch {
-		case strings.Contains(err.Error(), "list services"):
-			reason = "failed to list DCGM services (RBAC/cluster connectivity issue)"
+		case strings.Contains(err.Error(), "list pods"):
+			reason = "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
 		case strings.Contains(err.Error(), "install dcgm via helm"):
 			reason = "failed to install DCGM exporter via Helm (check Helm/namespace privileges)"
 		case strings.Contains(err.Error(), "gpu operator is not installed"):
-			reason = "GPU Operator not installed in expected namespace)"
+			reason = "GPU Operator not installed in expected namespace"
 		case strings.Contains(err.Error(), "helm init failed"):
 			reason = "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
-		case strings.Contains(err.Error(), "context deadline exceeded"):
-			reason = "timeout while waiting for DCGM service to become ready)"
-		case strings.Contains(err.Error(), "wait"):
-			reason = "DCGM service did not become ready within timeout)"
-		case strings.Contains(err.Error(), "dcgm exporter service cannot be installed"):
-			reason = "DCGM exporter service could not be installed"
-		case strings.Contains(err.Error(), "dcgm service has no cluster IP"):
-			reason = "DCGM service has no ClusterIP (service misconfiguration)"
+		case strings.Contains(err.Error(), "timeout waiting for DCGM exporter pods"):
+			reason = "timeout while waiting for DCGM exporter pods to become ready"
 		case strings.Contains(err.Error(), "GET"):
-			reason = "failed to reach DCGM metrics endpoint (network/port issue)"
+			reason = "failed to reach DCGM metrics endpoint on pod (network/port issue)"
 		case strings.Contains(err.Error(), "metrics endpoint") && strings.Contains(err.Error(), "status"):
-			reason = "DCGM metrics endpoint returned non-200 status"
+			reason = "DCGM pod metrics endpoint returned non-200 status"
 		case strings.Contains(err.Error(), "parse prometheus metrics"):
 			reason = "failed to parse DCGM Prometheus metrics (invalid format)"
 		case strings.Contains(err.Error(), "no GPUs detected"):
 			reason = "no GPUs detected in DCGM metrics (GPU model or metrics missing)"
 		}
-
 		logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
 			"reason", reason, err.Error())
 	} else {

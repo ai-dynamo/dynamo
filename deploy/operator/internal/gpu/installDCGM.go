@@ -25,7 +25,7 @@ import (
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
-	discoveryv1 "k8s.io/api/discovery/v1"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -119,38 +119,47 @@ func EnsureDCGMEnabled(ctx context.Context) error {
 	return nil
 }
 
-// WaitForDCGMService waits until the DCGM exporter Service has at least one ready endpoint.
+// WaitForDCGMPods waits until at least one DCGM exporter pod is running
+// and has a valid Pod IP, or until the provided timeout is reached.
 //
-// It polls the Kubernetes API, checking the Endpoints associated with the
-// "nvidia-dcgm-exporter" Service in the specified namespace. Returns as soon as
-// any endpoint is ready, or an error if the timeout elapses.
+// The function polls the Kubernetes API at regular intervals,
+// checking for pods matching DCGM exporter labels.
 //
-// Parameters:
-//   - ctx: context for cancellation and deadlines.
-//   - c: Kubernetes client used to list Endpoints.
-//   - timeout: maximum duration to wait for an endpoint to become ready.
+// A pod is considered ready when:
+//   - Status.Phase == Running
+//   - PodIP is non-empty
 //
-// Returns an error if the timeout is exceeded, or if there is a failure accessing the API.
-func WaitForDCGMService(ctx context.Context, c client.Client, timeout time.Duration) error {
+// Returns:
+//   - nil once a ready DCGM exporter pod is detected
+//   - error if the timeout expires or if a Kubernetes API call fails
+//
+// This function is typically used after enabling DCGM via Helm
+// to ensure pods are ready before metrics scraping begins.
+// WaitForDCGMPods waits until at least one DCGM exporter pod is running
+// and has a valid Pod IP, or until the provided timeout is reached.
+//
+// It checks pods matching the supported DCGM exporter labels and
+// polls the Kubernetes API at regular intervals.
+//
+// Returns nil when a ready pod is found, or an error if timeout expires.
+func WaitForDCGMPods(ctx context.Context, k8sClient client.Client, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	serviceName := "nvidia-dcgm-exporter"
+
+	// List of label selectors to support multiple DCGM exporter labels
+	labelSelectors := []client.MatchingLabels{
+		{LabelAppKubernetesName: LabelValueNvidiaDCGMExporter},
+		{LabelApp: LabelValueDCGMExporter},
+	}
 
 	for time.Now().Before(deadline) {
-		sliceList := &discoveryv1.EndpointSliceList{}
+		for _, labels := range labelSelectors {
+			podList := &corev1.PodList{}
+			if err := k8sClient.List(ctx, podList, labels); err != nil {
+				return fmt.Errorf("listing pods with labels %v: %w", labels, err)
+			}
 
-		err := c.List(ctx, sliceList,
-			client.InNamespace(GPUOperatorNamespace),
-			client.MatchingLabels{
-				"kubernetes.io/service-name": serviceName,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to list EndpointSlices for %s/%s: %w", GPUOperatorNamespace, serviceName, err)
-		}
-
-		for _, slice := range sliceList.Items {
-			for _, endpoint := range slice.Endpoints {
-				if endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready {
+			for _, pod := range podList.Items {
+				if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" {
 					return nil
 				}
 			}
@@ -159,5 +168,5 @@ func WaitForDCGMService(ctx context.Context, c client.Client, timeout time.Durat
 		time.Sleep(5 * time.Second)
 	}
 
-	return fmt.Errorf("timeout waiting for DCGM exporter service endpoints in namespace %s", GPUOperatorNamespace)
+	return fmt.Errorf("timeout waiting for DCGM exporter pods")
 }
