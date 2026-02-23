@@ -253,6 +253,7 @@ pub struct BlockManagerBuilder {
     disable_device_pool: bool,
     kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
     consolidator_config: Option<(String, Option<String>, EventSource)>, // (engine_endpoint, output_endpoint (optional), engine_source)
+    data_parallel_rank: Option<i32>,
 }
 
 impl BlockManagerBuilder {
@@ -295,6 +296,11 @@ impl BlockManagerBuilder {
         engine_source: EventSource,
     ) -> Self {
         self.consolidator_config = Some((engine_endpoint, output_endpoint, engine_source));
+        self
+    }
+
+    pub fn data_parallel_rank(mut self, dp_rank: Option<i32>) -> Self {
+        self.data_parallel_rank = dp_rank;
         self
     }
 
@@ -369,8 +375,12 @@ impl BlockManagerBuilder {
         }
 
         if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {
-            config_builder =
-                config_builder.consolidator_config(engine_ep, output_ep, engine_source);
+            config_builder = config_builder.consolidator_config_with_dp_rank(
+                engine_ep,
+                output_ep,
+                engine_source,
+                self.data_parallel_rank,
+            );
         }
 
         let config = config_builder.build()?;

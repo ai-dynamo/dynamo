@@ -71,6 +71,7 @@ impl KvConnectorLeader {
         leader_py: PyKvbmLeader,
         consolidator_trtllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        data_parallel_rank: Option<i32>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -92,9 +93,10 @@ impl KvConnectorLeader {
 
         {
             let slot_manager_cell = slot_manager_cell.clone();
-            // Capture consolidator endpoints for the async block
+            // Capture consolidator endpoints and dp_rank for the async block
             let consolidator_trtllm_ep = consolidator_trtllm_endpoint.clone();
             let consolidator_output_ep = consolidator_output_endpoint.clone();
+            let dp_rank = data_parallel_rank;
 
             handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
@@ -110,7 +112,8 @@ impl KvConnectorLeader {
                     .leader(leader_py)
                     .page_size(page_size)
                     .disable_device_pool(false)
-                    .kvbm_metrics(kvbm_metrics_clone.clone());
+                    .kvbm_metrics(kvbm_metrics_clone.clone())
+                    .data_parallel_rank(dp_rank);
 
                 // Add consolidator config if endpoint is provided
                 // For TRTLLM: engine_endpoint is where TRTLLM publishes, output_endpoint is where consolidator publishes
@@ -518,7 +521,7 @@ pub struct PyTrtllmKvConnectorLeader {
 #[pymethods]
 impl PyTrtllmKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_trtllm_endpoint=None, consolidator_output_endpoint=None))]
+    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_trtllm_endpoint=None, consolidator_output_endpoint=None, data_parallel_rank=None))]
     pub fn new(
         worker_id: u64,
         drt: Option<PyObject>,
@@ -526,6 +529,7 @@ impl PyTrtllmKvConnectorLeader {
         leader: PyKvbmLeader,
         consolidator_trtllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        data_parallel_rank: Option<i32>,
     ) -> PyResult<Self> {
         let _ = &drt; // drt is currently un-used in leader
 
@@ -535,6 +539,7 @@ impl PyTrtllmKvConnectorLeader {
             leader,
             consolidator_trtllm_endpoint,
             consolidator_output_endpoint,
+            data_parallel_rank,
         ));
         Ok(Self { connector_leader })
     }

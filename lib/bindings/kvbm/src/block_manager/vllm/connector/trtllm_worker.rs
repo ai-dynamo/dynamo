@@ -580,7 +580,6 @@ impl Worker for KvConnectorWorker {
             .leader_ack_url(get_leader_zmq_ack_url())
             .scheduler_client(Some(self.transfer_client.clone()))
             .rank(self.rank)
-            .world_size(self.world_size)
             .nccl_config(nccl_config)
             .additional_cache_groups(additional_cache_groups)
             .build()?;

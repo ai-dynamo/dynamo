@@ -226,10 +226,21 @@ impl KvBlockManagerConfig {
 impl KvBlockManagerConfigBuilder {
     /// Set the consolidator config using individual parameters
     pub fn consolidator_config(
+        self,
+        engine_endpoint: String,
+        output_endpoint: Option<String>,
+        engine_source: crate::block_manager::kv_consolidator::EventSource,
+    ) -> Self {
+        self.consolidator_config_with_dp_rank(engine_endpoint, output_endpoint, engine_source, None)
+    }
+
+    /// Set the consolidator config with an explicit data parallel rank
+    pub fn consolidator_config_with_dp_rank(
         mut self,
         engine_endpoint: String,
         output_endpoint: Option<String>,
         engine_source: crate::block_manager::kv_consolidator::EventSource,
+        data_parallel_rank: Option<i32>,
     ) -> Self {
         let config = match engine_source {
             crate::block_manager::kv_consolidator::EventSource::Vllm => {
@@ -260,7 +271,8 @@ impl KvBlockManagerConfigBuilder {
                      KVBM events are sent directly to the consolidator handle, not via ZMQ."
                 )
             }
-        };
+        }
+        .with_data_parallel_rank(data_parallel_rank);
         // With setter(custom), the builder field is Option<Option<T>>, so we need Some(Some(...))
         self.consolidator_config = Some(Some(config));
         self

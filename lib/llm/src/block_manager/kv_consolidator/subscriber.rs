@@ -406,7 +406,7 @@ fn process_event(
 
         VllmRawEvent::AllBlocksCleared {} => {
             tracing::debug!("Processing AllBlocksCleared");
-            tracker.handle_clear_all();
+            tracker.handle_clear_all_with_rank(data_parallel_rank);
         }
     }
 }
