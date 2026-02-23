@@ -148,17 +148,20 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Default frames per second for generated videos.",
         )
 
-        # Diffusion engine-level args (passed to AsyncOmni constructor)
+        # Diffusion engine-level args (passed to AsyncOmni constructor).
+        # All flags use the --omni- prefix to avoid collisions with vLLM's
+        # native engine flags (e.g. --enforce-eager), which are parsed by a
+        # separate argparse pass and would otherwise be silently consumed here.
         add_negatable_bool_argument(
             g,
-            flag_name="--enable-layerwise-offload",
+            flag_name="--omni-enable-layerwise-offload",
             env_var="DYN_VLLM_ENABLE_LAYERWISE_OFFLOAD",
             default=False,
             help="Enable layerwise (blockwise) offloading on DiT modules to reduce GPU memory.",
         )
         add_argument(
             g,
-            flag_name="--layerwise-num-gpu-layers",
+            flag_name="--omni-layerwise-num-gpu-layers",
             env_var="DYN_VLLM_LAYERWISE_NUM_GPU_LAYERS",
             default=1,
             arg_type=int,
@@ -166,21 +169,21 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--vae-use-slicing",
+            flag_name="--omni-vae-use-slicing",
             env_var="DYN_VLLM_VAE_USE_SLICING",
             default=False,
             help="Enable VAE slicing for memory optimization in diffusion models.",
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--vae-use-tiling",
+            flag_name="--omni-vae-use-tiling",
             env_var="DYN_VLLM_VAE_USE_TILING",
             default=False,
             help="Enable VAE tiling for memory optimization in diffusion models.",
         )
         add_argument(
             g,
-            flag_name="--boundary-ratio",
+            flag_name="--omni-boundary-ratio",
             env_var="DYN_VLLM_BOUNDARY_RATIO",
             default=0.875,
             arg_type=float,
@@ -193,7 +196,7 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--flow-shift",
+            flag_name="--omni-flow-shift",
             env_var="DYN_VLLM_FLOW_SHIFT",
             default=None,
             arg_type=float,
@@ -201,7 +204,7 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--diffusion-cache-backend",
+            flag_name="--omni-diffusion-cache-backend",
             env_var="DYN_VLLM_DIFFUSION_CACHE_BACKEND",
             default=None,
             choices=["cache_dit", "tea_cache"],
@@ -213,28 +216,28 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--diffusion-cache-config",
+            flag_name="--omni-diffusion-cache-config",
             env_var="DYN_VLLM_DIFFUSION_CACHE_CONFIG",
             default=None,
             help="Cache configuration as JSON string (overrides defaults). Only used with --omni.",
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enable-cache-dit-summary",
+            flag_name="--omni-enable-cache-dit-summary",
             env_var="DYN_VLLM_ENABLE_CACHE_DIT_SUMMARY",
             default=False,
             help="Enable cache-dit summary logging after diffusion forward passes.",
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enable-cpu-offload",
+            flag_name="--omni-enable-cpu-offload",
             env_var="DYN_VLLM_ENABLE_CPU_OFFLOAD",
             default=False,
             help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enforce-eager",
+            flag_name="--omni-enforce-eager",
             env_var="DYN_VLLM_ENFORCE_EAGER",
             default=False,
             help="Disable torch.compile and force eager execution for diffusion models.",
@@ -242,7 +245,7 @@ class DynamoVllmArgGroup(ArgGroup):
         # Diffusion parallel configuration
         add_argument(
             g,
-            flag_name="--ulysses-degree",
+            flag_name="--omni-ulysses-degree",
             env_var="DYN_VLLM_ULYSSES_DEGREE",
             default=1,
             arg_type=int,
@@ -250,7 +253,7 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--ring-degree",
+            flag_name="--omni-ring-degree",
             env_var="DYN_VLLM_RING_DEGREE",
             default=1,
             arg_type=int,
@@ -258,7 +261,7 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--cfg-parallel-size",
+            flag_name="--omni-cfg-parallel-size",
             env_var="DYN_VLLM_CFG_PARALLEL_SIZE",
             default=1,
             arg_type=int,
@@ -313,22 +316,25 @@ class DynamoVllmConfig(ConfigBase):
     # Video encoding
     default_video_fps: int = 16
 
-    # Diffusion engine-level parameters (passed to AsyncOmni constructor)
-    enable_layerwise_offload: bool = False
-    layerwise_num_gpu_layers: int = 1
-    vae_use_slicing: bool = False
-    vae_use_tiling: bool = False
-    boundary_ratio: float = 0.875
-    flow_shift: Optional[float] = None
-    diffusion_cache_backend: Optional[str] = None
-    diffusion_cache_config: Optional[str] = None
-    enable_cache_dit_summary: bool = False
-    enable_cpu_offload: bool = False
+    # Diffusion engine-level parameters (passed to AsyncOmni constructor).
+    # Field names use omni_ prefix to match the --omni-* CLI flags and avoid
+    # collisions with vLLM's native engine args (e.g. enforce_eager).
+    omni_enable_layerwise_offload: bool = False
+    omni_layerwise_num_gpu_layers: int = 1
+    omni_vae_use_slicing: bool = False
+    omni_vae_use_tiling: bool = False
+    omni_boundary_ratio: float = 0.875
+    omni_flow_shift: Optional[float] = None
+    omni_diffusion_cache_backend: Optional[str] = None
+    omni_diffusion_cache_config: Optional[str] = None
+    omni_enable_cache_dit_summary: bool = False
+    omni_enable_cpu_offload: bool = False
+    omni_enforce_eager: bool = False
 
     # Diffusion parallel configuration
-    ulysses_degree: int = 1
-    ring_degree: int = 1
-    cfg_parallel_size: int = 1
+    omni_ulysses_degree: int = 1
+    omni_ring_degree: int = 1
+    omni_cfg_parallel_size: int = 1
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
