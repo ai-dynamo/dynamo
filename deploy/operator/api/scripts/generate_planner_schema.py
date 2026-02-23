@@ -68,8 +68,21 @@ def _resolve_repo_root(start: Path) -> Path:
     )
 
 
-_REPO_ROOT = _resolve_repo_root(Path(__file__).resolve().parent)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_OUTPUT_PATH = _SCRIPT_DIR.parent / "schemas" / "planner_config_json_schema.json"
+
+_REPO_ROOT = _resolve_repo_root(_SCRIPT_DIR)
 _COMPONENTS_SRC = _REPO_ROOT / "components" / "src"
+
+# In the operator Docker build the context is deploy/operator/ only — components/src
+# is not copied in.  The schema file is already committed alongside this script,
+# so skip regeneration rather than failing.
+if not _COMPONENTS_SRC.exists():
+    print(
+        f"Note: {_COMPONENTS_SRC} not found (operator-only build context). "
+        "Skipping schema regeneration; using committed planner_config_json_schema.json."
+    )
+    sys.exit(0)
 
 # ---------------------------------------------------------------------------
 # Stub dynamo.runtime.logging BEFORE any dynamo sub-module is imported.
@@ -102,8 +115,5 @@ from dynamo.planner.utils.planner_config import PlannerConfig  # noqa: E402
 
 schema = PlannerConfig.model_json_schema()
 
-output_path = (
-    _COMPONENTS_SRC / "dynamo" / "planner" / "utils" / "planner_config_json_schema.json"
-)
-output_path.write_text(json.dumps(schema, indent=2) + "\n")
-print(f"PlannerConfig JSON schema written to {output_path}")
+_OUTPUT_PATH.write_text(json.dumps(schema, indent=2) + "\n")
+print(f"PlannerConfig JSON schema written to {_OUTPUT_PATH}")
