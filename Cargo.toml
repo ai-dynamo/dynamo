@@ -9,7 +9,9 @@ members = [
     "lib/tokens",
     "lib/mocker",
     "lib/kv-router",
+    "lib/memory",
     "lib/kvbm-common",
+    "lib/kvbm-kernels",
     "lib/kvbm-logical",
     "lib/kvbm-physical",
     "lib/async-openai",
@@ -46,8 +48,8 @@ dynamo-parsers = { path = "lib/parsers", version = "0.9.0" }
 
 # kvbm
 kvbm-common = { path = "lib/kvbm-common", version = "0.9.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.9.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "0.9.0" }
-kvbm-kernels = { git = "https://github.com/ai-dynamo/dynamo.git", branch = "ryan/kvbm-kernels-encore"}
 kvbm-physical = { path = "lib/kvbm-physical", version = "0.9.0" }
 
 # velo
