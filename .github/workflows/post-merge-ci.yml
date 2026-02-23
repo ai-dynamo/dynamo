@@ -117,12 +117,12 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: [Workflow Summary]("https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}")
+                  text: "[Workflow Summary](https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }})"
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: $FAILED_JOBS
+                  text: "$FAILED_JOBS"
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: <!subteam^${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}|@ops-support> Please investigate the failures above.
+                  text: "<!subteam^${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}|@ops-support> Please investigate the failures above."
