@@ -125,17 +125,17 @@ while True:
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
 func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32, annotations map[string]string) {
 	expandedArgs := getExpandedArgs(container)
-	if needsMultinodeDistributedLaunch(expandedArgs, resources) {
-		if shouldUseMpBackend(annotations) {
-			injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
-		} else {
-			injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
-		}
-	} else if needsDataParallelLaunch(expandedArgs, resources) {
+	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, resources)
+
+	if needsDistributed && shouldUseMpBackend(annotations) {
+		injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
+	} else if needsDistributed {
+		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
+	} else if needsDataParallelMultinodeLaunch(expandedArgs, resources) {
 		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
 	} else {
 		logger := log.Log.WithName("vllm-backend")
-		logger.Info("No need to inject distributed or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
+		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
 	}
 }
 
@@ -292,7 +292,7 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 
 // needsMultinodeDistributedLaunch returns true when the model's world size (TP * PP)
 // exceeds the GPU count of a single node, requiring multi-node distribution (via mp or ray).
-func needsMultinodeDistributedLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
+func needsTensorParallelMultinodeLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
 	containerGPUs := getContainerGPUs(resources)
 	if containerGPUs == 0 {
 		return false
@@ -307,7 +307,7 @@ func getWorldSize(expandedArgs []string) int64 {
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
-func needsDataParallelLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
+func needsDataParallelMultinodeLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
 	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
 	containerGPUs := getContainerGPUs(resources)
 	if containerGPUs == 0 {
