@@ -57,7 +57,7 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_config, config, vllm_flags)
+    return EngineFactory(runtime, router_config, config, vllm_flags, config.debug_perf)
 
 
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
