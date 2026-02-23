@@ -12,14 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// mpWorkerWaitPrefix returns the expected port-wait loop prefix for mp worker commands in tests.
-func mpWorkerWaitPrefix(leaderHostname string) string {
-	return fmt.Sprintf(
-		`echo 'Waiting for leader master port at %s:%s...' && until python3 -c 'import socket; s=socket.create_connection(("%s", %s), timeout=2); s.close()' 2>>/tmp/mp-leader-wait.log; do sleep 2; done && echo 'Leader master port ready' && `,
-		leaderHostname, commonconsts.VLLMMpMasterPort, leaderHostname, commonconsts.VLLMMpMasterPort,
-	)
-}
-
 func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	backend := &VLLMBackend{}
 
@@ -125,7 +117,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
 			gpuCount:          8,
-			expectedArgs: []string{mpWorkerWaitPrefix("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)") + fmt.Sprintf(
+			expectedArgs: []string{fmt.Sprintf(
 				"exec python3 -m dynamo.vllm %s 16 --distributed-executor-backend mp --nnodes 2 --master-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --master-port %s --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --headless",
 				tensorParallelSizeFlag, commonconsts.VLLMMpMasterPort)},
 			expectProbesRemoved: true,
@@ -434,7 +426,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			annotations: map[string]string{
 				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
 			},
-			expectedArgs: []string{mpWorkerWaitPrefix("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)") + fmt.Sprintf(
+			expectedArgs: []string{fmt.Sprintf(
 				"exec python3 -m dynamo.vllm %s 16 --distributed-executor-backend mp --nnodes 2 --master-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --master-port %s --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --headless",
 				tensorParallelSizeFlag, commonconsts.VLLMMpMasterPort)},
 		},
@@ -447,7 +439,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			annotations: map[string]string{
 				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
 			},
-			expectedArgs: []string{mpWorkerWaitPrefix("$LWS_LEADER_ADDRESS") + fmt.Sprintf(
+			expectedArgs: []string{fmt.Sprintf(
 				"exec python3 -m dynamo.vllm %s 16 --distributed-executor-backend mp --nnodes 2 --master-addr $LWS_LEADER_ADDRESS --master-port %s --node-rank $(LWS_WORKER_INDEX) --headless",
 				tensorParallelSizeFlag, commonconsts.VLLMMpMasterPort)},
 		},
@@ -541,6 +533,163 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			} else if tt.expectedArgs != nil {
 				// Check exact match
 				g.Expect(tt.initialContainer.Args).To(gomega.Equal(tt.expectedArgs))
+			}
+		})
+	}
+}
+
+func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
+	backend := &VLLMBackend{}
+
+	tests := []struct {
+		name                    string
+		numberOfNodes           int32
+		role                    Role
+		component               *v1alpha1.DynamoComponentDeploymentSharedSpec
+		multinodeDeployer       MultinodeDeployer
+		initialPodSpec          *corev1.PodSpec
+		expectInitContainer     bool
+		expectedInitName        string
+		expectedInitImage       string
+		expectedInitCommandLen  int
+		expectWaitScriptContent string
+	}{
+		{
+			name:          "mp worker with Grove deployer injects init container",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:latest"},
+				},
+			},
+			expectInitContainer:    true,
+			expectedInitName:       "wait-for-leader-mp",
+			expectedInitImage:      "vllm:latest",
+			expectedInitCommandLen: 3,
+			expectWaitScriptContent: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+		},
+		{
+			name:          "mp worker with LWS deployer injects init container",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+			},
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:v2"},
+				},
+			},
+			expectInitContainer:     true,
+			expectedInitName:        "wait-for-leader-mp",
+			expectedInitImage:       "vllm:v2",
+			expectedInitCommandLen:  3,
+			expectWaitScriptContent: "$LWS_LEADER_ADDRESS",
+		},
+		{
+			name:          "mp leader does not inject init container",
+			numberOfNodes: 2,
+			role:          RoleLeader,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:latest"},
+				},
+			},
+			expectInitContainer: false,
+		},
+		{
+			name:          "ray worker does not inject init container (legacy)",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component:     &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:latest"},
+				},
+			},
+			expectInitContainer: false,
+		},
+		{
+			name:          "single node does not inject init container",
+			numberOfNodes: 1,
+			role:          RoleMain,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:latest"},
+				},
+			},
+			expectInitContainer: false,
+		},
+		{
+			name:          "mp worker preserves existing init containers",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				InitContainers: []corev1.Container{
+					{Name: "existing-init", Image: "busybox"},
+				},
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:latest"},
+				},
+			},
+			expectInitContainer:    true,
+			expectedInitName:       "wait-for-leader-mp",
+			expectedInitImage:      "vllm:latest",
+			expectedInitCommandLen: 3,
+			expectWaitScriptContent: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			initialInitCount := len(tt.initialPodSpec.InitContainers)
+			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
+
+			if tt.expectInitContainer {
+				g.Expect(len(tt.initialPodSpec.InitContainers)).To(gomega.Equal(initialInitCount + 1))
+
+				injected := tt.initialPodSpec.InitContainers[len(tt.initialPodSpec.InitContainers)-1]
+				g.Expect(injected.Name).To(gomega.Equal(tt.expectedInitName))
+				g.Expect(injected.Image).To(gomega.Equal(tt.expectedInitImage))
+				g.Expect(len(injected.Command)).To(gomega.Equal(tt.expectedInitCommandLen))
+				g.Expect(injected.Command[0]).To(gomega.Equal("python3"))
+				g.Expect(injected.Command[1]).To(gomega.Equal("-c"))
+				g.Expect(injected.Command[2]).To(gomega.ContainSubstring(tt.expectWaitScriptContent))
+				g.Expect(injected.Command[2]).To(gomega.ContainSubstring("socket.create_connection"))
+				g.Expect(injected.Command[2]).To(gomega.ContainSubstring(commonconsts.VLLMMpMasterPort))
+			} else {
+				g.Expect(len(tt.initialPodSpec.InitContainers)).To(gomega.Equal(initialInitCount))
 			}
 		})
 	}
