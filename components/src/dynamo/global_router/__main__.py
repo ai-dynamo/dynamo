@@ -74,8 +74,9 @@ async def worker(runtime: DistributedRuntime):
     prefill_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component_name}.prefill_generate"
     )
-    component = prefill_endpoint.component()
-    decode_endpoint = component.endpoint("decode_generate")
+    decode_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component_name}.decode_generate"
+    )
 
     logger.info("Registering as prefill worker...")
     # Register as prefill worker - frontend will send prefill requests here
