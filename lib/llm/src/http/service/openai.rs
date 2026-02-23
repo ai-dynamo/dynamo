@@ -760,23 +760,35 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        let comment_str = event
-            .comment
-            .as_ref()
-            .map(|c| c.join(", "))
-            .unwrap_or_else(|| "Unknown error".to_string());
+        // Extract error string: prefer DynamoError field, fallback to legacy comment
+        let error_str = if let Some(ref dynamo_err) = event.error {
+            // Flatten the DynamoError chain into a single string
+            let mut parts = Vec::new();
+            let mut current: Option<&dyn std::error::Error> = Some(dynamo_err);
+            while let Some(e) = current {
+                parts.push(e.to_string());
+                current = e.source();
+            }
+            parts.join(", ")
+        } else {
+            event
+                .comment
+                .as_ref()
+                .map(|c| c.join(", "))
+                .unwrap_or_else(|| "Unknown error".to_string())
+        };
 
-        // Try to parse comment as error JSON to extract status code
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str) {
+        // Try to parse as error JSON to extract status code
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
             let code = error_payload
                 .code
                 .and_then(|c| StatusCode::from_u16(c).ok())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(comment_str);
+            let message = error_payload.message.unwrap_or(error_str);
             return Some((message, code));
         }
 
-        return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
