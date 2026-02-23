@@ -99,7 +99,7 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             >$JOBS_JSON
 
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "• " + .name' "$JOBS_JSON")
+          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "- " + .name' "$JOBS_JSON")
           echo $FAILED_JOBS
           echo "FAILED_JOBS=$FAILED_JOBS" >> $GITHUB_ENV
       - name: Notify Slack
