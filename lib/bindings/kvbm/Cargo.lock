@@ -3244,7 +3244,6 @@ dependencies = [
  "dlpark",
  "dynamo-llm",
  "dynamo-runtime",
- "prometheus",
  "pyo3",
  "pyo3-async-runtimes",
  "serde",
