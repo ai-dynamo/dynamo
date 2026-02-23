@@ -137,7 +137,9 @@ class PrometheusAPIClient:
                 return 0 if math.isnan(value) else value
             else:
                 # Frontend per-model path: filter by model and dynamo_namespace labels
-                if not full_metric_name.startswith(prometheus_names.name_prefix.FRONTEND):
+                if not full_metric_name.startswith(
+                    prometheus_names.name_prefix.FRONTEND
+                ):
                     full_metric_name = (
                         f"{prometheus_names.name_prefix.FRONTEND}_{full_metric_name}"
                     )
