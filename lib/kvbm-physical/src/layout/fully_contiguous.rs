@@ -65,12 +65,14 @@ impl FullyContiguousLayoutBuilder {
     }
 
     /// Set the layout configuration.
+    #[expect(dead_code)]
     pub fn config(&mut self, config: LayoutConfig) -> &mut Self {
         self.config = Some(config);
         self
     }
 
     /// Set the memory buffer backing this layout.
+    #[expect(dead_code)]
     pub fn memory(&mut self, memory: Buffer) -> &mut Self {
         self.memory = Some(memory);
         self
@@ -79,6 +81,7 @@ impl FullyContiguousLayoutBuilder {
     /// Set the KV block layout describing dimension ordering.
     ///
     /// Default: `KvBlockLayout::Unknown`
+    #[expect(dead_code)]
     pub fn kv_block_layout(&mut self, layout: KvBlockLayout) -> &mut Self {
         self.kv_block_layout = layout;
         self
@@ -87,6 +90,7 @@ impl FullyContiguousLayoutBuilder {
     /// Set the block format.
     ///
     /// Default: `BlockFormat::default()` (Operational)
+    #[expect(dead_code)]
     pub fn block_format(&mut self, format: BlockFormat) -> &mut Self {
         self.block_format = format;
         self
@@ -101,6 +105,7 @@ impl FullyContiguousLayoutBuilder {
     /// - `memory` is not set
     /// - The memory region is too small for the layout
     /// - The config validation fails
+    #[expect(dead_code)]
     pub fn build(&self) -> Result<FullyContiguousLayout> {
         let config = self
             .config
@@ -117,6 +122,7 @@ impl FullyContiguousLayoutBuilder {
 
 impl FullyContiguousLayout {
     /// Create a builder for `FullyContiguousLayout`.
+    #[expect(dead_code)]
     pub fn builder() -> FullyContiguousLayoutBuilder {
         FullyContiguousLayoutBuilder::new()
     }
@@ -198,16 +204,19 @@ impl FullyContiguousLayout {
     }
 
     /// Get the block format.
+    #[expect(dead_code)]
     pub fn block_format(&self) -> BlockFormat {
         self.block_format
     }
 
     /// Get the KV block layout.
+    #[expect(dead_code)]
     pub fn kv_block_layout(&self) -> KvBlockLayout {
         self.kv_block_layout
     }
 
     /// Set the KV block layout.
+    #[expect(dead_code)]
     pub fn set_kv_block_layout(&mut self, layout: KvBlockLayout) {
         self.kv_block_layout = layout;
     }
@@ -248,6 +257,7 @@ impl FullyContiguousLayout {
     }
 
     /// Get mutable reference to the memory Arc for NIXL registration.
+    #[expect(dead_code)]
     pub fn memory_arc_mut(&mut self) -> &mut Buffer {
         &mut self.memory
     }

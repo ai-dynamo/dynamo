@@ -165,7 +165,7 @@ impl KvBlockLayout {
     /// Convert to InnerShape if this is an operational layout.
     ///
     /// Returns `None` for universal or custom layouts.
-    pub(crate) fn to_inner_shape(&self) -> Option<super::InnerShape> {
+    pub(crate) fn to_inner_shape(self) -> Option<super::InnerShape> {
         match self {
             Self::OperationalNHD => Some(super::InnerShape::NHD),
             Self::OperationalHND => Some(super::InnerShape::HND),
@@ -298,6 +298,7 @@ impl KvBlocks {
     }
 
     /// Create a KvBlocks collection without layout override.
+    #[expect(dead_code)]
     pub fn from_layout(
         layout: Arc<PhysicalLayout>,
         block_ids: Vec<BlockId>,
@@ -306,11 +307,13 @@ impl KvBlocks {
     }
 
     /// Get the physical layout.
+    #[expect(dead_code)]
     pub fn layout(&self) -> &Arc<PhysicalLayout> {
         &self.layout
     }
 
     /// Get the block IDs.
+    #[expect(dead_code)]
     pub fn block_ids(&self) -> &[BlockId] {
         &self.block_ids
     }
@@ -322,21 +325,25 @@ impl KvBlocks {
     }
 
     /// Get the layout override if set.
+    #[expect(dead_code)]
     pub fn layout_override(&self) -> Option<KvBlockLayout> {
         self.kv_layout_override
     }
 
     /// Check if this collection has a layout override.
+    #[expect(dead_code)]
     pub fn has_override(&self) -> bool {
         self.kv_layout_override.is_some()
     }
 
     /// Get the number of blocks in this collection.
+    #[expect(dead_code)]
     pub fn len(&self) -> usize {
         self.block_ids.len()
     }
 
     /// Check if the collection is empty.
+    #[expect(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.block_ids.is_empty()
     }
@@ -345,6 +352,7 @@ impl KvBlocks {
     ///
     /// Returns `true` if the effective layouts differ and a transformation kernel
     /// is needed rather than a simple copy.
+    #[expect(dead_code)]
     pub fn requires_transform_to(&self, dst: &KvBlocks) -> bool {
         self.effective_block_layout()
             .requires_transform(&dst.effective_block_layout())

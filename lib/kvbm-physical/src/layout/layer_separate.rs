@@ -246,16 +246,19 @@ impl LayerSeparateLayout {
         Ok(base_addr + offset)
     }
 
+    #[expect(dead_code)]
     pub fn block_dim(&self) -> BlockDimension {
         self.block_dim
     }
 
     /// Get mutable reference to the memory regions for NIXL registration.
+    #[expect(dead_code)]
     pub fn memory_regions_mut(&mut self) -> &mut [Buffer] {
         &mut self.memory_regions
     }
 
     /// Get the KV block layout.
+    #[expect(dead_code)]
     pub fn kv_block_layout(&self) -> KvBlockLayout {
         self.kv_block_layout
     }
@@ -263,6 +266,7 @@ impl LayerSeparateLayout {
     /// Set the KV block layout from an inner shape.
     ///
     /// Note: Only operational layouts (NHD, HND) are valid for layer-separate layouts.
+    #[expect(dead_code)]
     pub fn set_kv_block_layout(&mut self, inner_shape: InnerShape) {
         self.kv_block_layout = KvBlockLayout::from_inner_shape(inner_shape);
     }

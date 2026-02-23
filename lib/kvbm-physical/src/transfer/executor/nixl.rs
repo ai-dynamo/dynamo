@@ -183,6 +183,7 @@ impl<'a, TSrc, TDst, TSrcBlocks, TDstBlocks, TStrategy>
     }
 
     /// Sets an optional write notification UUID.
+    #[expect(dead_code)]
     pub fn write_notif(mut self, write_notif: uuid::Uuid) -> Self {
         self.write_notif = Some(write_notif);
         self

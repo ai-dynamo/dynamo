@@ -86,12 +86,6 @@ pub use crate::manager::{LayoutHandle, SerializedLayout, TransferManager, Worker
 // }
 
 #[derive(Clone)]
-pub(crate) enum BounceBufferLayout {
-    Layout(PhysicalLayout),
-    Handle(LayoutHandle),
-}
-
-#[derive(Clone)]
 pub struct BounceBuffer {
     layout: LayoutHandle,
     block_ids: Vec<BlockId>,

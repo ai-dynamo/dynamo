@@ -19,7 +19,6 @@ use anyhow::Result;
 use cudarc::driver::CudaStream;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
 // Re-export the NIXL transfer builder for public use
@@ -271,6 +270,7 @@ pub(crate) fn execute_transfer(
 }
 
 /// Execute a direct single-hop transfer.
+#[allow(clippy::too_many_arguments)]
 fn execute_direct_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -568,34 +568,6 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
     });
 
     Ok(TransferCompleteNotification::from_awaiter(awaiter))
-}
-
-pub struct TransferNotification {
-    status: Arc<AtomicBool>,
-}
-
-impl Default for TransferNotification {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TransferNotification {
-    pub fn new() -> Self {
-        Self {
-            status: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    pub fn done() -> Self {
-        Self {
-            status: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.status.load(Ordering::Relaxed)
-    }
 }
 
 #[cfg(test)]

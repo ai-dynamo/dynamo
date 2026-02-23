@@ -35,6 +35,7 @@ use std::sync::Arc;
 /// * `cuda_stream` - Optional caller-provided stream. If provided, use this stream
 ///   and skip event recording (caller manages sync). Returns completed() immediately.
 /// * `ctx` - Transfer context with CUDA stream
+#[allow(clippy::too_many_arguments)]
 pub fn execute_cuda_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,

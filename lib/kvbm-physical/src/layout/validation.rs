@@ -9,6 +9,7 @@ use std::sync::Arc;
 use dynamo_memory::TensorDescriptor;
 
 /// Format of tensor layout (for future TP translation).
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorFormat {
     /// NHD format: [N, H, D] where N=block_size, H=heads, D=hidden
@@ -33,6 +34,7 @@ pub enum TensorFormat {
 ///
 /// # Returns
 /// The detected tensor format (NHD, HND, or Unknown)
+#[expect(dead_code)]
 pub fn validate_tensor_strides(tensors: &[Arc<dyn TensorDescriptor>]) -> Result<TensorFormat> {
     if tensors.is_empty() {
         return Err(anyhow!("Cannot validate empty tensor list"));
@@ -89,6 +91,7 @@ pub fn validate_tensor_strides(tensors: &[Arc<dyn TensorDescriptor>]) -> Result<
 ///
 /// # Returns
 /// The common shape shared by all tensors
+#[expect(dead_code)]
 pub fn validate_tensor_shapes(tensors: &[Arc<dyn TensorDescriptor>]) -> Result<Vec<usize>> {
     if tensors.is_empty() {
         return Err(anyhow!("Cannot validate empty tensor list"));

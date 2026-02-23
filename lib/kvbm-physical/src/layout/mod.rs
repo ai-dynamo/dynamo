@@ -131,6 +131,7 @@ pub trait Layout: Send + Sync + std::fmt::Debug {
 }
 
 /// Inner shape format for tensor layout
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum InnerShape {
     /// Unknown shape - fallback when we can't determine the format
