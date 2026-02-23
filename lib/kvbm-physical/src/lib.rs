@@ -8,5 +8,5 @@ pub mod transfer;
 pub use manager::TransferManager;
 pub use transfer::{TransferConfig, TransferOptions};
 
-pub type BlockId = usize;
+pub use kvbm_common::BlockId;
 pub type SequenceHash = kvbm_common::SequenceHash;

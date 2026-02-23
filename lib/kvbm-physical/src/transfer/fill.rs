@@ -87,13 +87,16 @@ pub fn fill_blocks(
                             layer_id,
                             pattern,
                         )?;
-                        unsafe {
+                        let err = unsafe {
                             cudaMemcpy(
                                 region.addr() as *mut std::ffi::c_void,
                                 system_region.as_ptr() as *const std::ffi::c_void,
                                 region.size(),
                                 cudaMemcpyKind::cudaMemcpyHostToDevice,
-                            );
+                            )
+                        };
+                        if err != cudarc::runtime::sys::cudaError::cudaSuccess {
+                            return Err(anyhow!("cudaMemcpy H2D failed in fill_blocks: {:?}", err));
                         }
                     }
                     StorageKind::Disk(fd) => {
@@ -155,7 +158,23 @@ pub fn fill_layers(
         for layer_id in layer_range.clone() {
             for outer_id in 0..outer_dim {
                 let region = layout.memory_region(block_id, layer_id, outer_id)?;
-                fill_memory_region(region.addr(), region.size(), block_id, layer_id, pattern)?;
+
+                match layout.location() {
+                    StorageKind::System | StorageKind::Pinned => {
+                        fill_memory_region(
+                            region.addr(),
+                            region.size(),
+                            block_id,
+                            layer_id,
+                            pattern,
+                        )?;
+                    }
+                    StorageKind::Device(_) | StorageKind::Disk(_) => {
+                        return Err(anyhow!(
+                            "fill_layers only supports host-accessible storage (System/Pinned)"
+                        ));
+                    }
+                }
             }
         }
     }

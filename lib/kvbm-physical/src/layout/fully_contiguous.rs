@@ -230,21 +230,21 @@ impl FullyContiguousLayout {
     ) -> Result<usize> {
         if block_id >= self.config.num_blocks {
             return Err(anyhow!(
-                "Block ID {} out of range (max: {})",
+                "Block ID {} out of range (count: {})",
                 block_id,
                 self.config.num_blocks
             ));
         }
         if layer_id >= self.config.num_layers {
             return Err(anyhow!(
-                "Layer ID {} out of range (max: {})",
+                "Layer ID {} out of range (count: {})",
                 layer_id,
                 self.config.num_layers
             ));
         }
         if outer_id >= self.config.outer_dim {
             return Err(anyhow!(
-                "Outer ID {} out of range (max: {})",
+                "Outer ID {} out of range (count: {})",
                 outer_id,
                 self.config.outer_dim
             ));

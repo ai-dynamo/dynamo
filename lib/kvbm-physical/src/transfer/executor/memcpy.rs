@@ -35,6 +35,14 @@ pub fn execute_memcpy_transfer(
     layer_range: Option<Range<usize>>,
     _ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
+    if src_block_ids.len() != dst_block_ids.len() {
+        return Err(anyhow::anyhow!(
+            "Block ID slice length mismatch: src={}, dst={}",
+            src_block_ids.len(),
+            dst_block_ids.len()
+        ));
+    }
+
     // Validate layouts have compatible structure
     let src_layout = src.layout();
     let dst_layout = dst.layout();

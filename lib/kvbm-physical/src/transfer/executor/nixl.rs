@@ -254,6 +254,8 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         let src_is_local = nixl_agent.name() == src.nixl_metadata().agent_name();
         let dst_is_local = nixl_agent.name() == dst.nixl_metadata().agent_name();
 
+        // These are invariant assertions — a violation means a bug in `select_strategy`,
+        // not a user error. The strategy selection guarantees locality constraints.
         match xfer_op {
             XferOp::Write => {
                 assert!(

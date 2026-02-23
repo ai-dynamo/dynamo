@@ -41,7 +41,10 @@ impl LayoutHandle {
         self.0
     }
 
-    /// Create a handle from a raw u128 value.
+    /// Reconstruct a handle from a raw u128 value.
+    ///
+    /// This preserves all bits including reserved bits, and is intended for
+    /// deserialization roundtrips with `as_u128()`.
     pub fn from_u128(value: u128) -> Self {
         Self(value)
     }

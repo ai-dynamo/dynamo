@@ -482,11 +482,12 @@ impl LayoutRegistry {
     /// # Errors
     /// Returns an error if layout IDs are exhausted (u16::MAX reached)
     pub(crate) fn register_local(&mut self, layout: PhysicalLayout) -> Result<LayoutHandle> {
-        // Get next layout ID
-        let layout_id = self.next_layout_id.fetch_add(1, Ordering::SeqCst);
-        if layout_id == u16::MAX {
-            bail!("Layout ID overflow: maximum number of layouts (65535) reached");
+        // Check before incrementing to prevent wrapping
+        let current = self.next_layout_id.load(Ordering::SeqCst);
+        if current == u16::MAX {
+            bail!("Layout ID overflow: maximum number of layouts ({}) reached", u16::MAX);
         }
+        let layout_id = self.next_layout_id.fetch_add(1, Ordering::SeqCst);
 
         // Create handle
         let handle = LayoutHandle::new(self.worker_id, layout_id);

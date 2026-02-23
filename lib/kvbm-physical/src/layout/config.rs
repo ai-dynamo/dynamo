@@ -5,7 +5,11 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
-/// Configuration for block layouts
+/// Configuration for block layouts.
+///
+/// The `#[validate]` attributes on fields are checked during layout construction
+/// (e.g., `FullyContiguousLayout::new_internal()`, `LayerSeparateLayout::new_internal()`),
+/// not at builder `.build()` time.
 #[derive(Debug, Clone, Builder, Validate, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LayoutConfig {
     /// Number of blocks

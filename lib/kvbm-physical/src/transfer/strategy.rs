@@ -252,7 +252,7 @@ fn select_remote_strategy_v2(
     // We only support System, Pinned and Device for remote transfers.
     // Later we might support staged/bounce buffer transfers.
 
-    if matches!(src, StorageKind::Disk(_)) | matches!(dst, StorageKind::Disk(_)) {
+    if matches!(src, StorageKind::Disk(_)) || matches!(dst, StorageKind::Disk(_)) {
         return Err(anyhow::anyhow!(
             "Neither local nor remote disk transfers are supported over NIXL at this time."
         ));

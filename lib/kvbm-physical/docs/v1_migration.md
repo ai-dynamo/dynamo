@@ -13,7 +13,7 @@ Both implementations use the same `vectorized_copy` CUDA kernel. The original em
 | Original (block_manager) | kvbm-physical | Notes |
 |--------------------------|---------------|-------|
 | `TransportManager` | `TransferManager` | Same role, richer API |
-| `LayoutHandle` | `LayoutHandle` | Same concept, same encoding |
+| `LayoutHandle` | `LayoutHandle` | Same concept; encoding changed — see LayoutHandle docs for details |
 | `PhysicalLayout` + builder | `PhysicalLayout` + builder | Same pattern; adds `with_external_device_regions()` |
 | `LayoutConfig` | `LayoutConfig` | Same fields + optional `num_heads` |
 | `TransferOptions` | `TransferOptions` | Adds `cuda_stream`, `src_kv_layout`, `dst_kv_layout` |

@@ -76,7 +76,7 @@ pub enum KvBlockLayout {
 
 impl Default for KvBlockLayout {
     fn default() -> Self {
-        // OperationalNHD is the most common format
+        // Unknown until runtime detection determines the actual format
         Self::Unknown
     }
 }

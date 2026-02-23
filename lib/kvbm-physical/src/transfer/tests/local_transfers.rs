@@ -68,12 +68,12 @@ fn is_nixl_backend_available(backend: &str) -> bool {
     agent.add_backend(backend).is_ok()
 }
 
-fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result<NixlAgent> {
+fn build_agent_for_kinds(kinds: &[StorageKind]) -> Result<NixlAgent> {
     let mut agent = NixlAgent::new("agent")?;
     let mut added_backends = Vec::new();
 
-    // Determine required backends for both source and destination
-    for kind in [src_kind, dst_kind] {
+    // Determine required backends for all storage kinds
+    for &kind in kinds {
         match kind {
             StorageKind::System | StorageKind::Pinned => {
                 if !added_backends.contains(&"POSIX") {
@@ -97,8 +97,11 @@ fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result
     }
 
     // GDS_MT is optional for Device <-> Disk (will be checked separately)
-    if requires_gds(src_kind, dst_kind) && !added_backends.contains(&"GDS_MT") {
-        let _ = agent.add_backend("GDS_MT");
+    for window in kinds.windows(2) {
+        if requires_gds(window[0], window[1]) && !added_backends.contains(&"GDS_MT") {
+            let _ = agent.add_backend("GDS_MT");
+            break;
+        }
     }
 
     Ok(agent)
@@ -143,7 +146,7 @@ async fn test_p2p(
 
     use crate::transfer::{BounceBufferInternal, executor::TransferOptionsInternal};
 
-    let agent = build_agent_for_kinds(src_kind, dst_kind)?;
+    let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
 
     let src = build_layout(agent.clone(), src_layout, src_kind, 4);
     let dst = build_layout(agent.clone(), dst_layout, dst_kind, 4);
@@ -199,7 +202,7 @@ async fn test_roundtrip(
 
     use crate::transfer::executor::TransferOptionsInternal;
 
-    let agent = build_agent_for_kinds(src_kind, dst_kind)?;
+    let agent = build_agent_for_kinds(&[src_kind, inter_kind, dst_kind])?;
 
     // Create layouts: source pinned, device intermediate, destination pinned
     let src = build_layout(agent.clone(), src_layout, src_kind, 4);
@@ -259,7 +262,7 @@ async fn test_gds(
         return Ok(());
     }
 
-    let agent = build_agent_for_kinds(src_kind, dst_kind)?;
+    let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
 
     let src = build_layout(agent.clone(), src_layout, src_kind, 4);
     let dst = build_layout(agent.clone(), dst_layout, dst_kind, 4);
@@ -1033,7 +1036,7 @@ async fn test_cuda_fc_lw_roundtrip_uses_vectorized(
         return Ok(());
     }
 
-    let agent = build_agent_for_kinds(StorageKind::Pinned, StorageKind::Device(0))?;
+    let agent = build_agent_for_kinds(&[StorageKind::Pinned, StorageKind::Device(0)])?;
 
     let host = create_layout(
         agent.clone(),

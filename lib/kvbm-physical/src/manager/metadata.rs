@@ -234,7 +234,6 @@ mod tests {
             SerializedLayout::pack(worker_address.clone(), nixl_metadata.clone(), layouts).unwrap();
 
         assert!(!packed.is_empty());
-        assert!(!packed.is_empty());
 
         let unpacked = packed.unpack().unwrap();
 

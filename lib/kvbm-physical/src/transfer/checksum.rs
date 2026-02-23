@@ -128,14 +128,17 @@ fn compute_single_block_checksum(
                     hasher.update(slice);
                 }
                 StorageKind::Device(_) => {
-                    let system_region: Vec<u8> = vec![0; region.size()];
-                    unsafe {
+                    let mut system_region: Vec<u8> = vec![0; region.size()];
+                    let err = unsafe {
                         cudaMemcpy(
-                            system_region.as_ptr() as *mut std::ffi::c_void,
+                            system_region.as_mut_ptr() as *mut std::ffi::c_void,
                             region.addr() as *const std::ffi::c_void,
                             region.size(),
                             cudaMemcpyKind::cudaMemcpyDeviceToHost,
-                        );
+                        )
+                    };
+                    if err != cudarc::runtime::sys::cudaError::cudaSuccess {
+                        return Err(anyhow!("cudaMemcpy D2H failed in checksum: {:?}", err));
                     }
                     hasher.update(system_region.as_slice());
                 }
