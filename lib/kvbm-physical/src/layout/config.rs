@@ -101,7 +101,7 @@ impl LayoutConfig {
     pub fn supports_kv_block_layout(&self) -> bool {
         if let Some(nh) = self.num_heads {
             let divisor = self.page_size * nh;
-            divisor > 0 && self.inner_dim % divisor == 0
+            divisor > 0 && self.inner_dim.is_multiple_of(divisor)
         } else {
             false
         }
@@ -126,7 +126,7 @@ impl LayoutConfig {
         }
 
         let divisor = self.page_size * nh;
-        if self.inner_dim % divisor != 0 {
+        if !self.inner_dim.is_multiple_of(divisor) {
             return Err(ValidationError::new(
                 "inner_dim_must_be_divisible_by_page_size_times_num_heads",
             ));

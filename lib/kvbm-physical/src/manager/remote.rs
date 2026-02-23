@@ -59,12 +59,10 @@ impl RemoteLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{LayoutConfig, LayoutDescriptor, PhysicalLayout};
+    use crate::layout::{LayoutConfig, LayoutDescriptor, NixlMetadata, PhysicalLayout};
 
     fn make_serialized_layout() -> LayoutDescriptor {
-        use crate::layout::{
-            BlockFormat, FullyContiguousDetails, LayoutTypeDetails, physical::NixlMetadata,
-        };
+        use crate::layout::{BlockFormat, FullyContiguousDetails, LayoutTypeDetails, NixlMetadata};
         use dynamo_memory::{MemoryRegion, StorageKind, nixl};
 
         let config = LayoutConfig::builder()

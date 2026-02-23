@@ -154,7 +154,7 @@ pub(crate) enum InnerShape {
 /// - Access raw block memory for transformation kernels
 /// - Reinterpret block memory under different [`KvBlockLayout`] formats
 /// - Perform whole-block operations without layer decomposition
-pub(crate) trait ContiguousBlockLayout: Send + Sync + std::fmt::Debug {
+pub trait ContiguousBlockLayout: Send + Sync + std::fmt::Debug {
     /// Get the total number of blocks in this layout.
     fn num_blocks(&self) -> usize;
 

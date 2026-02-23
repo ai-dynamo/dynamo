@@ -356,8 +356,7 @@ impl TransferManager {
         self.registry
             .read()
             .unwrap()
-            .get_layout(handle)
-            .map(|l| l.clone())
+            .get_layout(handle).cloned()
     }
 
     /// Create a bounce buffer specification from a layout handle and block IDs.
