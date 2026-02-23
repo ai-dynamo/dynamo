@@ -84,7 +84,7 @@ host, port = "%s", %s
 print(f"Waiting for leader master port at {host}:{port}...", flush=True)
 start = time.monotonic()
 last_status = start
-first_unexpected_logged = False
+last_err = ""
 while True:
     try:
         s = socket.create_connection((host, port), timeout=2)
@@ -92,15 +92,11 @@ while True:
         elapsed = time.monotonic() - start
         print(f"Leader master port ready (waited {elapsed:.1f}s)", flush=True)
         break
-    except (ConnectionRefusedError, ConnectionResetError):
-        pass
     except Exception as e:
-        if not first_unexpected_logged:
-            print(f"Unexpected error connecting to {host}:{port}: {type(e).__name__}: {e}", flush=True)
-            first_unexpected_logged = True
+        last_err = f"{type(e).__name__}: {e}"
     now = time.monotonic()
     if now - last_status >= 30:
-        print(f"Still waiting for {host}:{port}... ({now - start:.0f}s elapsed)", flush=True)
+        print(f"Still waiting for {host}:{port}... ({now - start:.0f}s elapsed, last error: {last_err})", flush=True)
         last_status = now
     time.sleep(2)
 `, leaderHostname, commonconsts.VLLMMpMasterPort)
