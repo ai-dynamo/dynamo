@@ -62,7 +62,6 @@ def _make_handler(
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         return mod.MultimodalPDWorkerHandler(
             runtime=MagicMock(),
-            component=MagicMock(),
             engine_client=MagicMock(),
             config=config,
             encode_worker_client=encode_worker_client,
