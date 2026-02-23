@@ -27,16 +27,7 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-WHEEL_DIRS = ["/opt/dynamo/wheelhouse", "/opt/dynamo/dist"]
-
-
-def _find_runtime_wheel():
-    """Find the ai-dynamo-runtime wheel file on disk."""
-    for d in WHEEL_DIRS:
-        matches = glob.glob(f"{d}/ai_dynamo_runtime-*.whl")
-        if matches:
-            return matches[0]
-    return None
+WHEEL_DIR = "/opt/dynamo/wheelhouse"
 
 
 def test_no_bundled_shared_libraries():
@@ -47,12 +38,11 @@ def test_no_bundled_shared_libraries():
     add --exclude flags to the auditwheel repair command in
     container/templates/wheel_builder.Dockerfile.
     """
-    whl_path = _find_runtime_wheel()
-    if whl_path is None:
-        pytest.skip(
-            "ai-dynamo-runtime wheel not found in "
-            + ", ".join(WHEEL_DIRS)
-        )
+    matches = glob.glob(f"{WHEEL_DIR}/ai_dynamo_runtime-*.whl")
+    assert matches, (
+        f"ai-dynamo-runtime wheel not found in {WHEEL_DIR}"
+    )
+    whl_path = matches[0]
 
     with zipfile.ZipFile(whl_path) as zf:
         bundled_libs = [
