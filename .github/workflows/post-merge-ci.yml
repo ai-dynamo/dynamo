@@ -6,7 +6,6 @@ name: Post-Merge CI Pipeline
 on:
   push:
     branches:
-      - main
       - 'release/*.*.*'
 
 permissions:
