@@ -4,10 +4,6 @@
 name: Nightly CI Pipeline
 
 on:
-  push:
-    branches:
-      - dcullinan/refactor-nightly-postmerge
-
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
   workflow_dispatch:  # Allow manual triggering for testing
@@ -88,6 +84,8 @@ jobs:
     needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
     permissions:
       contents: read
+    env:
+      SLACK_OPS_SUPPORT_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
     steps:
       - name: Get Failed jobs
         shell: bash
@@ -114,17 +112,20 @@ jobs:
           webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
           webhook-type: incoming-webhook
           payload: |
-            text: "THIS IS A TEST :alert: Github Nightly Build Failure"
             blocks:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "[Workflow Summary](https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }})"
+                  text: "THIS IS A TEST :alert: Github Nightly Build Failure"
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "$FAILED_JOBS"
+                  text: "<https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}|Workflow Summary>"
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "<!subteam^${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}|@ops-support> Please investigate the failures above."
+                  text: "${{ env.FAILED_JOBS }}"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "<!subteam^${{ env.SLACK_OPS_SUPPORT_GROUP_ID }}|@ops-support> Please investigate the failures above."
