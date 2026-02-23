@@ -164,4 +164,4 @@ jobs:
       working-directory: ${{ matrix.dir }}
       run: |
         cargo-machete --version || cargo install cargo-machete@0.9.1
-        cargo machete --with-metadata
+        cargo machete
