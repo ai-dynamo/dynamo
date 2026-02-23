@@ -114,6 +114,7 @@ type WebhookServer struct {
 // LeaderElectionConfiguration holds leader election settings.
 type LeaderElectionConfiguration struct {
 	// Enabled enables leader election for controller manager
+	// +kubebuilder:default=false
 	Enabled bool `json:"enabled"`
 	// ID is the leader election resource identity
 	ID string `json:"id"`
@@ -315,5 +316,6 @@ type LoggingConfiguration struct {
 // SecurityConfiguration holds HTTP/2 and TLS settings.
 type SecurityConfiguration struct {
 	// EnableHTTP2 enables HTTP/2 for metrics and webhook servers
+	// +kubebuilder:default=false
 	EnableHTTP2 bool `json:"enableHTTP2"`
 }

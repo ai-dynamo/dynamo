@@ -190,9 +190,9 @@ func main() {
 
 	// Validate and normalize operator version to semver
 	if _, err := semver.NewVersion(operatorVersion); err != nil {
-		setupLog.Info("WARNING: operator-version is not valid semver, falling back to 0.0.0-unknown",
+		setupLog.Error(err, "operator-version is not valid semver",
 			"provided", operatorVersion, "error", err.Error())
-		operatorVersion = "0.0.0-unknown"
+		os.Exit(1)
 	}
 	setupLog.Info("Operator version configured", "version", operatorVersion)
 
