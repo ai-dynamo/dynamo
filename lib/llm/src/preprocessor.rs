@@ -283,6 +283,7 @@ impl OpenAIPreprocessor {
                 dp_rank: None, // dp_rank is set later in the pipeline
                 expected_output_tokens: hints.and_then(|h| h.osl),
                 priority_jump: hints.and_then(|h| h.latency_sensitivity),
+                priority: hints.and_then(|h| h.priority),
                 lora_name,
             };
             builder.routing(Some(routing));

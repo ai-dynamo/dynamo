@@ -57,7 +57,7 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_config, config, vllm_flags)
+    return EngineFactory(runtime, router_config, config, vllm_flags, config.debug_perf)
 
 
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace]]:
@@ -232,6 +232,9 @@ async def async_main():
         kwargs["namespace"] = config.namespace
     if config.kserve_grpc_server and config.grpc_metrics_port:
         kwargs["http_metrics_port"] = config.grpc_metrics_port
+
+    if config.enable_anthropic_api:
+        os.environ["DYN_ENABLE_ANTHROPIC_API"] = "1"
 
     if config.chat_processor == "vllm":
         assert (

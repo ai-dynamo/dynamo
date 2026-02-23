@@ -45,6 +45,7 @@ use dynamo_runtime::{
     metrics::{MetricsHierarchy, prometheus_names::kvrouter},
 };
 use prometheus::{IntCounterVec, Opts};
+use rustc_hash::FxBuildHasher;
 
 /// Trait for types that may represent an error response.
 /// Used for RPC-style responses that can indicate success or failure.
@@ -408,7 +409,7 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     backend: Arc<T>,
 
     /// Maps WorkerId to worker thread index for sticky routing.
-    worker_assignments: DashMap<WorkerId, usize>,
+    worker_assignments: DashMap<WorkerId, usize, FxBuildHasher>,
     /// Counter for round-robin assignment of new WorkerIds.
     worker_assignment_count: AtomicUsize,
 
@@ -465,7 +466,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
         Self {
             backend,
-            worker_assignments: DashMap::new(),
+            worker_assignments: DashMap::with_hasher(FxBuildHasher),
             worker_assignment_count: AtomicUsize::new(0),
             worker_event_channels: worker_event_senders,
             num_workers,
@@ -1390,7 +1391,7 @@ pub struct KvIndexerSharded {
     cancel: CancellationToken,
     /// The size of the KV block this indexer can handle.
     kv_block_size: u32,
-    worker_assignments: DashMap<WorkerId, usize>,
+    worker_assignments: DashMap<WorkerId, usize, FxBuildHasher>,
     worker_counts: Arc<Mutex<Vec<usize>>>,
 
     event_tx: Vec<mpsc::Sender<RouterEvent>>,
@@ -1423,7 +1424,7 @@ impl KvIndexerSharded {
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
-        let worker_assignments = DashMap::new();
+        let worker_assignments = DashMap::with_hasher(FxBuildHasher);
         let worker_counts = Arc::new(Mutex::new(vec![0; num_shards]));
 
         let mut event_tx = Vec::new();
@@ -2401,13 +2402,13 @@ mod tests {
         index.flush().await;
 
         // Query for full sequence [1, 2, 3, 4, 5] should match all 5 blocks
-        let full_seq: Vec<LocalBlockHash> = (1..=5).map(|i| LocalBlockHash(i)).collect();
+        let full_seq: Vec<LocalBlockHash> = (1..=5).map(LocalBlockHash).collect();
         let scores = index.find_matches(full_seq).await.unwrap();
         assert_eq!(scores.scores.len(), 1);
         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 5);
 
         // Query for just [1, 2, 3] should match 3 blocks
-        let prefix_seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
+        let prefix_seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(prefix_seq).await.unwrap();
         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
     }
@@ -2431,7 +2432,7 @@ mod tests {
         index.flush().await;
 
         // Query should return all 3 dp_ranks as separate entries
-        let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
+        let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq).await.unwrap();
 
         assert_eq!(scores.scores.len(), 3);
@@ -2451,14 +2452,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify all 3 blocks match
-        let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
+        let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq.clone()).await.unwrap();
         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
 
         // Remove only the last block (block 3)
         // To do this correctly, we need to compute the seq_hash for block 3 specifically,
         // which requires the full sequence context [1,2,3].
-        let full_hashes: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
+        let full_hashes: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let seq_hashes = compute_seq_hash_for_block(&full_hashes);
         let block_3_seq_hash = ExternalSequenceBlockHash(seq_hashes[2]); // Last block's hash
 
@@ -2481,7 +2482,7 @@ mod tests {
         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
 
         // Query [1, 2] - should still match 2 blocks
-        let partial_seq: Vec<LocalBlockHash> = (1..=2).map(|i| LocalBlockHash(i)).collect();
+        let partial_seq: Vec<LocalBlockHash> = (1..=2).map(LocalBlockHash).collect();
         let scores = index.find_matches(partial_seq).await.unwrap();
         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
     }
@@ -2503,7 +2504,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Worker 0's data should still be there
-        let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
+        let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq).await.unwrap();
         assert_eq!(scores.scores.len(), 1);
         assert!(scores.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
@@ -2523,7 +2524,7 @@ mod tests {
         index.flush().await;
 
         // Original data should still be there
-        let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
+        let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq).await.unwrap();
         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
     }
@@ -2542,7 +2543,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify data is gone
-        let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
+        let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq.clone()).await.unwrap();
         assert!(scores.scores.is_empty());
 
@@ -2573,12 +2574,12 @@ mod tests {
         index.flush().await;
 
         // Query first sequence
-        let seq1: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
+        let seq1: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq1).await.unwrap();
         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
 
         // Query second sequence
-        let seq2: Vec<LocalBlockHash> = (100..=102).map(|i| LocalBlockHash(i)).collect();
+        let seq2: Vec<LocalBlockHash> = (100..=102).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq2).await.unwrap();
         assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
 
@@ -2605,7 +2606,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify both dp_ranks are present
-        let seq: Vec<LocalBlockHash> = (1..=3).map(|i| LocalBlockHash(i)).collect();
+        let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq.clone()).await.unwrap();
         assert_eq!(scores.scores.len(), 2);
 
@@ -2648,7 +2649,7 @@ mod tests {
         );
 
         // Query prefix (first 64 blocks)
-        let prefix_query: Vec<LocalBlockHash> = (1..=64).map(|i| LocalBlockHash(i)).collect();
+        let prefix_query: Vec<LocalBlockHash> = (1..=64).map(LocalBlockHash).collect();
         let scores = index.find_matches(prefix_query).await.unwrap();
         assert_eq!(
             *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
@@ -2656,8 +2657,7 @@ mod tests {
         );
 
         // Query with divergence at position 50
-        let mut divergent_query: Vec<LocalBlockHash> =
-            (1..=100).map(|i| LocalBlockHash(i)).collect();
+        let mut divergent_query: Vec<LocalBlockHash> = (1..=100).map(LocalBlockHash).collect();
         divergent_query[49] = LocalBlockHash(99999); // Position 49 (0-indexed) diverges
         let scores = index.find_matches(divergent_query).await.unwrap();
         assert_eq!(
@@ -2692,7 +2692,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query full sequence - should match all 150 blocks
-        let full_query: Vec<LocalBlockHash> = (1..=150).map(|i| LocalBlockHash(i)).collect();
+        let full_query: Vec<LocalBlockHash> = (1..=150).map(LocalBlockHash).collect();
         let scores = index.find_matches(full_query).await.unwrap();
         assert_eq!(scores.scores.len(), 1);
         assert_eq!(
@@ -2701,14 +2701,13 @@ mod tests {
         );
 
         // Query crossing continuation boundaries
-        let cross_boundary_query: Vec<LocalBlockHash> =
-            (45..=105).map(|i| LocalBlockHash(i)).collect();
+        let cross_boundary_query: Vec<LocalBlockHash> = (45..=105).map(LocalBlockHash).collect();
         let scores = index.find_matches(cross_boundary_query).await.unwrap();
         // Query starts at block 45, but stored sequence starts at 1, so this won't match
         // because the sequence hash at position 0 of our query (block 45) won't match
         // the stored sequence hash at position 0 (block 1)
         assert!(
-            scores.scores.is_empty() || scores.scores.get(&WorkerWithDpRank::new(0, 0)).is_none()
+            scores.scores.is_empty() || !scores.scores.contains_key(&WorkerWithDpRank::new(0, 0))
         );
     }
 
@@ -2738,7 +2737,7 @@ mod tests {
         index.flush().await;
 
         // Query common prefix - both workers should match
-        let prefix_query: Vec<LocalBlockHash> = (1..=30).map(|i| LocalBlockHash(i)).collect();
+        let prefix_query: Vec<LocalBlockHash> = (1..=30).map(LocalBlockHash).collect();
         let scores = index.find_matches(prefix_query).await.unwrap();
         assert_eq!(scores.scores.len(), 2);
         assert_eq!(
@@ -2751,7 +2750,7 @@ mod tests {
         );
 
         // Query branch A path - only worker 0 should match fully
-        let branch_a_query: Vec<LocalBlockHash> = (1..=60).map(|i| LocalBlockHash(i)).collect();
+        let branch_a_query: Vec<LocalBlockHash> = (1..=60).map(LocalBlockHash).collect();
         let scores = index.find_matches(branch_a_query).await.unwrap();
         assert_eq!(
             *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
@@ -2783,7 +2782,7 @@ mod tests {
         );
 
         // Remove blocks 80-100 (the tail)
-        let tail_hashes: Vec<LocalBlockHash> = (1..=100).map(|i| LocalBlockHash(i)).collect();
+        let tail_hashes: Vec<LocalBlockHash> = (1..=100).map(LocalBlockHash).collect();
         let seq_hashes = compute_seq_hash_for_block(&tail_hashes);
         let remove_hashes: Vec<ExternalSequenceBlockHash> = seq_hashes[79..100]
             .iter()
@@ -2836,7 +2835,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query for 60 blocks - workers 0,1 match 60, worker 2 matches 50, worker 3 matches 25
-        let query_60: Vec<LocalBlockHash> = (1..=60).map(|i| LocalBlockHash(i)).collect();
+        let query_60: Vec<LocalBlockHash> = (1..=60).map(LocalBlockHash).collect();
         let scores = index.find_matches(query_60).await.unwrap();
         assert_eq!(scores.scores.len(), 4);
         assert_eq!(
@@ -2963,7 +2962,7 @@ mod tests {
 
         // Test divergence exactly at jump boundaries (position 31, 32, 33, 63, 64, 65)
         for diverge_pos in [31usize, 32, 33, 63, 64, 65, 95, 96, 97] {
-            let mut query: Vec<LocalBlockHash> = (1..=128).map(|i| LocalBlockHash(i)).collect();
+            let mut query: Vec<LocalBlockHash> = (1..=128).map(LocalBlockHash).collect();
             query[diverge_pos] = LocalBlockHash(99999);
 
             let scores = index.find_matches(query).await.unwrap();
@@ -3009,7 +3008,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query full sequence
-        let full_query: Vec<LocalBlockHash> = (1..=200).map(|i| LocalBlockHash(i)).collect();
+        let full_query: Vec<LocalBlockHash> = (1..=200).map(LocalBlockHash).collect();
         let scores = index.find_matches(full_query).await.unwrap();
         assert_eq!(
             *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
@@ -3017,7 +3016,7 @@ mod tests {
         );
 
         // Query partial prefix crossing multiple chunk boundaries
-        let partial_query: Vec<LocalBlockHash> = (1..=75).map(|i| LocalBlockHash(i)).collect();
+        let partial_query: Vec<LocalBlockHash> = (1..=75).map(LocalBlockHash).collect();
         let scores = index.find_matches(partial_query).await.unwrap();
         assert_eq!(
             *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
@@ -3156,7 +3155,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query for 100 blocks - each worker should match their stored length
-        let query: Vec<LocalBlockHash> = (1..=100).map(|i| LocalBlockHash(i)).collect();
+        let query: Vec<LocalBlockHash> = (1..=100).map(LocalBlockHash).collect();
         let scores = index.find_matches(query).await.unwrap();
 
         assert_eq!(
@@ -3202,7 +3201,7 @@ mod tests {
         );
 
         // Partial match (first 500)
-        let partial_query: Vec<LocalBlockHash> = (1..=500).map(|i| LocalBlockHash(i)).collect();
+        let partial_query: Vec<LocalBlockHash> = (1..=500).map(LocalBlockHash).collect();
         let scores = index.find_matches(partial_query).await.unwrap();
         assert_eq!(
             *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
@@ -3210,7 +3209,7 @@ mod tests {
         );
 
         // Divergence in the middle
-        let mut mid_diverge: Vec<LocalBlockHash> = (1..=1000).map(|i| LocalBlockHash(i)).collect();
+        let mut mid_diverge: Vec<LocalBlockHash> = (1..=1000).map(LocalBlockHash).collect();
         mid_diverge[499] = LocalBlockHash(99999);
         let scores = index.find_matches(mid_diverge).await.unwrap();
         assert_eq!(

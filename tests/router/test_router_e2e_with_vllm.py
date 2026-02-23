@@ -5,6 +5,7 @@
 # - GPU-1 subset (`-m "gpu_1 and not gpu_2"`): 130.43s total for 3 tests.
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
+import json
 import logging
 import os
 import time
@@ -22,6 +23,7 @@ from tests.router.common import (  # utilities
 from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -218,13 +220,23 @@ class VLLMProcess:
             kv_event_port = self._kv_event_ports[worker_idx]
             nixl_port = self._nixl_ports[worker_idx]
 
+            # Pass KV events config explicitly via CLI
+            kv_events_cfg = json.dumps(
+                {
+                    "publisher": "zmq",
+                    "topic": "kv-events",
+                    "endpoint": f"tcp://*:{kv_event_port}",
+                    "enable_kv_cache_events": True,
+                }
+            )
+            command.extend(["--kv-events-config", kv_events_cfg])
+
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
                 "CUDA_VISIBLE_DEVICES": gpu_device,
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
-                "DYN_VLLM_KV_EVENT_PORT": str(kv_event_port),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
@@ -279,6 +291,7 @@ class VLLMProcess:
                 # Manually initialize the process without blocking on health checks
                 process._logger = logging.getLogger(process.__class__.__name__)
                 process._command_name = process.command[0]
+                process.log_dir = resolve_test_output_path(process.log_dir)
                 os.makedirs(process.log_dir, exist_ok=True)
                 log_name = f"{process._command_name}.log.txt"
                 process._log_path = os.path.join(process.log_dir, log_name)
@@ -432,9 +445,7 @@ def test_router_decisions_vllm_multiple_workers(
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(vllm_workers.namespace)
-        component = namespace.component("backend")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{vllm_workers.namespace}.backend.generate")
 
         _test_router_decisions(
             vllm_workers,
@@ -481,9 +492,9 @@ def test_router_decisions_vllm_dp(
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the vLLM workers
-        namespace = runtime.namespace(vllm_workers.namespace)
-        component = namespace.component("backend")  # endpoint is backend.generate
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(
+            f"{vllm_workers.namespace}.backend.generate"
+        )  # endpoint is backend.generate
 
         _test_router_decisions(
             vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
