@@ -39,15 +39,12 @@ def test_no_bundled_shared_libraries():
     container/templates/wheel_builder.Dockerfile.
     """
     matches = glob.glob(f"{WHEEL_DIR}/ai_dynamo_runtime-*.whl")
-    assert matches, (
-        f"ai-dynamo-runtime wheel not found in {WHEEL_DIR}"
-    )
+    assert matches, f"ai-dynamo-runtime wheel not found in {WHEEL_DIR}"
     whl_path = matches[0]
 
     with zipfile.ZipFile(whl_path) as zf:
         bundled_libs = [
-            name for name in zf.namelist()
-            if ".libs/" in name and ".so" in name
+            name for name in zf.namelist() if ".libs/" in name and ".so" in name
         ]
 
     assert not bundled_libs, (
