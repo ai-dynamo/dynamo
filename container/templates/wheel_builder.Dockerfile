@@ -148,7 +148,7 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Build FFmpeg from source
+# Always built so FFmpeg libs are available for Rust checks in dev containers.
 # Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
