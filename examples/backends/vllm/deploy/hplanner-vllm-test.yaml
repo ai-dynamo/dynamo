@@ -1,76 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-# E2E test for the full GlobalPlanner flow with real vLLM workers.
 #
-# Validates the complete pipeline:
-#   1. GlobalRouter forwards requests across 2 prefill pools + 1 decode pool
-#   2. LocalRouter pods emit dynamo_component_router_* metrics to cluster Prometheus
-#   3. Each pool's SLA Planner reads router histogram metrics and computes scaling decisions
-#   4. Each pool's SLA Planner sends scaling decisions to GlobalPlanner via scale_request
-#   5. GlobalPlanner receives and executes scaling decisions
+# vLLM-based GlobalPlanner test: 2 prefill pools + 1 decode pool.
+# Each pool SLA Planner reads router histogram metrics from cluster Prometheus
+# and delegates scaling decisions to the GlobalPlanner.
 #
 # Architecture:
-#   DGD 1 (gp-ctrl):      Frontend + GlobalRouter + GlobalPlanner
-#   DGD 2 (gp-prefill-0): LocalRouter + VllmPrefillWorker (1 GPU, TP1) + SLA Planner (mode=prefill)
-#   DGD 3 (gp-prefill-1): LocalRouter + VllmPrefillWorker (2 GPU, TP2) + SLA Planner (mode=prefill)
-#   DGD 4 (gp-decode-0):  LocalRouter + VllmDecodeWorker  (1 GPU, TP1) + SLA Planner (mode=decode)
+#   DGD gp-ctrl:      Frontend + GlobalRouter + GlobalPlanner
+#   DGD gp-prefill-0: LocalRouter + VllmPrefillWorker (TP1) + Planner
+#   DGD gp-prefill-1: LocalRouter + VllmPrefillWorker (TP2) + Planner
+#   DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
 #
 # Prerequisites:
-#   - Cluster Prometheus deployed and scraping LocalRouter pods
-#     kubectl apply -f ../../mocker/deploy/standalone-prometheus.yaml -n <namespace>
-#   - HuggingFace token secret created:
-#     kubectl create secret generic hf-token-secret \
-#       --from-literal=HF_TOKEN=<your-token> -n <namespace>
-#   - hf-model-cache PVC (defined in this file) must be provisioned before workers start.
-#     The first worker to start will download the model; subsequent workers and restarts
-#     will read from the shared Azure Files volume (azurefile-csi-premium, RWX, 50Gi).
-#   - No profiling results needed: planners use throughput-based scaling with router metrics.
+#   - Cluster Prometheus deployed and scraping LocalRouter pods via PodMonitor
+#   - HuggingFace token secret: kubectl create secret generic hf-token-secret \
+#       --from-literal=HF_TOKEN=<your-token> -n ${K8S_NAMESPACE}
 #
-# Placeholders (substitute with sed before applying):
-#   <namespace>     Kubernetes namespace
-#   <base-image>    Dynamo frontend image for non-GPU pods (small, fast pull)
-#                   e.g. dynamoci.azurecr.io/ai-dynamo/dynamo:<commit>-frontend-amd64
-#   <vllm-image>    Dynamo vLLM image for GPU worker pods only
-#                   e.g. dynamoci.azurecr.io/ai-dynamo/dynamo:<commit>-vllm-cuda12-amd64
-#   <model>         HuggingFace model ID, e.g. Qwen/Qwen3-0.6B
-#
-# Self-patch on the Planner pods applies branch-specific changes:
-#   - prometheus.py              (router histogram dispatch)
-#   - planner_config.py          (throughput_metrics_source field)
-#   - defaults.py                (throughput_metrics_source default)
-#   - prometheus_names.py        (router metric name constants)
-#   - global_planner_connector.py
-#   - remote_planner_client.py
-#   - planner_core.py
-#   - global_planner/{argparse_config,scale_handler,__main__}.py
-#
-# Deploy:
-#   kubectl apply -f hplanner-vllm-test.yaml -n <namespace>
-#
-# Watch GlobalPlanner receive scale requests from all pool planners:
-#   kubectl logs -n <namespace> \
-#     $(kubectl get pods -n <namespace> -l nvidia.com/dynamo-component=GlobalPlanner \
-#       -o jsonpath='{.items[0].metadata.name}') -f \
-#     | grep -E "Scale request|Starting GlobalPlanner"
-#
-# Watch a pool planner compute + delegate:
-#   kubectl logs -n <namespace> \
-#     $(kubectl get pods -n <namespace> -l nvidia.com/dynamo-graph-name=gp-prefill-0,nvidia.com/dynamo-component-type=planner \
-#       -o jsonpath='{.items[0].metadata.name}') -f \
-#     | grep -E "Observed|Delegating scale|GlobalPlanner scaling"
-#
-# Cleanup:
-#   kubectl delete -f hplanner-vllm-test.yaml -n <namespace>
-
-# =============================================================================
-# RBAC — grant default SA permission to get/update DynamoGraphDeployments
-# Required by GlobalPlanner's KubernetesConnector for scaling operations.
-# =============================================================================
+# Usage:
+#   export K8S_NAMESPACE=... DYNAMO_IMAGE=... DYNAMO_VLLM_IMAGE=... MODEL_NAME=...
+#   envsubst < hplanner-vllm-test.yaml | kubectl apply   -n ${K8S_NAMESPACE} -f -
+#   envsubst < hplanner-vllm-test.yaml | kubectl delete  -n ${K8S_NAMESPACE} -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: <namespace>-planner
+  name: ${K8S_NAMESPACE}-planner
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -78,11 +31,8 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: default
-    namespace: <namespace>
+    namespace: ${K8S_NAMESPACE}
 ---
-# =============================================================================
-# GlobalRouter ConfigMap — 2 prefill pools + 2 decode pools
-# =============================================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -93,11 +43,11 @@ data:
       "num_prefill_pools": 2,
       "num_decode_pools": 1,
       "prefill_pool_dynamo_namespaces": [
-        "<namespace>-gp-prefill-0",
-        "<namespace>-gp-prefill-1"
+        "${K8S_NAMESPACE}-gp-prefill-0",
+        "${K8S_NAMESPACE}-gp-prefill-1"
       ],
       "decode_pool_dynamo_namespaces": [
-        "<namespace>-gp-decode-0"
+        "${K8S_NAMESPACE}-gp-decode-0"
       ],
       "prefill_pool_selection_strategy": {
         "ttft_min": 10, "ttft_max": 3000, "ttft_resolution": 2,
@@ -111,11 +61,8 @@ data:
       }
     }
 ---
-# =============================================================================
-# Shared model cache — ReadWriteMany Azure Files PVC
-# Mounted into all vLLM worker pods at /home/dynamo/.cache/huggingface/hub
-# so the model is downloaded once and reused across pods and restarts.
-# =============================================================================
+# Shared model cache — ReadWriteMany Azure Files PVC mounted into all vLLM worker pods.
+# The model is downloaded once and reused across pods and restarts.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -128,10 +75,6 @@ spec:
     requests:
       storage: 50Gi
 ---
-# =============================================================================
-# DGD 1: Control plane — Frontend + GlobalRouter + GlobalPlanner
-# Dynamo namespace: <namespace>-gp-ctrl
-# =============================================================================
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -145,7 +88,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: <base-image>
+          image: ${DYNAMO_IMAGE}
           workingDir: /workspace
           command:
             - python3
@@ -155,9 +98,9 @@ spec:
             - --router-mode
             - round-robin
             - --namespace
-            - <namespace>-gp-ctrl
+            - ${K8S_NAMESPACE}-gp-ctrl
             - --model-name
-            - <model>
+            - ${MODEL_NAME}
 
     GlobalRouter:
       componentType: default
@@ -184,7 +127,7 @@ spec:
             configMap:
               name: gp-global-router-config
         mainContainer:
-          image: <base-image>
+          image: ${DYNAMO_IMAGE}
           workingDir: /workspace
           command:
             - python3
@@ -194,9 +137,9 @@ spec:
             - --config
             - /config/global_router_config.json
             - --model-name
-            - <model>
+            - ${MODEL_NAME}
             - --namespace
-            - <namespace>-gp-ctrl
+            - ${K8S_NAMESPACE}-gp-ctrl
           volumeMounts:
             - name: global-router-config
               mountPath: /config
@@ -209,29 +152,12 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: <base-image>
+          image: ${DYNAMO_IMAGE}
           command:
-            - bash
-            - -c
-            - |
-              set -e
-              SP=/opt/dynamo/venv/lib/python3.12/site-packages
-              echo "Cloning feat/throughput-metrics-source for GlobalPlanner patch..."
-              git clone --depth=1 \
-                --branch feat/throughput-metrics-source \
-                https://github.com/ai-dynamo/dynamo /tmp/dynamo-pr 2>&1 | tail -3
-              SRC_COMP=/tmp/dynamo-pr/components/src/dynamo
-              echo "Patching: GlobalPlanner no-op mode..."
-              cp $SRC_COMP/global_planner/argparse_config.py  $SP/dynamo/global_planner/argparse_config.py
-              cp $SRC_COMP/global_planner/scale_handler.py    $SP/dynamo/global_planner/scale_handler.py
-              cp $SRC_COMP/global_planner/__main__.py         $SP/dynamo/global_planner/__main__.py
-              echo "Patches applied. Starting GlobalPlanner..."
-              exec python3 -m dynamo.global_planner
+            - python3
+            - -m
+            - dynamo.global_planner
 ---
-# =============================================================================
-# DGD 2: Prefill pool 0 — LocalRouter + VllmPrefillWorker (1 GPU) + SLA Planner
-# Dynamo namespace: <namespace>-gp-prefill-0
-# =============================================================================
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -245,7 +171,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: <base-image>
+          image: ${DYNAMO_IMAGE}
           workingDir: /workspace
           env:
             - name: DYN_SYSTEM_PORT
@@ -256,7 +182,7 @@ spec:
             - dynamo.router
           args:
             - --endpoint
-            - <namespace>-gp-prefill-0.prefill.generate
+            - ${K8S_NAMESPACE}-gp-prefill-0.prefill.generate
             - --router-block-size
             - "16"
             - --no-router-track-active-blocks
@@ -275,7 +201,7 @@ spec:
             persistentVolumeClaim:
               claimName: hf-model-cache
         mainContainer:
-          image: <vllm-image>
+          image: ${DYNAMO_VLLM_IMAGE}
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -283,7 +209,7 @@ spec:
             - dynamo.vllm
           args:
             - --model
-            - <model>
+            - ${MODEL_NAME}
             - --tensor-parallel-size
             - "1"
             - --is-prefill-worker
@@ -298,35 +224,15 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: <base-image>
+          image: ${DYNAMO_IMAGE}
           command:
-            - bash
-            - -c
-            - |
-              set -e
-              SP=/opt/dynamo/venv/lib/python3.12/site-packages
-              echo "Cloning feat/throughput-metrics-source for SLA Planner patch..."
-              git clone --depth=1 \
-                --branch feat/throughput-metrics-source \
-                https://github.com/ai-dynamo/dynamo /tmp/dynamo-pr 2>&1 | tail -3
-              SRC_LIB=/tmp/dynamo-pr/lib/bindings/python/src/dynamo
-              SRC_COMP=/tmp/dynamo-pr/components/src/dynamo
-              echo "Patching: throughput_metrics_source + global-planner connector..."
-              cp $SRC_LIB/prometheus_names.py                       $SP/dynamo/prometheus_names.py
-              cp $SRC_COMP/planner/defaults.py                      $SP/dynamo/planner/defaults.py
-              cp $SRC_COMP/planner/utils/planner_config.py          $SP/dynamo/planner/utils/planner_config.py
-              cp $SRC_COMP/planner/utils/prometheus.py              $SP/dynamo/planner/utils/prometheus.py
-              cp $SRC_COMP/planner/utils/planner_core.py            $SP/dynamo/planner/utils/planner_core.py
-              cp $SRC_COMP/planner/global_planner_connector.py      $SP/dynamo/planner/global_planner_connector.py
-              cp $SRC_COMP/planner/remote_planner_client.py         $SP/dynamo/planner/remote_planner_client.py
-              echo "Patches applied. Starting SLA Planner (prefill pool 0)..."
-              exec python3 -m dynamo.planner --config \
-                '{"environment":"global-planner","global_planner_namespace":"<namespace>-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"model_name":"<model>","profile_results_dir":"/tmp/dynamo-pr/tests/planner/profiling_results/H200_TP1P_TP1D"}'
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"}'
 ---
-# =============================================================================
-# DGD 3: Prefill pool 1 — LocalRouter + VllmPrefillWorker (2 GPU, TP2) + SLA Planner
-# Dynamo namespace: <namespace>-gp-prefill-1
-# =============================================================================
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -340,7 +246,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: <base-image>
+          image: ${DYNAMO_IMAGE}
           workingDir: /workspace
           env:
             - name: DYN_SYSTEM_PORT
@@ -351,7 +257,7 @@ spec:
             - dynamo.router
           args:
             - --endpoint
-            - <namespace>-gp-prefill-1.prefill.generate
+            - ${K8S_NAMESPACE}-gp-prefill-1.prefill.generate
             - --router-block-size
             - "16"
             - --no-router-track-active-blocks
@@ -370,7 +276,7 @@ spec:
             persistentVolumeClaim:
               claimName: hf-model-cache
         mainContainer:
-          image: <vllm-image>
+          image: ${DYNAMO_VLLM_IMAGE}
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -378,7 +284,7 @@ spec:
             - dynamo.vllm
           args:
             - --model
-            - <model>
+            - ${MODEL_NAME}
             - --tensor-parallel-size
             - "2"
             - --is-prefill-worker
@@ -393,35 +299,15 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: <base-image>
+          image: ${DYNAMO_IMAGE}
           command:
-            - bash
-            - -c
-            - |
-              set -e
-              SP=/opt/dynamo/venv/lib/python3.12/site-packages
-              echo "Cloning feat/throughput-metrics-source for SLA Planner patch..."
-              git clone --depth=1 \
-                --branch feat/throughput-metrics-source \
-                https://github.com/ai-dynamo/dynamo /tmp/dynamo-pr 2>&1 | tail -3
-              SRC_LIB=/tmp/dynamo-pr/lib/bindings/python/src/dynamo
-              SRC_COMP=/tmp/dynamo-pr/components/src/dynamo
-              echo "Patching: throughput_metrics_source + global-planner connector..."
-              cp $SRC_LIB/prometheus_names.py                       $SP/dynamo/prometheus_names.py
-              cp $SRC_COMP/planner/defaults.py                      $SP/dynamo/planner/defaults.py
-              cp $SRC_COMP/planner/utils/planner_config.py          $SP/dynamo/planner/utils/planner_config.py
-              cp $SRC_COMP/planner/utils/prometheus.py              $SP/dynamo/planner/utils/prometheus.py
-              cp $SRC_COMP/planner/utils/planner_core.py            $SP/dynamo/planner/utils/planner_core.py
-              cp $SRC_COMP/planner/global_planner_connector.py      $SP/dynamo/planner/global_planner_connector.py
-              cp $SRC_COMP/planner/remote_planner_client.py         $SP/dynamo/planner/remote_planner_client.py
-              echo "Patches applied. Starting SLA Planner (prefill pool 1, TP2)..."
-              exec python3 -m dynamo.planner --config \
-                '{"environment":"global-planner","global_planner_namespace":"<namespace>-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":2,"model_name":"<model>","profile_results_dir":"/tmp/dynamo-pr/tests/planner/profiling_results/H200_TP1P_TP1D"}'
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":2,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"}'
 ---
-# =============================================================================
-# DGD 4: Decode pool 0 — LocalRouter + VllmDecodeWorker (1 GPU) + SLA Planner
-# Dynamo namespace: <namespace>-gp-decode-0
-# =============================================================================
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -435,7 +321,7 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: <base-image>
+          image: ${DYNAMO_IMAGE}
           workingDir: /workspace
           env:
             - name: DYN_SYSTEM_PORT
@@ -446,7 +332,7 @@ spec:
             - dynamo.router
           args:
             - --endpoint
-            - <namespace>-gp-decode-0.backend.generate
+            - ${K8S_NAMESPACE}-gp-decode-0.backend.generate
             - --router-block-size
             - "16"
             - --router-kv-overlap-score-weight
@@ -466,7 +352,7 @@ spec:
             persistentVolumeClaim:
               claimName: hf-model-cache
         mainContainer:
-          image: <vllm-image>
+          image: ${DYNAMO_VLLM_IMAGE}
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -474,7 +360,7 @@ spec:
             - dynamo.vllm
           args:
             - --model
-            - <model>
+            - ${MODEL_NAME}
             - --tensor-parallel-size
             - "1"
           volumeMounts:
@@ -488,27 +374,11 @@ spec:
         imagePullSecrets:
           - name: docker-imagepullsecret
         mainContainer:
-          image: <base-image>
+          image: ${DYNAMO_IMAGE}
           command:
-            - bash
-            - -c
-            - |
-              set -e
-              SP=/opt/dynamo/venv/lib/python3.12/site-packages
-              echo "Cloning feat/throughput-metrics-source for SLA Planner patch..."
-              git clone --depth=1 \
-                --branch feat/throughput-metrics-source \
-                https://github.com/ai-dynamo/dynamo /tmp/dynamo-pr 2>&1 | tail -3
-              SRC_LIB=/tmp/dynamo-pr/lib/bindings/python/src/dynamo
-              SRC_COMP=/tmp/dynamo-pr/components/src/dynamo
-              echo "Patching: throughput_metrics_source + global-planner connector..."
-              cp $SRC_LIB/prometheus_names.py                       $SP/dynamo/prometheus_names.py
-              cp $SRC_COMP/planner/defaults.py                      $SP/dynamo/planner/defaults.py
-              cp $SRC_COMP/planner/utils/planner_config.py          $SP/dynamo/planner/utils/planner_config.py
-              cp $SRC_COMP/planner/utils/prometheus.py              $SP/dynamo/planner/utils/prometheus.py
-              cp $SRC_COMP/planner/utils/planner_core.py            $SP/dynamo/planner/utils/planner_core.py
-              cp $SRC_COMP/planner/global_planner_connector.py      $SP/dynamo/planner/global_planner_connector.py
-              cp $SRC_COMP/planner/remote_planner_client.py         $SP/dynamo/planner/remote_planner_client.py
-              echo "Patches applied. Starting SLA Planner (decode pool 0)..."
-              exec python3 -m dynamo.planner --config \
-                '{"environment":"global-planner","global_planner_namespace":"<namespace>-gp-ctrl","backend":"vllm","mode":"decode","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"model_name":"<model>","profile_results_dir":"/tmp/dynamo-pr/tests/planner/profiling_results/H200_TP1P_TP1D"}'
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"decode","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"}'
