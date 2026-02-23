@@ -327,9 +327,9 @@ Your application must implement the checkpoint flow. The DaemonSet communicates 
 
 - **`SIGUSR1`**: Checkpoint completed — your process should exit gracefully
 - **`SIGCONT`**: Restore completed — your process should wake up and continue
-- **`SIGUSR2`**: Checkpoint/restore failed
+- **`SIGKILL`**: Checkpoint failed — process is terminated immediately (unhandleable)
 
-Here's the pattern used by Dynamo vLLM (see `components/src/dynamo/vllm/chrek.py`):
+Here's the pattern used by Dynamo vLLM (see `components/src/dynamo/vllm/checkpoint_restore.py`):
 
 ```python
 import asyncio
@@ -348,14 +348,13 @@ async def main():
     # 1. Load your model/application
     model = await load_model()
 
-    # 2. Optional: Put model to sleep for CRIU-friendly GPU state
+    # 2. Put model to sleep for CRIU-friendly GPU state
     await model.sleep()
 
-    # 3. Write ready file — triggers DaemonSet checkpoint via readiness probe
-    with open(ready_file, "w") as f:
-        f.write("ready")
-
-    # 4. Set up signal handlers and wait for DaemonSet
+    # 3. Install signal handlers BEFORE writing the ready file to avoid a race
+    #    where the DaemonSet sends a signal while default disposition (terminate)
+    #    is still in effect. No handler needed for checkpoint failure — the
+    #    watcher sends SIGKILL which terminates the process immediately.
     checkpoint_done = asyncio.Event()
     restore_done = asyncio.Event()
 
@@ -363,9 +362,14 @@ async def main():
     loop.add_signal_handler(signal.SIGUSR1, checkpoint_done.set)
     loop.add_signal_handler(signal.SIGCONT, restore_done.set)
 
+    # 4. Write ready file — triggers DaemonSet checkpoint via readiness probe
+    with open(ready_file, "w") as f:
+        f.write("ready")
+
     print("Ready for checkpoint. Waiting for watcher signal...")
 
-    # Wait for whichever signal comes first
+    # Wait for whichever signal comes first (SIGKILL on failure kills us
+    # immediately, so only success/restore signals reach this point)
     done, pending = await asyncio.wait(
         [asyncio.create_task(checkpoint_done.wait()),
          asyncio.create_task(restore_done.wait())],
@@ -390,11 +394,14 @@ async def main():
    - Pod has `nvidia.com/chrek-is-checkpoint-source: "true"` label
    - Pod status is `Ready` (readiness probe passes = ready file exists)
 
-2. **Signal-based coordination**: The DaemonSet sends `SIGUSR1` after checkpoint completes and `SIGCONT` after restore completes. Your application must handle these signals (not poll for files).
+2. **Signal handler ordering**: Install signal handlers **before** writing the ready file. Otherwise there is a race window where the DaemonSet sends a signal while the default disposition (terminate) is still in effect.
 
-3. **Two exit paths**:
+3. **Signal-based coordination**: The DaemonSet sends `SIGUSR1` after checkpoint completes, `SIGCONT` after restore completes, and `SIGKILL` if checkpoint fails. Your application must handle `SIGUSR1` and `SIGCONT` (not poll for files). `SIGKILL` cannot be caught — the kernel terminates the process immediately.
+
+4. **Three exit paths**:
    - **SIGUSR1 received**: Checkpoint complete, exit gracefully
    - **SIGCONT received**: Process was restored, wake model and continue
+   - **SIGKILL received**: Checkpoint failed, process terminated immediately (no handler needed)
 
 
 ---
@@ -490,7 +497,7 @@ The DaemonSet communicates checkpoint/restore completion via Unix signals, not f
 |--------|-----------|---------|
 | `SIGUSR1` | DaemonSet → checkpoint pod | Checkpoint completed, process should exit |
 | `SIGCONT` | DaemonSet → restored pod | Restore completed, process should wake up |
-| `SIGUSR2` | DaemonSet → checkpoint pod | Checkpoint failed (wake process to continue) |
+| `SIGKILL` | DaemonSet → checkpoint pod | Checkpoint failed — process terminated immediately |
 
 CRIU tuning options are configured via the ChReK Helm chart's `config.checkpoint.criu` values, not environment variables. See the [Helm Chart Values](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/values.yaml) for available options.
 
@@ -660,7 +667,7 @@ CRIU tuning options are configured via the ChReK Helm chart's `config.checkpoint
 ## Additional Resources
 
 - [ChReK Helm Chart Values](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/values.yaml)
-- [Dynamo vLLM ChReK Integration](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/vllm/chrek.py) - Reference signal handler implementation
+- [Dynamo vLLM ChReK Integration](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/vllm/checkpoint_restore.py) - Reference signal handler implementation
 - [ChReK Dockerfile](https://github.com/ai-dynamo/dynamo/tree/main/deploy/chrek/Dockerfile)
 - [CRIU Documentation](https://criu.org/Main_Page)
 - [CUDA Checkpoint Utility](https://github.com/NVIDIA/cuda-checkpoint)
