@@ -119,7 +119,11 @@ def create_temp_engine_args_file(args) -> Path:
         "is_decode": getattr(args, "is_decode_worker", None),
         "enable_local_indexer": not getattr(args, "durable_kv_events", False),
         # Note: bootstrap_port and zmq_kv_events_port are NOT included here
-        # — they are per-worker and set in launch_workers()
+        # - they are per-worker and set in launch_workers()
+        # Note: kv_bytes_per_token and kv_cache_dtype are NOT included here
+        # - kv_bytes_per_token is auto-computed in main.py after model prefetch,
+        # - kv_cache_dtype is only used Python-side for the auto-computation.
+        "kv_transfer_bandwidth": getattr(args, "kv_transfer_bandwidth", None),
     }
 
     # Parse --reasoning JSON string into a nested object
@@ -386,6 +390,32 @@ def parse_args():
         "Prefill workers listen on these ports; decode workers connect to them. "
         "If not specified, bootstrap rendezvous is disabled.",
     )
+
+    # KV cache transfer latency simulation
+    parser.add_argument(
+        "--kv-transfer-bandwidth",
+        type=float,
+        default=64.0,
+        help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
+        "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
+        "For intra-node NVLink, typical value is ~450.",
+    )
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        default="auto",
+        help="Data type for KV cache, used to compute kv_bytes_per_token. "
+        "'auto' uses the model's torch_dtype (default). "
+        "Options: auto, float16, bfloat16, float32, float8_e4m3fn, float8_e5m2.",
+    )
+    parser.add_argument(
+        "--kv-bytes-per-token",
+        type=int,
+        default=None,
+        help="KV cache bytes per token. If not specified, auto-computed from model config "
+        "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
+    )
+
     parser.add_argument(
         "--stagger-delay",
         type=float,

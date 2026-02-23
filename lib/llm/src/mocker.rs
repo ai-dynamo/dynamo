@@ -41,6 +41,7 @@ use dynamo_mocker::common::protocols::OutputSignal;
 pub use dynamo_mocker::common::protocols::{
     DirectRequest, KvCacheEventSink, MockEngineArgs, MockEngineArgsBuilder,
 };
+use dynamo_mocker::common::utils::{compute_kv_transfer_delay, sleep_precise};
 pub use dynamo_mocker::common::{bootstrap, perf_model, protocols, running_mean, sequence};
 pub use dynamo_mocker::scheduler::Scheduler;
 pub use dynamo_mocker::{kv_manager, scheduler};
@@ -538,6 +539,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let bootstrap_server = self.bootstrap_server.clone();
         let reasoning = self.engine_args.reasoning.clone();
 
+        // Compute KV transfer delay for prefill workers.
+        // Simulates the time to transfer KV cache from prefill to decode worker.
+        let kv_transfer_delay = if is_prefill {
+            compute_kv_transfer_delay(&self.engine_args, request.token_ids.len())
+        } else {
+            None
+        };
+
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
             let mut token_count = 0;
@@ -553,6 +562,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string()));
                             break;
                         };
+
+                        // Simulate KV transfer delay before prefill's first (and only) token.
+                        // This models the time to transfer KV cache to the decode worker.
+                        if token_count == 0 {
+                            if let Some(delay) = kv_transfer_delay {
+                                sleep_precise(delay).await;
+                            }
+                        }
 
                         // Generate a token (with thinking boundaries if configured)
                         let token_id = if token_count == 0 && think_len > 0 {
