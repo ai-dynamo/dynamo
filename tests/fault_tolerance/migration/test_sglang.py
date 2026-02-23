@@ -26,6 +26,7 @@ from .utils import DynamoFrontendProcess, run_migration_test
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.sglang,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
@@ -82,7 +83,6 @@ class DynamoWorkerProcess(ManagedProcess):
         request: pytest request fixture
         worker_id: Unique identifier for the worker (e.g., "worker1", "worker2")
         frontend_port: Port where the frontend is running
-        migration_limit: Maximum number of migration attempts (default: 3)
         disagg_mode: None for aggregated, "prefill" or "decode" for disaggregated
     """
 
@@ -91,17 +91,11 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
-        migration_limit: int = 3,
         disagg_mode: str | None = None,
     ):
         self.worker_id = worker_id
         self.system_port = allocate_port(9100)
         self.disagg_mode = disagg_mode
-
-        # Prefill workers require migration_limit=0 (no KV cache migration support)
-        if disagg_mode == "prefill":
-            logging.info("Prefill worker - setting migration_limit to 0")
-            migration_limit = 0
 
         command = [
             "python3",
@@ -120,8 +114,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.3",
             "--context-length",
             "8192",
-            "--migration-limit",
-            str(migration_limit),
         ]
         if disagg_mode is None:
             # Aggregated
@@ -157,6 +149,9 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
+        # Disable backend shutdown grace period for all migration tests
+        env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = "0"
+
         # Configure health check based on worker type
         health_check_urls = [
             (f"http://localhost:{self.system_port}/health", self.is_ready)
@@ -184,7 +179,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["SGLANG:EngineCore"],
             straggler_commands=["-m dynamo.sglang"],
             log_dir=log_dir,
@@ -237,20 +232,17 @@ def test_request_migration_sglang_aggregated(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers
-        with DynamoWorkerProcess(
-            request, "worker1", frontend.frontend_port, migration_limit=migration_limit
-        ) as worker1:
+        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
             with DynamoWorkerProcess(
                 request,
                 "worker2",
                 frontend.frontend_port,
-                migration_limit=migration_limit,
             ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
@@ -293,7 +285,9 @@ def test_request_migration_sglang_prefill(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
+    with DynamoFrontendProcess(
+        request, migration_limit=migration_limit, enforce_disagg=True
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start decode worker first (required for prefill workers to connect)
@@ -301,7 +295,6 @@ def test_request_migration_sglang_prefill(
             request,
             "worker0",
             frontend.frontend_port,
-            migration_limit=migration_limit,
             disagg_mode="decode",
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
@@ -311,7 +304,6 @@ def test_request_migration_sglang_prefill(
                 request,
                 "worker1",
                 frontend.frontend_port,
-                migration_limit=migration_limit,
                 disagg_mode="prefill",
             ) as prefill1:
                 logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
@@ -320,7 +312,6 @@ def test_request_migration_sglang_prefill(
                     request,
                     "worker2",
                     frontend.frontend_port,
-                    migration_limit=migration_limit,
                     disagg_mode="prefill",
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
@@ -364,7 +355,9 @@ def test_request_migration_sglang_kv_transfer(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
+    with DynamoFrontendProcess(
+        request, migration_limit=migration_limit, enforce_disagg=True
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
@@ -372,7 +365,6 @@ def test_request_migration_sglang_kv_transfer(
             request,
             "worker0",
             frontend.frontend_port,
-            migration_limit=migration_limit,
             disagg_mode="prefill",
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -382,7 +374,6 @@ def test_request_migration_sglang_kv_transfer(
                 request,
                 "worker1",
                 frontend.frontend_port,
-                migration_limit=migration_limit,
                 disagg_mode="decode",
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -391,7 +382,6 @@ def test_request_migration_sglang_kv_transfer(
                     request,
                     "worker2",
                     frontend.frontend_port,
-                    migration_limit=migration_limit,
                     disagg_mode="decode",
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
@@ -438,7 +428,9 @@ def test_request_migration_sglang_decode(
         )
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
+    with DynamoFrontendProcess(
+        request, migration_limit=migration_limit, enforce_disagg=True
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
@@ -446,7 +438,6 @@ def test_request_migration_sglang_decode(
             request,
             "worker0",
             frontend.frontend_port,
-            migration_limit=migration_limit,
             disagg_mode="prefill",
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -456,7 +447,6 @@ def test_request_migration_sglang_decode(
                 request,
                 "worker1",
                 frontend.frontend_port,
-                migration_limit=migration_limit,
                 disagg_mode="decode",
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -465,7 +455,6 @@ def test_request_migration_sglang_decode(
                     request,
                     "worker2",
                     frontend.frontend_port,
-                    migration_limit=migration_limit,
                     disagg_mode="decode",
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")

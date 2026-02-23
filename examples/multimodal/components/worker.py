@@ -23,7 +23,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
-from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.llm import KvEventPublisher
 from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -163,12 +163,11 @@ class VllmBaseWorker:
             data_parallel_rank=self.engine_args.data_parallel_rank or 0,
         ).replace("*", "127.0.0.1")
 
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=endpoint.connection_id(),
+        self.kv_publisher = KvEventPublisher(
+            component=component,
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
         )
-        self.kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
 
         logger.info(f"Reading Events from {zmq_endpoint}")
 
@@ -234,12 +233,9 @@ class VllmPDWorker(VllmBaseWorker):
                 parsed_component_name,
                 parsed_endpoint_name,
             ) = parse_endpoint(self.downstream_endpoint)
-            self.decode_worker_client = (
-                await runtime.namespace(parsed_namespace)
-                .component(parsed_component_name)
-                .endpoint(parsed_endpoint_name)
-                .client()
-            )
+            self.decode_worker_client = await runtime.endpoint(
+                f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+            ).client()
 
         if "video" in self.engine_args.model.lower():
             self.EMBEDDINGS_DTYPE = torch.uint8
@@ -436,9 +432,10 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     Instantiate and serve
     """
 
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    generate_endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    component = generate_endpoint.component()
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
     if args.worker_type in ["prefill", "encode_prefill"]:

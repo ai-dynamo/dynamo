@@ -208,7 +208,7 @@ impl Layout for LayerSeparateLayout {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::super::tests::*;
     use super::*;

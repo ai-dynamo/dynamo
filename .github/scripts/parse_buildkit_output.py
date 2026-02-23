@@ -5,6 +5,8 @@
 Parse BuildKit output to extract detailed step-by-step metadata.
 BuildKit provides rich information about each build step including timing,
 cache status, sizes, and layer IDs.
+
+Also parses sccache statistics from the build log output.
 """
 
 import json
@@ -12,6 +14,127 @@ import re
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+
+
+def parse_sccache_json_from_log(
+    log_content: str, debug: bool = False
+) -> List[Dict[str, Any]]:
+    """
+    Parse multiple sccache JSON statistics blocks from build log output.
+
+    Returns a list of sccache stats dictionaries, one for each build section.
+    """
+    sccache_sections = []
+
+    # Find all JSON blocks between markers
+    pattern = r"=== SCCACHE_JSON_BEGIN ===\s*\n" r"(.*?)" r"=== SCCACHE_JSON_END ==="
+
+    matches = re.findall(pattern, log_content, re.DOTALL)
+
+    if not matches:
+        if debug:
+            print("DEBUG: No sccache JSON sections found in log", file=sys.stderr)
+        return []
+
+    for i, json_block in enumerate(matches):
+        try:
+            # Remove BuildKit prefixes from each line: "#43 103.6 " or "#43 "
+            cleaned_lines = []
+            for line in json_block.split("\n"):
+                cleaned_line = re.sub(r"^#\d+\s+[\d.]+\s+", "", line)
+                cleaned_line = re.sub(r"^#\d+\s+", "", cleaned_line)
+                cleaned_lines.append(cleaned_line)
+
+            cleaned_json = "\n".join(cleaned_lines)
+
+            if debug:
+                print(f"DEBUG: Parsing JSON block {i+1}", file=sys.stderr)
+
+            # Parse JSON
+            section_data = json.loads(cleaned_json)
+
+            # Extract key metrics into flat structure
+            section_name = section_data.get("section", f"section_{i+1}")
+            timestamp = section_data.get("timestamp", "")
+            native_stats = section_data.get("sccache_stats", {})
+
+            stats_dict = {
+                "section_name": section_name,
+                "timestamp": timestamp,
+            }
+
+            # Extract compile statistics from native JSON
+            if "stats" in native_stats:
+                stats = native_stats["stats"]
+                stats_dict["compile_requests"] = stats.get("compile_requests", 0)
+                stats_dict["requests_executed"] = stats.get("requests_executed", 0)
+
+                # Handle cache_hits (sum all language counts)
+                cache_hits = stats.get("cache_hits", {})
+                if isinstance(cache_hits, dict) and "counts" in cache_hits:
+                    stats_dict["cache_hits"] = sum(cache_hits["counts"].values())
+                else:
+                    stats_dict["cache_hits"] = 0
+
+                # Handle cache_misses
+                cache_misses = stats.get("cache_misses", {})
+                if isinstance(cache_misses, dict) and "counts" in cache_misses:
+                    stats_dict["cache_misses"] = sum(cache_misses["counts"].values())
+                else:
+                    stats_dict["cache_misses"] = 0
+
+                # Calculate hit rate
+                total = stats_dict["cache_hits"] + stats_dict["cache_misses"]
+                if total > 0:
+                    stats_dict["cache_hits_rate_percent"] = (
+                        stats_dict["cache_hits"] / total * 100
+                    )
+                else:
+                    stats_dict["cache_hits_rate_percent"] = 0.0
+
+                # Additional metrics
+                stats_dict["cache_timeouts"] = stats.get("cache_timeouts", 0)
+                stats_dict["cache_read_errors"] = stats.get("cache_read_errors", 0)
+                stats_dict["cache_write_errors"] = stats.get("cache_write_errors", 0)
+                stats_dict["cache_writes"] = stats.get("cache_writes", 0)
+                stats_dict["compile_fails"] = stats.get("compile_fails", 0)
+                stats_dict["non_cacheable_compilations"] = stats.get(
+                    "non_cacheable_compilations", 0
+                )
+
+                # Duration metrics (convert secs + nanos to total seconds)
+                for dur_key in [
+                    "cache_write_duration",
+                    "cache_read_hit_duration",
+                    "compiler_write_duration",
+                ]:
+                    dur = stats.get(dur_key, {})
+                    if dur:
+                        stats_dict[f"{dur_key}_seconds"] = (
+                            dur.get("secs", 0) + dur.get("nanos", 0) / 1_000_000_000
+                        )
+
+            # Metadata
+            stats_dict["cache_location"] = native_stats.get("cache_location", "")
+            stats_dict["sccache_version"] = native_stats.get("version", "")
+            stats_dict["_raw_stats"] = native_stats
+
+            sccache_sections.append(stats_dict)
+
+            if debug:
+                print(
+                    f"DEBUG: Parsed section '{section_name}': {len(stats_dict)} metrics",
+                    file=sys.stderr,
+                )
+
+        except json.JSONDecodeError as e:
+            if debug:
+                print(f"DEBUG: JSON parse error in block {i+1}: {e}", file=sys.stderr)
+        except Exception as e:
+            if debug:
+                print(f"DEBUG: Error parsing block {i+1}: {e}", file=sys.stderr)
+
+    return sccache_sections
 
 
 class BuildKitParser:
@@ -187,9 +310,12 @@ def main():
     # Parse arguments to find stage logs and metadata
     stage_logs = []  # List of (stage_name, log_file) tuples
     container_metadata_file = None
+    debug_mode = "--debug" in sys.argv
 
     for arg in sys.argv[2:]:
-        if arg.startswith("--metadata="):
+        if arg == "--debug":
+            continue
+        elif arg.startswith("--metadata="):
             container_metadata_file = arg.split("=", 1)[1]
         elif ":" in arg:
             stage_name, log_file = arg.split(":", 1)
@@ -209,6 +335,7 @@ def main():
     total_steps = 0
     total_cached = 0
     total_size = 0
+    all_sccache_sections = []
 
     # Parse each stage log
     for stage_name, log_file in stage_logs:
@@ -234,6 +361,21 @@ def main():
             total_steps += stage_data["container"]["total_steps"]
             total_cached += stage_data["container"]["cached_steps"]
             total_size += stage_data["container"]["total_size_transferred_bytes"]
+
+            # Extract all sccache JSON sections from the log
+            log_sccache_sections = parse_sccache_json_from_log(
+                log_content, debug=debug_mode
+            )
+            if log_sccache_sections:
+                # Associate sections with this stage
+                for section_stats in log_sccache_sections:
+                    section_stats["stage"] = stage_name
+                    all_sccache_sections.append(section_stats)
+
+                print(
+                    f"✅ Found {len(log_sccache_sections)} sccache section(s) in {stage_name} log",
+                    file=sys.stderr,
+                )
 
             print(
                 f"✅ Parsed {stage_name} stage: {stage_data['container']['total_steps']} steps",
@@ -274,6 +416,42 @@ def main():
         except Exception as e:
             print(f"Warning: Could not read container metadata: {e}", file=sys.stderr)
 
+    # Add all sccache statistics
+    if all_sccache_sections:
+        build_data["container"]["sccache_sections"] = all_sccache_sections
+        build_data["container"]["sccache_available"] = True
+
+        # Calculate aggregate stats
+        total_compile_requests = sum(
+            s.get("compile_requests", 0) for s in all_sccache_sections
+        )
+        total_cache_hits = sum(s.get("cache_hits", 0) for s in all_sccache_sections)
+        total_cache_misses = sum(s.get("cache_misses", 0) for s in all_sccache_sections)
+
+        aggregate_hit_rate = 0.0
+        if total_cache_hits + total_cache_misses > 0:
+            aggregate_hit_rate = (
+                total_cache_hits / (total_cache_hits + total_cache_misses)
+            ) * 100
+
+        build_data["container"]["sccache_aggregate"] = {
+            "total_sections": len(all_sccache_sections),
+            "section_names": [s["section_name"] for s in all_sccache_sections],
+            "total_compile_requests": total_compile_requests,
+            "total_cache_hits": total_cache_hits,
+            "total_cache_misses": total_cache_misses,
+            "aggregate_hit_rate_percent": round(aggregate_hit_rate, 2),
+        }
+
+        print(
+            f"✅ sccache metrics added: {len(all_sccache_sections)} sections, "
+            f"{total_compile_requests} total requests",
+            file=sys.stderr,
+        )
+    else:
+        build_data["container"]["sccache_available"] = False
+        print("ℹ️  No sccache stats found in build logs", file=sys.stderr)
+
     # Output JSON
     try:
         with open(output_json, "w") as f:
@@ -297,6 +475,44 @@ def main():
         f"   Cache Hit Rate: {container['overall_cache_hit_rate']:.1f}%",
         file=sys.stderr,
     )
+
+    # Print sccache summary
+    print("", file=sys.stderr)
+    print("🔨 sccache Summary:", file=sys.stderr)
+    print(
+        f"   Available: {container.get('sccache_available', False)}",
+        file=sys.stderr,
+    )
+
+    if "sccache_aggregate" in container:
+        agg = container["sccache_aggregate"]
+        print(
+            f"   Sections: {agg['total_sections']} ({', '.join(agg['section_names'])})",
+            file=sys.stderr,
+        )
+        print(
+            f"   Total Compile Requests: {agg['total_compile_requests']}",
+            file=sys.stderr,
+        )
+        print(f"   Total Cache Hits: {agg['total_cache_hits']}", file=sys.stderr)
+        print(f"   Total Cache Misses: {agg['total_cache_misses']}", file=sys.stderr)
+        print(
+            f"   Aggregate Hit Rate: {agg['aggregate_hit_rate_percent']:.2f}%",
+            file=sys.stderr,
+        )
+
+    if "sccache_sections" in container:
+        print("", file=sys.stderr)
+        print("   Per-section breakdown:", file=sys.stderr)
+        for section in container["sccache_sections"]:
+            section_name = section.get("section_name", "unknown")
+            requests = section.get("compile_requests", 0)
+            hits = section.get("cache_hits", 0)
+            hit_rate = section.get("cache_hits_rate_percent", 0.0)
+            print(
+                f"     • {section_name}: {requests} requests, {hits} hits ({hit_rate:.1f}%)",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":

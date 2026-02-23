@@ -74,7 +74,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Kubernetes Platform installed** - See [Installing Dynamo Kubernetes Platform](../../../../docs/kubernetes/installation_guide.md)
+1. **Dynamo Kubernetes Platform installed** - See [Installing Dynamo Kubernetes Platform](../../../../docs/pages/kubernetes/installation-guide.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for SGLang runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -144,10 +144,10 @@ All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. But you
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation_guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/pages/kubernetes/deployment/create-deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/pages/kubernetes/README.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/pages/kubernetes/installation-guide.md)
+- **Examples**: [Deployment Examples](../../../../docs/pages/getting-started/examples.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting
@@ -159,4 +159,4 @@ Common issues and solutions:
 3. **Health check failures**: Review model loading logs and increase `initialDelaySeconds`
 4. **Out of memory**: Increase memory limits or reduce model batch size
 
-For additional support, refer to the [deployment guide](../../../../docs/kubernetes/README.md).
+For additional support, refer to the [deployment guide](../../../../docs/pages/kubernetes/README.md).

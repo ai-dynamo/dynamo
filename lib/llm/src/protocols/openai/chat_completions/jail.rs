@@ -112,7 +112,9 @@ fn create_choice_stream(
         index,
         delta: ChatCompletionStreamResponseDelta {
             role,
-            content: Some(content.to_string()),
+            content: Some(
+                dynamo_async_openai::types::ChatCompletionMessageContent::Text(content.to_string()),
+            ),
             tool_calls,
             function_call: None,
             refusal: None,
@@ -194,11 +196,6 @@ impl ChoiceJailState {
 
                     if should_end {
                         // Complete tool call found in this chunk
-                        tracing::debug!(
-                            "Choice {} complete tool call detected in single chunk",
-                            choice.index
-                        );
-
                         let (jailed_part, trailing_part) = full_content.split_at(split_pos);
 
                         // Create the tool call choice
@@ -236,11 +233,6 @@ impl ChoiceJailState {
                         }
                     } else {
                         // Start jailing with the marker and suffix
-                        tracing::debug!(
-                            "Choice {} start marker '{}' detected, starting jail",
-                            choice.index,
-                            marker
-                        );
                         self.is_jailed = true;
                         self.accumulated_content = full_content;
                     }
@@ -289,10 +281,6 @@ impl ChoiceJailState {
 
                     if jail_stream.should_start_jail(&combined_content) {
                         // Start jailing with the combined content
-                        tracing::debug!(
-                            "Choice {} tool call start detected via parser, starting jail",
-                            choice.index
-                        );
                         self.is_jailed = true;
                         self.accumulated_content = combined_content;
                         self.partial_match_buffer.clear();
@@ -323,11 +311,6 @@ impl ChoiceJailState {
                 jail_stream.should_end_jail(&self.accumulated_content).await;
 
             if should_end {
-                tracing::debug!(
-                    "Choice {} jail exit detected, releasing accumulated content",
-                    choice.index
-                );
-
                 // Split the content
                 let (jailed_part, trailing_part) = self.accumulated_content.split_at(split_pos);
 
@@ -377,11 +360,6 @@ impl ChoiceJailState {
     /// Finalize any remaining content when stream ends
     async fn finalize(&mut self, jail_stream: &JailedStream) -> Option<ChoiceEmission> {
         if self.is_jailed && !self.accumulated_content.is_empty() {
-            tracing::debug!(
-                "Choice {} stream ended while jailed, releasing accumulated content",
-                self.index
-            );
-
             // Create a dummy choice for the method call
             #[allow(deprecated)]
             let dummy_choice = create_choice_stream(
@@ -533,23 +511,32 @@ impl JailedStream {
                     // Process each choice independently using the new architecture
                     for choice in &chat_response.choices {
                         if let Some(ref content) = choice.delta.content {
-                            let starts_jailed = matches!(self.jail_mode, JailMode::Immediate { .. });
-                            let choice_state = choice_states.get_or_create_state(choice.index, starts_jailed);
+                            // Jailing only applies to text content
+                            let text_content = match content {
+                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
+                                dynamo_async_openai::types::ChatCompletionMessageContent::Parts(_) => None,
+                            };
 
-                            // Store metadata when any choice becomes jailed (first time only)
-                            if !choice_state.is_jailed && self.should_start_jail(content)
-                                && last_annotated_id.is_none() {
-                                    last_annotated_id = response.id.clone();
-                                    last_annotated_event = response.event.clone();
-                                    last_annotated_comment = response.comment.clone();
-                                }
+                            if let Some(text) = text_content {
+                                let starts_jailed = matches!(self.jail_mode, JailMode::Immediate { .. });
+                                let choice_state = choice_states.get_or_create_state(choice.index, starts_jailed);
 
-                            // Track actual stream finish reason in the choice state
-                            choice_state.stream_finish_reason = choice.finish_reason;
+                                // Store metadata when any choice becomes jailed (first time only)
+                                if !choice_state.is_jailed && self.should_start_jail(text)
+                                    && last_annotated_id.is_none() {
+                                        last_annotated_id = response.id.clone();
+                                        last_annotated_event = response.event.clone();
+                                        last_annotated_comment = response.comment.clone();
+                                    }
 
-                            // Process this choice and get emissions
-                            let emissions = choice_state.process_content(choice, content, &self).await;
-                            all_emissions.extend(emissions);
+                                // Track actual stream finish reason in the choice state
+                                choice_state.stream_finish_reason = choice.finish_reason;
+
+                                // Process this choice and get emissions
+                                let emissions = choice_state.process_content(choice, text, &self).await;
+                                all_emissions.extend(emissions);
+                            }
+                            // For multimodal content, pass through unchanged (no jailing)
                         } else {
                             // Handle choices without content (e.g., final chunks with finish_reason)
                             // Only filter out if this choice was ever jailed and lacks role
@@ -725,14 +712,6 @@ impl JailedStream {
         let tool_call_match = self.tool_call_parser.is_some()
             && detect_tool_call_start(content, self.tool_call_parser.as_deref()).unwrap_or(false);
 
-        tracing::debug!(
-            "should_start_jail: content={:?}, sequence_match={}, tool_call_match={}, sequences={:?}",
-            content,
-            sequence_match,
-            tool_call_match,
-            self.jail_start_sequences
-        );
-
         sequence_match || tool_call_match
     }
 
@@ -821,12 +800,13 @@ impl JailedStream {
             JailMode::MarkerBased => {
                 // Traditional marker-based tool call parsing
                 let tools_slice = self.tool_definitions.as_deref();
-                if let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
+                let parse_result = try_tool_call_parse_aggregate(
                     accumulated_content,
                     self.tool_call_parser.as_deref(),
                     tools_slice,
                 )
-                .await
+                .await;
+                if let Ok((tool_calls, normal_text)) = parse_result
                     && !tool_calls.is_empty()
                 {
                     // Convert to streaming format

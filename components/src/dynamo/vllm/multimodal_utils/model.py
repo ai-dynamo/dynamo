@@ -35,8 +35,11 @@ class SupportedModels:
 
     LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
     QWEN_2_VL_2B = "Qwen/Qwen2-VL-2B-Instruct"
-    QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
     QWEN_2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
+    QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
+    QWEN_2_5_VL_32B = "Qwen/Qwen2.5-VL-32B-Instruct"
+    QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+    QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
     LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
@@ -112,8 +115,11 @@ def is_model_supported(model_name: str, supported_model: str) -> bool:
 # List of all Qwen VL model variants for easy extension
 QWEN_VL_MODELS = [
     SupportedModels.QWEN_2_VL_2B,
-    SupportedModels.QWEN_2_5_VL_7B,
     SupportedModels.QWEN_2_5_VL_3B,
+    SupportedModels.QWEN_2_5_VL_7B,
+    SupportedModels.QWEN_2_5_VL_32B,
+    SupportedModels.QWEN_3_VL_30B_A3B_FP8,
+    SupportedModels.QWEN_3_VL_8B_FP8,
 ]
 
 
@@ -143,13 +149,19 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
                 "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
             }
         )
-        # [gluo NOTE] this actually loads the full model,
-        # which require more GPU memory than needed.
+
+        # Load only the vision model via vLLM on encoder workers to avoid loading the full LLM weights, significantly reducing memory usage.
+        # Uses native vLLM encoder only model loading added in https://github.com/vllm-project/vllm/pull/32605.
+        # Load only the vision model via vLLM
         vllm_model = LLM(
             model=model_id,
             enforce_eager=True,
-            gpu_memory_utilization=0.4,
-            max_model_len=10,
+            kv_cache_memory_bytes=1024
+            * 1024
+            * 8,  # 8MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
+            max_model_len=1,
+            mm_encoder_only=True,
+            enable_prefix_caching=False,
         )
         return (
             vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual

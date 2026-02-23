@@ -12,10 +12,14 @@ metadata:
     {{- include "chrek.labels" . | nindent 4 }}
     app.kubernetes.io/component: checkpoint-agent
 rules:
-  # Watch pods in this namespace to detect checkpoint-source pods becoming ready
+  # Watch and annotate pods in this namespace to drive checkpoint/restore lifecycle
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  # Emit operational events on pod/restore lifecycle updates
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
 {{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -25,10 +29,13 @@ metadata:
     {{- include "chrek.labels" . | nindent 4 }}
     app.kubernetes.io/component: checkpoint-agent
 rules:
-  # Watch pods cluster-wide to detect checkpoint-source pods on assigned nodes
+  # Watch and annotate pods cluster-wide on assigned nodes
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  # Emit operational events on pod/restore lifecycle updates
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
 {{- end }}
 {{- end }}
-

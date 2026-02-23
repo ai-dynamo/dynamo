@@ -16,7 +16,7 @@ import uvloop
 
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
-from dynamo.llm import EngineType, EntrypointArgs, fetch_llm, make_engine, run_input
+from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -46,7 +46,7 @@ async def prefetch_model(model_path: str) -> None:
 
     logger.info(f"Pre-fetching model from HuggingFace: {model_path}")
     try:
-        local_path = await fetch_llm(model_path, ignore_weights=True)
+        local_path = await fetch_model(model_path, ignore_weights=True)
         logger.info(f"Model cached at: {local_path}")
     except Exception as e:
         logger.warning(
@@ -159,7 +159,11 @@ async def launch_workers(args, extra_engine_args_path):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
         # Create a separate DistributedRuntime for this worker (on same event loop)
-        runtime = DistributedRuntime(loop, args.store_kv, args.request_plane)
+        runtime = DistributedRuntime(
+            loop,
+            args.discovery_backend,
+            args.request_plane,
+        )
         runtimes.append(runtime)
 
         # Determine which engine args file to use

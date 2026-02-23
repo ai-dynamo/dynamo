@@ -12,8 +12,7 @@
 # Start nats and etcd:
 #  - nats-server -js
 #
-# Window 1: `python server_vllm.py`. Wait for log "Starting endpoint".
-# Window 2: `dynamo-run out=dyn
+# `python server_vllm.py`. Wait for log "Starting endpoint".
 
 import argparse
 import asyncio
@@ -28,7 +27,7 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
@@ -100,10 +99,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
-    component = runtime.namespace(config.namespace).component(config.component)
-
-    endpoint = component.endpoint(config.endpoint)
-    await register_llm(
+    endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+    await register_model(
         ModelInput.Tokens,
         ModelType.Chat | ModelType.Completions,
         endpoint,

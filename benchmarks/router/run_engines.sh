@@ -14,6 +14,7 @@ USE_MOCKERS=false
 USE_TRTLLM=false
 MODE="agg"  # Options: agg (default), decode, prefill
 BASE_GPU_OFFSET=0
+REASONING=""
 EXTRA_ARGS=()
 
 # Parse arguments
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --base-gpu-offset)
             BASE_GPU_OFFSET="$2"
+            shift 2
+            ;;
+        --reasoning)
+            REASONING="$2"
             shift 2
             ;;
         --)
@@ -192,6 +197,9 @@ if [ "$USE_MOCKERS" = true ]; then
     if [ "$DATA_PARALLEL_SIZE" -gt 1 ]; then
         MOCKER_ARGS+=("--data-parallel-size" "$DATA_PARALLEL_SIZE")
     fi
+    if [ -n "$REASONING" ]; then
+        MOCKER_ARGS+=("--reasoning" "$REASONING")
+    fi
     MOCKER_ARGS+=("${EXTRA_ARGS[@]}")
 
     python -m dynamo.mocker "${MOCKER_ARGS[@]}" &
@@ -252,7 +260,8 @@ else
                 fi
                 VLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
-                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES DYN_VLLM_KV_EVENT_PORT=$((20080 + i)) VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) python3 -m dynamo.vllm \
+                VLLM_ARGS+=("--kv-events-config" "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}")
+                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) python3 -m dynamo.vllm \
                     "${VLLM_ARGS[@]}"
             fi
         } &

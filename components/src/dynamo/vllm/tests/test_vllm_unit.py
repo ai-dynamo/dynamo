@@ -71,3 +71,148 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_vllm_cli):
         f"Expected custom_jinja_template value to be {JINJA_TEMPLATE_PATH}, "
         f"got {config.custom_jinja_template}"
     )
+
+
+@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
+def test_model_express_url_from_cli_arg(mock_vllm_cli, load_format):
+    """Test that --model-express-url is stored when load format is mx-source/mx-target."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--load-format",
+        load_format,
+        "--model-express-url",
+        "http://mx-server:8080",
+    )
+    config = parse_args()
+    assert config.model_express_url == "http://mx-server:8080"
+
+
+@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
+def test_model_express_url_from_env_var(monkeypatch, mock_vllm_cli, load_format):
+    """Test that MODEL_EXPRESS_URL env var is used as fallback."""
+    monkeypatch.setenv("MODEL_EXPRESS_URL", "http://env-mx:9090")
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--load-format",
+        load_format,
+    )
+    config = parse_args()
+    assert config.model_express_url == "http://env-mx:9090"
+
+
+@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
+def test_model_express_url_cli_overrides_env(monkeypatch, mock_vllm_cli, load_format):
+    """Test that --model-express-url takes precedence over MODEL_EXPRESS_URL."""
+    monkeypatch.setenv("MODEL_EXPRESS_URL", "http://env-mx:9090")
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--load-format",
+        load_format,
+        "--model-express-url",
+        "http://cli-mx:8080",
+    )
+    config = parse_args()
+    assert config.model_express_url == "http://cli-mx:8080"
+
+
+@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
+def test_model_express_url_missing_raises(monkeypatch, mock_vllm_cli, load_format):
+    """Test that missing server URL raises ValueError for mx load formats."""
+    monkeypatch.delenv("MODEL_EXPRESS_URL", raising=False)
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--load-format",
+        load_format,
+    )
+    with pytest.raises(
+        ValueError,
+        match=re.escape(f"--load-format={load_format}"),
+    ):
+        parse_args()
+
+
+def test_model_express_url_none_for_default_load_format(mock_vllm_cli):
+    """Test that model_express_url is None when load format is not mx-*."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    config = parse_args()
+    assert config.model_express_url is None
+
+
+# --endpoint flag tests
+
+
+def test_endpoint_overrides_defaults(mock_vllm_cli):
+    """Test that --endpoint overrides default namespace/component/endpoint."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--endpoint",
+        "dyn://mynamespace.mycomponent.myendpoint",
+    )
+    config = parse_args()
+    assert config.namespace == "mynamespace"
+    assert config.component == "mycomponent"
+    assert config.endpoint == "myendpoint"
+
+
+def test_endpoint_not_provided_preserves_defaults(mock_vllm_cli):
+    """Test that without --endpoint, defaults are preserved."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    config = parse_args()
+    assert config.namespace == "dynamo"
+    assert config.component == "backend"
+    assert config.endpoint == "generate"
+
+
+def test_endpoint_overrides_with_prefill_worker(mock_vllm_cli):
+    """Test that --endpoint overrides even with --is-prefill-worker."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--endpoint",
+        "dyn://custom.worker.serve",
+        "--is-prefill-worker",
+    )
+    config = parse_args()
+    assert config.namespace == "custom"
+    assert config.component == "worker"
+    assert config.endpoint == "serve"
+
+
+def test_endpoint_invalid_format_raises(mock_vllm_cli):
+    """Test that invalid --endpoint format raises ValueError."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--endpoint",
+        "invalid-endpoint",
+    )
+    with pytest.raises(ValueError, match="Invalid endpoint format"):
+        parse_args()
+
+
+def test_headless_namespace_has_required_fields(mock_vllm_cli):
+    """Test that build_headless_namespace produces a Namespace with fields
+    required by vLLM's run_headless(), including the api_server_count fallback."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--headless",
+    )
+    config = parse_args()
+    assert config.headless is True
+
+    from dynamo.vllm.main import build_headless_namespace
+
+    ns = build_headless_namespace(config)
+
+    # Required by run_headless()
+    assert hasattr(ns, "api_server_count")
+    assert ns.api_server_count == 0
+    # Core engine fields must survive the round-trip
+    assert hasattr(ns, "model")
+    assert hasattr(ns, "tensor_parallel_size")

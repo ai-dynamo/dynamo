@@ -57,17 +57,17 @@ Dynamo must be installed. No external services are required for local developmen
 First, start the backend service:
 ```bash
 cd examples/custom_backend/hello_world
-DYN_STORE_KV=file python hello_world.py
+DYN_DISCOVERY_BACKEND=file python hello_world.py
 ```
 
 Second, in a separate terminal, run the client:
 ```bash
 cd examples/custom_backend/hello_world
-DYN_STORE_KV=file python client.py
+DYN_DISCOVERY_BACKEND=file python client.py
 ```
 
-> **Note**: Setting `DYN_STORE_KV=file` uses file-based storage instead of etcd.
-> Both the backend and client must use the same KV backend to discover each other.
+> **Note**: Setting `DYN_DISCOVERY_BACKEND=file` uses file-based discovery instead of etcd.
+> Both the backend and client must use the same discovery backend to discover each other.
 
 The client will connect to the backend service and print the streaming results.
 
@@ -97,7 +97,7 @@ Hello star!
 Note that this a very simple degenerate example which does not demonstrate the standard Dynamo FrontEnd-Backend deployment. The hello-world client is not a web server, it is a one-off function which sends the predefined text "world,sun,moon,star" to the backend. The example is meant to show the HelloWorldWorker. As such you will only see the HelloWorldWorker pod in deployment. The client will run and exit and the pod will not be operational.
 
 
-Follow the [Quickstart Guide](/docs/kubernetes/README.md) to install Dynamo Kubernetes Platform.
+Follow the [Quickstart Guide](/docs/pages/kubernetes/README.md) to install Dynamo Kubernetes Platform.
 Then deploy to kubernetes using
 
 ```bash

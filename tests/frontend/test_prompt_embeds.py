@@ -77,7 +77,7 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
             "none",
             "--max-model-len",
             "4096",
-            "--store-kv",
+            "--discovery-backend",
             "file",
             "--request-plane",
             "tcp",
@@ -107,7 +107,7 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
             ],
             timeout=500,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
@@ -151,8 +151,8 @@ def start_services(
     with DynamoFrontendProcess(
         request,
         frontend_port=frontend_port,
-        terminate_existing=False,
-        extra_args=["--store-kv", "file", "--request-plane", "tcp"],
+        terminate_all_matching_process_names=False,
+        extra_args=["--discovery-backend", "file", "--request-plane", "tcp"],
     ):
         logger.info("Frontend started for prompt embeds tests")
         with VllmPromptEmbedsWorkerProcess(

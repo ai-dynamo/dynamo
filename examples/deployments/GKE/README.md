@@ -71,7 +71,7 @@ kubectl create secret generic hf-token-secret \
 
 ## Install Dynamo Kubernetes Platform
 
-[See installation steps](/docs/kubernetes/installation_guide.md#overview)
+[See installation steps](/docs/pages/kubernetes/installation-guide.md#overview)
 
 After installation, verify the installation:
 
