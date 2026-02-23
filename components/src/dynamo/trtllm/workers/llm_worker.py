@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+from typing import Optional
 
 from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
@@ -46,7 +47,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
-from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -109,7 +110,10 @@ def build_kv_connector_config(config: Config):
 
 
 async def init_llm_worker(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    shutdown_endpoints: Optional[list] = None,
 ) -> None:
     """Initialize and run the LLM worker.
 
@@ -119,6 +123,7 @@ async def init_llm_worker(
         runtime: The Dynamo distributed runtime.
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
+        shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
 
     encode_client = None
@@ -129,14 +134,9 @@ async def init_llm_worker(
         parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
             config.encode_endpoint
         )
-        encode_client = (
-            await runtime.namespace(parsed_namespace)
-            .component(parsed_component_name)
-            .endpoint(parsed_endpoint_name)
-            .client()
-        )
-
-    component = runtime.namespace(config.namespace).component(config.component)
+        encode_client = await runtime.endpoint(
+            f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+        ).client()
 
     # Convert model path to Path object if it's a local path, otherwise keep as string
     model_path = str(config.model)
@@ -295,7 +295,7 @@ async def init_llm_worker(
         # This overrides the skip_tokenizer_init=True set earlier
         engine_args["skip_tokenizer_init"] = False
 
-    if modality == "multimodal":
+    if modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
         model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
         multimodal_processor = MultimodalRequestProcessor(
@@ -334,7 +334,12 @@ async def init_llm_worker(
         config.disaggregation_mode,
         component_gauges=component_gauges,
     ) as engine:
-        endpoint = component.endpoint(config.endpoint)
+        endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        component = endpoint.component()
+        if shutdown_endpoints is not None:
+            shutdown_endpoints[:] = [endpoint]
 
         # should ideally call get_engine_runtime_config
         # this is because we don't have a good way to
@@ -428,6 +433,7 @@ async def init_llm_worker(
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+            disable_request_abort=config.disable_request_abort,
         )
 
         # Register the model with runtime config
@@ -451,9 +457,7 @@ async def init_llm_worker(
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
-            kv_listener = runtime.namespace(config.namespace).component(
-                config.component
-            )
+            kv_listener = endpoint.component()
             # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [

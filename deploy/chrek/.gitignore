@@ -2,10 +2,6 @@
 bin/
 *.exe
 
-# Reference source repos (clone separately if needed)
-containerd/
-runc/
-
 # Build artifacts
 *.o
 *.a
