@@ -1,6 +1,6 @@
 # Chrek Helm Chart
 
-> ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. It requires privileged mode for restore operations, which may not be suitable for all production environments. See [Prerequisites](#prerequisites) for security considerations.
+> ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. The DaemonSet runs in privileged mode to perform CRIU operations. See [Prerequisites](#prerequisites) for security considerations.
 
 This Helm chart deploys the checkpoint/restore infrastructure for NVIDIA Dynamo, including:
 - Persistent Volume Claim (PVC) for checkpoint storage
@@ -14,14 +14,14 @@ This Helm chart deploys the checkpoint/restore infrastructure for NVIDIA Dynamo,
 
 ## Prerequisites
 
-⚠️ **Security Warning**: ChReK restore operations require **privileged mode**, which grants containers elevated host access. This may violate security policies in production environments. Only deploy in environments where privileged containers are acceptable.
+⚠️ **Security Warning**: The ChReK DaemonSet runs in **privileged mode** with `hostPID`, `hostIPC`, and `hostNetwork` to perform CRIU checkpoint/restore operations. Workload pods do not need privileged mode. Only deploy in environments where a privileged DaemonSet is acceptable.
 
 - Kubernetes 1.21+
 - GPU nodes with NVIDIA runtime (`nvidia` runtime class)
-- CRIU support in the container runtime (containerd with CRIU plugin)
-- NVIDIA Dynamo operator installed (cluster-wide or namespace-scoped)
+- containerd runtime (for container inspection; CRIU is bundled in ChReK images)
+- NVIDIA Dynamo operator installed (cluster-wide or namespace-scoped), **or** manual pod configuration — see [Standalone Usage](../../../../docs/pages/kubernetes/chrek/standalone.md#using-chrek-without-the-dynamo-operator) for required labels, seccomp profiles, command overrides, and deployment strategy when running without the operator
 - RWX (ReadWriteMany) storage class for multi-node deployments
-- **Security clearance for privileged pods** (required for restore operations)
+- **Security clearance for privileged DaemonSet** (the ChReK agent runs privileged with hostPID/hostIPC/hostNetwork)
 
 ## Installation
 
@@ -63,11 +63,10 @@ See `values.yaml` for all configuration options.
 | `storage.pvc.name` | PVC name (must match operator config) | `chrek-pvc` |
 | `storage.pvc.size` | PVC size | `100Gi` |
 | `storage.pvc.storageClass` | Storage class name | `""` (default) |
-| `daemonset.image.repository` | DaemonSet image repository | `nvidia/chrek-agent` |
+| `daemonset.image.repository` | DaemonSet image repository | `nvcr.io/nvidian/dynamo-dev/chrek-agent` |
 | `daemonset.nodeSelector` | Node selector for GPU nodes | `nvidia.com/gpu.present: "true"` |
-| `daemonset.runtimeClassName` | Runtime class for GPU access | `nvidia` |
-| `daemonset.criu.timeout` | CRIU timeout in seconds | `"21600"` (6 hours) |
-| `daemonset.criu.ghostLimit` | CRIU ghost file size limit | `"512MB"` |
+| `config.checkpoint.criu.ghostLimit` | CRIU ghost file size limit in bytes | `536870912` (512MB) |
+| `config.checkpoint.criu.logLevel` | CRIU logging verbosity (0-4) | `4` |
 | `rbac.namespaceRestricted` | Use namespace-scoped RBAC | `true` |
 
 ## Usage

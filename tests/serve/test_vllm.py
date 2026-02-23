@@ -16,7 +16,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.conftest import MULTIMODAL_IMG_PATH, MULTIMODAL_IMG_URL
+from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
@@ -276,37 +276,34 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    # The original script is misleading  agg_multimodal_epd.sh is actually a disagg
-    # case which uses disgg encoder. We are bringing this test back shortly
-    # TODO(qiwa): enable this in https://github.com/ai-dynamo/dynamo/pull/6061/
-    # "multimodal_agg_qwen2vl_2b_epd": VLLMConfig(
-    #     name="multimodal_agg_qwen2vl_2b_epd",
-    #     directory=vllm_dir,
-    #     script_name="agg_multimodal_epd.sh",
-    #     marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
-    #     model="Qwen/Qwen2-VL-2B-Instruct",
-    #     script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
-    #     request_payloads=[
-    #         chat_payload(
-    #             [
-    #                 {
-    #                     "type": "text",
-    #                     "text": "What colors are in the following image? Respond only with the colors.",
-    #                 },
-    #                 {
-    #                     "type": "image_url",
-    #                     "image_url": {"url": MULTIMODAL_IMG_URL},
-    #                 },
-    #             ],
-    #             repeat_count=1,
-    #             # With proper prompt templating, the model actually only returns "green",
-    #             # verified behavior with native vLLM.
-    #             expected_response=["green"],
-    #             temperature=0.0,
-    #             max_tokens=100,
-    #         )
-    #     ],
-    # ),
+    "multimodal_disagg_qwen2vl_2b_e_pd": VLLMConfig(
+        name="multimodal_disagg_qwen2vl_2b_e_pd",
+        directory=vllm_dir,
+        script_name="disagg_multimodal_e_pd.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                # With proper prompt templating, the model actually only returns "green",
+                # verified behavior with native vLLM.
+                expected_response=["green"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
     "multimodal_agg_frontend_decoding": VLLMConfig(
         name="multimodal_agg_frontend_decoding",
         directory=vllm_dir,
@@ -668,6 +665,21 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "multi_node_tp_headless": VLLMConfig(
+        name="multi_node_tp_headless",
+        directory=os.path.join(WORKSPACE_DIR, "tests/serve"),
+        script_name="multi_node_tp_headless.sh",
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "guided_decoding": VLLMConfig(
         name="guided_decoding",
         directory=vllm_dir,
@@ -755,9 +767,8 @@ def test_multimodal_b64(
     This test is separate because it loads the required image at runtime
     (not collection time), ensuring it only fails when actually executed.
     """
-    # Load B64 image at test execution time
-    with open(MULTIMODAL_IMG_PATH, "rb") as f:
-        b64_img = base64.b64encode(f.read()).decode()
+    # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
+    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
 
     # Create payload with B64 image
     b64_payload = chat_payload(
