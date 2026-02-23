@@ -590,8 +590,14 @@ impl Slot for VllmConnectorSlot {
         tracing::debug!(
             "ENTRY: apply_scheduler_output: tokens.len={}, block_ids.len={}, computed={}, scheduled={}, \
              has_priorities={}, current_pos={}, evaluated_blocks={}, device_blocks_len={}",
-            tokens.len(), block_ids.len(), num_computed_tokens, num_scheduled_tokens,
-            priorities.is_some(), self.current_position, self.evaluated_blocks, self.device_blocks.len()
+            tokens.len(),
+            block_ids.len(),
+            num_computed_tokens,
+            num_scheduled_tokens,
+            priorities.is_some(),
+            self.current_position,
+            self.evaluated_blocks,
+            self.device_blocks.len()
         );
 
         // Validate contract: priorities must match block_ids length when provided
@@ -731,8 +737,11 @@ impl Slot for VllmConnectorSlot {
                 tracing::debug!(
                     "PRIORITY_CALC: new_blocks_start={}, candidate_start={}, device_blocks_len={}, \
                      block_ids_len={}, prios_len={}, will_use_real_priorities={}",
-                    new_blocks_start, candidate_start,
-                    self.device_blocks.len(), block_ids.len(), prios.len(),
+                    new_blocks_start,
+                    candidate_start,
+                    self.device_blocks.len(),
+                    block_ids.len(),
+                    prios.len(),
                     candidate_start >= new_blocks_start
                 );
 
@@ -767,7 +776,8 @@ impl Slot for VllmConnectorSlot {
                     tracing::debug!(
                         "PRIORITY_STORED: candidate_start={} < new_blocks_start={}, \
                          using stored priorities for {} candidates: {:?}",
-                        candidate_start, new_blocks_start,
+                        candidate_start,
+                        new_blocks_start,
                         stored.len(),
                         &stored[..std::cmp::min(10, stored.len())]
                     );
@@ -1894,7 +1904,10 @@ mod connector_tests {
     fn create_test_slot(
         num_tokens: usize,
         offload_min_priority: u32,
-    ) -> (VllmConnectorSlot, mpsc::UnboundedReceiver<LocalTransferRequest>) {
+    ) -> (
+        VllmConnectorSlot,
+        mpsc::UnboundedReceiver<LocalTransferRequest>,
+    ) {
         let tokens: Vec<u32> = (1..=num_tokens as u32).collect();
         let (xfer_tx, xfer_rx) = mpsc::unbounded_channel();
         let cache_stats = Arc::new(CacheStatsTracker::new(None));
@@ -2105,16 +2118,14 @@ mod connector_tests {
         slot.append_mutable_device_blocks(&blocks).unwrap();
 
         // Chunk 1: schedule first 64 tokens → evaluates blocks 0,1
-        slot.apply_scheduler_output(&[], &[], 0, 64, None)
-            .unwrap();
+        slot.apply_scheduler_output(&[], &[], 0, 64, None).unwrap();
         let offloads_1 = drain_offload_block_ids(&mut rx);
         assert_eq!(offloads_1.len(), 1);
         assert_eq!(offloads_1[0], vec![100, 101]); // blocks 0,1
 
         // Chunk 2: schedule next 64 tokens → evaluates blocks 2,3
         // (uses cached_request pattern: empty tokens, empty blocks)
-        slot.apply_scheduler_output(&[], &[], 64, 64, None)
-            .unwrap();
+        slot.apply_scheduler_output(&[], &[], 64, 64, None).unwrap();
         let offloads_2 = drain_offload_block_ids(&mut rx);
         assert_eq!(offloads_2.len(), 1);
         assert_eq!(offloads_2[0], vec![102, 103]); // blocks 2,3
