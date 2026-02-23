@@ -9,7 +9,7 @@
 # Architecture ARGs are declared per-stage (not globally) so that BuildKit
 # correctly injects TARGETARCH (amd64 or arm64) based on --platform per stage.
 # Global declaration of TARGETARCH would lock it to amd64 and prevent auto-injection.
-# Each stage that needs ARCH declares: ARG TARGETARCH / ARG ARCH=${TARGETARCH}
+# Each stage that needs the arch declares: ARG TARGETARCH (BuildKit injects amd64 or arm64)
 
 # Python/CUDA configuration
 ARG PYTHON_VERSION={{ context.dynamo.python_version }}

@@ -62,7 +62,6 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 
 # TARGETARCH is auto-set by BuildKit per platform (amd64 or arm64) within stage scope
 ARG TARGETARCH
-ARG ARCH=${TARGETARCH}
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
@@ -85,7 +84,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     /tmp/install_vllm.sh \
         --vllm-ref $VLLM_REF \
         --max-jobs $MAX_JOBS \
-        --arch $ARCH \
+        --arch ${TARGETARCH} \
         --installation-dir /opt \
         ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} \
         ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} \
