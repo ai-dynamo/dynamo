@@ -123,7 +123,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
-ARG NIXL_UCX_REF
 ARG NIXL_GDRCOPY_REF
 
 # Build and install gdrcopy
@@ -186,6 +185,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
 
 # Build and install UCX
+ARG NIXL_UCX_REF
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
@@ -274,11 +274,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     /tmp/use-sccache.sh show-stats "AWS SDK C++"
 {% endif %}
 
-# Copy source code (order matters for layer caching)
-COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
-COPY lib/ /opt/dynamo/lib/
-COPY components/ /opt/dynamo/components/
-
 
 ##################################
 ##### runtime_wheel_builder ######
@@ -288,13 +283,15 @@ COPY components/ /opt/dynamo/components/
 
 FROM wheel_builder_base AS runtime_wheel_builder
 
-# Redeclare ARGs for this stage (ENVs are inherited from wheel_builder_base)
+# Copy source code first so ARG changes don't invalidate the COPY layer
+COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+COPY lib/ /opt/dynamo/lib/
+COPY components/ /opt/dynamo/components/
+
+# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG ARCH
 ARG USE_SCCACHE
 ARG ENABLE_MEDIA_FFMPEG
-ARG ENABLE_GPU_MEMORY_SERVICE
-
-# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cargo/registry \
@@ -318,6 +315,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         export UV_CACHE_DIR=/root/.cache/uv && \
@@ -334,16 +332,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM wheel_builder_base AS wheel_builder
 
-# Redeclare ARGs for this stage (ENVs are inherited from wheel_builder_base)
+# Build and install nixl
 ARG ARCH
-ARG ARCH_ALT
 ARG NIXL_REF
 ARG CUDA_MAJOR
-ARG ENABLE_KVBM
 ARG USE_SCCACHE
-ARG PYTHON_VERSION
-
-# Build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
@@ -377,6 +370,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
 # Build nixl Python wheel
+ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cache/uv \
@@ -388,7 +382,14 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /workspace/nixl && \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
+# Copy source code (after nixl build so nixl layers are cached across source changes)
+COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+COPY lib/ /opt/dynamo/lib/
+COPY components/ /opt/dynamo/components/
+
 # Build kvbm wheel (with nixl linkage via auditwheel repair)
+ARG ARCH_ALT
+ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cargo/registry \
