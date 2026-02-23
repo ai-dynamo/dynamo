@@ -46,6 +46,9 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 				"pvcMountPath":   "/data/model",
 			},
 		},
+		"planner": map[string]interface{}{
+			"enable_load_scaling": false,
+		},
 		"extra_key": "preserved",
 	}
 	blobRaw, _ := json.Marshal(profilingBlob)
@@ -97,6 +100,7 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 	osl := int32(256)
 
 	rawDGD, _ := json.Marshal(map[string]interface{}{"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"})
+	rawPlanner, _ := json.Marshal(map[string]interface{}{"enable_load_scaling": false})
 
 	return &v1beta1.DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{
@@ -122,7 +126,8 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 				PVCMountPath: "/models",
 			},
 			Features: &v1beta1.FeaturesSpec{
-				Mocker: &v1beta1.MockerSpec{Enabled: true},
+				Mocker:  &v1beta1.MockerSpec{Enabled: true},
+				Planner: &runtime.RawExtension{Raw: rawPlanner},
 			},
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
@@ -298,6 +303,14 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	// Verify unknown keys are preserved via the annotation round-trip
 	if blob["extra_key"] != "preserved" {
 		t.Errorf("extra_key: got %v, want %q", blob["extra_key"], "preserved")
+	}
+	// Planner round-trip via applyPlannerFromBlob / mergePlannerIntoBlob
+	plannerMap, _ := blob["planner"].(map[string]interface{})
+	if plannerMap == nil {
+		t.Fatal("planner key missing in restored JSON blob")
+	}
+	if plannerMap["enable_load_scaling"] != false {
+		t.Errorf("planner.enable_load_scaling: got %v, want false", plannerMap["enable_load_scaling"])
 	}
 
 	// --- Status checks ---

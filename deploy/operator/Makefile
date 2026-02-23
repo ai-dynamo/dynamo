@@ -2,8 +2,6 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 
-# Absolute path to the repository root (used to set PYTHONPATH for Python targets).
-REPO_ROOT := $(shell git -C . rev-parse --show-toplevel)
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.29.0
 

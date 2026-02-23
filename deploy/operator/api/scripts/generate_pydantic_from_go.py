@@ -31,16 +31,20 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 # Types that should be IMPORTED rather than re-emitted.
-# Maps Go type name → (Python import path, Python name).
+# Maps Go type name → (Python import path, Python name, always_import).
+# always_import=True: emit regardless of whether the type appears in the parsed
+# structs/enums (e.g. types used only as field overrides, never as standalone Go types).
 # Planner-specific types are the canonical hand-written source of truth.
-_IMPORT_OVERRIDES: dict[str, tuple[str, str]] = {
+_IMPORT_OVERRIDES: dict[str, tuple[str, str, bool]] = {
     "PlannerPreDeploymentSweepMode": (
         "dynamo.planner.utils.planner_config",
         "PlannerPreDeploymentSweepMode",
+        True,
     ),
     "PlannerConfig": (
         "dynamo.planner.utils.planner_config",
         "PlannerConfig",
+        True,
     ),
 }
 
@@ -123,7 +127,10 @@ def _resolve_repo_root(start: Path) -> Path:
         if (p / "go.mod").exists():
             return p
         p = p.parent
-    return start
+    raise RuntimeError(
+        f"Could not locate repository root from {start}. "
+        "Ensure the script is run inside the dynamo repository."
+    )
 
 
 @dataclass
@@ -473,22 +480,16 @@ class GoToPydanticConverter:
 
         # Emit import statements for overridden types, grouped by module
         import_groups: dict[str, list[str]] = {}
-        for go_name, (mod, py_name) in _IMPORT_OVERRIDES.items():
-            # Only emit if the type actually appears in the parsed content
+        for go_name, (mod, py_name, always_import) in _IMPORT_OVERRIDES.items():
             in_enums = any(e.name == go_name for e in self.enums)
             in_structs = any(s.name == go_name for s in self.structs)
-            # Always emit if it's a known planner type (may appear as field type)
-            if (
-                in_enums
-                or in_structs
-                or go_name in ("PlannerPreDeploymentSweepMode", "PlannerConfig")
-            ):
+            if always_import or in_enums or in_structs:
                 import_groups.setdefault(mod, []).append(py_name)
 
         for mod in sorted(import_groups):
             names = sorted(import_groups[mod])
             lines.append(
-                "# Import canonical planner types – do NOT redefine them here."
+                "# Import canonical planner types - do NOT redefine them here."
             )
             lines.append(f"from {mod} import (  # noqa: F401 (re-exported)")
             for n in names:
@@ -544,6 +545,9 @@ class GoToPydanticConverter:
                 override_key = (struct.name, go_field.name)
                 if override_key in _FIELD_TYPE_OVERRIDES:
                     python_type = _FIELD_TYPE_OVERRIDES[override_key]
+                    # Derive effective_optional from the override string itself so
+                    # default=None is emitted iff the type is actually Optional.
+                    effective_optional = python_type.startswith("Optional[")
                 else:
                     python_type = self._go_type_to_python(
                         go_field.go_type, go_field.is_pointer, effective_optional

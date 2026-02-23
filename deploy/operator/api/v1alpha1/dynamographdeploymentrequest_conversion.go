@@ -434,7 +434,7 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 		}
 		mergeModelCacheIntoBlob(src.ModelCache, blob)
 	}
-	if src.Features != nil {
+	if src.Features != nil && src.Features.Planner != nil {
 		if blob == nil {
 			blob = make(map[string]interface{})
 		}

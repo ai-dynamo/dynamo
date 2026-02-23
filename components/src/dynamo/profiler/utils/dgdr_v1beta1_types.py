@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-# Import canonical planner types – do NOT redefine them here.
+# Import canonical planner types - do NOT redefine them here.
 from dynamo.planner.utils.planner_config import (  # noqa: F401 (re-exported)
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
