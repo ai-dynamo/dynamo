@@ -108,9 +108,9 @@ class PrometheusAPIClient:
         """Query average histogram metric.
 
         When model_name is None (router source): queries aggregate metrics via
-        sum(increase(metric_sum[interval])) / sum(increase(metric_count[interval])).
-        No label filtering — router pods are already isolated by the Kubernetes
-        namespace via PodMonitor own_namespace=true.
+        sum(increase(metric_sum[interval])) / sum(increase(metric_count[interval])),
+        filtered by dynamo_namespace. DYN_NAMESPACE uses dashes but Prometheus labels
+        use underscores, so dashes are normalized before building the PromQL filter.
 
         When model_name is provided (frontend source): queries per-model metrics
         via increase(metric_sum)/increase(metric_count), filtered by model and
@@ -124,9 +124,9 @@ class PrometheusAPIClient:
             if model_name is None:
                 # Router aggregate path: filter by dynamo_namespace so each pool
                 # planner only reads its own LocalRouter's metrics.
-                ns_filter = (
-                    f'{prometheus_names.labels.NAMESPACE}="{self.dynamo_namespace}"'
-                )
+                # Prometheus labels use underscores; DYN_NAMESPACE uses dashes.
+                prom_namespace = self.dynamo_namespace.replace("-", "_")
+                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{prom_namespace}"'
                 query = (
                     f"sum(increase({full_metric_name}_sum{{{ns_filter}}}[{interval}])) / "
                     f"sum(increase({full_metric_name}_count{{{ns_filter}}}[{interval}]))"
@@ -220,9 +220,8 @@ class PrometheusAPIClient:
         if self.metrics_source == "router":
             try:
                 router_req_total = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
-                ns_filter = (
-                    f'{prometheus_names.labels.NAMESPACE}="{self.dynamo_namespace}"'
-                )
+                prom_namespace = self.dynamo_namespace.replace("-", "_")
+                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{prom_namespace}"'
                 query = f"sum(increase({router_req_total}{{{ns_filter}}}[{interval}]))"
                 result = self.prom.custom_query(query=query)
                 if not result:

@@ -332,24 +332,29 @@ class TestPrometheusAPIClientRouterSource:
 
     def test_dynamo_namespace_filter_in_router_histogram_query(self, router_client):
         """Router histogram query must filter by dynamo_namespace so each pool planner
-        only reads its own LocalRouter's metrics, not the cluster-wide aggregate."""
+        only reads its own LocalRouter's metrics, not the cluster-wide aggregate.
+        DYN_NAMESPACE uses dashes (e.g. 'my-ns') but Prometheus labels use underscores
+        ('my_ns'), so the filter must normalize dashes to underscores."""
         router_client.get_avg_inter_token_latency("60s", "mymodel")
         call_args = str(router_client.prom.custom_query.call_args)
         assert "dynamo_namespace" in call_args, (
             "dynamo_namespace filter missing from router histogram query — "
             "without it, all pool planners read the same cluster-wide aggregate"
         )
-        assert "test-fe-namespace" in call_args
+        # Dashes in DYN_NAMESPACE are normalized to underscores for Prometheus
+        assert "test_fe_namespace" in call_args
 
     def test_dynamo_namespace_filter_in_router_request_count_query(self, router_client):
-        """Router request count query must filter by dynamo_namespace."""
+        """Router request count query must filter by dynamo_namespace.
+        Dashes in DYN_NAMESPACE are normalized to underscores for Prometheus labels."""
         router_client.get_avg_request_count("60s", "mymodel")
         call_args = str(router_client.prom.custom_query.call_args)
         assert "dynamo_namespace" in call_args, (
             "dynamo_namespace filter missing from router request count query — "
             "without it, all pool planners read the same cluster-wide aggregate"
         )
-        assert "test-fe-namespace" in call_args
+        # Dashes in DYN_NAMESPACE are normalized to underscores for Prometheus
+        assert "test_fe_namespace" in call_args
 
     def test_router_histogram_returns_zero_on_empty_result(self, router_client):
         """_get_router_average_histogram returns 0 when Prometheus has no data."""
