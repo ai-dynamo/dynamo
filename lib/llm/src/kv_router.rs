@@ -29,8 +29,8 @@ pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
 pub mod config;
-mod jetstream;
 pub mod indexer_standalone;
+mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
