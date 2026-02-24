@@ -43,16 +43,16 @@ pip3 install aiconfigurator
 
 # Find optimal configuration for vLLM backend
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 8 \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
+  --backend-version 0.12.0 \
   --isl 4000 \
   --osl 500 \
   --ttft 600 \
   --tpot 16.67 \
-  --save_dir ./results_vllm
+  --save-dir ./results_vllm
 
 # Deploy on Kubernetes
 kubectl apply -f ./results_vllm/agg/top1/agg/k8s_deploy.yaml
@@ -66,27 +66,27 @@ This section walks through a validated example deploying Qwen3-32B-FP8 on 8× H2
 
 ```bash
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
+  --model Qwen/Qwen3-32B-FP8 \
   --system h200_sxm \
-  --total_gpus 8 \
+  --total-gpus 8 \
   --isl 4000 \
   --osl 500 \
   --ttft 600 \
-  --tpot 16.67 \
+  --tpot 25 \
   --backend vllm \
-  --backend_version 0.12.0 \
-  --save_dir ./results_vllm
+  --backend-version 0.12.0 \
+  --save-dir ./results_vllm
 ```
 
 **Parameters explained:**
-- `--model_path`: HuggingFace model ID or local path (e.g., `Qwen/Qwen3-32B-FP8`)
+- `--model`: HuggingFace model ID or local path (e.g., `Qwen/Qwen3-32B-FP8`)
 - `--system`: GPU system type (`h200_sxm`, `h100_sxm`, `a100_sxm`)
-- `--total_gpus`: Number of GPUs available for deployment
+- `--total-gpus`: Number of GPUs available for deployment
 - `--isl` / `--osl`: Input/Output sequence lengths in tokens
 - `--ttft` / `--tpot`: SLA targets - Time To First Token (ms) and Time Per Output Token (ms)
-- `--backend`: Inference backend (`sglang`, `trtllm`, or `vllm`)
-- `--backend_version`: Backend version (e.g., `0.12.0` for vLLM)
-- `--save_dir`: Directory to save generated deployment configs
+- `--backend`: Inference backend (`vllm`, `trtllm`, or `sglang`)
+- `--backend-version`: Backend version (e.g., `0.12.0` for vLLM)
+- `--save-dir`: Directory to save generated deployment configs
 
 ### Step 2: Review the Results
 
@@ -100,37 +100,72 @@ AIConfigurator outputs a comparison of aggregated vs disaggregated deployment st
   Input Configuration & SLA Target:
     Model: Qwen/Qwen3-32B-FP8 (is_moe: False)
     Total GPUs: 8
-    Best Experiment Chosen: disagg at 521.77 tokens/s/gpu
+    Best Experiment Chosen: disagg at 446.85 tokens/s/gpu (disagg 1.38x better)
   ----------------------------------------------------------------------------
   Overall Best Configuration:
-    - Best Throughput: 4,174.16 tokens/s
-    - Per-GPU Throughput: 521.77 tokens/s/gpu
-    - Per-User Throughput: 76.96 tokens/s/user
-    - TTFT: 388.11ms
-    - TPOT: 12.99ms
+    - Best Throughput: 3,574.80 tokens/s
+    - Per-GPU Throughput: 446.85 tokens/s/gpu
+    - Per-User Throughput: 53.58 tokens/s/user
+    - TTFT: 453.18ms
+    - TPOT: 18.66ms
+    - Request Latency: 9766.51ms
   ----------------------------------------------------------------------------
-```
+  Pareto Frontier:
+      Qwen/Qwen3-32B-FP8 Pareto Frontier: tokens/s/gpu_cluster vs tokens/s/user
+     ┌─────────────────────────────────────────────────────────────────────────┐
+850.0┤ •• agg                                                                  │
+     │ ff disagg                                                               │
+     │ xx disagg best                                                          │
+     │                                                                         │
+708.3┤                                                                         │
+     │         f                                                               │
+     │         f                                                               │
+     │          fff                                                            │
+566.7┤             f                                                           │
+     │             f                                                           │
+     │              f                                                          │
+     │    ••         fffffffffffffffffx                                        │
+425.0┤     ••••                        ff                                      │
+     │        •••                       f                                      │
+     │           •••••                  f                                      │
+     │                ••••••••••        f                                      │
+283.3┤                          •••     f                                      │
+     │                             ••    f                                     │
+     │                               ••  f                                     │
+     │                                ••••f                                    │
+141.7┤                                   •f•                                   │
+     │                                     f•••••                              │
+     │                                      f    •••••••                       │
+     │                                       fffff      ••••                   │
+  0.0┤                                                      ••••               │
+     └┬─────────────────┬─────────────────┬─────────────────┬─────────────────┬┘
+      0                30                60                90               120
+tokens/s/gpu_cluster                tokens/s/user
 
-AIC evaluates both aggregated and disaggregated architectures and outputs ranked configurations for each:
+  ----------------------------------------------------------------------------
+  Deployment Details:
+    (p) stands for prefill, (d) stands for decode, bs stands for batch size, a replica stands for the smallest scalable unit xPyD of the disagg system
+    Some math: total gpus used = replicas * gpus/replica
+               gpus/replica = (p)gpus/worker * (p)workers + (d)gpus/worker * (d)workers; for Agg, gpus/replica = gpus/worker
+               gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined numbers are the actual values in math)
 
-```text
 agg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+----------+----+
-| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | request_latency | concurrency | total_gpus (used) | replicas | parallel | bs |
-+------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+----------+----+
-|  1   |    397.31    |     60.66     | 509.14 |     8734.68     | 56 (=14x4)  |    8 (8=4x2)      |    4     |  tp2pp1  | 14 |
-|  2   |    349.90    |     60.98     | 412.58 |     8596.28     | 48 (=24x2)  |    8 (8=2x4)      |    2     |  tp4pp1  | 24 |
-|  3   |    235.62    |     62.71     | 482.57 |     8439.41     | 32 (=32x1)  |    8 (8=1x8)      |    1     |  tp8pp1  | 32 |
-+------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+----------+----+
++------+---------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+--------------+-------------+----------+----+
+| Rank | backend | tokens/s/gpu | tokens/s/user |  TTFT  | request_latency | concurrency | total_gpus (used) | replicas | gpus/replica | gpus/worker | parallel | bs |
++------+---------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+--------------+-------------+----------+----+
+|  1   |   vllm  |    322.69    |     41.78     | 546.92 |     12490.03    |  64 (=32x2) |     8 (8=2x4)     |    2     |      4       |  4 (=4x1x1) |  tp4pp1  | 32 |
+|  2   |   vllm  |    293.94    |     44.43     | 593.10 |     11823.67    |  56 (=14x4) |     8 (8=4x2)     |    4     |      2       |  2 (=2x1x1) |  tp2pp1  | 14 |
+|  3   |   vllm  |    208.87    |     42.90     | 460.58 |     12093.52    |  40 (=40x1) |     8 (8=1x8)     |    1     |      8       |  8 (=8x1x1) |  tp8pp1  | 40 |
++------+---------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+--------------+-------------+----------+----+
 
 disagg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+-------------+----------+
-| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | request_latency | concurrency | total_gpus (used) | replicas | (p)parallel | (d)parallel |
-+------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+-------------+----------+
-|  1   |    521.77    |     76.96     | 388.11 |     6871.61     | 60 (=60x1)  |    8 (8=1x8)      |    1     |   tp2pp1    |  tp4pp1  |
-|  2   |    521.77    |     63.29     | 388.11 |     8272.31     | 80 (=40x2)  |    8 (8=2x4)      |    2     |   tp2pp1    |  tp2pp1  |
-|  3   |    260.89    |     62.81     | 388.11 |     8332.18     | 42 (=42x1)  |    8 (8=1x8)      |    1     |   tp2pp1    |  tp1pp1  |
-+------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+-------------+----------+
++------+---------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+--------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+| Rank | backend | tokens/s/gpu | tokens/s/user |  TTFT  | request_latency | concurrency | total_gpus (used) | replicas | gpus/replica | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
++------+---------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+--------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+|  1   |   vllm  |    446.85    |     53.58     | 453.18 |     9766.51     |  76 (=76x1) |     8 (8=1x8)     |    1     | 8 (=2x2+1x4) |     2      |    2 (=2x1)    |    tp2pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   76  |
+|  2   |   vllm  |    446.85    |     41.14     | 453.18 |     12581.87    | 144 (=72x2) |     8 (8=2x4)     |    2     | 4 (=1x2+1x2) |     1      |    2 (=2x1)    |    tp2pp1   |   1   |     1      |    2 (=2x1)    |    tp2pp1   |   72  |
+|  3   |   vllm  |    333.73    |     40.22     | 453.18 |     12860.32    |  72 (=36x2) |     8 (8=2x4)     |    2     | 4 (=1x2+2x1) |     1      |    2 (=2x1)    |    tp2pp1   |   1   |     2      |    1 (=1x1)    |    tp1pp1   |   18  |
++------+---------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+--------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
 ```
 
 **Reading the output:**
@@ -138,26 +173,40 @@ disagg Top Configurations: (Sorted by tokens/s/gpu)
 - **tokens/s/user**: Per-request generation speed (inverse of TPOT)
 - **TTFT**: Predicted time to first token
 - **concurrency**: Total concurrent requests across all replicas (e.g., `56 (=14x4)` means batch size 14 × 4 replicas)
-- **agg Rank 1** recommends TP2 with 4 replicas — simpler to deploy
+- **agg Rank 1** recommends TP4 with 2 replicas — simpler to deploy
 - **disagg Rank 1** recommends 2 prefill workers (TP2) + 1 decode worker (TP4) — higher throughput but requires RDMA
 
 ### Step 3: Deploy on Kubernetes
 
-The `--save_dir` generates ready-to-use Kubernetes manifests:
+The `--save-dir` generates ready-to-use Kubernetes manifests:
 
 ```
-results_vllm/
-├── agg/
-│   └── top1/
-│       └── agg/
-│           ├── k8s_deploy.yaml    # Kubernetes DynamoGraphDeployment
-│           └── agg_config.yaml    # Engine configuration
-├── disagg/
-│   └── top1/
-│       └── disagg/
-│           ├── k8s_deploy.yaml
-│           ├── prefill_config.yaml
-│           └── decode_config.yaml
+├── agg
+│   ├── best_config_topn.csv
+│   ├── exp_config.yaml
+│   ├── pareto.csv
+│   ├── top1
+│   │   ├── agg_config.yaml
+│   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
+│   │   ├── generator_config.yaml
+│   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
+│   │   ├── k8s_deploy.yaml       # Kubernetes DynamoGraphDeployment
+│   │   └── run_0.sh
+│   ...
+├── disagg
+│   ├── best_config_topn.csv
+│   ├── exp_config.yaml
+│   ├── pareto.csv
+│   ├── top1
+│   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
+│   │   ├── decode_config.yaml
+│   │   ├── generator_config.yaml
+│   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
+│   │   ├── k8s_deploy.yaml       # Kubernetes DynamoGraphDeployment
+│   │   ├── prefill_config.yaml
+│   │   ├── run_0.sh
+│   │   └── run_1.sh  (for multi-node setups)
+│   ...
 └── pareto_frontier.png
 ```
 
@@ -279,13 +328,9 @@ spec:
 
 After deployment, validate the predictions against actual performance using [AIPerf](https://github.com/ai-dynamo/aiperf).
 
-<Tip>
-Run AIPerf **inside the cluster** to avoid network latency affecting measurements. Use a Kubernetes Job:
-</Tip>
+> ℹ️ Run AIPerf **inside the cluster** to avoid network latency affecting measurements.
 
-#### Deriving AIPerf Parameters from AIC Output
-
-To use AIPerf to benchmark an AIC-recommended configuration, you'll need to translate AIC parameters into AIPerf profiling arguments (we are working to automate this):
+AIC automatically generates AIPerf scripts along with Dynamo configs and stores them in the results folder (when `--save-dir ...` is specified). For Kubernetes deployments, you can run benchmarks using `k8s_bench.yaml`; while for bare metal systems, use the `bench_run.sh` script. These scripts execute AIPerf across a concurrency list: the default set (`1 2 8 16 32 64 128`) along with `BenchConfig.estimated_concurrency` and its values within ±5%. You can also customize this concurrency list as needed.
 
 ![AIC-to-AIPerf parameter mapping](../../../assets/img/param-mapping.svg)
 
@@ -331,7 +376,7 @@ spec:
 ```
 
 ```bash
-kubectl apply -f aiperf-job.yaml
+kubectl apply -f k8s_bench.yaml
 kubectl logs -f -l job-name=aiperf-benchmark
 ```
 
@@ -360,16 +405,16 @@ If your real workload differs from the benchmark parameters:
 # For longer outputs (chat/code generation):
 # increase OSL, relax TTFT target
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 8 \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
+  --backend-version 0.12.0 \
   --isl 2000 \
   --osl 2000 \
   --ttft 1000 \
   --tpot 10 \
-  --save_dir ./results_long_output
+  --save-dir ./results_long_output
 ```
 
 ### Exploring Alternative Configurations
@@ -416,7 +461,7 @@ exp_tp4:
 ```
 
 ```bash
-aiconfigurator cli exp --yaml_path custom_exp.yaml --save_dir ./results_custom
+aiconfigurator cli exp --yaml-path custom_exp.yaml --save-dir ./results_custom
 ```
 
 > **Critical**: Disaggregated deployments **require RDMA** for KV cache transfer. Without RDMA, performance degrades by **40x** (TTFT increases from 355ms to 10+ seconds). See the Disaggregated Deployment section below.
@@ -586,14 +631,14 @@ Override vLLM engine parameters with `--generator-set`:
 
 ```bash
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 8 \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
+  --backend-version 0.12.0 \
   --isl 4000 --osl 500 \
   --ttft 600 --tpot 16.67 \
-  --save_dir ./results_tuned \
+  --save-dir ./results_tuned \
   --generator-set Workers.agg.kv_cache_free_gpu_memory_fraction=0.85 \
   --generator-set Workers.agg.max_num_seqs=2048
 ```
@@ -613,55 +658,42 @@ AIConfigurator's default predictions assume no prefix caching. Enable it post-de
 
 ### Backends and Versions
 
-| Backend | Versions | Status |
-|---------|----------|--------|
-| TensorRT-LLM | 1.0.0rc3, 1.2.0rc5 | Production |
-| vLLM | 0.12.0 | Production |
-| SGLang | 0.5.6.post2 | Production |
+For a comprehensive breakdown of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, refer to the [**support matrix CSV**](https://github.com/ai-dynamo/aiconfigurator/blob/main/src/aiconfigurator/systems/support_matrix.csv). This file is automatically generated and tested to ensure accuracy across all supported configurations.
 
-### Systems
+You can also check if a system / framework version is supported via the `aiconfigurator cli support` command. For example:
+```bash
+aiconfigurator cli support --model Qwen/Qwen3-32B-FP8 --system h100_sxm --backend-version 1.2.0rc5
+```
 
-| GPU System | SGLang | TensorRT-LLM | vLLM |
-|------------|--------|--------------|------|
-| H200 SXM | Yes | Yes | Yes |
-| H100 SXM | Yes | Yes | Yes |
-| A100 SXM | -- | Yes | Yes |
-| B200 SXM | Yes | Yes | -- |
-| GB200 SXM | -- | Yes | -- |
-
-### Models
-
-- **Dense**: GPT, LLAMA2/3, QWEN2.5/3
-- **MoE**: Mixtral, DEEPSEEK_V3
 
 ## Common Use Cases
 
 ```bash
 # Strict latency SLAs (real-time chat)
 aiconfigurator cli default \
-  --model_path meta-llama/Llama-3.1-70B \
-  --total_gpus 16 \
+  --model meta-llama/Llama-3.1-70B \
+  --total-gpus 16 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
+  --backend-version 0.12.0 \
   --ttft 200 --tpot 8
 
 # High throughput (batch processing)
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 32 \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 32 \
   --system h200_sxm \
   --backend trtllm \
   --ttft 2000 --tpot 50
 
 # Request latency constraint (end-to-end SLA)
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 16 \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 16 \
   --system h200_sxm \
   --backend vllm \
-  --backend_version 0.12.0 \
-  --request_latency 12000 \
+  --backend-version 0.12.0 \
+  --request-latency 12000 \
   --isl 4000 --osl 500
 ```
 
@@ -674,14 +706,14 @@ aiconfigurator webapp  # Visit http://127.0.0.1:7860
 
 # Quick config generation (no parameter sweep)
 aiconfigurator cli generate \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 8 \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
   --system h200_sxm \
   --backend vllm
 
 # Check model/system support
 aiconfigurator cli support \
-  --model_path Qwen/Qwen3-32B-FP8 \
+  --model Qwen/Qwen3-32B-FP8 \
   --system h200_sxm \
   --backend vllm
 ```
@@ -692,7 +724,7 @@ aiconfigurator cli support \
 
 **Model not found**: Use the full HuggingFace path (e.g., `Qwen/Qwen3-32B-FP8` not `QWEN3_32B`)
 
-**Backend version mismatch**: Check supported versions with `aiconfigurator cli support --model_path <model> --system <system> --backend <backend>`
+**Backend version mismatch**: Check supported versions with `aiconfigurator cli support --model <model> --system <system> --backend <backend>`
 
 ### Deployment Issues
 
