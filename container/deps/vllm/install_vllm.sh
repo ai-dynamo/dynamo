@@ -6,8 +6,9 @@
 # Installation order:
 # 1. LMCache (installed first so vLLM's dependencies take precedence)
 # 2. vLLM
-# 3. DeepGEMM
-# 4. EP kernels
+# 3. vLLM-Omni
+# 4. DeepGEMM
+# 5. EP kernels
 
 set -euo pipefail
 
@@ -25,6 +26,7 @@ DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.6.1"
 LMCACHE_REF="0.3.13"
+VLLM_OMNI_REF="0.14.0"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -56,6 +58,10 @@ while [[ $# -gt 0 ]]; do
             LMCACHE_REF="$2"
             shift 2
             ;;
+        --vllm-omni-ref)
+            VLLM_OMNI_REF="$2"
+            shift 2
+            ;;
         --torch-cuda-arch-list)
             TORCH_CUDA_ARCH_LIST="$2"
             shift 2
@@ -65,7 +71,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
+            echo "Usage: $0 [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--vllm-omni-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
             echo "Options:"
             echo "  --vllm-ref REF      vLLM release version (default: ${VLLM_REF})"
             echo "  --max-jobs NUM      Maximum parallel jobs (default: ${MAX_JOBS})"
@@ -74,6 +80,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --deepgemm-ref REF  DeepGEMM git ref (default: ${DEEPGEMM_REF})"
             echo "  --flashinf-ref REF  FlashInfer version (default: ${FLASHINF_REF})"
             echo "  --lmcache-ref REF   LMCache version (default: ${LMCACHE_REF})"
+            echo "  --vllm-omni-ref REF vLLM-Omni version (default: ${VLLM_OMNI_REF})"
             echo "  --torch-cuda-arch-list LIST  CUDA architectures (default: ${TORCH_CUDA_ARCH_LIST})"
             echo "  --cuda-version VERSION  CUDA version (default: ${CUDA_VERSION})"
             exit 0
@@ -159,6 +166,19 @@ else
     exit 1
 fi
 echo "✓ vLLM installation completed"
+
+echo "\n=== Installing vLLM-Omni ==="
+if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
+    # Save original vllm entrypoint before vllm-omni overwrites it
+    VLLM_BIN=$(which vllm)
+    cp "$VLLM_BIN" /tmp/vllm-entrypoint-backup
+    uv pip install vllm-omni==${VLLM_OMNI_REF}
+    # Restore original vllm CLI entrypoint (vllm-omni replaces it with its own)
+    cp /tmp/vllm-entrypoint-backup "$VLLM_BIN"
+    echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed (original vllm entrypoint preserved)"
+else
+    echo "⚠ Skipping vLLM-Omni (no ref provided or ARM64 not supported)"
+fi
 
 echo "\n=== Installing DeepGEMM ==="
 cd $INSTALLATION_DIR/vllm/tools

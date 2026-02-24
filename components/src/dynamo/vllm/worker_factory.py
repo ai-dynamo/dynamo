@@ -187,19 +187,19 @@ class WorkerFactory:
         if kv_publisher:
             handler.kv_publisher = kv_publisher
 
-        # Register model with the frontend so it can route requests
-        model_type = parse_endpoint_types(config.endpoint_types)
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-        await self.register_vllm_model(
-            model_input,
-            model_type,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-        )
+        if not config.multimodal_decode_worker:
+            model_type = parse_endpoint_types(config.endpoint_types)
+            model_input = (
+                ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+            )
+            await self.register_vllm_model(
+                model_input,
+                model_type,
+                generate_endpoint,
+                config,
+                engine_client,
+                vllm_config,
+            )
 
         metrics_labels = [("model", config.served_model_name or config.model)]
         try:
