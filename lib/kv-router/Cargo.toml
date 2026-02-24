@@ -55,12 +55,6 @@ dynamo-mocker = { workspace = true }
 dynamo-tokens = { workspace = true }
 minstant = "0.1.7"
 
-
-[[bench]]
-name = "radix_tree_microbench"
-harness = false
-required-features = ["bench"]
-
 [[bench]]
 name = "kv_indexer_bench"
 harness = false
