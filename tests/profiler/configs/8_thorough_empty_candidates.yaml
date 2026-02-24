@@ -6,7 +6,7 @@
 # enumerate_profiling_configs should return empty lists.
 model: "deepseek-ai/DeepSeek-R1"
 backend: sglang
-image: "nvcr.io/nvidia/dynamo:latest"
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
 hardware:
   gpuSku: l40s
   totalGpus: 1

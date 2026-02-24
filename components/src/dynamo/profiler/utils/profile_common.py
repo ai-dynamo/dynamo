@@ -29,6 +29,68 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentReques
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Published container image naming conventions
+# ---------------------------------------------------------------------------
+
+# The image-name component of the published Dynamo frontend image.
+# e.g. nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0
+FRONTEND_IMAGE_NAME = "dynamo-frontend"
+
+# Mapping from backend name to the image-name component of the published
+# backend runtime image.
+# e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+BACKEND_IMAGE_NAMES: dict[str, str] = {
+    "vllm": "vllm-runtime",
+    "sglang": "sglang-runtime",
+    "trtllm": "tensorrtllm-runtime",
+}
+
+
+def derive_backend_image(frontend_image: str, backend: str) -> str:
+    """Derive the backend worker image from the frontend image.
+
+    The frontend image must contain ``dynamo-frontend`` in its name.  The
+    backend image is derived by replacing that component with the appropriate
+    backend runtime image name, preserving the registry path and tag.
+
+    Example::
+
+        derive_backend_image(
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0", "vllm"
+        )
+        # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
+
+    Args:
+        frontend_image: The frontend container image.  Must contain
+            ``'dynamo-frontend'`` (e.g.
+            ``nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0``).
+        backend: The resolved backend type (``'vllm'``, ``'sglang'``, or
+            ``'trtllm'``).
+
+    Returns:
+        The backend container image string.
+
+    Raises:
+        ValueError: If *backend* is not a recognised backend, or if
+            *frontend_image* does not follow the expected naming convention.
+    """
+    backend_image_name = BACKEND_IMAGE_NAMES.get(backend)
+    if backend_image_name is None:
+        raise ValueError(
+            f"Cannot derive backend image for unknown backend '{backend}'. "
+            f"Supported backends: {list(BACKEND_IMAGE_NAMES.keys())}"
+        )
+    if FRONTEND_IMAGE_NAME not in frontend_image:
+        raise ValueError(
+            f"Image '{frontend_image}' does not contain '{FRONTEND_IMAGE_NAME}'. "
+            f"The profiler expects the 'image' field to reference the published "
+            f"Dynamo frontend image "
+            f"(e.g. nvcr.io/nvidia/ai-dynamo/{FRONTEND_IMAGE_NAME}:<tag>)."
+        )
+    return frontend_image.replace(FRONTEND_IMAGE_NAME, backend_image_name)
+
+
+# ---------------------------------------------------------------------------
 # Operational defaults not part of DynamoGraphDeploymentRequestSpec
 # ---------------------------------------------------------------------------
 

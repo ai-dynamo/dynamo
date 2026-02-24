@@ -26,12 +26,6 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-# Import canonical planner types – do NOT redefine them here.
-from dynamo.planner.utils.planner_config import (  # noqa: F401 (re-exported)
-    PlannerConfig,
-    PlannerPreDeploymentSweepMode,
-)
-
 
 class DGDRPhase(str, Enum):
     Pending = "Pending"
@@ -67,6 +61,12 @@ class BackendType(str, Enum):
     Sglang = "sglang"
     Trtllm = "trtllm"
     Vllm = "vllm"
+
+
+class PlannerPreDeploymentSweepMode(str, Enum):
+    None_ = "none"
+    Rapid = "rapid"
+    Thorough = "thorough"
 
 
 class WorkloadSpec(BaseModel):
@@ -161,6 +161,22 @@ class OverridesSpec(BaseModel):
     )
 
 
+class PlannerSpec(BaseModel):
+    """PlannerSpec configures the SLA planner for autoscaling in the generated DGD."""
+
+    enabled: Optional[bool] = Field(
+        default=None, description="Enabled indicates whether the planner is enabled."
+    )
+    plannerPreDeploymentSweeping: Optional[PlannerPreDeploymentSweepMode] = Field(
+        default=None,
+        description='PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
+    )
+    plannerArgsList: Optional[List[str]] = Field(
+        default=None,
+        description="PlannerArgsList is a list of additional planner arguments.",
+    )
+
+
 class MockerSpec(BaseModel):
     """MockerSpec configures the simulated (mocker) backend."""
 
@@ -182,9 +198,9 @@ class KVRouterSpec(BaseModel):
 class FeaturesSpec(BaseModel):
     """FeaturesSpec controls optional Dynamo platform features in the generated deployment."""
 
-    planner: Optional[PlannerConfig] = Field(
+    planner: Optional[PlannerSpec] = Field(
         default=None,
-        description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig. Go treats this as opaque bytes; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
+        description="Planner configures the SLA planner for autoscaling in the generated DGD.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,
@@ -223,7 +239,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/dynamo-runtime:latest" TODO: In a future MR, the operator will derive the backend inference image from the backend type automatically; backend images can be overridden via overrides.dgd.',
+        description='Image is the container image reference for the profiling job (frontend image). Must reference the published Dynamo frontend image containing "dynamo-frontend" in the image name. Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0". The profiler auto-derives the backend runtime image from this by substituting the backend-specific name (e.g. "vllm-runtime", "sglang-runtime", "tensorrtllm-runtime"), preserving the registry and tag.',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,

@@ -7,7 +7,7 @@
 # This uses a supported combo so rapid sweeping should work.
 model: "Qwen/Qwen3-32B"
 backend: trtllm
-image: "nvcr.io/nvidia/dynamo:latest"
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
 hardware:
   gpuSku: h200_sxm
   totalGpus: 8

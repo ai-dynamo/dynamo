@@ -5,7 +5,7 @@
 # l40s + vllm has no disagg support in AIC
 model: "Qwen/Qwen3-32B"
 backend: vllm
-image: "nvcr.io/nvidia/dynamo:latest"
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
 hardware:
   gpuSku: l40s
   totalGpus: 4
