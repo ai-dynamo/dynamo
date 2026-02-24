@@ -1076,19 +1076,18 @@ jobs:
             echo "Files to merge:"
             ls -lh coverage-combined/
 
-            cd coverage-combined
-
-            # Combine all coverage data (ignore path errors)
+            # Combine all coverage data from the workspace root so that the
+            # relative canonical path "components/src/dynamo" in .coveragerc
+            # resolves to $GITHUB_WORKSPACE/components/src/dynamo (where the
+            # source actually lives) rather than to the non-existent
+            # coverage-combined/components/src/dynamo subdirectory.
             echo "Running coverage combine with path remapping..."
             set +e  # Don't exit on error
-            COVERAGE_RCFILE=../.coveragerc coverage combine --keep .coverage* 2>&1 | tee ../combine.log
+            COVERAGE_RCFILE=.coveragerc coverage combine --keep coverage-combined/.coverage* 2>&1 | tee combine.log
             set -e
-
 
             if [ -f .coverage ]; then
               echo "✅ Combined .coverage file created"
-              mv .coverage ../
-              cd ..
 
               # Generate reports (continue even if some fail)
               echo "📊 Generating coverage reports..."
@@ -1102,7 +1101,6 @@ jobs:
 
             else
               echo "❌ Failed to create combined .coverage file"
-              cd ..
               echo "No coverage data available" > coverage-report.txt
               echo "TOTAL_COVERAGE=0%" >> $GITHUB_ENV
             fi
