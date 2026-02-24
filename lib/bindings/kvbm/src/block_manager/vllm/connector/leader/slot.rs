@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{any::Any, cmp::max, collections::HashMap, sync::Arc};
+use std::{any::Any, cmp::max, collections::{HashMap, HashSet}, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
@@ -471,6 +471,11 @@ impl VllmConnectorSlot {
         }
     }
 
+    #[cfg(test)]
+    fn device_blocks_snapshot(&self) -> &[BlockId] {
+        &self.device_blocks
+    }
+
     fn mark_as_skipped_prefill(&mut self) -> Result<(), SlotError> {
         if self.state != SlotState::Prefilling {
             return Err(SlotError::InvalidState(format!(
@@ -629,19 +634,69 @@ impl Slot for VllmConnectorSlot {
         self.current_position = max(self.current_position, num_computed_tokens);
         self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
 
-        // apply new block_ids — with dedup guard to prevent double-add
-        // when update_state_after_alloc already registered the same blocks via append_mutable_device_blocks
+        // Apply new block_ids with suffix/prefix overlap contract.
+        // Block IDs are unique, so we use an O(N) algorithm:
+        //   1. Locate block_ids[0] in device_blocks via rposition (at most one match).
+        //   2. Verify device_blocks[pos..] == block_ids[..suffix_len] (the overlap).
+        //   3. Extend with only the non-overlapping tail block_ids[overlap_len..].
+        //
+        // Valid cases:
+        //   [3,4,5] + [6,7]       → [3,4,5,6,7]       (no overlap)
+        //   [3,4,5,6,7] + [6,7,8,9] → [3,4,5,6,7,8,9] (suffix/prefix overlap of 2)
+        //   [3,4,5] + [3,4,5]     → [3,4,5]            (full overlap)
+        //
+        // Invalid (panics):
+        //   [3,4,5,6,7] + [6,8,9] → block 6 found but suffix doesn't match prefix
         if !block_ids.is_empty() {
-            let already_present = self.device_blocks.ends_with(block_ids);
-            if already_present {
-                tracing::debug!(
-                    "DEDUP: skipping extend: req={}, {} block_ids already at tail, device_blocks_len={}",
-                    self.request_id,
-                    block_ids.len(),
-                    self.device_blocks.len()
+            let overlap_len = if let Some(pos) =
+                self.device_blocks.iter().rposition(|&id| id == block_ids[0])
+            {
+                let suffix_len = self.device_blocks.len() - pos;
+                assert!(
+                    suffix_len <= block_ids.len()
+                        && self.device_blocks[pos..] == block_ids[..suffix_len],
+                    "device_blocks contract violation: block_ids[0]={} found at \
+                     device_blocks[{}] but device_blocks[{}..] != block_ids[..{}] \
+                     (device_blocks={:?}, block_ids={:?})",
+                    block_ids[0],
+                    pos,
+                    pos,
+                    suffix_len,
+                    self.device_blocks,
+                    block_ids
                 );
+                suffix_len
             } else {
-                self.device_blocks.extend(block_ids);
+                0
+            };
+
+            let new_ids = &block_ids[overlap_len..];
+
+            if !new_ids.is_empty() {
+                // Validate: no block in the non-overlapping portion should already exist.
+                let existing: HashSet<BlockId> = self.device_blocks.iter().copied().collect();
+                for id in new_ids {
+                    assert!(
+                        !existing.contains(id),
+                        "device_blocks contract violation: block {} already in device_blocks \
+                         but not part of suffix/prefix overlap (overlap_len={}, \
+                         device_blocks={:?}, block_ids={:?})",
+                        id,
+                        overlap_len,
+                        self.device_blocks,
+                        block_ids
+                    );
+                }
+                self.device_blocks.extend_from_slice(new_ids);
+            }
+
+            if overlap_len > 0 {
+                tracing::debug!(
+                    "DEDUP: suffix/prefix overlap of {} block_ids for req={}, extended with {} new",
+                    overlap_len,
+                    self.request_id,
+                    new_ids.len()
+                );
             }
         }
 
@@ -719,53 +774,19 @@ impl Slot for VllmConnectorSlot {
                 .copied()
                 .collect();
 
-            // Get candidate priorities from the priorities parameter.
-            // When priorities are provided, extract priorities for candidate blocks.
-            let candidate_priorities: Vec<u32> = if let Some(prios) = priorities {
-                let new_blocks_start = self.device_blocks.len() - block_ids.len();
-                let candidate_start = self.evaluated_blocks;
-
-                if candidate_start >= new_blocks_start {
-                    let prio_offset = candidate_start - new_blocks_start;
-                    debug_assert!(
-                        prio_offset + num_candidate_blocks <= prios.len(),
-                        "prio_offset ({}) + num_candidate_blocks ({}) > prios.len() ({}); \
-                         candidate_start={}, new_blocks_start={}, device_blocks.len()={}, block_ids.len()={}",
-                        prio_offset,
-                        num_candidate_blocks,
-                        prios.len(),
-                        candidate_start,
-                        new_blocks_start,
-                        self.device_blocks.len(),
-                        block_ids.len()
-                    );
-                    prios
-                        .iter()
-                        .skip(prio_offset)
-                        .take(num_candidate_blocks)
+            // Look up candidate priorities from stored_block_priorities.
+            // The HashMap is populated above (lines 700-706) for every block_id
+            // that arrives with priorities. This replaces fragile offset-based indexing
+            // that assumed block_ids was appended verbatim to device_blocks.
+            let candidate_priorities: Vec<u32> = candidate_block_ids
+                .iter()
+                .map(|id| {
+                    self.stored_block_priorities
+                        .get(id)
                         .copied()
-                        .collect()
-                } else if !self.stored_block_priorities.is_empty() {
-                    // Candidate blocks predate current block_ids (candidate_start < new_blocks_start).
-                    // In chunked prefill, chunk 2+ carries priorities only for its NEW blocks,
-                    // but candidates may include blocks from earlier chunks. Use stored priorities.
-                    candidate_block_ids
-                        .iter()
-                        .map(|id| self.stored_block_priorities.get(id).copied().unwrap_or(0))
-                        .collect()
-                } else {
-                    vec![0; num_candidate_blocks]
-                }
-            } else if !self.stored_block_priorities.is_empty() {
-                // priorities=None entirely (shouldn't happen in practice with TRT-LLM,
-                // but handle defensively).
-                candidate_block_ids
-                    .iter()
-                    .map(|id| self.stored_block_priorities.get(id).copied().unwrap_or(0))
-                    .collect()
-            } else {
-                vec![0; num_candidate_blocks]
-            };
+                        .unwrap_or(0)
+                })
+                .collect();
 
             assert_eq!(
                 candidate_block_ids.len(),
@@ -2092,5 +2113,159 @@ mod connector_tests {
         assert_eq!(offloads_2[0], vec![102, 103]); // blocks 2,3
 
         assert_eq!(slot.num_device_blocks_allocated(), 4);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 9: Partial overlap dedup — suffix/prefix contract
+    //         [10,11,12] + apply([12,13]) → [10,11,12,13]
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_partial_overlap_dedup() {
+        let num_tokens = 128; // 4 blocks
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        // Step 1: append_mutable with first 3 blocks
+        slot.append_mutable_device_blocks(&[10, 11, 12]).unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+
+        // Step 2: apply_scheduler_output with overlapping blocks [12, 13].
+        // Suffix [12] of device_blocks matches prefix [12] of block_ids.
+        // Only block 13 is new and gets appended.
+        slot.apply_scheduler_output(&[], &[12, 13], 0, 128, None)
+            .unwrap();
+
+        assert_eq!(slot.num_device_blocks_allocated(), 4);
+        assert_eq!(slot.device_blocks_snapshot(), &[10, 11, 12, 13]);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 10: Priorities work correctly with partial overlap dedup.
+    //          Chunk 1 provides priorities for blocks 10-12, chunk 2
+    //          overlaps on block 12 and adds block 13 with low priority.
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_partial_overlap_with_priorities() {
+        let num_tokens = 128; // 4 blocks
+        let (mut slot, mut rx) = create_test_slot(num_tokens, 30);
+
+        // Chunk 1: 3 blocks, all high priority, schedule 96 tokens
+        slot.append_mutable_device_blocks(&[10, 11, 12]).unwrap();
+        slot.apply_scheduler_output(&[], &[10, 11, 12], 0, 96, Some(&[80, 80, 80]))
+            .unwrap();
+
+        let offloads_1 = drain_offload_block_ids(&mut rx);
+        assert_eq!(offloads_1.len(), 1);
+        assert_eq!(offloads_1[0], vec![10, 11, 12]);
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+
+        // Chunk 2: block 13 is new. append_mutable adds it.
+        // apply receives [12, 13] with priorities [80, 10].
+        // Dedup: suffix [12] matches prefix [12], overlap=1, extends with [13].
+        // But block 13 was already added by append_mutable, so the new_ids
+        // validation would fail — unless append_mutable already put it there.
+        // Actually: append_mutable added 13, so device_blocks = [10,11,12,13].
+        // Then apply receives [12,13]: suffix [12,13] matches prefix [12,13], overlap=2.
+        // No new blocks to extend. Priorities {12->80, 13->10} stored in HashMap.
+        slot.append_mutable_device_blocks(&[13]).unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 4);
+
+        slot.apply_scheduler_output(&[], &[12, 13], 96, 32, Some(&[80, 10]))
+            .unwrap();
+
+        // Candidate is block 13 (index 3, evaluated_blocks=3).
+        // Priority for 13 = 10 (< threshold 30), so no offload.
+        let offloads_2 = drain_offload_block_ids(&mut rx);
+        assert!(
+            offloads_2.is_empty(),
+            "block 13 has priority 10 < threshold 30"
+        );
+        assert_eq!(slot.device_blocks_snapshot(), &[10, 11, 12, 13]);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 11: Invalid overlap panics — block present but not at tail
+    //          [10,11,12] + apply([11,14]) → panic (contract violation)
+    // ---------------------------------------------------------------
+    #[test]
+    #[should_panic(expected = "contract violation")]
+    fn test_invalid_overlap_panics() {
+        let num_tokens = 128;
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        slot.append_mutable_device_blocks(&[10, 11, 12]).unwrap();
+
+        // block_ids[0]=11 is found at device_blocks[1], but device_blocks[1..] = [11,12]
+        // does NOT match block_ids[..2] = [11,14]. Contract violation.
+        slot.apply_scheduler_output(&[], &[11, 14], 0, 128, None)
+            .unwrap();
+    }
+
+    // ---------------------------------------------------------------
+    // Test 12: Non-contiguous duplicate panics (Case 3)
+    //          [10,11,12,13,14] + apply([13,14,10]) → block 10 already
+    //          exists but is not part of the suffix/prefix overlap.
+    // ---------------------------------------------------------------
+    #[test]
+    #[should_panic(expected = "contract violation")]
+    fn test_non_contiguous_duplicate_panics() {
+        let num_tokens = 192; // 6 blocks
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        slot.append_mutable_device_blocks(&[10, 11, 12, 13, 14])
+            .unwrap();
+
+        // Overlap: suffix [13,14] matches prefix [13,14], overlap=2.
+        // new_ids = [10]. But 10 ∈ device_blocks → contract violation.
+        slot.apply_scheduler_output(&[], &[13, 14, 10], 0, 192, None)
+            .unwrap();
+    }
+
+    // ---------------------------------------------------------------
+    // Test 13: Over-provision — caller provides all blocks including
+    //          those already registered. Full prefix overlap.
+    //          [10,11,12] + apply([10,11,12,13,14]) → [10,11,12,13,14]
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_over_provision_dedup() {
+        let num_tokens = 160; // 5 blocks
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        slot.append_mutable_device_blocks(&[10, 11, 12]).unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 3);
+
+        // block_ids[0]=10 found at device_blocks[0], suffix_len=3.
+        // device_blocks[0..3]=[10,11,12] == block_ids[0..3]=[10,11,12] → overlap=3.
+        // new_ids=[13,14], both genuinely new → extend.
+        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14], 0, 160, None)
+            .unwrap();
+
+        assert_eq!(slot.num_device_blocks_allocated(), 5);
+        assert_eq!(slot.device_blocks_snapshot(), &[10, 11, 12, 13, 14]);
+    }
+
+    // ---------------------------------------------------------------
+    // Test 14: Chunked re-provision — all blocks re-sent in chunk 2
+    //          with additional new blocks appended.
+    //          [10,11,12,13,14] + apply([10,11,12,13,14,15,16])
+    //          → [10,11,12,13,14,15,16]
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_chunked_reprovision_dedup() {
+        let num_tokens = 224; // 7 blocks
+        let (mut slot, _rx) = create_test_slot(num_tokens, 0);
+
+        slot.append_mutable_device_blocks(&[10, 11, 12, 13, 14])
+            .unwrap();
+        assert_eq!(slot.num_device_blocks_allocated(), 5);
+
+        // Full overlap of all 5 existing blocks, plus 2 new.
+        slot.apply_scheduler_output(&[], &[10, 11, 12, 13, 14, 15, 16], 0, 224, None)
+            .unwrap();
+
+        assert_eq!(slot.num_device_blocks_allocated(), 7);
+        assert_eq!(
+            slot.device_blocks_snapshot(),
+            &[10, 11, 12, 13, 14, 15, 16]
+        );
     }
 }
