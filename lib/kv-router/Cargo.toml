@@ -12,12 +12,12 @@ repository.workspace = true
 
 [features]
 default = []
-metrics = ["dep:dynamo-runtime"]
+metrics = []
 bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:uuid", "dep:plotters"]
 
 [dependencies]
 # repo
-dynamo-runtime = { workspace = true, optional = true }
+dynamo-runtime = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
