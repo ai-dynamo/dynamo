@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 import torch
 
@@ -669,11 +668,11 @@ class TestVideoHandlerResponseFormats:
 
     def _make_handler(self):
         """Create a handler with mocked engine and fs."""
+        from types import SimpleNamespace
+
         from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
             VideoGenerationHandler,
         )
-
-        from types import SimpleNamespace
 
         mock_output = SimpleNamespace(
             video=torch.zeros((4, 64, 64, 3), dtype=torch.uint8),
