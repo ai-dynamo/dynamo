@@ -196,7 +196,7 @@ def update_dynamo_config_with_engine(
     )
     if dynamo_config.is_prefill_worker and not has_kv_transfer_config:
         raise ValueError(
-            "The default connector is no longer nixl. "
+            "--connector is deprecated and the default is no longer nixl. "
             "When using --is-prefill-worker, you must explicitly provide "
             "--kv-transfer-config. Example:\n"
             "  --kv-transfer-config "
