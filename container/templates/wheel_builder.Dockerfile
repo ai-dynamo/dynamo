@@ -7,21 +7,21 @@
 ##### Wheel Build Image ##########
 ##################################
 
-# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
-ARG ARCH_ALT
-
-FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
+FROM ${WHEEL_BUILDER_IMAGE} AS wheel_builder
 
 # Redeclare ARGs for this stage
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
+ARG DEVICE
 
 WORKDIR /workspace
 
+{% if device == "cuda" %}
 # Copy CUDA from base stage
 COPY --from=dynamo_base /usr/local/cuda /usr/local/cuda
 COPY --from=dynamo_base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
+{% endif %}
 
 # Set environment variables first so they can be used in COPY commands
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
@@ -34,6 +34,68 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 
+{% if device == "xpu" %}
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics
+
+RUN wget https://raw.githubusercontent.com/intel/llm-scaler/main/vllm/patches/ai-dynamo-xpu/patches/ucx.patch -O /tmp/ucx.patch
+
+RUN apt clean && apt-get update -y && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    curl \
+    ffmpeg \
+    git \
+    libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    lsb-release \
+    libaio-dev \
+    numactl \
+    wget \
+    vim \
+    linux-libc-dev && \
+    # Install Intel GPU runtime packages
+    apt update -y && apt upgrade -y && \
+    apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd  \
+    libze-intel-gpu-raytracing intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # NIXL build dependencies
+        autoconf \
+        automake \
+        cmake \
+        git \
+        git-lfs \
+        libtool \
+        meson \
+        net-tools \
+        ninja-build \
+        pybind11-dev \
+        # Rust build dependencies
+        clang \
+        libclang-dev \
+        protobuf-compiler \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends \
+        libibverbs-dev \
+        rdma-core \
+        ibverbs-utils \
+        libibumad-dev \
+        libnuma-dev \
+        librdmacm-dev \
+        ibverbs-providers \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+{% endif %}
+
+{% if device == "cuda" %}
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
@@ -84,7 +146,7 @@ ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
     LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
     CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
     CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
-
+{% endif %}
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -104,10 +166,14 @@ RUN set -eux; \
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
 
+{% if device == "xpu" %}
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+{% else %}
 ENV CUDA_PATH=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
 
 # Create virtual environment for building wheels
 ARG PYTHON_VERSION
@@ -120,6 +186,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 ARG NIXL_UCX_REF
 ARG NIXL_REF
+
+{% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF
 
 # Build and install gdrcopy
@@ -129,6 +197,7 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
     rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
+{% endif %}
 
 # sccache binary is pre-installed in dynamo_base; stage it off-PATH so
 # Meson doesn't auto-detect it as a CUDA compiler launcher
@@ -150,6 +219,7 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
+{% if device == "cuda" %}
 # Always build FFmpeg so libs are available for Rust checks in CI
 # Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION
@@ -186,6 +256,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     ldconfig && \
     mkdir -p /usr/local/src/ffmpeg && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
+{% endif %}
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -195,11 +266,30 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-     git clone https://github.com/openucx/ucx.git && \
-     cd ucx && 			     \
-     git checkout $NIXL_UCX_REF &&	 \
-     ./autogen.sh &&      \
-     ./contrib/configure-release    \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx &&  \
+    git checkout $NIXL_UCX_REF &&	 \
+    if [ "$DEVICE" = "xpu" ]; then \
+    git apply --ignore-whitespace /tmp/ucx.patch; \
+    fi && \
+    ./autogen.sh &&      \
+    if [ "$DEVICE" = "xpu" ]; then \
+     ./contrib/configure-release     \
+        --prefix=/usr/local/ucx     \
+        --with-ze                   \
+        --enable-shared             \
+        --disable-static            \
+        --disable-doxygen-doc       \
+        --enable-optimizations      \
+        --enable-cma                \
+        --enable-devel-headers      \
+        --with-verbs                \
+        --with-dm                   \
+        --with-efa                  \
+        --without-cuda              \
+        --enable-mt;                 \
+    elif [ "$DEVICE" = "cuda" ]; then \
+     ./contrib/configure-release     \
         --prefix=/usr/local/ucx     \
         --enable-shared             \
         --disable-static            \
@@ -212,7 +302,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         --with-dm                   \
         --with-gdrcopy=/usr/local   \
         --with-efa                  \
-        --enable-mt &&              \
+        --enable-mt;                 \
+     fi && \
      make -j &&                      \
      make -j install-strip &&        \
      /tmp/use-sccache.sh show-stats "UCX" && \
@@ -220,6 +311,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
+{% if device == "cuda" %}
 ARG NIXL_LIBFABRIC_REF
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -248,8 +340,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
     echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
     ldconfig
+{% endif %}
 
-{% if framework == "vllm" %}
+{% if framework == "vllm" and device == "cuda" %}
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
 ARG AWS_SDK_CPP_VERSION=1.11.581
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -277,7 +370,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 {% endif %}
 
 # build and install nixl
+{% if device == "cuda" %}
 ARG CUDA_MAJOR
+{% endif %}
+
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
@@ -288,22 +384,38 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
     git checkout ${NIXL_REF} && \
-    PKG_NAME="nixl-cu${CUDA_MAJOR}" && \
+    if [ "$DEVICE" = "cuda" ]; then \
+        PKG_NAME="nixl-cu${CUDA_MAJOR}"; \
+    elif [ "$DEVICE" = "xpu" ]; then \
+        PKG_NAME="nixl-xpu"; \
+    fi && \
     ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
-    meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
-    -Dcudapath_lib="/usr/local/cuda/lib64" \
-    -Dcudapath_inc="/usr/local/cuda/include" \
-    -Ducx_path="/usr/local/ucx" \
-    -Dlibfabric_path="/usr/local/libfabric" && \
+    if [ "$DEVICE" = "cuda" ]; then \
+        meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
+            -Dcudapath_lib="/usr/local/cuda/lib64" \
+            -Dcudapath_inc="/usr/local/cuda/include" \
+            -Ducx_path="/usr/local/ucx" \
+            -Dlibfabric_path="/usr/local/libfabric"; \
+    elif [ "$DEVICE" = "xpu" ]; then \
+        meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
+            -Ducx_path="/usr/local/ucx"; \
+    fi && \
     cd build && \
     ninja && \
     ninja install && \
     /tmp/use-sccache.sh show-stats "NIXL"
 
+{% if device == "xpu" %}
+ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib64  \
+    NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib64/plugins \
+    NIXL_PREFIX=/opt/intel/intel_nixl
+{% else %}
 ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64  \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
     NIXL_PREFIX=/opt/nvidia/nvda_nixl
+{% endif %}
+
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
 
 RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
@@ -349,20 +461,23 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
-    if [ "$ENABLE_KVBM" == "true" ]; then \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
-        auditwheel repair \
-            --exclude libnixl.so \
-            --exclude libnixl_build.so \
-            --exclude libnixl_common.so \
-            --exclude 'lib*.so*' \
-            --plat manylinux_2_28_${ARCH_ALT} \
-            --wheel-dir /opt/dynamo/dist \
-            target/wheels/*.whl; \
+        if [ "$DEVICE" = "cuda" ]; then \
+            auditwheel repair \
+                --exclude libnixl.so \
+                --exclude libnixl_build.so \
+                --exclude libnixl_common.so \
+                --exclude 'lib*.so*' \
+                --plat manylinux_2_28_${ARCH_ALT} \
+                --wheel-dir /opt/dynamo/dist \
+                target/wheels/*.whl; \
+        elif [ "$DEVICE" = "xpu" ]; then \
+            cp target/wheels/*.whl /opt/dynamo/dist/; \
+        fi; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
-
 
 # Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
 ARG ENABLE_GPU_MEMORY_SERVICE

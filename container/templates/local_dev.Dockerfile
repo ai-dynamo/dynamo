@@ -15,6 +15,7 @@ FROM aws AS local-dev
 ENV USERNAME=dynamo
 ARG USER_UID
 ARG USER_GID
+ARG DEVICE
 
 # Copy rustup home into a writable per-user location so sanity_check passes.
 # (dev target already has rustup/cargo/maturin from concatenated wheel_builder/dynamo_base)

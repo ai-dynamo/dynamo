@@ -21,6 +21,15 @@ def parse_args():
         choices=["dynamo", "vllm", "sglang", "trtllm"],
         help="Dockerfile framework to use",
     )
+
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "xpu"],
+        help="Dockerfile device to use",
+    )
+
     parser.add_argument(
         "--target",
         type=str,
@@ -58,6 +67,7 @@ def parse_args():
 def validate_args(args):
     valid_inputs = {
         "vllm": {
+            "device": ["cuda", "xpu"],
             "target": [
                 "runtime",
                 "dev",
@@ -69,6 +79,7 @@ def validate_args(args):
             "cuda_version": ["12.9", "13.0"],
         },
         "trtllm": {
+            "device": ["cuda"],
             "target": [
                 "runtime",
                 "dev",
@@ -80,6 +91,7 @@ def validate_args(args):
             "cuda_version": ["13.1"],
         },
         "sglang": {
+            "device": ["cuda"],
             "target": [
                 "runtime",
                 "dev",
@@ -90,6 +102,7 @@ def validate_args(args):
             "cuda_version": ["12.9", "13.0"],
         },
         "dynamo": {
+            "device": ["cuda"],
             "target": [
                 "runtime",
                 "dev",
@@ -106,8 +119,10 @@ def validate_args(args):
         if (
             args.target in valid_inputs[args.framework]["target"]
             and args.cuda_version in valid_inputs[args.framework]["cuda_version"]
+            and args.device in valid_inputs[args.framework]["device"]
         ):
             return
+
         raise ValueError(
             f"Invalid input combination: [framework={args.framework},target={args.target},cuda_version={args.cuda_version}]"
         )
@@ -128,6 +143,7 @@ def render(args, context, script_dir):
     rendered = template.render(
         context=context,
         framework=args.framework,
+        device=args.device,
         target=args.target,
         platform=args.platform,
         cuda_version=args.cuda_version,
@@ -139,7 +155,7 @@ def render(args, context, script_dir):
     if args.output_short_filename:
         filename = "rendered.Dockerfile"
     else:
-        filename = f"{args.framework}-{args.target}-cuda{args.cuda_version}-{args.platform}-rendered.Dockerfile"
+        filename = f"{args.framework}-{args.target}-{args.device}{args.cuda_version}-{args.platform}-rendered.Dockerfile"
 
     with open(f"{script_dir}/{filename}", "w") as f:
         f.write(cleaned)
@@ -159,6 +175,9 @@ def render(args, context, script_dir):
 def main():
     args = parse_args()
     validate_args(args)
+    # Clear cuda version for non-cuda device
+    if args.device != "cuda":
+        args.cuda_version = ""
     script_dir = Path(__file__).parent
     with open(f"{script_dir}/context.yaml", "r") as f:
         context = yaml.safe_load(f)

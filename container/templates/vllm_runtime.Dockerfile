@@ -24,6 +24,7 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+ARG DEVICE
 WORKDIR /workspace
 ENV DYNAMO_HOME=/opt/dynamo
 ENV VIRTUAL_ENV=/opt/dynamo/venv
