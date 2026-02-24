@@ -491,7 +491,7 @@ impl ModelWatcher {
                         self.router_config.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
-                        self.router_config.enforce_disagg,
+                        self.router_config.decode_fallback,
                         model_name.clone(),
                         namespace.clone(),
                     )
@@ -536,7 +536,7 @@ impl ModelWatcher {
                         kv_chooser.clone(),
                         tokenizer_hf.clone(),
                         prefill_chooser.clone(),
-                        self.router_config.enforce_disagg,
+                        self.router_config.decode_fallback,
                         self.migration_limit,
                         self.metrics.clone(),
                     )
@@ -570,7 +570,7 @@ impl ModelWatcher {
                     preprocessor,
                     tokenizer_hf,
                     prefill_chooser,
-                    self.router_config.enforce_disagg,
+                    self.router_config.decode_fallback,
                     self.migration_limit,
                     self.metrics.clone(),
                 )
