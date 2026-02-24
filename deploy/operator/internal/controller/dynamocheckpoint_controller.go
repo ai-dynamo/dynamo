@@ -58,7 +58,7 @@ func (r *CheckpointReconciler) getCheckpointLocation(identityHash string) string
 
 // Helper function to get checkpoint storage type from operator config
 func (r *CheckpointReconciler) getCheckpointStorageType() nvidiacomv1alpha1.DynamoCheckpointStorageType {
-	return nvidiacomv1alpha1.DynamoCheckpointStorageType(configv1alpha1.CheckpointStorageTypePVC)
+	return nvidiacomv1alpha1.DynamoCheckpointStorageType(r.Config.Checkpoint.Storage.Type)
 }
 
 // GetRecorder returns the event recorder (implements controller_common.Reconciler interface)
