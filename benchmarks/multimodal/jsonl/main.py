@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate a .jsonl benchmark file for aiperf (single-turn, text + images).
 
 Images are drawn from a fixed pool; a smaller pool produces more cross-request
