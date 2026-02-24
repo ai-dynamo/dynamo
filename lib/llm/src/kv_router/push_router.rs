@@ -262,7 +262,7 @@ impl KvPushRouter {
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
-            .get_overlap_blocks(routing_token_ids, worker)
+            .get_overlap_blocks(routing_token_ids, worker, lora_name.as_deref())
             .await?;
 
         if !is_query_only {
