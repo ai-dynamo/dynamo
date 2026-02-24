@@ -778,9 +778,10 @@ mod tests {
             }
         }
 
-        // 4th response should be an error after retries are exhausted
+        // 4th response should be a Disconnected error after retries are exhausted
         let error_response = &responses[3];
-        assert!(error_response.err().is_some());
+        let err = error_response.err().expect("expected error response");
+        assert_eq!(err.error_type(), ErrorType::Disconnected);
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3); // 2 retries + 1 final failure
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1); // initial ongoing failure retry
@@ -835,9 +836,10 @@ mod tests {
             }
         }
 
-        // 4th response should be an error after retries are exhausted
+        // 4th response should be a Disconnected error after retries are exhausted
         let error_response = &responses[3];
-        assert!(error_response.err().is_some());
+        let err = error_response.err().expect("expected error response");
+        assert_eq!(err.error_type(), ErrorType::Disconnected);
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 4); // 3 retries + 1 final failure
