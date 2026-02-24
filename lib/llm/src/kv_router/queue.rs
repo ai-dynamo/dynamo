@@ -102,7 +102,7 @@ impl SchedulerQueue {
             return;
         };
 
-        if self.all_workers_busy(threshold).await {
+        if self.all_workers_busy(threshold) {
             tracing::debug!("all workers busy, queueing request");
             let entry = self.make_entry(request);
             self.pending.lock().await.push(entry);
@@ -128,7 +128,7 @@ impl SchedulerQueue {
             if self.pending.lock().await.is_empty() {
                 break;
             }
-            if self.all_workers_busy(threshold).await {
+            if self.all_workers_busy(threshold) {
                 break;
             }
             let entry = self.pending.lock().await.pop();
@@ -147,8 +147,8 @@ impl SchedulerQueue {
 
     /// Check if all workers are busy based on threshold.
     /// Returns true only if ALL workers exceed the threshold (no worker has capacity).
-    async fn all_workers_busy(&self, threshold: f64) -> bool {
-        let active_tokens = self.slots.active_tokens().await;
+    fn all_workers_busy(&self, threshold: f64) -> bool {
+        let active_tokens = self.slots.active_tokens();
         let configs = self.workers_with_configs.borrow();
 
         for (&worker_id, config) in configs.iter() {

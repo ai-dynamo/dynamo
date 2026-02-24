@@ -816,7 +816,7 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Query all workers for the number of new blocks that would be added by a token sequence
-    pub async fn new_blocks(
+    pub fn new_blocks(
         &self,
         token_sequence: Vec<SequenceHash>,
     ) -> HashMap<WorkerWithDpRank, usize> {
@@ -828,7 +828,7 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Query all workers for the total number of blocks (new + active) that would be used by a token sequence
-    pub async fn potential_blocks(
+    pub fn potential_blocks(
         &self,
         token_sequence: Vec<SequenceHash>,
     ) -> HashMap<WorkerWithDpRank, usize> {
@@ -843,7 +843,7 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Query all workers for the potential blocks and tokens
-    pub async fn potential_blocks_and_tokens(
+    pub fn potential_blocks_and_tokens(
         &self,
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
@@ -886,7 +886,7 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Query all workers for their current number of active blocks
-    pub async fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
+    pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
         let mut results = HashMap::new();
         for entry in self.workers.iter() {
             results.insert(*entry.key(), entry.value().active_blocks());
@@ -895,7 +895,7 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Query all workers for their current number of active tokens
-    pub async fn active_tokens(&self) -> HashMap<WorkerWithDpRank, usize> {
+    pub fn active_tokens(&self) -> HashMap<WorkerWithDpRank, usize> {
         let mut results = HashMap::new();
         for entry in self.workers.iter() {
             results.insert(*entry.key(), entry.value().active_tokens());
@@ -1052,8 +1052,8 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         // Query seq_manager_1 to verify it sees all requests including request_2 from seq_manager_2
-        let blocks_phase1 = seq_manager_1.active_blocks().await;
-        let tokens_phase1 = seq_manager_1.active_tokens().await;
+        let blocks_phase1 = seq_manager_1.active_blocks();
+        let tokens_phase1 = seq_manager_1.active_tokens();
 
         // Verify that seq_manager_1 sees all requests including request_2 from seq_manager_2
         // We now have:
@@ -1102,8 +1102,8 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         // Query seq_manager_2 to verify everything is empty
-        let blocks_phase2 = seq_manager_2.active_blocks().await;
-        let tokens_phase2 = seq_manager_2.active_tokens().await;
+        let blocks_phase2 = seq_manager_2.active_blocks();
+        let tokens_phase2 = seq_manager_2.active_tokens();
 
         // Verify phase 2 results - everything should be empty for all 3 workers
         let all_workers = vec![
@@ -1231,7 +1231,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         // Query seq_manager_1 to verify it sees all requests including request_2 from seq_manager_2
-        let tokens_phase1 = seq_manager_1.active_tokens().await;
+        let tokens_phase1 = seq_manager_1.active_tokens();
 
         // Verify that seq_manager_1 sees all requests including request_2 from thread 2
         let worker_0 = WorkerWithDpRank::from_worker_id(0);
@@ -1273,7 +1273,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         // Query seq_manager_2 to verify everything is empty
-        let tokens_phase2 = seq_manager_2.active_tokens().await;
+        let tokens_phase2 = seq_manager_2.active_tokens();
 
         // Verify phase 2 results - everything should be empty
         for worker_id in 0..=2 {

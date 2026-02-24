@@ -202,8 +202,7 @@ impl KvScheduler {
                             request.token_seq.clone(),
                             request.isl_tokens,
                             request.overlaps.clone(),
-                        )
-                        .await;
+                        );
                     request.decode_blocks = decode_blocks;
                     request.prefill_tokens = prefill_tokens;
 
@@ -363,8 +362,7 @@ impl KvScheduler {
     ) -> Vec<PotentialLoad> {
         let (decode_blocks, prefill_tokens) = self
             .slots
-            .potential_blocks_and_tokens(token_seq, isl_tokens, overlaps)
-            .await;
+            .potential_blocks_and_tokens(token_seq, isl_tokens, overlaps);
 
         // Get all unique WorkerWithDpRank from both hashmaps
         let mut workers: HashSet<WorkerWithDpRank> = HashSet::new();
