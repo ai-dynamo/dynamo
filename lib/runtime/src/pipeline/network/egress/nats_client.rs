@@ -51,11 +51,13 @@ impl RequestPlaneClient for NatsRequestClient {
             .request_with_headers(address.clone(), nats_headers, payload)
             .await
             .map_err(|e| {
-                anyhow::anyhow!(DynamoError::new(
-                    ErrorType::CannotConnect,
-                    format!("NATS request to {address} failed"),
-                    Some(e),
-                ))
+                anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!("NATS request to {address} failed"))
+                        .cause(e)
+                        .build()
+                )
             })?;
 
         Ok(response.payload)

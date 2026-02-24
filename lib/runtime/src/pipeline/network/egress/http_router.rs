@@ -180,11 +180,13 @@ impl RequestPlaneClient for HttpRequestClient {
         }
 
         let response = req.send().await.map_err(|e| {
-            anyhow::anyhow!(crate::error::DynamoError::new(
-                crate::error::ErrorType::CannotConnect,
-                format!("HTTP request to {address} failed"),
-                Some(e),
-            ))
+            anyhow::anyhow!(
+                crate::error::DynamoError::builder()
+                    .error_type(crate::error::ErrorType::CannotConnect)
+                    .message(format!("HTTP request to {address} failed"))
+                    .cause(e)
+                    .build()
+            )
         })?;
 
         if !response.status().is_success() {

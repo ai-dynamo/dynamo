@@ -249,13 +249,12 @@ where
                                     e
                                 ))
                             }
-                            ResponseProcessingError::PyGeneratorExit(_) => {
-                                Annotated::from_err(DynamoError::new(
-                                    ErrorType::Backend(BackendError::EngineShutdown),
-                                    "engine shutting down",
-                                    None::<DynamoError>,
-                                ))
-                            }
+                            ResponseProcessingError::PyGeneratorExit(_) => Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                                    .message("engine shutting down")
+                                    .build(),
+                            ),
                             ResponseProcessingError::PythonException(e) => {
                                 Annotated::from_error(format!(
                                     "a python exception was caught while processing the async generator: {}",

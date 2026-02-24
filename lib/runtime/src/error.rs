@@ -21,7 +21,11 @@
 //!
 //! // Typed error with cause
 //! let cause = std::io::Error::other("io error");
-//! let err = DynamoError::new(ErrorType::Unknown, "operation failed", Some(cause));
+//! let err = DynamoError::builder()
+//!     .error_type(ErrorType::Unknown)
+//!     .message("operation failed")
+//!     .cause(cause)
+//!     .build();
 //!
 //! // Convert from any std::error::Error
 //! let std_err = std::io::Error::other("io error");
@@ -138,30 +142,14 @@ pub struct DynamoError {
 }
 
 impl DynamoError {
-    /// Create a new DynamoError with the given type, message, and optional cause.
-    ///
-    /// If the cause is a `DynamoError`, it is preserved as-is. Otherwise, it is
-    /// converted to a `DynamoError` with `ErrorType::Unknown`.
-    pub fn new(
-        error_type: ErrorType,
-        message: impl Into<String>,
-        cause: Option<impl std::error::Error + 'static>,
-    ) -> Self {
-        Self {
-            error_type,
-            message: message.into(),
-            caused_by: cause
-                .map(|e| Box::new(DynamoError::from(&e as &(dyn std::error::Error + 'static)))),
-        }
+    /// Create a builder for constructing a `DynamoError`.
+    pub fn builder() -> DynamoErrorBuilder {
+        DynamoErrorBuilder::default()
     }
 
     /// Shorthand to create an `Unknown` error with just a message and no cause.
     pub fn msg(message: impl Into<String>) -> Self {
-        Self {
-            error_type: ErrorType::Unknown,
-            message: message.into(),
-            caused_by: None,
-        }
+        Self::builder().message(message).build()
     }
 
     /// Returns the error type.
@@ -222,6 +210,63 @@ impl From<Box<dyn std::error::Error + 'static>> for DynamoError {
 }
 
 // ============================================================================
+// DynamoErrorBuilder
+// ============================================================================
+
+/// Builder for constructing a [`DynamoError`].
+///
+/// # Example
+/// ```rust,ignore
+/// let err = DynamoError::builder()
+///     .error_type(ErrorType::Disconnected)
+///     .message("worker lost")
+///     .cause(some_io_error)
+///     .build();
+/// ```
+#[derive(Default)]
+pub struct DynamoErrorBuilder {
+    error_type: Option<ErrorType>,
+    message: Option<String>,
+    caused_by: Option<Box<DynamoError>>,
+}
+
+impl DynamoErrorBuilder {
+    /// Set the error type.
+    pub fn error_type(mut self, error_type: ErrorType) -> Self {
+        self.error_type = Some(error_type);
+        self
+    }
+
+    /// Set the error message.
+    pub fn message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
+        self
+    }
+
+    /// Set the cause from any `std::error::Error`.
+    ///
+    /// If the cause is already a `DynamoError`, it is preserved as-is.
+    /// Otherwise, it is converted to a `DynamoError` with `ErrorType::Unknown`.
+    pub fn cause(mut self, cause: impl std::error::Error + 'static) -> Self {
+        self.caused_by = Some(Box::new(DynamoError::from(
+            &cause as &(dyn std::error::Error + 'static),
+        )));
+        self
+    }
+
+    /// Build the `DynamoError`.
+    ///
+    /// Defaults: `error_type` → `Unknown`, `message` → `""`, `cause` → `None`.
+    pub fn build(self) -> DynamoError {
+        DynamoError {
+            error_type: self.error_type.unwrap_or(ErrorType::Unknown),
+            message: self.message.unwrap_or_default(),
+            caused_by: self.caused_by,
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -256,7 +301,11 @@ mod tests {
     #[test]
     fn test_new_constructor_with_cause() {
         let cause = std::io::Error::other("io error");
-        let err = DynamoError::new(ErrorType::Unknown, "operation failed", Some(cause));
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Unknown)
+            .message("operation failed")
+            .cause(cause)
+            .build();
 
         assert_eq!(err.error_type(), ErrorType::Unknown);
         assert_eq!(err.message(), "operation failed");
@@ -266,7 +315,11 @@ mod tests {
     #[test]
     fn test_display_shows_only_current_error() {
         let cause = std::io::Error::other("io error");
-        let err = DynamoError::new(ErrorType::Unknown, "operation failed", Some(cause));
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Unknown)
+            .message("operation failed")
+            .cause(cause)
+            .build();
 
         // Display should only show the current error, not the chain
         assert_eq!(err.to_string(), "Unknown: operation failed");
@@ -275,7 +328,11 @@ mod tests {
     #[test]
     fn test_source_chain() {
         let cause = std::io::Error::other("io error");
-        let err = DynamoError::new(ErrorType::Unknown, "operation failed", Some(cause));
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Unknown)
+            .message("operation failed")
+            .cause(cause)
+            .build();
 
         // source() should return the cause
         let source = err.source().unwrap();
@@ -337,7 +394,11 @@ mod tests {
     #[test]
     fn test_serialization_roundtrip() {
         let cause = DynamoError::msg("inner cause");
-        let err = DynamoError::new(ErrorType::Unknown, "outer error", Some(cause));
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Unknown)
+            .message("outer error")
+            .cause(cause)
+            .build();
 
         let json = serde_json::to_string(&err).unwrap();
         let deserialized: DynamoError = serde_json::from_str(&json).unwrap();

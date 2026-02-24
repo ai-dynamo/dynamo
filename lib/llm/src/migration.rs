@@ -353,11 +353,12 @@ mod tests {
                 MockBehavior::FailThenSuccess => {
                     if call_num == 0 {
                         // First call - return "No responders available" error to trigger retry
-                        return Err(anyhow::anyhow!(DynamoError::new(
-                            ErrorType::CannotConnect,
-                            "no responders",
-                            None::<DynamoError>,
-                        )));
+                        return Err(anyhow::anyhow!(
+                            DynamoError::builder()
+                                .error_type(ErrorType::CannotConnect)
+                                .message("no responders")
+                                .build()
+                        ));
                     } else {
                         // Subsequent calls - succeed with remaining responses
                         self.send_responses(responses_already_generated, self.num_responses)
@@ -381,11 +382,12 @@ mod tests {
                                 }
                             }
                             // Send the specific error that triggers retry logic
-                            let error_response = Annotated::from_err(DynamoError::new(
-                                ErrorType::Disconnected,
-                                "Stream ended before generation completed",
-                                None::<DynamoError>,
-                            ));
+                            let error_response = Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Disconnected)
+                                    .message("Stream ended before generation completed")
+                                    .build(),
+                            );
                             let _ = tx.send(error_response).await;
                         });
                     } else {
@@ -424,11 +426,12 @@ mod tests {
                                 }
                             }
                             // Send the specific error that triggers retry logic
-                            let error_response = Annotated::from_err(DynamoError::new(
-                                ErrorType::Disconnected,
-                                "Stream ended before generation completed",
-                                None::<DynamoError>,
-                            ));
+                            let error_response = Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Disconnected)
+                                    .message("Stream ended before generation completed")
+                                    .build(),
+                            );
                             let _ = tx.send(error_response).await;
                         });
 
@@ -440,11 +443,12 @@ mod tests {
                         ))
                     } else {
                         // Subsequent calls - always fail with NoResponders error (same as AlwaysFail)
-                        Err(anyhow::anyhow!(DynamoError::new(
-                            ErrorType::CannotConnect,
-                            "no responders",
-                            None::<DynamoError>,
-                        )))
+                        Err(anyhow::anyhow!(
+                            DynamoError::builder()
+                                .error_type(ErrorType::CannotConnect)
+                                .message("no responders")
+                                .build()
+                        ))
                     }
                 }
                 MockBehavior::MidStreamFailAlwaysStreamError { fail_after } => {
@@ -464,11 +468,12 @@ mod tests {
                                 }
                             }
                             // Send the specific error that triggers retry logic
-                            let error_response = Annotated::from_err(DynamoError::new(
-                                ErrorType::Disconnected,
-                                "Stream ended before generation completed",
-                                None::<DynamoError>,
-                            ));
+                            let error_response = Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Disconnected)
+                                    .message("Stream ended before generation completed")
+                                    .build(),
+                            );
                             let _ = tx.send(error_response).await;
                         });
 
@@ -482,11 +487,12 @@ mod tests {
                         // Subsequent calls - immediately send stream error (no successful responses)
                         tokio::spawn(async move {
                             // Send the stream error immediately
-                            let error_response = Annotated::from_err(DynamoError::new(
-                                ErrorType::Disconnected,
-                                "Stream ended before generation completed",
-                                None::<DynamoError>,
-                            ));
+                            let error_response = Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Disconnected)
+                                    .message("Stream ended before generation completed")
+                                    .build(),
+                            );
                             let _ = tx.send(error_response).await;
                         });
 
@@ -500,11 +506,12 @@ mod tests {
                 }
                 MockBehavior::AlwaysFail => {
                     // Always fail with NoResponders error (same as FailThenSuccess first call)
-                    Err(anyhow::anyhow!(DynamoError::new(
-                        ErrorType::CannotConnect,
-                        "no responders",
-                        None::<DynamoError>,
-                    )))
+                    Err(anyhow::anyhow!(
+                        DynamoError::builder()
+                            .error_type(ErrorType::CannotConnect)
+                            .message("no responders")
+                            .build()
+                    ))
                 }
             }
         }

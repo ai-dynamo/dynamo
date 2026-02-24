@@ -225,11 +225,10 @@ where
                 None
             } else {
                 // stream ended unexpectedly
-                let err = DynamoError::new(
-                    ErrorType::Disconnected,
-                    "Stream ended before generation completed",
-                    None::<DynamoError>,
-                );
+                let err = DynamoError::builder()
+                    .error_type(ErrorType::Disconnected)
+                    .message("Stream ended before generation completed")
+                    .build();
                 tracing::debug!("{}", err);
                 Some(U::from_err(err))
             }
