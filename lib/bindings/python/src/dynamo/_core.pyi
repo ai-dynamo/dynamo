@@ -945,7 +945,7 @@ class RouterConfig:
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
-        enforce_disagg: bool = False,
+        enforce_disagg: bool = True,
     ) -> None:
         """
         Create a RouterConfig.

@@ -207,7 +207,7 @@ var (
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
-	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
+	ffiEnforceDisagg = !getEnvBoolOrDefault("DYN_DECODE_FALLBACK", false)
 	// Note: model name and kv_cache_block_size are now auto-discovered from the model card
 	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, enforce_disagg=%v\n",
 		ffiNamespace, ffiComponent, ffiEnforceDisagg)

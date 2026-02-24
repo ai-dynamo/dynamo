@@ -560,7 +560,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `enforce_disagg`: If true, disaggregated mode is required (fails if no prefill workers found)
+/// - `enforce_disagg`: If true (default), disaggregated mode is required (fails if no prefill workers found)
 /// - `out_handle`: Output handle
 ///
 /// # Safety

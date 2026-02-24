@@ -31,7 +31,7 @@ pub type ChatEngineFactoryCallback = Arc<
         + Sync,
 >;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
@@ -40,13 +40,24 @@ pub struct RouterConfig {
     pub enforce_disagg: bool,
 }
 
+impl Default for RouterConfig {
+    fn default() -> Self {
+        Self {
+            router_mode: RouterMode::default(),
+            kv_router_config: KvRouterConfig::default(),
+            load_threshold_config: LoadThresholdConfig::default(),
+            enforce_disagg: true,
+        }
+    }
+}
+
 impl RouterConfig {
     pub fn new(router_mode: RouterMode, kv_router_config: KvRouterConfig) -> Self {
         Self {
             router_mode,
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
-            enforce_disagg: false,
+            enforce_disagg: true,
         }
     }
 
