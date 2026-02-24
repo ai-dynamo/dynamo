@@ -39,7 +39,7 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.Server.HealthProbe.Port = 8081
 	}
 	if obj.Server.HealthProbe.BindAddress == "" {
-		obj.Server.HealthProbe.BindAddress = "127.0.0.1"
+		obj.Server.HealthProbe.BindAddress = "0.0.0.0"
 	}
 	if obj.Server.Webhook.Host == "" {
 		obj.Server.Webhook.Host = "0.0.0.0"

@@ -80,7 +80,7 @@ type ServerConfiguration struct {
 	// +kubebuilder:default={bindAddress: "127.0.0.1", port: 8080}
 	Metrics MetricsServer `json:"metrics"`
 	// Health probe server configuration
-	// +kubebuilder:default={bindAddress: "127.0.0.1", port: 8081}
+	// +kubebuilder:default={bindAddress: "0.0.0.0", port: 8081}
 	HealthProbe Server `json:"healthProbe"`
 	// Webhook server configuration
 	// +kubebuilder:default={host: "0.0.0.0", port: 9443, certDir: "/tmp/k8s-webhook-server/serving-certs"}
