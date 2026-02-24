@@ -402,6 +402,16 @@ async def parse_args(args: list[str]) -> Config:
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None
 
+    # SGLang's DLLM scheduler reads server_args.max_running_requests directly
+    # but the field stays None until the normal scheduler init sets it from
+    # tp_worker.get_worker_info(). Set a safe default so the DLLM mixin
+    # doesn't crash on `None - int`.
+    if diffusion_worker and server_args.max_running_requests is None:
+        server_args.max_running_requests = 8
+        logging.info(
+            "Defaulting max_running_requests to 8 for diffusion worker"
+        )
+
     dynamo_config.namespace = parsed_namespace
     dynamo_config.component = parsed_component_name
     dynamo_config.endpoint = parsed_endpoint_name
