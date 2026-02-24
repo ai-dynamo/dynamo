@@ -263,6 +263,12 @@ The `router_temperature` parameter controls routing randomness:
    - To reduce ITL: Decrease the weight
 4. If you observe severe load imbalance, increase the temperature setting
 
+## Prometheus Metrics
+
+The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`. All router metrics require `--router-mode kv` and will not appear when using `round-robin` or `random` routing.
+
+For the full list of router metrics (`dynamo_router_*`, `dynamo_router_overhead_*`, per-worker gauges), see the [Metrics reference](../../observability/metrics.md#router-metrics).
+
 ## Disaggregated Serving
 
 Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../../development/backend-guide.md)), the frontend automatically detects them and activates an internal prefill router.
@@ -439,3 +445,5 @@ curl http://localhost:8000/busy_threshold
 - **[KV Router Index Data Structures](../../../../lib/kv-router/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing
+- **[Prometheus and Grafana Setup](../../observability/prometheus-grafana.md)**: General Prometheus/Grafana configuration
+- **[Metrics Developer Guide](../../observability/metrics-developer-guide.md)**: How the Dynamo metrics API works
