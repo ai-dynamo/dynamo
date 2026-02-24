@@ -130,11 +130,10 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
     rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
-# sccache binary + wrapper scripts are pre-installed in dynamo_base;
-# COPY them so the install call below is a no-op (no GitHub download).
+# sccache binary is pre-installed in dynamo_base;
+# COPY it so the install call below skips the GitHub download.
+# Wrapper scripts (sccache-cc, sccache-cxx) are created by use-sccache.sh install.
 COPY --from=dynamo_base /usr/local/bin/sccache /usr/local/bin/sccache
-COPY --from=dynamo_base /usr/local/bin/sccache-cc /usr/local/bin/sccache-cc
-COPY --from=dynamo_base /usr/local/bin/sccache-cxx /usr/local/bin/sccache-cxx
 
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
