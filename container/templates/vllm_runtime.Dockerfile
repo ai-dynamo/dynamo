@@ -32,19 +32,15 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # This fixes NVML InvalidArgument errors when CUDA_VISIBLE_DEVICES is set
 ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
 
-# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
-COPY --from=dynamo_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
-COPY --from=dynamo_base /usr/local/cuda/bin/nvlink /usr/local/cuda/bin/nvlink
-COPY --from=dynamo_base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
-COPY --from=dynamo_base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
-COPY --from=dynamo_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+# Copy full CUDA toolkit directories from base devel image.
+# Avoids cherry-picking individual binaries/libs which breaks when new CUDA deps are introduced.
+COPY --from=dynamo_base /usr/local/cuda/bin/ /usr/local/cuda/bin/
+COPY --from=dynamo_base /usr/local/cuda/lib64/ /usr/local/cuda/lib64/
 COPY --from=dynamo_base /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=dynamo_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
-COPY --from=dynamo_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-COPY --from=dynamo_base /usr/local/cuda/lib64/stubs/ /usr/local/cuda/lib64/stubs/
+COPY --from=dynamo_base /usr/local/cuda/nvvm/ /usr/local/cuda/nvvm/
 RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
-    ln -s /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
-    ln -s /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
+    ln -sf /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
+    ln -sf /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
 
 # DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
 # is not properly set for complilation. Set CPATH to help nvcc find the headers.
