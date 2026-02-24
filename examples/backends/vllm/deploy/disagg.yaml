@@ -32,7 +32,8 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-            - --is-decode-worker
+            - --disaggregation-mode
+            - decode
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -52,4 +53,5 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill

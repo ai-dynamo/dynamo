@@ -71,10 +71,10 @@ spec:
           - Qwen/Qwen3-0.6B
           - --tensor-parallel-size
           - "2"
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           - --connector
           - none
           - --kv-transfer-config
           - '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "engine_id":
             "vllm-disagg-prefill-engine-0abc123"}'
-

@@ -55,7 +55,7 @@ CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --enforce-eager \
-  --is-decode-worker \
+  --disaggregation-mode decode \
   --gpu-memory-utilization ${GPU_MEM_FRACTION} &
 DECODE_PID=$!
 
@@ -75,7 +75,7 @@ CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --enforce-eager \
-  --is-prefill-worker \
+  --disaggregation-mode prefill \
   --gpu-memory-utilization ${GPU_MEM_FRACTION} \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 

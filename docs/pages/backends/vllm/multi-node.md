@@ -84,7 +84,7 @@ python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager \
-  --is-decode-worker
+  --disaggregation-mode decode
 ```
 
 **Node 2**: Run prefill worker
@@ -94,7 +94,7 @@ python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager \
-  --is-prefill-worker
+  --disaggregation-mode prefill
 ```
 
 ### Multi-node Tensor/Pipeline Parallelism
