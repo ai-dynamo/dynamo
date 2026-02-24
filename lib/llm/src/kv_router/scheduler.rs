@@ -197,12 +197,11 @@ impl KvScheduler {
 
                 // Drain ALL ready requests (each iteration uses fresh slot state)
                 while let Some(mut request) = queue_clone.try_dequeue().await {
-                    let (decode_blocks, prefill_tokens) = slots_clone
-                        .potential_blocks_and_tokens(
-                            request.token_seq.clone(),
-                            request.isl_tokens,
-                            request.overlaps.clone(),
-                        );
+                    let (decode_blocks, prefill_tokens) = slots_clone.potential_blocks_and_tokens(
+                        request.token_seq.clone(),
+                        request.isl_tokens,
+                        request.overlaps.clone(),
+                    );
                     request.decode_blocks = decode_blocks;
                     request.prefill_tokens = prefill_tokens;
 
