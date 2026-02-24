@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{any::Any, cmp::max, collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    any::Any,
+    cmp::max,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use dynamo_llm::{
     block_manager::{
@@ -648,8 +653,10 @@ impl Slot for VllmConnectorSlot {
         // Invalid (panics):
         //   [3,4,5,6,7] + [6,8,9] → block 6 found but suffix doesn't match prefix
         if !block_ids.is_empty() {
-            let overlap_len = if let Some(pos) =
-                self.device_blocks.iter().rposition(|&id| id == block_ids[0])
+            let overlap_len = if let Some(pos) = self
+                .device_blocks
+                .iter()
+                .rposition(|&id| id == block_ids[0])
             {
                 let suffix_len = self.device_blocks.len() - pos;
                 assert!(
@@ -780,12 +787,7 @@ impl Slot for VllmConnectorSlot {
             // that assumed block_ids was appended verbatim to device_blocks.
             let candidate_priorities: Vec<u32> = candidate_block_ids
                 .iter()
-                .map(|id| {
-                    self.stored_block_priorities
-                        .get(id)
-                        .copied()
-                        .unwrap_or(0)
-                })
+                .map(|id| self.stored_block_priorities.get(id).copied().unwrap_or(0))
                 .collect();
 
             assert_eq!(
@@ -2263,9 +2265,6 @@ mod connector_tests {
             .unwrap();
 
         assert_eq!(slot.num_device_blocks_allocated(), 7);
-        assert_eq!(
-            slot.device_blocks_snapshot(),
-            &[10, 11, 12, 13, 14, 15, 16]
-        );
+        assert_eq!(slot.device_blocks_snapshot(), &[10, 11, 12, 13, 14, 15, 16]);
     }
 }
