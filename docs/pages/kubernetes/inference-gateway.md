@@ -130,7 +130,18 @@ you could deploy it as a standalone pod
 
 #### 5.a. Deploy as a DGD component (recommended)
 
+We provide an example for the Qwen vLLM below.
+Follow the steps in [model deployment](../../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg_gaie.yaml](../../../examples/backends/vllm/deploy/agg_gaie.yaml) in `my-model` kubernetes namespace.
 
+Sample commands to deploy model:
+
+```bash
+cd <dynamo-source-root>
+cd examples/backends/vllm/deploy
+kubectl apply -f agg_gaie.yaml -n my-model
+```
+
+Examples for other models can be found in the recipes folder.
 
 ```bash
 # Deploy PVC, having first Update `storageClassName` in recipes/llama-3-70b/model-cache/model-cache.yaml to match your cluster before deploying
@@ -185,29 +196,9 @@ If you installed it into a different namespace, you need to adjust the HttpRoute
 
 #### 5.b. Deploy as a standalone pod
 
+We do not recommend this method but there are hints on how to do this here.
+
 ##### 5.b.1 Deploy Your Model ###
-
-We provide an example for Qwen vLLM below.
-Before deploying you must enable the `--direct-route` flag in the FrontEnd cli in your Dynamo Graph.
-```bash
-    command:
-      - python3
-    args:
-      - -m
-      - dynamo.frontend
-      - --router-mode
-      - direct
-```
-
-Follow the steps in [model deployment](../../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
-
-Sample commands to deploy model:
-
-```bash
-cd <dynamo-source-root>
-cd examples/backends/vllm/deploy
-kubectl apply -f agg.yaml -n my-model
-```
 
 ##### 5.b.2 Install Dynamo GIE helm chart ###
 
