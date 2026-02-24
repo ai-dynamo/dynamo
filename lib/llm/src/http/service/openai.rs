@@ -760,13 +760,18 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        // Extract error string: prefer DynamoError field, fallback to legacy comment
+        // Extract error string: prefer DynamoError field, fallback to legacy comment.
+        // Use message() instead of to_string() for DynamoError to avoid prefixing
+        // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
         let error_str = if let Some(ref dynamo_err) = event.error {
-            // Flatten the DynamoError chain into a single string
             let mut parts = Vec::new();
             let mut current: Option<&dyn std::error::Error> = Some(dynamo_err);
             while let Some(e) = current {
-                parts.push(e.to_string());
+                if let Some(de) = e.downcast_ref::<dynamo_runtime::error::DynamoError>() {
+                    parts.push(de.message().to_string());
+                } else {
+                    parts.push(e.to_string());
+                }
                 current = e.source();
             }
             parts.join(", ")
