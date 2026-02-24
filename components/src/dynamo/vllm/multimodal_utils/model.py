@@ -40,6 +40,7 @@ class SupportedModels:
     QWEN_2_5_VL_32B = "Qwen/Qwen2.5-VL-32B-Instruct"
     QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
     QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
+    QWEN_3_VL_4B = "Qwen/Qwen3-VL-4B-Instruct"
     LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
@@ -120,6 +121,7 @@ QWEN_VL_MODELS = [
     SupportedModels.QWEN_2_5_VL_32B,
     SupportedModels.QWEN_3_VL_30B_A3B_FP8,
     SupportedModels.QWEN_3_VL_8B_FP8,
+    SupportedModels.QWEN_3_VL_4B,
 ]
 
 
@@ -155,7 +157,7 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
         # Load only the vision model via vLLM
         vllm_model = LLM(
             model=model_id,
-            enforce_eager=True,
+            enforce_eager=False,
             kv_cache_memory_bytes=1024
             * 1024
             * 8,  # 8MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.

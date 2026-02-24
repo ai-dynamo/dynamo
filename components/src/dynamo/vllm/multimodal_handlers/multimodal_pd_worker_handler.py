@@ -130,6 +130,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             for item in mm_data.get(IMAGE_URL_KEY, []):
                 if isinstance(item, dict) and "Url" in item:
                     image_urls.append(item["Url"])
+                elif isinstance(item, dict) and "Decoded" in item:
+                    image_urls.append(item["Decoded"])
 
         sampling_params = build_sampling_params(
             raw_request, self.default_sampling_params

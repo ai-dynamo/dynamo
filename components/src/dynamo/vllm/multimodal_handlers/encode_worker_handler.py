@@ -200,7 +200,7 @@ class EncodeWorkerHandler:
                         // merge_size
                         // merge_size
                     ).tolist()
-                    splitted_embeddings = embeddings.cpu().squeeze(0).split(sizes)
+                    splitted_embeddings = embeddings.squeeze(0).split(sizes)
                     logger.debug(
                         f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
                     )
@@ -209,7 +209,7 @@ class EncodeWorkerHandler:
                     # embeddings already has batch dimension for images, so we can directly
                     # split by batch dimension
                     logger.debug(f"image embedding shape: {embeddings.shape}")
-                    splitted_embeddings = embeddings.cpu()
+                    splitted_embeddings = embeddings
 
                 image_grid_thw = (
                     image_embeds["image_grid_thw"].tolist()
