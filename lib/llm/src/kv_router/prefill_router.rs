@@ -565,11 +565,9 @@ impl
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // If prefill router is not activated, skip directly to decode
+        // If prefill router is not activated (no prefill workers discovered),
+        // this is aggregated mode — route directly to decode.
         if self.prefill_router.get().is_none() {
-            if !self.decode_fallback {
-                return Err(anyhow::anyhow!(PrefillError::NotActivated));
-            }
             return next.generate(context.map(|_| req)).await;
         }
 
