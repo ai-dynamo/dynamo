@@ -150,7 +150,7 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--no-router-kv-events`: Disables KV event tracking. By default (when this flag is not provided), the router uses KV events to monitor block creation and deletion from workers. When disabled with this flag, the router predicts cache state based on routing decisions with TTL-based expiration (default 120s) and pruning. Use this flag if your backend doesn't support KV events (or you are not confident in the accuracy or responsiveness of the events).
 
-- `--router-durable-kv-events`: Enables JetStream mode for KV event transport. Must be specified on **both** the frontend **and** all workers. When enabled, workers publish to JetStream instead of the local indexer, and the frontend consumes from JetStream as a durable consumer. Without this flag (default), workers use the local indexer with NATS Core or ZMQ event plane. .
+- `--router-durable-kv-events`: **(Deprecated — will be removed in a future release.)** Enables JetStream mode for KV event transport. The event-plane subscriber (local_indexer mode) is now the recommended path. When enabled, workers publish to JetStream instead of the local indexer, and the frontend consumes from JetStream as a durable consumer. Without this flag (default), workers use the local indexer with NATS Core or ZMQ event plane.
 
 - `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - in JetStream mode those are synchronized through JetStream events; in local indexer mode (default) each router queries workers directly.
 
@@ -261,6 +261,12 @@ The `router_temperature` parameter controls routing randomness:
    - To reduce TTFT: Increase the weight
    - To reduce ITL: Decrease the weight
 4. If you observe severe load imbalance, increase the temperature setting
+
+## Prometheus Metrics
+
+The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`. All router metrics require `--router-mode kv` and will not appear when using `round-robin` or `random` routing.
+
+For the full list of router metrics (`dynamo_router_*`, `dynamo_router_overhead_*`, per-worker gauges), see the [Metrics reference](../../observability/metrics.md#router-metrics).
 
 ## Disaggregated Serving
 
@@ -436,3 +442,5 @@ curl http://localhost:8000/busy_threshold
 - **[KV Router Index Data Structures](../../../../lib/kv-router/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing
+- **[Prometheus and Grafana Setup](../../observability/prometheus-grafana.md)**: General Prometheus/Grafana configuration
+- **[Metrics Developer Guide](../../observability/metrics-developer-guide.md)**: How the Dynamo metrics API works

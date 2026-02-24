@@ -453,6 +453,7 @@ def test_router_decisions_vllm_multiple_workers(
             MODEL_NAME,
             request,
             test_dp_rank=False,
+            block_size=BLOCK_SIZE,
             router_event_threads=router_event_threads,
         )
 
@@ -497,7 +498,12 @@ def test_router_decisions_vllm_dp(
         )  # endpoint is backend.generate
 
         _test_router_decisions(
-            vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
+            vllm_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=True,
+            block_size=BLOCK_SIZE,
         )
 
 
