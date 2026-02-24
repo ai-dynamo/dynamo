@@ -6,6 +6,9 @@
 //! This module centralizes all router-side Prometheus metric definitions:
 //! - [`WorkerLoadMetrics`]: Per-worker active decode blocks and prefill tokens gauges.
 //! - [`RoutingOverheadMetrics`]: Per-request routing phase latency histograms.
+//! - [`RouterRequestMetrics`]: Per-request aggregate histograms (TTFT, ITL, tokens, KV hit rate).
+//!
+//! See also: `docs/pages/observability/metrics.md` (Router Metrics section).
 
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
@@ -214,6 +217,9 @@ impl RouterRequestMetrics {
             kv_hit_rate,
         }
     }
+
+    // TODO: move all `router_*` metric name strings to `prometheus_names.rs` constants
+    // for consistency with the other metric families (routing_overhead, frontend_service).
 
     /// Create from a Component, memoized in a static OnceLock.
     pub fn from_component(component: &Component) -> Arc<Self> {
