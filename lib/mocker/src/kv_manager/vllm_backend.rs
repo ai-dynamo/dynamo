@@ -98,6 +98,7 @@ impl KvManager {
         local_hashes: &[BlockHash],
         parent_hash: Option<u64>,
         is_store: bool,
+        token_ids: Option<Vec<Vec<u32>>>,
     ) {
         if full_blocks.is_empty() {
             return;
@@ -171,7 +172,7 @@ impl KvManager {
             dp_rank: self.dp_rank,
         };
 
-        if let Err(e) = sink.publish(event) {
+        if let Err(e) = sink.publish(event, token_ids.as_deref()) {
             tracing::warn!("Failed to publish KV event: {e}");
         }
     }
@@ -179,7 +180,7 @@ impl KvManager {
     /// Process a MoveBlock instruction synchronously
     pub fn process(&mut self, event: &MoveBlock) -> bool {
         match event {
-            MoveBlock::Use(hashes, local_hashes) => {
+            MoveBlock::Use(hashes, local_hashes, token_ids) => {
                 let mut blocks_stored = Vec::<u64>::new();
 
                 let mut parent_block: Option<&UniqueBlock> = None;
@@ -208,7 +209,7 @@ impl KvManager {
                             self.dp_rank
                         );
                         if let UniqueBlock::FullBlock(evicted_full_block) = evicted {
-                            self.publish_kv_event(vec![evicted_full_block], &[], None, false);
+                            self.publish_kv_event(vec![evicted_full_block], &[], None, false, None);
                         }
                     }
 
@@ -225,7 +226,13 @@ impl KvManager {
                     Some(UniqueBlock::FullBlock(block)) => Some(*block),
                     Some(UniqueBlock::PartialBlock(_)) => panic!("parent block cannot be partial"),
                 };
-                self.publish_kv_event(blocks_stored, local_hashes, parent_hash, true);
+                self.publish_kv_event(
+                    blocks_stored,
+                    local_hashes,
+                    parent_hash,
+                    true,
+                    token_ids.clone(),
+                );
             }
 
             MoveBlock::Destroy(hashes) => {
@@ -239,7 +246,7 @@ impl KvManager {
                     }
                 }
 
-                self.publish_kv_event(blocks_destroyed, &[], None, false);
+                self.publish_kv_event(blocks_destroyed, &[], None, false, None);
             }
 
             MoveBlock::Deref(hashes) => {
@@ -261,7 +268,7 @@ impl KvManager {
                 }
             }
 
-            MoveBlock::Promote(uuid, hash, parent_hash, local_hash) => {
+            MoveBlock::Promote(uuid, hash, parent_hash, local_hash, promote_token_ids) => {
                 let uuid_block = UniqueBlock::PartialBlock(*uuid);
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
@@ -283,7 +290,13 @@ impl KvManager {
                     .insert_active(hash_block, hash_ref_count.unwrap_or(0) + 1);
 
                 if is_new {
-                    self.publish_kv_event(vec![*hash], &[*local_hash], *parent_hash, true);
+                    self.publish_kv_event(
+                        vec![*hash],
+                        &[*local_hash],
+                        *parent_hash,
+                        true,
+                        promote_token_ids.as_ref().map(|t| vec![t.clone()]),
+                    );
                 }
             }
         }
@@ -392,7 +405,7 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> bool {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes))
+            manager.process(&MoveBlock::Use(blocks, hashes, None))
         }
 
         // First use 10 blocks (0 to 9) in a batch
@@ -419,7 +432,7 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes));
+            manager.process(&MoveBlock::Use(blocks, hashes, None));
         }
 
         // Helper function to destroy multiple blocks

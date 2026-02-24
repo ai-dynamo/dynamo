@@ -47,7 +47,9 @@ pytestmark = [
 ]
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
-BASE_PORT = 9100  # Base port for all tests (high port to avoid conflicts)
+BASE_PORT = 9100  # Base port for general test allocations (frontend, system, etc.)
+BASE_PORT_BOOTSTRAP = 10100  # Base port for disagg bootstrap rendezvous
+BASE_PORT_ZMQ = 11100  # Base port for ZMQ KV event publishing
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
@@ -163,6 +165,8 @@ def _build_mocker_command(
         command.append("--durable-kv-events")
     if "bootstrap_ports" in mocker_args:
         command.extend(["--bootstrap-ports", mocker_args["bootstrap_ports"]])
+    if "zmq_kv_events_ports" in mocker_args:
+        command.extend(["--zmq-kv-events-ports", mocker_args["zmq_kv_events_ports"]])
 
     return command
 
@@ -177,18 +181,36 @@ class MockerProcess:
         num_mockers: int = 1,
         store_backend: str = "etcd",
         request_plane: str = "nats",
+        zmq_kv_events: bool = False,
     ):
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.component_name = "mocker"
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
+        self._zmq_kv_events_ports: list[int] = []
 
-        mocker_args = mocker_args or {}
+        mocker_args = (mocker_args or {}).copy()
         # Store dp_size for DP-aware test functions
         self.dp_size = mocker_args.get("dp_size")
         # Alias for consistency with vLLM/SGLang workers
         self.data_parallel_size = self.dp_size
+
+        # Allocate ZMQ base ports for KV event publishing.
+        # Each worker's DP ranks bind on base_port + dp_rank, so we need bases
+        # spaced dp_size apart. Allocate num_mockers * dp_size ports total,
+        # then pick every dp_size'th port as a base.
+        if zmq_kv_events:
+            dp_size = mocker_args.get("dp_size", 1)
+            self._zmq_kv_events_ports = allocate_ports(
+                num_mockers * dp_size, BASE_PORT_ZMQ
+            )
+            bases = [self._zmq_kv_events_ports[i * dp_size] for i in range(num_mockers)]
+            mocker_args["zmq_kv_events_ports"] = ",".join(str(p) for p in bases)
+            logger.info(
+                f"Allocated ZMQ KV event ports {self._zmq_kv_events_ports} "
+                f"(bases: {bases}) for {num_mockers} workers"
+            )
 
         command = _build_mocker_command(
             endpoint=self.endpoint,
@@ -222,6 +244,10 @@ class MockerProcess:
     def __exit__(self, exc_type, exc_val, exc_tb):
         logger.info("Stopping mocker process")
         self._process.__exit__(exc_type, exc_val, exc_tb)
+        if self._zmq_kv_events_ports:
+            deallocate_ports(self._zmq_kv_events_ports)
+            logger.info(f"Deallocated ZMQ KV event ports {self._zmq_kv_events_ports}")
+            self._zmq_kv_events_ports = []
 
 
 class DisaggMockerProcess:
@@ -267,7 +293,7 @@ class DisaggMockerProcess:
 
         # Allocate bootstrap ports for prefill workers if enabled (one per worker)
         if enable_bootstrap and worker_type == "prefill":
-            self._bootstrap_ports = allocate_ports(num_mockers, BASE_PORT)
+            self._bootstrap_ports = allocate_ports(num_mockers, BASE_PORT_BOOTSTRAP)
             mocker_args["bootstrap_ports"] = ",".join(
                 str(p) for p in self._bootstrap_ports
             )
@@ -644,14 +670,15 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(90)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events,router_event_threads",
+    "durable_kv_events,use_kv_events,router_event_threads,zmq_kv_events",
     [
-        (True, True, 1),  # JetStream mode with KV events
-        (False, True, 1),  # NATS Core mode with local indexer (default)
-        (False, False, 1),  # Approximate mode (--no-kv-events) - no KV events
-        (False, True, 2),  # NATS Core mode - multi-threaded indexer
+        (True, True, 1, False),  # JetStream mode with KV events
+        (False, True, 1, False),  # NATS Core mode with local indexer (default)
+        (False, False, 1, False),  # Approximate mode (--no-kv-events) - no KV events
+        (False, True, 2, False),  # NATS Core mode - multi-threaded indexer
+        (False, True, 1, True),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
     ],
-    ids=["jetstream", "nats_core", "no_kv_events", "nats_core_multi_thread"],
+    ids=["jetstream", "nats_core", "no_kv_events", "nats_core_multi_thread", "zmq"],
     indirect=["durable_kv_events"],
 )
 def test_router_decisions(
@@ -662,6 +689,7 @@ def test_router_decisions(
     use_kv_events,
     request_plane,
     router_event_threads,
+    zmq_kv_events,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
@@ -690,6 +718,7 @@ def test_router_decisions(
         mocker_args=mocker_args,
         num_mockers=2,
         request_plane=request_plane,
+        zmq_kv_events=zmq_kv_events,
     ) as mockers:
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
