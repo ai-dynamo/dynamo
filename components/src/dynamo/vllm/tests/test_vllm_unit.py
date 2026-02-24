@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from dynamo.vllm.args import parse_args
+from dynamo.vllm.args import _connector_to_kv_transfer_json, parse_args
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -176,6 +176,8 @@ def test_endpoint_overrides_with_prefill_worker(mock_vllm_cli):
         "--endpoint",
         "dyn://custom.worker.serve",
         "--is-prefill-worker",
+        "--kv-transfer-config",
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
     )
     config = parse_args()
     assert config.namespace == "custom"
@@ -193,6 +195,53 @@ def test_endpoint_invalid_format_raises(mock_vllm_cli):
     )
     with pytest.raises(ValueError, match="Invalid endpoint format"):
         parse_args()
+
+
+# --connector removal tests
+
+
+def test_connector_nixl_raises_error_with_migration_hint(mock_vllm_cli):
+    """Test that --connector nixl raises ValueError with --kv-transfer-config hint."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "nixl")
+    with pytest.raises(ValueError, match="--connector is no longer supported"):
+        parse_args()
+
+
+def test_connector_none_raises_error(mock_vllm_cli):
+    """Test that --connector none raises ValueError telling user it's no longer needed."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "none")
+    with pytest.raises(ValueError, match="no longer needed"):
+        parse_args()
+
+
+def test_env_var_dyn_connector_raises_error(monkeypatch, mock_vllm_cli):
+    """Test that DYN_CONNECTOR env var raises error for vLLM backend."""
+    monkeypatch.setenv("DYN_CONNECTOR", "nixl")
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    with pytest.raises(ValueError, match="no longer supported"):
+        parse_args()
+
+
+def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
+    """Test that --is-prefill-worker without --kv-transfer-config raises ValueError."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--is-prefill-worker")
+    with pytest.raises(ValueError, match="--kv-transfer-config"):
+        parse_args()
+
+
+def test_connector_to_kv_transfer_json_single():
+    """Test _connector_to_kv_transfer_json for single connector."""
+    result = _connector_to_kv_transfer_json(["nixl"])
+    assert '"NixlConnector"' in result
+    assert '"kv_both"' in result
+
+
+def test_connector_to_kv_transfer_json_multi():
+    """Test _connector_to_kv_transfer_json for multiple connectors."""
+    result = _connector_to_kv_transfer_json(["kvbm", "nixl"])
+    assert '"PdConnector"' in result
+    assert '"DynamoConnector"' in result
+    assert '"NixlConnector"' in result
 
 
 def test_headless_namespace_has_required_fields(mock_vllm_cli):

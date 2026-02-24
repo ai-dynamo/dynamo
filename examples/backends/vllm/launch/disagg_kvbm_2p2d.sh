@@ -10,9 +10,9 @@ python -m dynamo.frontend --router-mode kv &
 
 # run decode workers on GPU 0 and 1, without enabling KVBM
 # NOTE: remove --enforce-eager for production use
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector nixl --enforce-eager --is-decode-worker &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --enforce-eager --is-decode-worker &
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector nixl --enforce-eager --is-decode-worker &
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --enforce-eager --is-decode-worker &
 
 # run prefill workers on GPU 2 and 3 with KVBM enabled using 20GB of CPU cache
 # NOTE: use different barrier id prefixes for each prefill worker to avoid conflicts
@@ -23,7 +23,7 @@ CUDA_VISIBLE_DEVICES=2 \
   python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --is-prefill-worker \
-    --connector kvbm nixl \
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --enforce-eager \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082","enable_kv_cache_events":true}' &
 
@@ -35,6 +35,6 @@ CUDA_VISIBLE_DEVICES=3 \
   python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --is-prefill-worker \
-    --connector kvbm nixl \
+    --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --enforce-eager \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20083","enable_kv_cache_events":true}'

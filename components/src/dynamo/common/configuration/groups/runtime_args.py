@@ -110,8 +110,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             g,
             flag_name="--connector",
             env_var="DYN_CONNECTOR",
-            default=["nixl"],
-            help="List of connectors to use in order (e.g., --connector nixl lmcache). Options: nixl, lmcache, kvbm, null, none. Order will be preserved in MultiConnector.",
+            default=[],
+            help="[Deprecated for vLLM] Use --kv-transfer-config instead. For TRT-LLM, options: nixl, lmcache, kvbm, null, none.",
             nargs="*",
         )
 
