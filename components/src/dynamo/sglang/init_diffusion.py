@@ -164,6 +164,17 @@ async def init_image_diffusion(
 
     ready_event = asyncio.Event()
 
+    # The global --output-modalities default is ["text"] which is wrong for
+    # image diffusion workers -- it causes the Rust registration path to look
+    # for config.json (LLM artefacts).  Only override when the user hasn't
+    # explicitly chosen a non-default value.
+    output_modalities = dynamo_args.output_modalities
+    if output_modalities is None or output_modalities == ["text"]:
+        output_modalities = ["image"]
+        logging.info(
+            "Overriding output_modalities to ['image'] for image diffusion worker"
+        )
+
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -176,7 +187,7 @@ async def init_image_diffusion(
                 generator,
                 generate_endpoint,
                 server_args,
-                output_modalities=dynamo_args.output_modalities,
+                output_modalities=output_modalities,
                 readiness_gate=ready_event,
             ),
         )
