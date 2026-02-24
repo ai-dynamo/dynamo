@@ -9,6 +9,7 @@ import dynamo.nixl_connect as connect
 from dynamo.runtime import DistributedRuntime
 
 from ..args import Config
+from ..constants import DisaggregationMode
 from ..handlers import BaseWorkerHandler
 from ..multimodal_utils import MyRequestOutput, vLLMMultimodalRequest
 from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
@@ -22,7 +23,6 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
-        component,
         engine_client,
         config: Config,
         shutdown_event=None,
@@ -36,7 +36,6 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         # Call BaseWorkerHandler.__init__ with proper parameters
         super().__init__(
             runtime,
-            component,
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
@@ -46,7 +45,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         )
 
         self.config = config
-        self.enable_disagg = config.is_prefill_worker
+        self.enable_disagg = config.disaggregation_mode == DisaggregationMode.PREFILL
 
     async def async_init(self, runtime: DistributedRuntime):
         """Async initialization - connector needs async setup"""

@@ -20,9 +20,10 @@ from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     NixlPersistentEmbeddingReceiver,
 )
-from dynamo.runtime import Client, Component, DistributedRuntime
+from dynamo.runtime import Client, DistributedRuntime
 
 from ..args import Config
+from ..constants import DisaggregationMode
 from ..handlers import BaseWorkerHandler, build_sampling_params
 from ..multimodal_utils import (
     MyRequestOutput,
@@ -44,7 +45,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
-        component: Component,
         engine_client: AsyncLLM,
         config: Config,
         encode_worker_client: Client | None = None,
@@ -60,7 +60,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Call BaseWorkerHandler.__init__ with proper parameters
         super().__init__(
             runtime,
-            component,
             engine_client,
             default_sampling_params,
             enable_multimodal=config.enable_multimodal,
@@ -72,7 +71,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         self.config = config
         self.encode_worker_client = encode_worker_client
         self.decode_worker_client = decode_worker_client
-        self.enable_disagg = config.is_prefill_worker
+        self.enable_disagg = config.disaggregation_mode == DisaggregationMode.PREFILL
         self.embedding_cache_manager: MultimodalEmbeddingCacheManager | None = None
         if config.multimodal_embedding_cache_capacity_gb > 0:
             capacity_bytes = int(

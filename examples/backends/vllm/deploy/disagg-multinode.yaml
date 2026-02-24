@@ -39,10 +39,16 @@ spec:
           - -m
           - dynamo.vllm
           args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --tensor-parallel-size
-            - "2"
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "2"
+          - --is-decode-worker
+          - --connector
+          - none
+          - --kv-transfer-config
+          - '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "engine_id":
+            "vllm-disagg-decode-engine-0abc123"}'
     prefill:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -61,8 +67,14 @@ spec:
           - -m
           - dynamo.vllm
           args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --is-prefill-worker
-            - --tensor-parallel-size
-            - "2"
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "2"
+          - --disaggregation-mode
+          - prefill
+          - --connector
+          - none
+          - --kv-transfer-config
+          - '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "engine_id":
+            "vllm-disagg-prefill-engine-0abc123"}'

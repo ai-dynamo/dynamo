@@ -31,6 +31,8 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-8B
+            - --disaggregation-mode
+            - decode
             - --max-model-len
             - "32000"
             - --enforce-eager
@@ -59,7 +61,8 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-8B
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
             - --max-model-len
             - "32000"
             - --enforce-eager

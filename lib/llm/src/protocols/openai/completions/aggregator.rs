@@ -265,6 +265,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -395,6 +396,7 @@ mod tests {
             id: Some("test_id".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
 
         // Create a stream
