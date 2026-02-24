@@ -122,7 +122,7 @@ jobs:
       # so we can generate multiple formats without re-running the tests.
       run: |
         cargo llvm-cov --locked --all-targets --no-report
-        cargo llvm-cov report --text --output-path coverage-rust.txt
+        cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"
         grep "^TOTAL" coverage-rust.txt || tail -3 coverage-rust.txt

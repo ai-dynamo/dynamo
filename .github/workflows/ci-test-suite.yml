@@ -1068,7 +1068,7 @@ jobs:
       # so we can generate multiple formats without re-running the tests.
       run: |
         cargo llvm-cov --locked --all-targets --no-report
-        cargo llvm-cov report --text --output-path coverage-rust.txt
+        cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"
         grep "^TOTAL" coverage-rust.txt || tail -3 coverage-rust.txt
@@ -1212,7 +1212,7 @@ jobs:
 
             # Extract line coverage % (3rd percentage on TOTAL line: Region%, Func%, Line%, Branch%)
             FIRST=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | head -1)
-            RUST_TOTAL_COVERAGE=$(grep "^TOTAL" "$FIRST" | grep -oE '[0-9]+\.[0-9]+%' | sed -n '3p')
+            RUST_TOTAL_COVERAGE=$(grep "^TOTAL" "$FIRST" | grep -oE '[0-9]+\.[0-9]+%' | sed -n '3p' || true)
             RUST_TOTAL_COVERAGE="${RUST_TOTAL_COVERAGE:-N/A}"
             echo "Rust line coverage: ${RUST_TOTAL_COVERAGE}"
           else
