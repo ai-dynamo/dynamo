@@ -218,29 +218,8 @@ async def parse_args(args: list[str]) -> Config:
         unknown.append("--config")
         unknown.append(temp_config_file)
 
-    # Handle SGLang --config file merge if present.
     if "--config" in unknown:
-        # Merge config file arguments with CLI arguments.
-        # ConfigArgumentMerger API changed after SGLang v0.5.7:
-        # - New API (post-v0.5.7): accepts parser= for proper store_true detection
-        # - Old API (v0.5.7 and earlier): only accepts boolean_actions=
-        # We use inspect.signature to detect the API rather than version checking
-        # since unreleased builds may have the new API while still reporting v0.5.7.
-        # Related upstream issue: https://github.com/sgl-project/sglang/issues/16256
-        # Upstream fix PR: https://github.com/sgl-project/sglang/pull/16638
-        import inspect
-
-        sig = inspect.signature(ConfigArgumentMerger.__init__)
-        if "parser" in sig.parameters:
-            config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
-        else:
-            # Legacy path: extract store_true actions manually
-            boolean_actions = [
-                action.dest
-                for action in sglang_only_parser._actions
-                if isinstance(action, argparse._StoreTrueAction)
-            ]
-            config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
+        config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
         unknown = config_merger.merge_config_with_args(unknown)
 
     parsed_args = sglang_only_parser.parse_args(unknown)
