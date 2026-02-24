@@ -114,7 +114,7 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: ":alert: *Github Post-merge Build Failure*"
+                  text: ":alert: *Github Post-merge Pipeline Failure*"
               - type: "section"
                 text:
                   type: mrkdwn

@@ -114,7 +114,7 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: ":alert: *Github Nightly Build Failure*"
+                  text: ":alert: *Github Nightly Pipeline Failure*"
               - type: "section"
                 text:
                   type: mrkdwn
