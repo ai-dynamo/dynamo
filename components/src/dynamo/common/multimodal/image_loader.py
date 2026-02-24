@@ -31,6 +31,7 @@ from .http_client import get_http_client
 
 logger = logging.getLogger(__name__)
 
+
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
@@ -82,6 +83,11 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
 
                 image_data = BytesIO(response.content)
+            elif parsed_url.scheme == "" or parsed_url.scheme == "file":
+                # Local file path (plain path or file:// URI)
+                path = image_url if parsed_url.scheme == "" else parsed_url.path
+                image = await asyncio.to_thread(Image.open, path)
+                return image.convert("RGB")
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
