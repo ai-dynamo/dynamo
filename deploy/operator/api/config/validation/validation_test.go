@@ -28,7 +28,7 @@ import (
 // validConfig returns a minimal valid OperatorConfiguration for cluster-wide mode.
 func validConfig() *configv1alpha1.OperatorConfiguration {
 	cfg := &configv1alpha1.OperatorConfiguration{}
-	configv1alpha1.SetDefaults_OperatorConfiguration(cfg)
+	configv1alpha1.SetDefaultsOperatorConfiguration(cfg)
 	cfg.MPI.SSHSecretName = "mpi-ssh"
 	cfg.MPI.SSHSecretNamespace = "default"
 	cfg.RBAC.PlannerClusterRoleName = "planner-role"

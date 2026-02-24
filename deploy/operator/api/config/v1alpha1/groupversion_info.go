@@ -53,7 +53,7 @@ func addDefaultingFuncs(scheme *runtime.Scheme) error {
 // Public to allow building arbitrary schemes.
 func RegisterDefaults(scheme *runtime.Scheme) error {
 	scheme.AddTypeDefaultingFunc(&OperatorConfiguration{}, func(obj interface{}) {
-		SetDefaults_OperatorConfiguration(obj.(*OperatorConfiguration))
+		SetDefaultsOperatorConfiguration(obj.(*OperatorConfiguration))
 	})
 	return nil
 }

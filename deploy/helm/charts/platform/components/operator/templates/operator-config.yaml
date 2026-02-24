@@ -21,7 +21,7 @@ metadata:
     {{- include "dynamo-operator.labels" . | nindent 4 }}
 data:
   config.yaml: |
-    apiVersion: config.dynamo.nvidia.com/v1alpha1
+    apiVersion: operator.config.dynamo.nvidia.com/v1alpha1
     kind: OperatorConfiguration
     server:
       metrics:

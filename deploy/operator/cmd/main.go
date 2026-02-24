@@ -40,6 +40,7 @@ import (
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/scale"
 	k8sCache "k8s.io/client-go/tools/cache"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -614,7 +615,7 @@ func main() {
 	}
 
 	dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(
-		isClusterWide, operatorCfg.GPU.DiscoveryEnabled,
+		isClusterWide, ptr.Deref(operatorCfg.GPU.DiscoveryEnabled, true),
 	)
 	if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")

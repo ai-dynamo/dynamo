@@ -1645,9 +1645,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
-| `initContainerImage` _string_ | InitContainerImage is the image used for init containers | busybox:latest |  |
 | `readyForCheckpointFilePath` _string_ | ReadyForCheckpointFilePath signals model readiness for checkpoint jobs | /tmp/ready-for-checkpoint |  |
-| `restoreMarkerFilePath` _string_ | RestoreMarkerFilePath is the marker file written after successful restore | /tmp/dynamo-restored |  |
 | `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage holds storage backend configuration |  |  |
 
 
@@ -1821,7 +1819,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `virtualServiceGateway` _string_ | VirtualServiceGateway is the name of the Istio virtual service gateway |  |  |
-| `virtualServiceSupportsHTTPS` _boolean_ | VirtualServiceSupportsHTTPS indicates whether VirtualService endpoints support HTTPS |  |  |
 | `controllerClassName` _string_ | ControllerClassName is the ingress controller class name |  |  |
 | `controllerTLSSecretName` _string_ | ControllerTLSSecretName is the TLS secret for the ingress controller |  |  |
 | `hostSuffix` _string_ | HostSuffix is the suffix for ingress hostnames |  |  |

@@ -187,8 +187,6 @@ type InfrastructureConfiguration struct {
 type IngressConfiguration struct {
 	// VirtualServiceGateway is the name of the Istio virtual service gateway
 	VirtualServiceGateway string `json:"virtualServiceGateway"`
-	// VirtualServiceSupportsHTTPS indicates whether VirtualService endpoints support HTTPS
-	VirtualServiceSupportsHTTPS bool `json:"virtualServiceSupportsHTTPS"`
 	// ControllerClassName is the ingress controller class name
 	ControllerClassName string `json:"controllerClassName"`
 	// ControllerTLSSecretName is the TLS secret for the ingress controller
@@ -224,15 +222,9 @@ type MPIConfiguration struct {
 type CheckpointConfiguration struct {
 	// Enabled indicates if checkpoint functionality is enabled
 	Enabled bool `json:"enabled"`
-	// InitContainerImage is the image used for init containers
-	// +kubebuilder:default="busybox:latest"
-	InitContainerImage string `json:"initContainerImage"`
 	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
 	// +kubebuilder:default="/tmp/ready-for-checkpoint"
 	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
-	// RestoreMarkerFilePath is the marker file written after successful restore
-	// +kubebuilder:default="/tmp/dynamo-restored"
-	RestoreMarkerFilePath string `json:"restoreMarkerFilePath"`
 	// Storage holds storage backend configuration
 	Storage CheckpointStorageConfiguration `json:"storage"`
 }
@@ -300,7 +292,7 @@ const (
 type GPUConfiguration struct {
 	// DiscoveryEnabled indicates whether GPU discovery is enabled
 	// +kubebuilder:default=true
-	DiscoveryEnabled bool `json:"discoveryEnabled"`
+	DiscoveryEnabled *bool `json:"discoveryEnabled,omitempty"`
 }
 
 // LoggingConfiguration holds logging settings.

@@ -21,12 +21,13 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
-// SetDefaults_OperatorConfiguration sets default values for OperatorConfiguration.
+// SetDefaultsOperatorConfiguration sets default values for OperatorConfiguration.
 // IMPORTANT: When changing defaults here, also update the corresponding
 // +kubebuilder:default= markers in types.go to keep API docs in sync.
-func SetDefaults_OperatorConfiguration(obj *OperatorConfiguration) {
+func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 	// Server defaults
 	if obj.Server.Metrics.Port == 0 {
 		obj.Server.Metrics.Port = 8080
@@ -62,15 +63,14 @@ func SetDefaults_OperatorConfiguration(obj *OperatorConfiguration) {
 		obj.Discovery.Backend = DiscoveryBackendKubernetes
 	}
 
-	// Checkpoint defaults
-	if obj.Checkpoint.InitContainerImage == "" {
-		obj.Checkpoint.InitContainerImage = "busybox:latest"
+	// GPU discovery defaults
+	if obj.GPU.DiscoveryEnabled == nil {
+		obj.GPU.DiscoveryEnabled = ptr.To(true)
 	}
+
+	// Checkpoint defaults
 	if obj.Checkpoint.ReadyForCheckpointFilePath == "" {
 		obj.Checkpoint.ReadyForCheckpointFilePath = "/tmp/ready-for-checkpoint"
-	}
-	if obj.Checkpoint.RestoreMarkerFilePath == "" {
-		obj.Checkpoint.RestoreMarkerFilePath = "/tmp/dynamo-restored"
 	}
 	if obj.Checkpoint.Storage.Type == "" {
 		obj.Checkpoint.Storage.Type = CheckpointStorageTypePVC
