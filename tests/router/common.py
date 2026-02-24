@@ -2085,27 +2085,40 @@ def _test_router_decisions(
         response_worker_ids,
     ) = asyncio.run(test_sync())
 
-    # Verify request 4 routed to worker a
-    req4 = response_worker_ids[3]
-    assert req4.get("prefill_worker_id") == worker_a_id, (
-        f"Request 4: expected prefill_worker_id={worker_a_id} (longest prefix match), "
-        f"got {req4.get('prefill_worker_id')}"
-    )
-    if test_dp_rank:
-        assert (
-            req4.get("prefill_dp_rank") == dp_rank_a
-        ), f"Request 4: expected prefill_dp_rank={dp_rank_a}, got {req4.get('prefill_dp_rank')}"
+    # Verify all responses actually contain worker routing info (not None)
+    for i, resp in enumerate(response_worker_ids):
+        assert resp.get("prefill_worker_id") is not None, (
+            f"Request {i + 1}: prefill_worker_id is None — backend may not be returning "
+            f"disaggregated_params.worker_id in the response"
+        )
 
-    # Verify request 5 routed to worker b
-    req5 = response_worker_ids[4]
-    assert req5.get("prefill_worker_id") == worker_b_id, (
-        f"Request 5: expected prefill_worker_id={worker_b_id} (tiebreak by smaller tree), "
-        f"got {req5.get('prefill_worker_id')}"
+    # Verify request 4 routed to worker a (longest prefix match)
+    req4 = response_worker_ids[3]
+    assert req4["prefill_worker_id"] == worker_a_id, (
+        f"Request 4: expected prefill_worker_id={worker_a_id} (longest prefix match), "
+        f"got {req4['prefill_worker_id']}"
     )
     if test_dp_rank:
         assert (
-            req5.get("prefill_dp_rank") == dp_rank_b
-        ), f"Request 5: expected prefill_dp_rank={dp_rank_b}, got {req5.get('prefill_dp_rank')}"
+            req4.get("prefill_dp_rank") is not None
+        ), "Request 4: prefill_dp_rank is None — backend not returning dp_rank"
+        assert (
+            req4["prefill_dp_rank"] == dp_rank_a
+        ), f"Request 4: expected prefill_dp_rank={dp_rank_a}, got {req4['prefill_dp_rank']}"
+
+    # Verify request 5 routed to worker b (tiebreak by smaller tree)
+    req5 = response_worker_ids[4]
+    assert req5["prefill_worker_id"] == worker_b_id, (
+        f"Request 5: expected prefill_worker_id={worker_b_id} (tiebreak by smaller tree), "
+        f"got {req5['prefill_worker_id']}"
+    )
+    if test_dp_rank:
+        assert (
+            req5.get("prefill_dp_rank") is not None
+        ), "Request 5: prefill_dp_rank is None — backend not returning dp_rank"
+        assert (
+            req5["prefill_dp_rank"] == dp_rank_b
+        ), f"Request 5: expected prefill_dp_rank={dp_rank_b}, got {req5['prefill_dp_rank']}"
 
     logger.info(
         f"Response routing verified: req4 → worker_a (id={worker_a_id}, dp_rank={dp_rank_a}), "
