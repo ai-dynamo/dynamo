@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if .Values.webhook.enabled }}
 ---
 # Role to read the webhook certificate secret
 apiVersion: rbac.authorization.k8s.io/v1
@@ -56,5 +55,4 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "dynamo-operator.fullname" . }}-controller-manager
   namespace: {{ .Release.Namespace }}
-{{- end }}
 

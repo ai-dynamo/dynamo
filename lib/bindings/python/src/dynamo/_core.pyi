@@ -85,12 +85,6 @@ class DistributedRuntime:
         """
         ...
 
-    def child_token(self) -> CancellationToken:
-        """
-        Get a child cancellation token that can be passed to async tasks
-        """
-        ...
-
     def register_engine_route(
         self,
         route_name: str,
@@ -114,33 +108,6 @@ class DistributedRuntime:
         a dict that will be serialized as the JSON response.
 
         For GET requests or empty bodies, an empty dict {} is passed.
-        """
-        ...
-
-class CancellationToken:
-    def cancel(self) -> None:
-        """
-        Cancel the token and all its children
-        """
-        ...
-
-    async def cancelled(self) -> None:
-        """
-        Await until the token is cancelled
-        """
-        ...
-
-
-class Component:
-    """
-    A component is a collection of endpoints
-    """
-
-    ...
-
-    def endpoint(self, name: str) -> Endpoint:
-        """
-        Create an endpoint
         """
         ...
 
@@ -209,25 +176,6 @@ class Endpoint:
         and should start receiving requests.
         """
         ...
-
-    def component(self) -> Component:
-        """
-        Get the parent Component that this endpoint belongs to.
-
-        Returns:
-            Component: The parent component
-
-        Note:
-            To avoid duplicate metrics registries, reuse the returned Component for
-            multiple endpoints: component.endpoint("ep1"), component.endpoint("ep2")
-
-        Example:
-            endpoint = runtime.endpoint("demo.backend.generate")
-            component = endpoint.component()
-            health_endpoint = component.endpoint("health")  # Reuse component
-        """
-        ...
-
 
 class Client:
     """
@@ -424,14 +372,15 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    async def create_endpoint(self, component: Component) -> None:
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Create the NATS endpoint for metrics publishing. Must be awaited.
+        Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
 
-        Only service created through this method will interact with KV router of the same component.
+        Extracts component information from the endpoint to set up metrics publishing
+        on the correct NATS subject for routing decisions.
 
         Args:
-            component: The component to create the endpoint for
+            endpoint: The endpoint to extract component information from for metrics publishing
         """
 
     def publish(
@@ -595,7 +544,7 @@ class KvIndexer:
 
     ...
 
-    def __init__(self, component: Component, block_size: int) -> None:
+    def __init__(self, endpoint: Endpoint, block_size: int) -> None:
         """
         Create a `KvIndexer` object
         """
@@ -642,7 +591,7 @@ class ApproxKvIndexer:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: int,
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
@@ -709,7 +658,7 @@ class KvEventPublisher:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         worker_id: int = 0,
         kv_block_size: int = 0,
         dp_rank: int = 0,
@@ -726,8 +675,8 @@ class KvEventPublisher:
         When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
-            component: The component to publish events for
-            worker_id: The worker ID (unused, inferred from component)
+            endpoint: The endpoint to extract component information from for event publishing
+            worker_id: The worker ID (unused, inferred from endpoint)
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
             enable_local_indexer: Enable worker-local KV indexer
@@ -784,7 +733,29 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    ...
+    def __init__(self, port: Optional[int] = None) -> None:
+        """
+        Create a new HTTP service.
+
+        Args:
+            port: Optional port number to bind the service to (default: 8080)
+        """
+        ...
+
+    async def run(self, runtime: DistributedRuntime) -> None:
+        """
+        Run the HTTP service.
+
+        Args:
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the HTTP service by cancelling its internal token.
+        """
+        ...
 
 class PythonAsyncEngine:
     """
@@ -925,12 +896,18 @@ class KserveGrpcService:
         """
         ...
 
-    async def run(self, token: CancellationToken) -> None:
+    async def run(self, runtime: DistributedRuntime) -> None:
         """
         Run the KServe gRPC service.
 
         Args:
-            token: Cancellation token to stop the service
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the KServe gRPC service by cancelling its internal token.
         """
         ...
 
@@ -968,7 +945,7 @@ class RouterConfig:
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
-        enforce_disagg: bool = False,
+        decode_fallback: bool = False,
     ) -> None:
         """
         Create a RouterConfig.
@@ -979,7 +956,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            enforce_disagg: Enforce disaggregated prefill-decode mode
+            decode_fallback: Allow falling back to decode-only mode when prefill workers are unavailable
         """
         ...
 
@@ -1035,6 +1012,12 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool.
         """
         ...
+
+async def start_kv_block_indexer(
+    endpoint: Endpoint,
+    block_size: int,
+    kv_router_config: KvRouterConfig,
+) -> None: ...
 
 async def register_model(
     model_input: ModelInput,
@@ -1598,7 +1581,6 @@ class VirtualConnectorClient:
 
 __all__ = [
     "Client",
-    "Component",
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",

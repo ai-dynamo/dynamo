@@ -54,6 +54,7 @@ class FrontendConfig(ConfigBase):
     router_max_tree_size: int
     router_prune_target_ratio: float
     namespace: Optional[str] = None
+    namespace_prefix: Optional[str] = None
     router_replica_sync: bool
     router_snapshot_threshold: int
     router_reset_states: bool
@@ -63,7 +64,7 @@ class FrontendConfig(ConfigBase):
     router_track_output_blocks: bool
     router_event_threads: int
     router_queue_threshold: Optional[float]
-    enforce_disagg: bool
+    decode_fallback: bool
 
     migration_limit: int
     active_decode_blocks_threshold: Optional[float]
@@ -82,7 +83,8 @@ class FrontendConfig(ConfigBase):
     event_plane: str
     chat_processor: str
     enable_anthropic_api: bool
-    exp_python_factory: bool
+    debug_perf: bool
+    preprocess_workers: int
 
     def validate(self) -> None:
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
@@ -127,9 +129,8 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_NAMESPACE",
             default=None,
             help=(
-                "Dynamo namespace for model discovery scoping. If specified, models will "
-                "only be discovered from this namespace. If not specified, discovers models "
-                "from all namespaces (global discovery)."
+                "Dynamo namespace for model discovery scoping. Use for exact namespace matching. "
+                "If --namespace-prefix is also specified, prefix takes precedence."
             ),
         )
 
@@ -255,6 +256,18 @@ class FrontendArgGroup(ArgGroup):
             arg_type=float,
         )
 
+        add_argument(
+            g,
+            flag_name="--namespace-prefix",
+            env_var="DYN_NAMESPACE_PREFIX",
+            default=None,
+            help=(
+                "Dynamo namespace prefix for model discovery scoping. Discovers models from "
+                "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
+                "'ns-def456'). Takes precedence over --namespace if both are specified."
+            ),
+        )
+
         add_negatable_bool_argument(
             g,
             flag_name="--router-replica-sync",
@@ -363,12 +376,14 @@ class FrontendArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enforce-disagg",
-            env_var="DYN_ENFORCE_DISAGG",
+            flag_name="--decode-fallback",
+            env_var="DYN_DECODE_FALLBACK",
             default=False,
+            dest="decode_fallback",
             help=(
-                "Enforce disaggregated prefill-decode. When set, unactivated prefill router will "
-                "return an error instead of falling back to decode-only mode."
+                "Allow falling back to decode-only (aggregated) mode when prefill workers are "
+                "unavailable. By default, disaggregated prefill-decode is enforced and requests "
+                "fail if no prefill workers are found."
             ),
         )
 
@@ -515,9 +530,10 @@ class FrontendArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--chat-processor",
+            flag_name="--dyn-chat-processor",
             env_var="DYN_CHAT_PROCESSOR",
             default="dynamo",
+            dest="chat_processor",
             help=(
                 "[EXPERIMENTAL] When set to 'vllm', use local vllm for the pre and post "
                 "processor."
@@ -527,11 +543,28 @@ class FrontendArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--exp-python-factory",
-            env_var="DYN_EXP_PYTHON_FACTORY",
+            flag_name="--dyn-debug-perf",
+            env_var="DYN_DEBUG_PERF",
             default=False,
+            dest="debug_perf",
             help=(
-                "[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be "
-                "created via a Python callback instead of the default Rust pipeline."
+                "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
+                "Logs per-function timing, request concurrency, and hot-path section durations. "
+                "'--dyn-chat-processor vllm' only."
             ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--dyn-preprocess-workers",
+            env_var="DYN_PREPROCESS_WORKERS",
+            default=0,
+            dest="preprocess_workers",
+            help=(
+                "[EXPERIMENTAL] Number of worker processes for preprocessing and output processing. "
+                "When > 0, offloads CPU-bound work (tokenization, template rendering, "
+                "detokenization) to a ProcessPoolExecutor with N workers, each with its "
+                "own GIL. 0 (default) keeps all processing on the main event loop. '--dyn-chat-processor vllm' only."
+            ),
+            arg_type=int,
         )

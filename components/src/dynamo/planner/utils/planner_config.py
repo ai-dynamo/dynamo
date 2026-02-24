@@ -43,7 +43,7 @@ class PlannerConfig(BaseModel):
 
     pre_deployment_sweeping_mode: Optional[PlannerPreDeploymentSweepMode] = Field(
         default=PlannerPreDeploymentSweepMode.Rapid,
-        description='PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
+        description='Controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
     )
 
     environment: Literal[

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import asyncio
 import logging
 import os
@@ -10,7 +11,9 @@ from typing import Optional
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
+from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.entrypoints.cli.serve import run_headless
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -19,6 +22,7 @@ from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -44,12 +48,13 @@ except ImportError:
     MediaFetcher = None
     MEDIA_DECODER_AVAILABLE = False
 
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from .args import Config, parse_args
-from .chrek import get_checkpoint_config
+from .checkpoint_restore import get_checkpoint_config
+from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
     VllmHealthCheckPayload,
@@ -60,6 +65,7 @@ from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+shutdown_endpoints: list = []
 CHECKPOINT_SLEEP_MODE_LEVEL = 1
 
 
@@ -76,17 +82,28 @@ async def _handle_non_leader_node(dp_rank: int) -> None:
     await asyncio.Event().wait()
 
 
-async def graceful_shutdown(runtime, shutdown_event):
+def build_headless_namespace(config: Config) -> argparse.Namespace:
+    """Build an argparse Namespace from engine_args for vLLM's run_headless().
+
+    run_headless() expects the raw CLI namespace. We reconstruct it from
+    the already-parsed AsyncEngineArgs so parse_args() doesn't need to
+    leak transport details.
     """
-    Shutdown dynamo distributed runtime.
-    The endpoints will be immediately invalidated so no new requests will be accepted.
-    For endpoints served with graceful_shutdown=True, the serving function will wait until all in-flight requests are finished.
-    For endpoints served with graceful_shutdown=False, the serving function will return immediately.
+    ns = argparse.Namespace(**vars(config.engine_args))
+    # run_headless() reads api_server_count; default to 0 (no API server)
+    if not hasattr(ns, "api_server_count"):
+        ns.api_server_count = 0
+    return ns
+
+
+def run_dynamo_headless(config: Config) -> None:
+    """Run in headless mode for multi-node TP/PP.
+
+    Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
+    no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    shutdown_event.set()
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
+    args = build_headless_namespace(config)
+    run_headless(args)
 
 
 async def worker():
@@ -100,8 +117,8 @@ async def worker():
         config.served_model_name = config.engine_args.served_model_name = config.model
 
     # Check checkpoint mode and validate env vars EARLY (fail fast if misconfigured)
-    checkpoint_cfg = get_checkpoint_config()
-    if checkpoint_cfg and checkpoint_cfg.checkpoint_exists():
+    early_exit, checkpoint_cfg = get_checkpoint_config()
+    if early_exit:
         return
 
     # Download the model if necessary using modelexpress.
@@ -116,13 +133,23 @@ async def worker():
     if not os.path.exists(config.model):
         await fetch_model(config.model)
 
+    # HEADLESS MODE: bypass DistributedRuntime entirely.
+    # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
+    if config.headless:
+        if checkpoint_cfg is not None:
+            raise ValueError(
+                "--headless is incompatible with checkpoint mode "
+                "(DYN_CHECKPOINT_SIGNAL_FILE is set). "
+                "Remove --headless or unset DYN_CHECKPOINT_SIGNAL_FILE."
+            )
+        run_dynamo_headless(config)
+        return
+
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
     pre_created_engine = None
     if checkpoint_cfg is not None:
-        logger.info(
-            f"Checkpoint mode enabled (signal_file={checkpoint_cfg.signal_file})"
-        )
+        logger.info("Checkpoint mode enabled (watcher-driven signals)")
 
         # Checkpoint mode requires sleep mode — enable before engine init
         config.engine_args.enable_sleep_mode = True
@@ -136,13 +163,14 @@ async def worker():
             return
 
     shutdown_event = asyncio.Event()
-    runtime, _ = create_runtime(
+    runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
         use_kv_events=config.use_kv_events,
-        shutdown_event=shutdown_event,
     )
+
+    install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
     # Route to appropriate initialization based on config flags
     if WorkerFactory.handles(config):
@@ -153,13 +181,17 @@ async def worker():
             register_vllm_model_fn=register_vllm_model,
         )
         await factory.create(
-            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            pre_created_engine=pre_created_engine,
         )
         logger.debug("multimodal worker completed")
     elif config.omni:
         await init_omni(runtime, config, shutdown_event)
         logger.debug("init_omni completed")
-    elif config.is_prefill_worker:
+    elif config.disaggregation_mode == DisaggregationMode.PREFILL:
         await init_prefill(
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
         )
@@ -265,9 +297,8 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
 
 def setup_kv_event_publisher(
     config: Config,
-    component,
-    generate_endpoint,
-    vllm_config,
+    generate_endpoint: Endpoint,
+    vllm_config: VllmConfig,
     consolidator_enabled: bool = False,
     consolidator_port: Optional[int] = 5558,
 ) -> Optional[KvEventPublisher]:
@@ -276,7 +307,6 @@ def setup_kv_event_publisher(
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
     Args:
         config: Worker configuration
-        component: Component for runtime integration
         generate_endpoint: Endpoint for worker ID
         vllm_config: vLLM configuration
         consolidator_enabled: If True, subscribe to kv eventconsolidator's ZMQ endpoint
@@ -289,7 +319,7 @@ def setup_kv_event_publisher(
         return None
 
     # Skip KV event publishing for decode workers
-    if config.is_decode_worker:
+    if config.disaggregation_mode == DisaggregationMode.DECODE:
         logger.info("Skipping KV event publisher setup for decode worker")
         return None
 
@@ -325,7 +355,7 @@ def setup_kv_event_publisher(
             )
 
         kv_publisher = KvEventPublisher(
-            component=component,
+            endpoint=generate_endpoint,
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
             zmq_topic="",
@@ -405,6 +435,32 @@ def setup_vllm_engine(config, stat_logger=None):
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
     )
+
+    # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
+    # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
+    if (
+        not config.route_to_encoder
+        and config.multimodal_embedding_cache_capacity_gb > 0
+    ):
+        from vllm.config import ECTransferConfig
+
+        logger.info(
+            "Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector "
+            "(capacity=%.2f GB)",
+            config.multimodal_embedding_cache_capacity_gb,
+        )
+        instance_id = 0
+        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
+        engine_args.ec_transfer_config = ECTransferConfig(
+            engine_id=engine_id,
+            ec_role="ec_both",
+            ec_connector="DynamoMultimodalEmbeddingCacheConnector",
+            ec_connector_module_path="dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
+            ec_connector_extra_config={
+                "multimodal_embedding_cache_capacity_gb": config.multimodal_embedding_cache_capacity_gb,
+            },
+        )
+        logger.info("Configured ec_both with engine_id=%s", engine_id)
 
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
@@ -487,7 +543,8 @@ async def register_vllm_model(
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     runtime_config.enable_local_indexer = (
-        config.enable_local_indexer and not config.is_decode_worker
+        config.enable_local_indexer
+        and config.disaggregation_mode != DisaggregationMode.DECODE
     )
 
     # Add tool/reasoning parsers for decode models
@@ -543,8 +600,9 @@ async def init_prefill(
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = generate_endpoint.component()
-    clear_endpoint = component.endpoint("clear_kv_blocks")
+    clear_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.clear_kv_blocks"
+    )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
@@ -566,7 +624,6 @@ async def init_prefill(
 
     handler = PrefillWorkerHandler(
         runtime,
-        component,
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
@@ -597,7 +654,6 @@ async def init_prefill(
     # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
         config,
-        component,
         generate_endpoint,
         vllm_config,
         consolidator_enabled=consolidator_enabled,
@@ -617,6 +673,7 @@ async def init_prefill(
     if config.engine_args.data_parallel_rank:
         await _handle_non_leader_node(config.engine_args.data_parallel_rank)
         return
+    shutdown_endpoints[:] = [generate_endpoint, clear_endpoint]
 
     # Register prefill model with ModelType.Prefill
     model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
@@ -686,16 +743,34 @@ async def init(
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = generate_endpoint.component()
-    clear_endpoint = component.endpoint("clear_kv_blocks")
+    clear_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.clear_kv_blocks"
+    )
+
+    shutdown_endpoints[:] = [
+        generate_endpoint,
+        clear_endpoint,
+    ]
 
     lora_enabled = config.engine_args.enable_lora
     if lora_enabled:
-        load_lora_endpoint = component.endpoint("load_lora")
-        unload_lora_endpoint = component.endpoint("unload_lora")
-        list_loras_endpoint = component.endpoint("list_loras")
+        load_lora_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.load_lora"
+        )
+        unload_lora_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.unload_lora"
+        )
+        list_loras_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.list_loras"
+        )
 
-    model_name = config.served_model_name or config.model
+        shutdown_endpoints.extend(
+            [
+                load_lora_endpoint,
+                unload_lora_endpoint,
+                list_loras_endpoint,
+            ]
+        )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
@@ -708,19 +783,17 @@ async def init(
         ) = pre_created_engine
         # Factory is created after unpack so component_gauges is available
         factory = StatLoggerFactory(
-            component,
+            endpoint=generate_endpoint,
             component_gauges=component_gauges,
             dp_rank=config.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", model_name)],
         )
     else:
         # Factory is created without component_gauges; setup_vllm_engine() will
         # create the gauges after setup_multiprocess_prometheus() and set them
         # on the factory before vLLM calls create_stat_logger().
         factory = StatLoggerFactory(
-            component,
+            endpoint=generate_endpoint,
             dp_rank=config.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", model_name)],
         )
         (
             engine_client,
@@ -736,7 +809,6 @@ async def init(
 
     handler = DecodeWorkerHandler(
         runtime,
-        component,
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
@@ -767,7 +839,6 @@ async def init(
     # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
         config,
-        component,
         generate_endpoint,
         vllm_config,
         consolidator_enabled=consolidator_enabled,
@@ -913,7 +984,8 @@ async def init_omni(
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = generate_endpoint.component()
+
+    shutdown_endpoints[:] = [generate_endpoint]
 
     # Initialize media filesystem for storing generated images/videos
     media_fs = (
@@ -923,7 +995,6 @@ async def init_omni(
     # Initialize unified OmniHandler
     handler = OmniHandler(
         runtime=runtime,
-        component=component,
         config=config,
         default_sampling_params={},
         shutdown_event=shutdown_event,

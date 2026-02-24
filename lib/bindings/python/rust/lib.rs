@@ -140,6 +140,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::kv::start_kv_block_indexer_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
@@ -149,8 +150,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
-    m.add_class::<CancellationToken>()?;
-    m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
@@ -462,13 +461,6 @@ struct CancellationToken {
 
 #[pyclass]
 #[derive(Clone)]
-struct Component {
-    inner: rs::component::Component,
-    event_loop: PyObject,
-}
-
-#[pyclass]
-#[derive(Clone)]
 struct Endpoint {
     inner: rs::component::Endpoint,
     event_loop: PyObject,
@@ -680,11 +672,6 @@ impl DistributedRuntime {
         self.event_loop.clone()
     }
 
-    fn child_token(&self) -> CancellationToken {
-        let inner = self.inner.runtime().child_token();
-        CancellationToken { inner }
-    }
-
     /// Register an async Python callback for /engine/{route_name}
     ///
     /// Args:
@@ -776,32 +763,6 @@ impl DistributedRuntime {
         let name = CString::new("dynamo.runtime.weak").expect("valid capsule name");
 
         PyCapsule::new(py, weak, Some(name))
-    }
-}
-
-#[pymethods]
-impl CancellationToken {
-    fn cancel(&self) {
-        self.inner.cancel();
-    }
-
-    fn cancelled<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let token = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            token.cancelled().await;
-            Ok(())
-        })
-    }
-}
-
-#[pymethods]
-impl Component {
-    fn endpoint(&self, name: String) -> PyResult<Endpoint> {
-        let inner = self.inner.endpoint(name);
-        Ok(Endpoint {
-            inner,
-            event_loop: self.event_loop.clone(),
-        })
     }
 }
 
@@ -926,17 +887,6 @@ impl Endpoint {
             inner.register_endpoint_instance().await.map_err(to_pyerr)?;
             Ok(())
         })
-    }
-
-    /// Get the parent Component.
-    ///
-    /// Note: To avoid duplicate metrics registries, reuse the returned Component for
-    /// multiple endpoints: `component.endpoint("ep1")`, `component.endpoint("ep2")`.
-    fn component(&self) -> Component {
-        Component {
-            inner: self.inner.component().clone(),
-            event_loop: self.event_loop.clone(),
-        }
     }
 }
 

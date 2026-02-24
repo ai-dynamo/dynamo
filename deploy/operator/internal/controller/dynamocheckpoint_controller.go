@@ -207,14 +207,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
 			Status:             metav1.ConditionTrue,
 			Reason:             "JobSucceeded",
-			Message:            "Checkpoint job completed successfully",
-			LastTransitionTime: metav1.Now(),
-		})
-		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionTarAvailable),
-			Status:             metav1.ConditionTrue,
-			Reason:             "TarCreated",
-			Message:            fmt.Sprintf("Checkpoint available at %s", ckpt.Status.Location),
+			Message:            fmt.Sprintf("Checkpoint job completed, available at %s", ckpt.Status.Location),
 			LastTransitionTime: metav1.Now(),
 		})
 
@@ -264,46 +257,8 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	if podTemplate.Labels == nil {
 		podTemplate.Labels = make(map[string]string)
 	}
-	podTemplate.Labels[consts.KubeLabelCheckpointName] = ckpt.Name
 	podTemplate.Labels[consts.KubeLabelCheckpointHash] = ckpt.Status.IdentityHash
-	podTemplate.Labels[consts.KubeLabelCheckpointSource] = "true"
-
-	// Add signal volume (hostPath for communication with DaemonSet)
-	// The DaemonSet writes a signal file after checkpoint is complete
-	hostPathType := corev1.HostPathDirectoryOrCreate
-	podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, corev1.Volume{
-		Name: consts.CheckpointSignalVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			HostPath: &corev1.HostPathVolumeSource{
-				Path: r.Config.Checkpoint.Storage.SignalHostPath,
-				Type: &hostPathType,
-			},
-		},
-	})
-
-	// Compute the signal file path - unique per checkpoint hash
-	signalFilePath := consts.CheckpointSignalMountPath + "/" + ckpt.Status.IdentityHash
-
-	// Add initContainer to clean up any leftover signal file from previous runs
-	// This ensures a fresh start for each checkpoint job without affecting the checkpoint itself
-	// InitContainers complete before the main container starts, so they don't appear in the checkpoint
-	initContainerImage := r.Config.Checkpoint.InitContainerImage
-
-	podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, corev1.Container{
-		Name:  consts.SignalFileCleanupInitContainerName,
-		Image: initContainerImage,
-		Command: []string{
-			"sh",
-			"-c",
-			fmt.Sprintf("rm -f %s || true; echo 'Signal file cleanup complete'", signalFilePath),
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      consts.CheckpointSignalVolumeName,
-				MountPath: consts.CheckpointSignalMountPath,
-			},
-		},
-	})
+	podTemplate.Labels[consts.KubeLabelIsCheckpointSource] = "true"
 
 	// Add checkpoint env vars and volume mounts to main container
 	if len(podTemplate.Spec.Containers) > 0 {
@@ -315,11 +270,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 
 		// Add checkpoint-related env vars
 		mainContainer.Env = append(mainContainer.Env,
-			// Signal file: DaemonSet writes this after checkpoint completes
-			corev1.EnvVar{
-				Name:  consts.EnvCheckpointSignalFile,
-				Value: signalFilePath,
-			},
 			// Ready file: Worker creates this when model is loaded
 			corev1.EnvVar{
 				Name:  consts.EnvReadyForCheckpointFile,
@@ -339,19 +289,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			corev1.EnvVar{
 				Name:  consts.EnvCheckpointStorageType,
 				Value: storageType,
-			},
-			// Restore marker: Written by restore-entrypoint after CRIU restore
-			corev1.EnvVar{
-				Name:  consts.EnvRestoreMarkerFile,
-				Value: r.Config.Checkpoint.RestoreMarkerFilePath,
-			},
-		)
-
-		// Add signal volume mount (required for DaemonSet communication)
-		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts,
-			corev1.VolumeMount{
-				Name:      consts.CheckpointSignalVolumeName,
-				MountPath: consts.CheckpointSignalMountPath,
 			},
 		)
 
@@ -423,7 +360,6 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			Name:      jobName,
 			Namespace: ckpt.Namespace,
 			Labels: map[string]string{
-				consts.KubeLabelCheckpointName: ckpt.Name,
 				consts.KubeLabelCheckpointHash: ckpt.Status.IdentityHash,
 			},
 		},

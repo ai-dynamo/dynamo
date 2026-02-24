@@ -221,7 +221,6 @@ ${NIXL_LIB_DIR}:\
 ${NIXL_PLUGIN_DIR}:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
-/usr/local/cuda/compat/lib.real:\
 ${LD_LIBRARY_PATH}
 
 # Copy shell profile script for framework-specific environment variables
