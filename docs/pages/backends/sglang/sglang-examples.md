@@ -67,7 +67,7 @@ cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/disagg.sh
 ```
 
-For details on how SGLang disaggregation works with Dynamo, including the bootstrap mechanism and RDMA transfer flow, see [SGLang Disaggregation](disaggregation.md).
+For details on how SGLang disaggregation works with Dynamo, including the bootstrap mechanism and RDMA transfer flow, see [SGLang Disaggregation](sglang-disaggregation.md).
 
 ### Disaggregated Serving with KV-Aware Prefill Routing
 
@@ -154,7 +154,7 @@ cd $DYNAMO_HOME/examples/backends/sglang
 
 Options: `--wan-size 1b|14b`, `--num-frames`, `--height`, `--width`, `--num-inference-steps`.
 
-For full details on all diffusion worker types (LLM, image, video), see [Diffusion](diffusion.md).
+For full details on all diffusion worker types (LLM, image, video), see [Diffusion](sglang-diffusion.md).
 
 ### Kubernetes Deployment
 
@@ -166,7 +166,7 @@ For complete K8s deployment examples, see:
 ## See Also
 
 - **[SGLang README](README.md)**: Quick start and feature overview
-- **[Reference Guide](reference-guide.md)**: Architecture, configuration, and operational details
+- **[Reference Guide](sglang-reference-guide.md)**: Architecture, configuration, and operational details
 - **[SGLang Multimodal](../../features/multimodal/multimodal-sglang.md)**: Vision model deployment patterns
 - **[SGLang HiCache](../../integrations/sglang-hicache.md)**: Hierarchical cache integration
 - **[Benchmarking](../../benchmarks/benchmarking.md)**: Performance benchmarking tools

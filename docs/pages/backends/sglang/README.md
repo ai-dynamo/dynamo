@@ -82,10 +82,10 @@ docker run \
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
 | [**Multimodal Support**](../../features/multimodal/multimodal-sglang.md) | ✅ | Image via EPD, E/PD, E/P/D patterns |
-| [**Diffusion Models**](diffusion.md) | ✅ | LLM diffusion, image, and video generation |
+| [**Diffusion Models**](sglang-diffusion.md) | ✅ | LLM diffusion, image, and video generation |
 | [**Request Cancellation**](../../fault-tolerance/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**Graceful Shutdown**](../../fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
-| [**Prometheus Metrics**](prometheus.md) | ✅ | SGLang + Dynamo metrics on `/metrics` |
+| [**Prometheus Metrics**](sglang-prometheus.md) | ✅ | SGLang + Dynamo metrics on `/metrics` |
 | [**KVBM**](../../components/kvbm/README.md) | ❌ | Planned |
 
 ## Quick Start
@@ -124,9 +124,9 @@ You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`.
 
 ## Next Steps
 
-- **[Reference Guide](reference-guide.md)**: Worker types, architecture, and configuration
-- **[Examples](examples.md)**: All deployment patterns with launch scripts
-- **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer details
-- **[Diffusion](diffusion.md)**: LLM, image, and video diffusion models
-- **[Prometheus Metrics](prometheus.md)**: Metrics integration and monitoring
+- **[Reference Guide](sglang-reference-guide.md)**: Worker types, architecture, and configuration
+- **[Examples](sglang-examples.md)**: All deployment patterns with launch scripts
+- **[Disaggregation](sglang-disaggregation.md)**: P/D architecture and KV transfer details
+- **[Diffusion](sglang-diffusion.md)**: LLM, image, and video diffusion models
+- **[Prometheus Metrics](sglang-prometheus.md)**: Metrics integration and monitoring
 - **[Deploying SGLang with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy)**: Kubernetes deployment guide

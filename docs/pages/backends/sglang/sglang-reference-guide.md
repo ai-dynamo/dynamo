@@ -45,8 +45,8 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 | `--multimodal-processor` | `DYN_SGL_MULTIMODAL_PROCESSOR` | `false` | Run as [multimodal](../../features/multimodal/multimodal-sglang.md) processor |
 | `--multimodal-encode-worker` | `DYN_SGL_MULTIMODAL_ENCODE_WORKER` | `false` | Run as multimodal encode worker |
 | `--multimodal-worker` | `DYN_SGL_MULTIMODAL_WORKER` | `false` | Run as multimodal LLM worker |
-| `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](diffusion.md#image-diffusion) worker |
-| `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](diffusion.md#video-generation) worker |
+| `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](sglang-diffusion.md#image-diffusion) worker |
+| `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](sglang-diffusion.md#video-generation) worker |
 | `--disagg-config` | `DYN_SGL_DISAGG_CONFIG` | `None` | Path to YAML disaggregation config file |
 | `--disagg-config-key` | `DYN_SGL_DISAGG_CONFIG_KEY` | `None` | Key to select from disaggregation config (e.g., `prefill`, `decode`) |
 
@@ -115,7 +115,7 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --enab
 
 Both SGLang engine metrics (`sglang:*` prefix) and Dynamo runtime metrics (`dynamo_*` prefix) are served from the same endpoint.
 
-For metric details, see [SGLang Prometheus Metrics](prometheus.md). For visualization setup, see [Prometheus + Grafana](../../observability/prometheus-grafana.md).
+For metric details, see [SGLang Prometheus Metrics](sglang-prometheus.md). For visualization setup, see [Prometheus + Grafana](../../observability/prometheus-grafana.md).
 
 ### KV Events
 
@@ -139,7 +139,7 @@ SGLang workers expose operational endpoints via Dynamo's system server:
 
 ## See Also
 
-- **[Examples](examples.md)**: All deployment patterns
-- **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
-- **[Diffusion](diffusion.md)**: LLM, image, and video diffusion models
+- **[Examples](sglang-examples.md)**: All deployment patterns
+- **[Disaggregation](sglang-disaggregation.md)**: P/D architecture and KV transfer
+- **[Diffusion](sglang-diffusion.md)**: LLM, image, and video diffusion models
 - **[Router Guide](../../components/router/router-guide.md)**: KV-aware routing configuration

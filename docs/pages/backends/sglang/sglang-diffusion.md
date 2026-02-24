@@ -107,6 +107,6 @@ curl http://localhost:8000/v1/videos \
 
 ## See Also
 
-- **[Examples](examples.md)**: Launch scripts for all deployment patterns
-- **[Reference Guide](reference-guide.md)**: Worker types and argument reference
+- **[Examples](sglang-examples.md)**: Launch scripts for all deployment patterns
+- **[Reference Guide](sglang-reference-guide.md)**: Worker types and argument reference
 - **[SGLang Diffusion LMs (upstream)](https://github.com/sgl-project/sglang/blob/main/docs/supported_models/text_generation/diffusion_language_models.md)**: SGLang diffusion documentation
