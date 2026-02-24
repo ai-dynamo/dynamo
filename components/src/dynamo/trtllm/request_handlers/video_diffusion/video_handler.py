@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class VideoGenerationHandler(BaseGenerativeHandler):
-    """Handler for video/image generation requests.
+    """Handler for video generation requests.
 
     This handler receives generation requests, runs the diffusion pipeline
     via DiffusionEngine, encodes the output to the appropriate media format,
@@ -176,7 +176,7 @@ class VideoGenerationHandler(BaseGenerativeHandler):
         Handles MediaOutput from the pipeline:
         - video tensor → MP4
         - image tensor → unsupported (raises error)
-        - audio tensor → logged (future: mux into MP4)
+        - audio tensor → unsupported (raises error)
 
         Args:
             request: Request dictionary with generation parameters.
@@ -236,18 +236,6 @@ class VideoGenerationHandler(BaseGenerativeHandler):
             if output is None:
                 raise RuntimeError("Pipeline returned no output (MediaOutput is None)")
 
-            # Log audio if present (future: mux into video MP4)
-            if output.audio is not None:
-                logger.info(
-                    f"Request {request_id}: audio output available "
-                    f"(shape={output.audio.shape}, dtype={output.audio.dtype}). "
-                    f"Audio muxing into MP4 is not yet supported — audio will be dropped."
-                )
-
-            # Determine output format
-            response_format = req.response_format or "url"
-            fps = nvext.fps or self.config.default_fps
-
             # Encode media based on what the pipeline returned
             if output.video is not None:
                 # Video output: torch.Tensor (num_frames, H, W, 3) uint8 → MP4
@@ -266,9 +254,16 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                     "only supports video. Use an image generation handler instead."
                 )
 
+            # Log audio if present (unsupported)
+            elif output.audio is not None:
+                raise RuntimeError(
+                    "Pipeline returned audio-only output, but this handler "
+                    "only supports video. Use an audio generation handler instead."
+                )
+
             else:
                 raise RuntimeError(
-                    "Pipeline returned MediaOutput with no video or image data. "
+                    "Pipeline returned MediaOutput with no video or image or audio data. "
                     f"MediaOutput fields: video={output.video is not None}, "
                     f"image={output.image is not None}, audio={output.audio is not None}"
                 )
