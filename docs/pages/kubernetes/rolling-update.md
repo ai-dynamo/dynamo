@@ -80,7 +80,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
       componentType: worker
-      replicas: 1
+      replicas: 2
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -128,13 +128,46 @@ kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.rollingUpdate}'
 
 ## Default Behavior (Grove and LWS)
 
-For DGDs backed by **Grove** (PodCliques, PodCliqueScalingGroups) or **LWS** (LeaderWorkerSets), the operator does not manage rolling updates directly. Instead, these deployments rely on the native rolling update mechanisms of their underlying resources.
+For DGDs backed by **Grove** (PodCliques, PodCliqueSets) or **LWS** (LeaderWorkerSets), the operator does not manage rolling updates directly. Instead, these deployments rely on the native rolling update mechanisms of their underlying resources.
 
 ### What Happens
 
 - A modification to the pod spec of a service triggers the rolling update behavior of the backing resource. In the example above, the modification to the pod spec of the decode worker triggers the rolling update of just the decode worker.
-- For Grove, PodCliques and PodCliqueScalingGroups use a static rolling update strategy of `maxUnavailable: 1` and `maxSurge: 0`. LWS follows a similar approach with its native update mechanism.
+- For Grove, PodCliques and PodCliqueScalingGRoups use a static rolling update strategy of `maxUnavailable: 1` and `maxSurge: 0`. LWS follows a similar approach with its native update mechanism.
 - **Old and new workers operate within the same Dynamo namespace.** This means old and new workers can discover each other through service discovery.
+
+The following diagram illustrates the rolling update of the decode worker in a Grove PodCliqueSet (PCS). Only the decode PodClique is updated — the frontend and prefill PodCliques are unaffected:
+
+```
+┌─ PodCliqueSet: vllm-disagg ───────────────────────────────────────────────────────┐
+│                                                                                    │
+│  ┌─ PCLQ: Frontend ──────┐  ┌─ PCLQ: VllmPrefillWorker ─┐                        │
+│  │                        │  │                            │                        │
+│  │  ┌──────────────────┐  │  │  ┌──────────────────────┐  │                        │
+│  │  │ Pod (v1) ✓       │  │  │  │ Pod (v1) ✓           │  │   No changes —        │
+│  │  └──────────────────┘  │  │  └──────────────────────┘  │   not rolling          │
+│  │                        │  │                            │                        │
+│  └────────────────────────┘  └────────────────────────────┘                        │
+│                                                                                    │
+│  ┌─ PCLQ: VllmDecodeWorker ──────────────────────────────────────────────────────┐ │
+│  │                                                                                │ │
+│  │  maxUnavailable: 1, maxSurge: 0                                                │ │
+│  │                                                                                │ │
+│  │  ┌──────────────────────┐  ┌──────────────────────┐                            │ │
+│  │  │ Pod (v2) ✓ NEW       │  │ Pod (v1) Terminating │  ← rolling one at a time   │ │
+│  │  └──────────────────────┘  └──────────────────────┘                            │ │
+│  │                                                                                │ │
+│  └────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                    │
+│                        ┌──────────────────────────────────┐                        │
+│                        │  Dynamo Namespace: vllm-disagg   │                        │
+│                        │                                  │                        │
+│                        │  All v1 and v2 pods registered   │                        │
+│                        │  and discoverable by each other  │                        │
+│                        └──────────────────────────────────┘                        │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Implications for Disaggregated Deployments
 
@@ -217,10 +250,10 @@ This avoids creating extra pods but allows up to 2 decode replicas to be unavail
 
 ### Worker Hash and DCD Naming
 
-During a managed rolling update, the operator uses a hash-based naming scheme to distinguish between old and new worker DCDs:
+Worker DCDs always include a hash suffix derived from the worker specs: `{dgd-name}-{service-name}-{hash}` (e.g., `vllm-disagg-vllmdecodeworker-a1b2c3d4`). During a rolling update, the new worker DCDs are created with the new spec hash while the old DCDs retain the previous hash, allowing both generations to coexist:
 
-- **Normal (no rolling update):** `{dgd-name}-{service-name}` (e.g., `my-llm-decode`)
-- **During rolling update:** `{dgd-name}-{service-name}-{hash}` (e.g., `my-llm-decode-a1b2c3d4`)
+- **Old worker DCD:** `vllm-disagg-vllmdecodeworker-a1b2c3d4` (previous hash)
+- **New worker DCD:** `vllm-disagg-vllmdecodeworker-f5e6d7c8` (new hash)
 
 The hash is computed from a SHA-256 digest of all worker service specs (excluding non-pod-template fields like `replicas`, `autoscaling`, and `ingress`). This means:
 
