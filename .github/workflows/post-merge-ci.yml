@@ -34,6 +34,9 @@ jobs:
       single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
       multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_timeout_minutes: 60
+      multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
   # ============================================================================
@@ -54,6 +57,9 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_timeout_minutes: 60
+      multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
   # ============================================================================
@@ -74,6 +80,9 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_timeout_minutes: 60
+      multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
   ############################## SLACK NOTIFICATION ##############################
