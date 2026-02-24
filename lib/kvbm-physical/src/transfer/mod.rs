@@ -48,7 +48,7 @@ pub(crate) mod preferences;
 pub(crate) mod strategy;
 pub(crate) mod validation;
 
-#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
+#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
 mod tests;
 
 // Re-export StorageKind

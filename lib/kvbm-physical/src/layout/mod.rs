@@ -19,7 +19,7 @@ mod physical;
 mod serialize;
 mod validation;
 
-#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
+#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
 pub(super) mod tests;
 
 // #[cfg(test)]

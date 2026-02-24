@@ -33,7 +33,7 @@ impl CompletionChecker for CudaEventChecker {
     }
 }
 
-#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
+#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
 mod tests {
     use crate::manager::TransferManager;
     use crate::transfer::tests::CudaSleep;

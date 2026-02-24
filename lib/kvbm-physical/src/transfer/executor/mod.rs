@@ -570,7 +570,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
     Ok(TransferCompleteNotification::from_awaiter(awaiter))
 }
 
-#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
+#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
 mod tests {
     use super::*;
 

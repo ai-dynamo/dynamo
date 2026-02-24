@@ -66,7 +66,7 @@ impl Deref for LocalLayout {
     }
 }
 
-#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
+#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
 mod tests {
     use super::*;
     use crate::layout::{LayoutConfig, PhysicalLayout};

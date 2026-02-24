@@ -12,7 +12,7 @@ repository.workspace = true
 [dependencies]
 dynamo-memory = { workspace = true }
 kvbm-common = { workspace = true }
-kvbm-kernels = { git = "http://github.com/ai-dynamo/dynamo", branch = "ryan/kvbm-kernels-encore" }
+kvbm-kernels = { workspace = true }
 velo-events = { workspace = true }
 
 aligned-vec = "0.6.4"
@@ -35,8 +35,7 @@ validator = { workspace = true }
 [features]
 default = []
 collectives = []
-testing-cuda = []
-testing-nixl = []
+testing-full = []
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }

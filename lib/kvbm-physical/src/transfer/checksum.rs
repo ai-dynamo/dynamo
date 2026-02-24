@@ -157,7 +157,7 @@ fn compute_single_block_checksum(
     Ok(hasher.finalize().to_string())
 }
 
-#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
+#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
 mod tests {
     use super::super::tests::*;
     use super::*;

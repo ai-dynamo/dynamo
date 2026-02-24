@@ -9,11 +9,11 @@
 //! 2. Intermediate → Destination blocks (host, different IDs)
 //! 3. Verify checksums match between source and destination
 
-use super::{
-    BlockChecksum, FillPattern, PhysicalLayout, StorageKind, compute_block_checksums,
-    fill_blocks, transfer_blocks,
-};
 use super::context::TransferContext;
+use super::{
+    BlockChecksum, FillPattern, PhysicalLayout, StorageKind, compute_block_checksums, fill_blocks,
+    transfer_blocks,
+};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 
@@ -236,7 +236,7 @@ impl RoundTripTest {
     }
 }
 
-#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
+#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
 mod tests {
     use super::*;
     use crate::v2::layout::{
