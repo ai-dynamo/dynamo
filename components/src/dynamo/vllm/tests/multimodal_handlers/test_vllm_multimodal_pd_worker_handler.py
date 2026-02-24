@@ -38,9 +38,16 @@ def _make_config(
     multimodal_embedding_cache_capacity_gb: float = 0,
 ) -> MagicMock:
     """Create a mock Config with the fields used by MultimodalPDWorkerHandler."""
+    from dynamo.vllm.constants import DisaggregationMode
+
     config = MagicMock()
     config.model = model
     config.is_prefill_worker = is_prefill_worker
+    config.disaggregation_mode = (
+        DisaggregationMode.PREFILL
+        if is_prefill_worker
+        else DisaggregationMode.AGGREGATED
+    )
     config.enable_multimodal = enable_multimodal
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb

@@ -9,7 +9,6 @@ import socket
 import sys
 import tempfile
 from argparse import Namespace
-from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
@@ -20,18 +19,13 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
-
-
-class DisaggregationMode(Enum):
-    AGGREGATED = "agg"
-    PREFILL = "prefill"
-    DECODE = "decode"
 
 
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):

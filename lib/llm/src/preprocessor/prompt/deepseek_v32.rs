@@ -275,13 +275,42 @@ fn render_message(
             // Handle reasoning content
             // NOTE: If this assistant comes after last user message, the opening <think>
             // was already added in the user message. We only need to add content and closing tag.
+            //
+            // Handle reasoning_content which may be a plain string or an array of segments.
+            // DeepSeek V3.2 always places its <think> block before all tool calls, so
+            // joining segments produces the correct flat form here.
             if thinking_mode == ThinkingMode::Thinking
                 && last_user_idx.is_some_and(|idx| index > idx)
-                && let Some(reasoning) = msg.get("reasoning_content").and_then(|r| r.as_str())
             {
-                // DON'T add THINKING_START - it was already added in user message
-                prompt.push_str(reasoning);
-                prompt.push_str(tokens::THINKING_END);
+                let reasoning = msg.get("reasoning_content").and_then(|v| match v {
+                    serde_json::Value::String(s) => {
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(s.clone())
+                        }
+                    }
+                    serde_json::Value::Array(arr) => {
+                        let joined = arr
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if joined.is_empty() {
+                            None
+                        } else {
+                            Some(joined)
+                        }
+                    }
+                    _ => None,
+                });
+
+                if let Some(reasoning) = reasoning {
+                    // DON'T add THINKING_START - it was already added in user message
+                    prompt.push_str(&reasoning);
+                    prompt.push_str(tokens::THINKING_END);
+                }
             }
 
             // Handle content

@@ -125,9 +125,9 @@ def _build_mocker_command(
 
     # Add worker type flag for disaggregated mode
     if worker_type == "prefill":
-        command.append("--is-prefill-worker")
+        command.extend(["--disaggregation-mode", "prefill"])
     elif worker_type == "decode":
-        command.append("--is-decode-worker")
+        command.extend(["--disaggregation-mode", "decode"])
 
     # Add individual CLI arguments from mocker_args
     if "speedup_ratio" in mocker_args:
