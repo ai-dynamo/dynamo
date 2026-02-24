@@ -43,7 +43,7 @@ Requires Rust and the CUDA toolkit (`nvcc`).
 ```bash
 # install dynamo
 uv venv --python 3.12 --seed
-uv pip install maturin
+uv pip install maturin nixl
 cd $DYNAMO_HOME/lib/bindings/python
 maturin develop --uv
 cd $DYNAMO_HOME
@@ -52,6 +52,8 @@ uv pip install -e .
 git clone https://github.com/sgl-project/sglang.git
 cd sglang && uv pip install -e "python"
 ```
+
+This is the ideal way for agents to also develop. You can provide the path to both repos and the virtual environment and have it rerun these commands as it makes changes
 </Accordion>
 
 ### Docker
