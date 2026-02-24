@@ -537,7 +537,15 @@ def main():
         "--step-duration",
         type=int,
         default=None,
-        help="Duration of each rate step in seconds (use with --step-rates)",
+        help="Uniform duration for each rate step in seconds (use with --step-rates). "
+        "Overridden by --step-durations if both are provided.",
+    )
+    parser.add_argument(
+        "--step-durations",
+        type=str,
+        default=None,
+        help="Comma-separated per-step durations in seconds (e.g., '30,60,180,60,30'). "
+        "Must have the same number of values as --step-rates.",
     )
     parser.add_argument(
         "--step-rates",
@@ -556,15 +564,17 @@ def main():
     args = parser.parse_args()
 
     # Validate rate schedule arguments
-    has_schedule = args.step_rates is not None or args.step_duration is not None
-    if has_schedule:
-        if args.step_rates is None or args.step_duration is None:
-            parser.error("--step-duration and --step-rates must be used together")
-        if args.speedup_ratio != 1:
-            parser.error("--speedup-ratio cannot be used with --step-rates")
+    has_schedule = args.step_rates is not None
+    has_duration = args.step_duration is not None or args.step_durations is not None
+    if has_schedule and not has_duration:
+        parser.error("--step-rates requires --step-duration or --step-durations")
+    if has_duration and not has_schedule:
+        parser.error("--step-duration/--step-durations requires --step-rates")
+    if has_schedule and args.speedup_ratio != 1:
+        parser.error("--speedup-ratio cannot be used with --step-rates")
     if args.constant_rate:
         if not has_schedule:
-            parser.error("--constant-rate requires --step-duration and --step-rates")
+            parser.error("--constant-rate requires --step-rates")
         if args.speedup_ratio != 1:
             parser.error("--constant-rate cannot be used with --speedup-ratio")
 
@@ -573,10 +583,22 @@ def main():
         rates = [float(r) for r in args.step_rates.split(",")]
         if any(r <= 0 for r in rates):
             parser.error("All step rates must be positive")
-        if args.step_duration <= 0:
-            parser.error("--step-duration must be positive")
-        duration_ms = args.step_duration * 1000
-        rate_schedule = [(duration_ms, r) for r in rates]
+
+        if args.step_durations is not None:
+            durations_s = [int(d) for d in args.step_durations.split(",")]
+            if len(durations_s) != len(rates):
+                parser.error(
+                    f"--step-durations has {len(durations_s)} values but "
+                    f"--step-rates has {len(rates)} (must match)"
+                )
+            if any(d <= 0 for d in durations_s):
+                parser.error("All step durations must be positive")
+            rate_schedule = [(d * 1000, r) for d, r in zip(durations_s, rates)]
+        else:
+            if args.step_duration <= 0:
+                parser.error("--step-duration must be positive")
+            duration_ms = args.step_duration * 1000
+            rate_schedule = [(duration_ms, r) for r in rates]
 
     # Default num_requests when no rate schedule is provided
     if args.num_requests is None and rate_schedule is None:
@@ -592,7 +614,11 @@ def main():
         if rate_schedule is not None:
             rates_str = "-".join(f"{r:g}" for _, r in rate_schedule)
             prefix = "constant" if args.constant_rate else "staircase"
-            suffix_parts.append(f"{prefix}_{args.step_duration}s_{rates_str}")
+            if args.step_durations is not None:
+                durations_str = "-".join(f"{d // 1000}" for d, _ in rate_schedule)
+                suffix_parts.append(f"{prefix}_{durations_str}s_{rates_str}")
+            else:
+                suffix_parts.append(f"{prefix}_{args.step_duration}s_{rates_str}")
         else:
             suffix_parts.append(f"speedup{args.speedup_ratio}")
         if args.max_isl is not None:
@@ -624,10 +650,11 @@ def main():
         total_duration_s = sum(d for d, _ in rate_schedule) / 1000
         mode = "constant req/s" if args.constant_rate else "multiplier"
         print(
-            f"Rate schedule ({mode}): {len(rate_schedule)} steps of "
-            f"{args.step_duration}s each ({total_duration_s:.0f}s total)"
+            f"Rate schedule ({mode}): {len(rate_schedule)} steps, {total_duration_s:.0f}s total"
         )
-        print(f"Step rates: {[r for _, r in rate_schedule]}")
+        for i, (d, r) in enumerate(rate_schedule):
+            print(f"  step {i}: {d // 1000}s @ {r:g}")
+
     print("synthesizing requests...", flush=True)
     requests = synthesizer.synthesize_requests(
         num_requests=args.num_requests,

@@ -60,12 +60,16 @@ datagen synthesize --input-file <path_to_trace.jsonl> --num-requests <N> [other 
 
 **Options:**
 - `--input-file`: Path to the input trace file (default: `mooncake_trace.jsonl`)
-- `--num-requests`: Number of requests to synthesize (default: 100000)
-- `--speedup-ratio`: Factor to speed up request intervals. It effectively divides the synthetic timestamps by this value (default: 1)
+- `--num-requests`: Number of requests to synthesize (default: 100000 if no rate schedule)
+- `--speedup-ratio`: Factor to speed up request intervals (default: 1). Mutually exclusive with `--step-rates`
 - `--prefix-len-multiplier`: Multiplier for prefix lengths (default: 1.0)
 - `--prefix-root-multiplier`: Number of times to replicate the core radix tree (default: 1)
 - `--prompt-len-multiplier`: Multiplier for leaf path lengths (default: 1.0, use <1 for shorter prompts)
-- `--max-isl`: Maximum input sequence length to include in output (default: None, no filtering)
+- `--osl-multiplier`: Multiplier for output sequence lengths (default: 1.0)
+- `--max-isl`: Maximum input sequence length — filters out requests above this (default: None)
+- `--min-isl`: Minimum input sequence length — filters out requests below this (default: None)
+- `--max-osl`: Maximum output sequence length — clips values above this (default: None)
+- `--min-osl`: Minimum output sequence length — clips values below this (default: None)
 - `--block-size`: Block size for prefilling and decoding (default: 512)
 - `--output-file`: Path to the output file (default: auto-generated from input file and options)
 
@@ -107,7 +111,9 @@ For example, if rows 2 and 4 are offseted, then we would get:
 
 ### Staircase Rate Schedule
 
-For load testing scenarios where you need to measure how fast the system reacts to changing load, use `--step-duration` and `--step-rates` to generate a staircase request rate pattern. When a rate schedule is provided, `--num-requests` is optional — generation stops when the schedule duration is exhausted.
+For load testing scenarios where you need to measure how fast the system reacts to changing load, use `--step-duration` (or `--step-durations`) with `--step-rates` to generate a staircase request rate pattern. When a rate schedule is provided, `--num-requests` is optional — generation stops when the schedule duration is exhausted.
+
+**Uniform step duration:**
 
 ```bash
 datagen synthesize \
@@ -126,13 +132,35 @@ rate  ^
       +--0----60---120--180--240--300-->  time (s)
 ```
 
-Each rate value is a multiplier on the base request rate from the original trace (same semantics as `--speedup-ratio`, but time-varying). `--step-rates` and `--speedup-ratio` are mutually exclusive.
+**Per-step durations:**
+
+Use `--step-durations` to set different durations per step (must match the number of `--step-rates` values):
+
+```bash
+datagen synthesize \
+  --input-file trace.jsonl \
+  --step-durations 30,60,180,60,30 \
+  --step-rates 1,2,4,2,1
+```
+
+This produces a 5-step staircase over 360 seconds with a long peak:
+
+```
+rate  ^
+  4x  |       _______________
+  2x  |   ___|               |___
+  1x  |__|                       |__
+      +--0-30-90------270--330-360-->  time (s)
+         30s 60s  180s    60s  30s
+```
+
+Each rate value is a multiplier on the base request rate from the original trace (same semantics as `--speedup-ratio`, but time-varying). `--step-rates` and `--speedup-ratio` are mutually exclusive. `--step-durations` overrides `--step-duration` if both are provided.
 
 You can optionally add `--num-requests` as a cap to stop early if the schedule would produce more requests than needed.
 
 ### Constant Rate Mode
 
-For scenarios that require a deterministic, evenly-spaced request stream (e.g., measuring latency at a precise QPS), use `--constant-rate` with `--step-duration` and `--step-rates`. In this mode, `--step-rates` values are interpreted as **absolute req/s** (not multipliers) and each timestamp gets exactly 1 request.
+For scenarios that require a deterministic, evenly-spaced request stream (e.g., measuring latency at a precise QPS), use `--constant-rate` with `--step-duration`/`--step-durations` and `--step-rates`. In this mode, `--step-rates` values are interpreted as **absolute req/s** (not multipliers) and each timestamp gets exactly 1 request.
 
 ```bash
 # Steady 1 req/s for 30 seconds -> 30 requests, 1000ms apart
@@ -142,11 +170,18 @@ datagen synthesize \
   --step-rates 1 \
   --constant-rate
 
-# Staircase with absolute rates
+# Staircase with absolute rates (uniform steps)
 datagen synthesize \
   --input-file trace.jsonl \
   --step-duration 60 \
   --step-rates 1,5,10,5,1 \
+  --constant-rate
+
+# Staircase with absolute rates (per-step durations)
+datagen synthesize \
+  --input-file trace.jsonl \
+  --step-durations 120,360,120 \
+  --step-rates 4,16,4 \
   --constant-rate
 ```
 
