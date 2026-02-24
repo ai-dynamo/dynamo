@@ -65,11 +65,19 @@ impl TcpListener {
 
         match runtime_config {
             RuntimeConfig::Handle(handle) => {
-                handle.spawn(self.run_server());
+                handle.spawn(async move {
+                    if let Err(e) = self.run_server().await {
+                        error!("TCP listener error: {}", e);
+                    }
+                });
                 Ok(())
             }
             RuntimeConfig::Runtime(rt) => {
-                rt.spawn(self.run_server());
+                rt.spawn(async move {
+                    if let Err(e) = self.run_server().await {
+                        error!("TCP listener error: {}", e);
+                    }
+                });
                 Ok(())
             }
             RuntimeConfig::CpuPin(cpu_id) => {
