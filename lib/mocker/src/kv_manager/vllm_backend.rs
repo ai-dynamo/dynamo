@@ -182,9 +182,11 @@ impl KvManager {
         match event {
             MoveBlock::Use(hashes, local_hashes, token_ids) => {
                 let mut blocks_stored = Vec::<u64>::new();
+                let mut stored_token_ids: Option<Vec<Vec<u32>>> =
+                    token_ids.as_ref().map(|_| Vec::new());
 
                 let mut parent_block: Option<&UniqueBlock> = None;
-                for hash in hashes {
+                for (i, hash) in hashes.iter().enumerate() {
                     // First check if it already exists in active blocks
                     if self.cache.contains_active(hash) {
                         // Block already active, just increment reference count
@@ -218,6 +220,9 @@ impl KvManager {
                     // Track blocks for trace/event
                     if let UniqueBlock::FullBlock(stored_full_block) = hash {
                         blocks_stored.push(*stored_full_block);
+                        if let Some(ref mut stids) = stored_token_ids {
+                            stids.push(token_ids.as_ref().unwrap()[i].clone());
+                        }
                     }
                 }
 
@@ -231,7 +236,7 @@ impl KvManager {
                     local_hashes,
                     parent_hash,
                     true,
-                    token_ids.clone(),
+                    stored_token_ids,
                 );
             }
 
