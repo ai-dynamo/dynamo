@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - 'release/*.*.*'
-      - dcullinan/refactor-nightly-postmerge
 
 permissions:
   contents: read
