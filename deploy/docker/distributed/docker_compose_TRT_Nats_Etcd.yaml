@@ -1,0 +1,85 @@
+name: dynamo-trt_nats_etcd
+networks:
+  server:
+    driver: bridge
+
+volumes:
+  nats-data:
+  etcd-data:
+
+services:
+  nats-server:
+    image: nats:2.11.4
+    command: [ "-c", "/etc/nats/nats-server.conf" ]
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-data:/data
+    ports:
+      - 4222:4222
+      - 6222:6222
+      - 8222:8222
+    networks:
+      - server
+
+  etcd-server:
+    image: bitnamilegacy/etcd:3.6.1
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_DATA_DIR=/etcd-data
+    volumes:
+      - etcd-data:/etcd-data
+    ports:
+      - 2379:2379
+      - 2380:2380
+    networks:
+      - server
+
+  dynamo-frontend:
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+    command: python3 -m dynamo.frontend --http-port 8000
+    ports:
+      - 8000:8000
+    networks:
+      - server
+    environment:
+      - ETCD_ENDPOINTS=http://etcd-server:2379
+      - NATS_SERVER=nats://nats-server:4222
+      - HF_HOME=/data/hf
+      - HF_HUB_CACHE=/data/hf/hub
+    volumes:
+      - ${HOME}/.cache/huggingface:/data/hf
+    depends_on:
+      etcd-server:
+        condition: service_started
+      nats-server:
+        condition: service_started
+
+
+  dynamo-TensorRT-LLM:
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+    command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --free-gpu-memory-fraction 0.80 --max-seq-len 10000
+    networks:
+      - server
+    gpus: all
+    ipc: host
+    environment:
+      - ETCD_ENDPOINTS=http://etcd-server:2379
+      - NATS_SERVER=nats://nats-server:4222
+      - HF_HOME=/data/hf
+      - HF_HUB_CACHE=/data/hf/hub
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    volumes:
+      - ${HOME}/.cache/huggingface:/data/hf
+    depends_on:
+      etcd-server:
+        condition: service_started
+      nats-server:
+        condition: service_started
+      dynamo-frontend:
+        condition: service_started
+
