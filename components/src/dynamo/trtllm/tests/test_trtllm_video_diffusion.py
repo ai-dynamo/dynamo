@@ -16,7 +16,9 @@ from dataclasses import dataclass
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import torch
 
 from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
@@ -26,6 +28,34 @@ from dynamo.common.protocols.video_protocol import (
 )
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.constants import Modality
+
+
+def _make_mock_media_output(
+    video_shape=(4, 64, 64, 3),
+    image_shape=None,
+    audio_shape=None,
+):
+    """Create a mock MediaOutput object with torch tensors.
+
+    This avoids importing tensorrt_llm._torch.visual_gen.output.MediaOutput
+    (which may not be available in all test environments) by creating a
+    SimpleNamespace with the same interface.
+
+    Args:
+        video_shape: Shape for the video tensor (num_frames, H, W, 3), or None.
+        image_shape: Shape for the image tensor (H, W, 3), or None.
+        audio_shape: Shape for the audio tensor, or None.
+
+    Returns:
+        A SimpleNamespace with .video, .image, .audio attributes.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        video=torch.zeros(video_shape, dtype=torch.uint8) if video_shape else None,
+        image=torch.zeros(image_shape, dtype=torch.uint8) if image_shape else None,
+        audio=torch.zeros(audio_shape, dtype=torch.float32) if audio_shape else None,
+    )
 
 pytestmark = [
     pytest.mark.unit,
@@ -535,10 +565,8 @@ class ConcurrencyTracker:
         with self._lock:
             self._active_count -= 1
 
-        # Return fake frames (shape: [num_frames, H, W, C])
-        import numpy as np
-
-        return np.zeros((4, 64, 64, 3), dtype=np.uint8)
+        # Return a mock MediaOutput with a video tensor
+        return _make_mock_media_output(video_shape=(4, 64, 64, 3))
 
 
 class TestVideoHandlerConcurrency:
@@ -664,15 +692,13 @@ class TestVideoHandlerResponseFormats:
 
     def _make_handler(self):
         """Create a handler with mocked engine and fs."""
-        import numpy as np
-
         from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
             VideoGenerationHandler,
         )
 
         mock_engine = MagicMock()
         mock_engine.generate = MagicMock(
-            return_value=np.zeros((4, 64, 64, 3), dtype=np.uint8)
+            return_value=_make_mock_media_output(video_shape=(4, 64, 64, 3))
         )
 
         config = DiffusionConfig(
