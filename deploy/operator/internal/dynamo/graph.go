@@ -867,7 +867,7 @@ func ParseBackendFramework(framework string) (BackendFramework, error) {
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
-	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string)
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
@@ -877,7 +877,7 @@ func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
-func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string) {
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
@@ -1166,7 +1166,7 @@ func GenerateBasePodSpec(
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
-	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
+	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
 
 	// Inject checkpoint configuration if enabled
 	// This handles ALL checkpoint-related modifications:
@@ -1338,7 +1338,7 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName, checkpointInfo)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1392,7 +1392,12 @@ func GenerateGrovePodCliqueSet(
 	return gangSet, nil
 }
 
-func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
+func generateLabels(
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+	componentName string,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
@@ -1408,24 +1413,30 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	}
 	// Add base model label if modelRef is specified
 	AddBaseModelLabel(labels, component.ModelRef)
-	// Add checkpoint labels if checkpointing is enabled
+	// Merge user-supplied labels first so they cannot overwrite checkpoint labels.
+	setMetricsLabels(labels, dynamoDeployment)
+	if component.Labels != nil {
+		if err := mergo.Merge(&labels, component.Labels, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to merge labels: %w", err)
+		}
+	}
+	if component.ExtraPodMetadata != nil {
+		if err := mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
+		}
+	}
+
+	// Inject checkpoint labels AFTER user labels so they cannot be overridden.
 	var err error
 	labels, err = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to inject checkpoint labels: %w", err)
 	}
-	setMetricsLabels(labels, dynamoDeployment)
-	if component.Labels != nil {
-		err = mergo.Merge(&labels, component.Labels, mergo.WithOverride)
-		if err != nil {
-			return nil, fmt.Errorf("failed to merge labels: %w", err)
-		}
-	}
-	if component.ExtraPodMetadata != nil {
-		err = mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
-		if err != nil {
-			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
-		}
+
+	// Only mark pods as restore targets when a concrete checkpoint is ready.
+	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
+		labels[commonconsts.KubeLabelIsRestoreTarget] = "true"
+		labels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
 	}
 	return labels, nil
 }

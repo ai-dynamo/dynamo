@@ -217,6 +217,38 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 - **HTTP Queue**: Measures queuing time before processing begins (including prefill time)
 - **HTTP Queue ≤ Inflight** (HTTP queue is a subset of inflight time)
 
+### Router Metrics
+
+When using the KV cache router (`--router-mode kv`), the frontend exposes additional metrics for monitoring routing decisions and overhead. These metrics are defined in `lib/llm/src/kv_router/metrics.rs`.
+
+#### Per-Request Routing Overhead (`dynamo_routing_overhead_*`)
+
+Histograms (in milliseconds) tracking the time spent in each phase of the routing decision for every request. Exposed on the frontend port (default 8000) at `/metrics`.
+
+- `dynamo_routing_overhead_block_hashing_ms`: Time computing block hashes from input tokens
+- `dynamo_routing_overhead_indexer_find_matches_ms`: Time in the KV indexer finding prefix matches
+- `dynamo_routing_overhead_seq_hashing_ms`: Time computing sequence hashes for active block tracking
+- `dynamo_routing_overhead_scheduling_ms`: Time in the scheduler selecting a worker (includes channel round-trip and load-aware selection)
+- `dynamo_routing_overhead_total_ms`: Total routing overhead per request (sum of all phases above)
+
+#### Per-Worker Load (`dynamo_frontend_worker_active_*`)
+
+Gauges tracking the active load on each worker, labeled by `worker_id`, `dp_rank`, and `worker_type`. Exposed on the frontend port at `/metrics`.
+
+- `dynamo_frontend_worker_active_decode_blocks`: Active KV cache decode blocks per worker
+- `dynamo_frontend_worker_active_prefill_tokens`: Active prefill tokens queued per worker
+
+#### Router Request Metrics (`dynamo_component_router_*`)
+
+Component-scoped histograms and counters for aggregate request-level statistics. These use the `dynamo_component_*` prefix with standard component labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`). The `dynamo_component` label is set to the frontend component name. Exposed on the frontend port at `/metrics`.
+
+- `dynamo_component_router_requests_total`: Total requests processed by the router (counter)
+- `dynamo_component_router_time_to_first_token_seconds`: Time to first token as observed at the router (histogram)
+- `dynamo_component_router_inter_token_latency_seconds`: Average inter-token latency at the router (histogram)
+- `dynamo_component_router_input_sequence_tokens`: Input sequence length in tokens (histogram)
+- `dynamo_component_router_output_sequence_tokens`: Output sequence length in tokens (histogram)
+- `dynamo_component_router_kv_hit_rate`: Predicted KV cache hit rate at routing time, 0.0-1.0 (histogram)
+
 ## Related Documentation
 
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)

@@ -68,7 +68,6 @@ class OmniHandler(BaseOmniHandler):
     def __init__(
         self,
         runtime,
-        component,
         config,
         default_sampling_params: Dict[str, Any],
         shutdown_event: asyncio.Event | None = None,
@@ -88,7 +87,6 @@ class OmniHandler(BaseOmniHandler):
         """
         super().__init__(
             runtime=runtime,
-            component=component,
             config=config,
             default_sampling_params=default_sampling_params,
             shutdown_event=shutdown_event,
@@ -239,7 +237,9 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt or "" if nvext else "",
+            negative_prompt=nvext.negative_prompt
+            if nvext and nvext.negative_prompt
+            else None,
         )
 
         sp = OmniDiffusionSamplingParams(
@@ -281,7 +281,9 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt or "" if nvext else "",
+            negative_prompt=nvext.negative_prompt
+            if nvext and nvext.negative_prompt
+            else None,
         )
 
         sp = OmniDiffusionSamplingParams(
