@@ -543,6 +543,21 @@ impl Slot for VllmConnectorSlot {
         num_scheduled_tokens: usize,
         priorities: Option<&[u32]>,
     ) -> Result<(), SlotError> {
+        // Debug logging for chunked prefill analysis
+        tracing::info!(
+            request_id = %self.request_id,
+            "apply_scheduler_output: computed={}, scheduled={}, new_blocks={}, priorities={:?}, \
+             current_pos={}, evaluated_blocks={}, offload_terminated={:?}",
+            num_computed_tokens,
+            num_scheduled_tokens,
+            block_ids.len(),
+            priorities.map(|p| p.len()),
+            self.current_position,
+            self.evaluated_blocks,
+            self.offload_terminated_at_block
+        );
+
+
         // Validate contract: priorities must match block_ids length when provided
         if let Some(prios) = priorities {
             assert_eq!(
@@ -570,10 +585,20 @@ impl Slot for VllmConnectorSlot {
         self.current_position = max(self.current_position, num_computed_tokens);
         self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
 
-        // apply new block_ids
+        // apply new block_ids — but skip if already added by update_state_after_alloc
+        // (which calls append_mutable_device_blocks before apply_scheduler_output)
         if !block_ids.is_empty() {
-            tracing::debug!("assigning {} new device blocks slot", block_ids.len());
-            self.device_blocks.extend(block_ids);
+            let already_present = block_ids.len() <= self.device_blocks.len()
+                && self.device_blocks[self.device_blocks.len() - block_ids.len()..] == *block_ids;
+            if already_present {
+                tracing::debug!(
+                    "skipping extend of {} device blocks (already added by update_state_after_alloc)",
+                    block_ids.len()
+                );
+            } else {
+                tracing::debug!("assigning {} new device blocks slot", block_ids.len());
+                self.device_blocks.extend(block_ids);
+            }
         }
 
         // Early exit if offload has been permanently terminated.
