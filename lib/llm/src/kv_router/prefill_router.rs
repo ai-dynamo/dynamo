@@ -694,11 +694,11 @@ impl
             Err(PrefillError::NotActivated) => {
                 if !self.decode_fallback {
                     tracing::error!(
-                        "Prefill router not activated and decode fallback is disabled. Failing request."
+                        "No prefill workers discovered yet and decode fallback is disabled. Failing request."
                     );
                     return Err(anyhow::anyhow!(PrefillError::NotActivated));
                 }
-                tracing::debug!("Prefill router not activated, falling back to decode-only");
+                tracing::debug!("No prefill workers discovered yet, falling back to decode-only");
                 next.generate(context.map(|_| req)).await
             }
             Err(e) => {
