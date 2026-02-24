@@ -66,8 +66,12 @@ pub fn compute_block_hash_for_seq_py(
         .map(depythonize_block_mm_infos)
         .transpose()?;
 
-    let hashes =
-        compute_block_hash_for_seq(&tokens, kv_block_size as u32, mm_infos.as_deref(), lora_name.as_deref());
+    let hashes = compute_block_hash_for_seq(
+        &tokens,
+        kv_block_size as u32,
+        mm_infos.as_deref(),
+        lora_name.as_deref(),
+    );
 
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }

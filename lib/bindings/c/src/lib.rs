@@ -335,11 +335,13 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     let lora_name = if lora_name.is_null() {
         None
     } else {
-        Some(
-            unsafe { CStr::from_ptr(lora_name) }
-                .to_string_lossy()
-                .into_owned(),
-        )
+        match unsafe { CStr::from_ptr(lora_name) }.to_str() {
+            Ok(s) => Some(s.to_owned()),
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to convert C string to Rust string (lora_name)");
+                return DynamoLlmResult::ERR;
+            }
+        }
     };
     let kv_params = DynamoKvStoredEventParams {
         event_id,
