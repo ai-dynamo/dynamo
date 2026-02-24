@@ -503,7 +503,7 @@ def _assert_overrides_applied(final_config_path: Path, dgdr):
 
 
 class TestThoroughMockedOverrides:
-    """Cases 9a/9b/9c: thorough + DGD overrides for DeepSeek-R1 per backend."""
+    """Thorough + DGD overrides: verify overrides are applied end-to-end."""
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -516,3 +516,22 @@ class TestThoroughMockedOverrides:
             tmp_path / "profiling_results" / "final_config.yaml",
             dgdr,
         )
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_10_override_security_context(self, tmp_path):
+        """Case 10: imagePullSecrets injected via overrides into a new spec field."""
+        dgdr = _load_dgdr(CONFIGS_DIR / "10_thorough_override_security_context.yaml")
+        ops = _make_ops(tmp_path)
+        _run_mocked_thorough(dgdr, ops, "trtllm")
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists(), "final_config.yaml should exist"
+        config = yaml.safe_load(output.read_text())
+        assert config and "spec" in config
+
+        secrets = config["spec"].get("imagePullSecrets")
+        assert secrets is not None, "imagePullSecrets should be present"
+        secret_names = [s["name"] for s in secrets]
+        assert "my-registry-secret" in secret_names
+        assert "nvcr-pull-secret" in secret_names
