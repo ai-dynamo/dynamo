@@ -31,7 +31,6 @@ import (
 	"github.com/prometheus/common/model"
 
 	corev1 "k8s.io/api/core/v1"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -113,8 +112,8 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 //
 //  1. Returns cached GPU information if still valid.
 //  2. Lists DCGM exporter pods across all namespaces using supported labels.
-//  3. If no pods are found, attempts to enable DCGM via Helm.
-//  4. Waits for DCGM exporter pods to become ready.
+//  3. If no pods are found, attempts to find if GPU operator is installed and DCGM is enabled via Helm.
+//  4. Warns user appropriately.
 //  5. Scrapes each running pods metrics endpoint (http://<podIP>:9400/metrics).
 //  6. Selects the "best" GPU node based on:
 //     - Highest GPU count
@@ -142,49 +141,23 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 // does not represent full cluster GPU inventory. Future improvements should
 // aggregate and return GPU information for all nodes instead of selecting
 // only one.
-func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *GPUDiscoveryCache) (*GPUInfo, ctrl.Result, error) {
-
-	const maxRetryAttempts = 3
-	const requeueDelay = 5 * time.Second
+func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *GPUDiscoveryCache) (*GPUInfo, error) {
 
 	// Return cached result if still valid
 	if cached, ok := cache.Get(); ok {
-		return cached, ctrl.Result{}, nil
+		return cached, nil
 	}
-
-	// Track retry attempts in context
-	var retryAttempts int
-	if val := ctx.Value("retryAttempts"); val != nil {
-		if attempts, ok := val.(int); ok {
-			retryAttempts = attempts
-		}
-	}
-	// Increment for this invocation
-	retryAttempts++
-	ctx = context.WithValue(ctx, "retryAttempts", retryAttempts)
 
 	// List DCGM exporter pods
 	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
 	if err != nil && !strings.Contains(err.Error(), "no DCGM exporter pods found") {
-		return nil, ctrl.Result{}, fmt.Errorf("listing DCGM exporter pods failed: %w", err)
+		return nil, fmt.Errorf("listing DCGM exporter pods failed: %w", err)
 	}
 
 	// If no pods found
 	if len(dcgmPods) == 0 {
-		// Only attempt to enable DCGM on the first attempt
-		if retryAttempts == 1 {
-			if err := ensureDCGMFunc(ctx); err != nil {
-				return nil, ctrl.Result{}, fmt.Errorf("failed to enable DCGM and DCGM Exporter: %w", err)
-			}
-		}
-
-		// If max retries exceeded, stop retrying
-		if retryAttempts >= maxRetryAttempts {
-			return nil, ctrl.Result{}, fmt.Errorf("DCGM exporter pods not found after %d attempts", retryAttempts)
-		}
-
-		// Requeue for non-blocking retry
-		return nil, ctrl.Result{RequeueAfter: requeueDelay}, nil
+		err := ensureDCGMFunc(ctx)
+		return nil, err
 	}
 
 	// Scrape each running pod individually
@@ -214,9 +187,9 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *G
 
 	if bestNode == nil {
 		if len(scrapeErrors) > 0 {
-			return nil, ctrl.Result{}, fmt.Errorf("failed to scrape any DCGM exporter pod: %v", scrapeErrors)
+			return nil, fmt.Errorf("failed to scrape any DCGM exporter pod: %v", scrapeErrors)
 		}
-		return nil, ctrl.Result{}, fmt.Errorf("no GPU metrics could be parsed from any DCGM pod")
+		return nil, fmt.Errorf("no GPU metrics could be parsed from any DCGM pod")
 	}
 
 	// Infer cloud provider for the best node
@@ -228,7 +201,7 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *G
 	// Cache result for 60 seconds
 	cache.Set(bestNode, 60*time.Second)
 
-	return bestNode, ctrl.Result{}, nil
+	return bestNode, nil
 }
 
 func listDCGMExporterPods(ctx context.Context, k8sClient client.Client) ([]corev1.Pod, error) {

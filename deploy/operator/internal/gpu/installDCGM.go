@@ -22,9 +22,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -32,30 +34,28 @@ const (
 	GPUOperatorNamespace   = "gpu-operator"
 )
 
-// EnsureDCGMEnabled ensures that both DCGM and DCGM Exporter are enabled
-// in the NVIDIA GPU Operator Helm release for the specified namespace.
+// EnsureDCGMEnabled checks if the GPU Operator is installed and whether DCGM is enabled.
 //
-// Function Behavior:
-//  1. Checks if the GPU Operator Helm release exists in the given namespace.
-//     - If not installed, returns an error asking the user to install it first.
-//  2. Retrieves the existing Helm release values and merges in the following:
-//     - dcgm.enabled = true       (enables GPU telemetry collection)
-//     - dcgmExporter.enabled = true (enables Prometheus metrics export)
-//  3. Performs a Helm upgrade in-place using the existing chart, preserving
-//     other user-provided values.
+// This function performs the following actions:
+// 1. Initializes Helm configuration to interact with the cluster.
+// 2. Verifies that the GPU Operator is installed by checking its Helm release.
+// 3. If the GPU Operator is installed, it checks the Helm values to ensure that DCGM is enabled.
+// 4. If DCGM is not enabled, it returns an error prompting the user to enable it manually.
+// 5. If the GPU Operator is not installed, it returns an error prompting the user to install it first.
 //
-// Notes:
-//   - Does NOT install the GPU Operator; it only modifies an existing release.
-//   - Both DCGM and DCGM Exporter must be enabled to collect full GPU metrics
-//     (utilization, memory, power, ECC errors, MIG profiles, per-process stats).
-//   - The function assumes the caller has cluster-wide RBAC and access to
-//     the target namespace for Helm operations.
-//   - Uses /tmp as a temporary HOME directory for Helm caching and config.
+// Logs appropriate warning or success messages based on the status of GPU Operator and DCGM.
+//
+// Returns:
+// - nil if DCGM is enabled and GPU Operator is installed.
+// - An error if GPU Operator is not installed or DCGM is not enabled.
+// TODO: set a Controller Runtime status flag to indicate DCGM is not enabled.
 func EnsureDCGMEnabled(ctx context.Context) error {
-	// Configure Helm environment
+	logger := log.FromContext(ctx)
+
+	// Step 1: Check if GPU Operator is installed using Helm
 	settings := cli.New()
 
-	// Explicitly configure paths
+	// Explicitly configure Helm environment
 	settings.RepositoryCache = "/tmp/helm/.cache/repository"
 	settings.RepositoryConfig = "/tmp/helm/.config/repositories.yaml"
 	settings.RegistryConfig = "/tmp/helm/.config/registry.json"
@@ -84,48 +84,32 @@ func EnsureDCGMEnabled(ctx context.Context) error {
 		return fmt.Errorf("helm init failed: %w", err)
 	}
 
-	// Verify GPU Operator is installed
+	// Step 2: Check if GPU Operator is installed
 	get := action.NewGet(actionConfig)
 	release, err := get.Run(GPUOperatorReleaseName)
 	if err != nil {
-		return fmt.Errorf(
-			"gpu operator is not installed in namespace %s. please install gpu operator first",
-			GPUOperatorNamespace,
-		)
+		if strings.Contains(err.Error(), "not found") {
+			logger.Info("GPU Operator is not installed", "namespace", GPUOperatorNamespace)
+			return fmt.Errorf("GPU Operator is not installed. Please install GPU Operator first.")
+		}
+		logger.Error(err, "Failed to fetch GPU Operator release with Helm")
+		return fmt.Errorf("unable to fetch GPU Operator release: %w", err)
 	}
 
-	// Upgrade GPU Operator and enable DCGM + DCGM Exporter
-	upgrade := action.NewUpgrade(actionConfig)
-	upgrade.Namespace = GPUOperatorNamespace
-
-	// Start with existing release values to avoid overwriting user config
+	// Step 3: Check if DCGM is enabled within the GPU Operator Helm release values
 	values := release.Config
 	if values == nil {
-		values = map[string]interface{}{}
+		return fmt.Errorf("GPU Operator release does not have any config values set")
 	}
 
-	// Enable DCGM
+	// Check if the 'dcgm' section exists and if it's enabled
 	dcgmValues, ok := values["dcgm"].(map[string]interface{})
-	if !ok {
-		dcgmValues = map[string]interface{}{}
-	}
-	dcgmValues["enabled"] = true
-	values["dcgm"] = dcgmValues
-
-	// Enable DCGM Exporter
-	dcgmExporterValues, ok := values["dcgmExporter"].(map[string]interface{})
-	if !ok {
-		dcgmExporterValues = map[string]interface{}{}
-	}
-	dcgmExporterValues["enabled"] = true
-	values["dcgmExporter"] = dcgmExporterValues
-
-	// Reuse existing chart to upgrade in-place
-	chart := release.Chart
-
-	if _, err := upgrade.Run(GPUOperatorReleaseName, chart, values); err != nil {
-		return fmt.Errorf("failed to enable dcgm and dcgmExporter in gpu operator: %w", err)
+	if !ok || dcgmValues["enabled"] == nil || dcgmValues["enabled"].(bool) != true {
+		logger.Info("DCGM is not enabled in the GPU Operator", "namespace", GPUOperatorNamespace)
+		return fmt.Errorf("DCGM is not enabled in the GPU Operator. Please enable it manually.")
 	}
 
+	// Step 4: Log success if DCGM is enabled
+	logger.Info("DCGM is enabled in the GPU Operator", "namespace", GPUOperatorNamespace)
 	return nil
 }

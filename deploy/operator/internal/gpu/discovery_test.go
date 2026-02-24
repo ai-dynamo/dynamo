@@ -19,6 +19,7 @@ package gpu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // newFakeClient creates a fake Kubernetes client with the given objects
@@ -453,67 +453,6 @@ DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="H100-SXM5-80GB",Hostname="node1"} 50
 	assert.Equal(t, "H100-SXM5-80GB", info.Model)
 }
 
-func TestDiscoverGPUsFromDCGM_WithService(t *testing.T) {
-	ctx := context.Background()
-
-	// Fake Kubernetes Service for DCGM
-	svc := &corev1.Service{}
-	svc.Name = "nvidia-dcgm-exporter"
-	svc.Namespace = "gpu-namespace"
-	svc.Spec.ClusterIP = "1.2.3.4"
-
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
-
-	cache := NewGPUDiscoveryCache()
-
-	// Patch scrapeMetricsEndpoint to return dummy GPUInfo
-	origScrape := scrapeMetricsFunc
-	defer func() { scrapeMetricsFunc = origScrape }()
-	scrapeMetricsFunc = func(ctx context.Context, endpoint string) (*GPUInfo, error) {
-		return &GPUInfo{
-			NodeName:    "node1",
-			GPUsPerNode: 2,
-			Model:       "H100-SXM5-80GB",
-			VRAMPerGPU:  15000,
-		}, nil
-	}
-
-	info, err := DiscoverGPUsFromDCGM(ctx, cl, cache)
-	require.NoError(t, err)
-	assert.Equal(t, "node1", info.NodeName)
-	assert.Equal(t, 2, info.GPUsPerNode)
-
-	// Cache should return same info on second call
-	info2, err := DiscoverGPUsFromDCGM(ctx, cl, cache)
-	require.NoError(t, err)
-	assert.Equal(t, info, info2)
-}
-
-func TestDiscoverGPUsFromDCGM_NoService(t *testing.T) {
-	ctx := context.Background()
-
-	// Empty client: no services exist
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	cl := clientfake.NewClientBuilder().WithScheme(scheme).Build()
-
-	cache := NewGPUDiscoveryCache()
-
-	// Patch EnsureDCGMEnabled to simulate an error
-	origEnsure := ensureDCGMFunc
-	defer func() { ensureDCGMFunc = origEnsure }()
-	ensureDCGMFunc = func(ctx context.Context) error {
-		return fmt.Errorf("failed to install DCGM")
-	}
-
-	info, err := DiscoverGPUsFromDCGM(ctx, cl, cache)
-	require.Error(t, err)
-	assert.Nil(t, info)
-	assert.Contains(t, err.Error(), "install dcgm via helm")
-}
-
 func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	ctx := context.Background()
 
@@ -578,6 +517,123 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 
 	// Results should be identical
 	require.Equal(t, info1, info2)
+}
+
+// ---- Test constants (ensure these match your real ones) ----
+// LabelApp
+// LabelValueNvidiaDCGMExporter
+// LabelValueDCGMExporter
+// LabelAppKubernetesName
+
+func TestListDCGMExporterPods(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		objects     []client.Object
+		expectCount int
+		expectErr   bool
+		errorClient bool
+	}{
+		{
+			name: "pods found via different selectors",
+			objects: []client.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pod1",
+						Namespace: "ns1",
+						Labels: map[string]string{
+							LabelApp: LabelValueNvidiaDCGMExporter,
+						},
+					},
+				},
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pod2",
+						Namespace: "ns1",
+						Labels: map[string]string{
+							LabelAppKubernetesName: LabelValueDCGMExporter,
+						},
+					},
+				},
+			},
+			expectCount: 2,
+			expectErr:   false,
+		},
+		{
+			name: "duplicate pods across selectors should dedupe",
+			objects: []client.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pod1",
+						Namespace: "ns1",
+						Labels: map[string]string{
+							LabelApp:               LabelValueDCGMExporter,
+							LabelAppKubernetesName: LabelValueDCGMExporter,
+						},
+					},
+				},
+			},
+			expectCount: 1,
+			expectErr:   false,
+		},
+		{
+			name:        "no pods found",
+			objects:     []client.Object{},
+			expectCount: 0,
+			expectErr:   true,
+		},
+		{
+			name:        "client list error",
+			objects:     []client.Object{},
+			expectCount: 0,
+			expectErr:   true,
+			errorClient: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			var k8sClient client.Client
+
+			if tt.errorClient {
+				k8sClient = &errorListClient{}
+			} else {
+				k8sClient = fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(tt.objects...).
+					Build()
+			}
+
+			pods, err := listDCGMExporterPods(ctx, k8sClient)
+
+			if tt.expectErr && err == nil {
+				t.Fatalf("expected error but got nil")
+			}
+			if !tt.expectErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(pods) != tt.expectCount {
+				t.Fatalf("expected %d pods, got %d", tt.expectCount, len(pods))
+			}
+		})
+	}
+}
+
+//
+// ---- Fake client that forces List error ----
+//
+
+type errorListClient struct {
+	client.Client
+}
+
+func (e *errorListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	return errors.New("forced list error")
 }
 
 // --- Helper functions ---

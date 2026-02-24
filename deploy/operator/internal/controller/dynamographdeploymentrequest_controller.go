@@ -382,17 +382,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 	// State machine: handle different states
 	switch dgdr.Status.State {
 	case nvidiacomv1alpha1.DGDRStateInitializing, "":
-		res, err := r.handleInitialState(ctx, dgdr)
-		if res.RequeueAfter > 0 {
-			logger.Info("Intializing state requires requeue", "requeueAfter", res.RequeueAfter)
-		}
-		return res, err
+		return r.handleInitialState(ctx, dgdr)
 	case nvidiacomv1alpha1.DGDRStatePending:
-		res, err := r.handlePendingState(ctx, dgdr)
-		if res.RequeueAfter > 0 {
-			logger.Info("Pending state requires requeue", "requeueAfter", res.RequeueAfter)
-		}
-		return res, err
+		return r.handlePendingState(ctx, dgdr)
 	case nvidiacomv1alpha1.DGDRStateProfiling:
 		return r.handleProfilingState(ctx, dgdr)
 	case nvidiacomv1alpha1.DGDRStateDeploying:
@@ -415,11 +407,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleInitialState(ctx context.
 	logger.Info("Handling initial state", "name", dgdr.Name)
 
 	// Validate the spec
-	res, err := r.validateSpec(ctx, dgdr)
-	if res.RequeueAfter > 0 {
-		return res, err
-	}
-	if err != nil {
+	if err := r.validateSpec(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonValidationFailed, err.Error())
 		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeValidation, metav1.ConditionFalse, EventReasonValidationFailed, err.Error())
 	}
@@ -441,12 +429,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingState(ctx context.
 	logger.Info("Handling pending state", "name", dgdr.Name)
 
 	// Create profiling job (online or AIC)
-	res, err := r.createProfilingJob(ctx, dgdr)
-	if res.RequeueAfter > 0 {
-		return res, err
-	}
-
-	if err != nil {
+	if err := r.createProfilingJob(ctx, dgdr); err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, EventReasonProfilingJobFailed, err.Error())
 		return r.updateStateWithCondition(ctx, dgdr, nvidiacomv1alpha1.DGDRStateFailed, ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
@@ -906,7 +889,7 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 }
 
 // validateSpec validates the DGDR spec
-func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	// Validate ConfigMap if provided (for the DGD base config)
 	// This requires cluster access and cannot be done in the stateless validator
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
@@ -918,10 +901,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf(MessageConfigMapNotFound,
+				return fmt.Errorf(MessageConfigMapNotFound,
 					dgdr.Spec.ProfilingConfig.ConfigMapRef.Name, dgdr.Namespace)
 			}
-			return ctrl.Result{}, err
+			return err
 		}
 
 		// Validate key exists
@@ -931,7 +914,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 		}
 
 		if _, exists := cm.Data[key]; !exists {
-			return ctrl.Result{}, fmt.Errorf(MessageConfigMapKeyNotFound, key, cm.Name)
+			return fmt.Errorf(MessageConfigMapKeyNotFound, key, cm.Name)
 		}
 	}
 
@@ -946,21 +929,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf(MessageModelCachePVCNotFound, modelCachePVC, dgdr.Namespace)
+				return fmt.Errorf(MessageModelCachePVCNotFound, modelCachePVC, dgdr.Namespace)
 			}
-			return ctrl.Result{}, err
+			return err
 		}
 	}
-	res, err := r.validateGPUHardwareInfo(ctx, dgdr)
-	if res.RequeueAfter > 0 {
-		return res, err
-	}
-	if err != nil {
-		return ctrl.Result{}, err
+	if err := r.validateGPUHardwareInfo(ctx, dgdr); err != nil {
+		return err
 	}
 
 	// The profiler will validate the rest of the configuration
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // toFloat64 converts a numeric value (int or float64) to float64.
@@ -977,7 +956,7 @@ func toFloat64(val interface{}) float64 {
 }
 
 // validateGPUHardwareInfo ensures GPU hardware information is available when required for profiling
-func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
 
 	// Check for hardware info and GPU ranges
@@ -986,7 +965,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 	if dgdr.Spec.ProfilingConfig.Config != nil {
 		if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
 			// Config parse errors will be caught later, skip validation here
-			return ctrl.Result{}, nil
+			return nil
 		}
 	} else {
 		config = make(map[string]interface{})
@@ -1014,7 +993,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 
 				// Validate that min <= max
 				if minVal > maxVal {
-					return ctrl.Result{}, fmt.Errorf("invalid GPU range: %s (%v) cannot be greater than %s (%v)",
+					return fmt.Errorf("invalid GPU range: %s (%v) cannot be greater than %s (%v)",
 						ConfigKeyMinNumGpusPerEng, minVal, ConfigKeyMaxNumGpusPerEng, maxVal)
 				}
 
@@ -1025,16 +1004,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 
 	// If manual config or explicit ranges are provided, validation passes
 	if hasManualHardwareConfig || hasExplicitGPURanges {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
-	discoveredInfo, res, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
-	if res.RequeueAfter > 0 {
-		return res, err
-	}
-	if err == nil && discoveredInfo != nil {
+	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
+	if err == nil {
 		// GPU discovery is available, validation passes
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	// Refine the logger message
@@ -1077,7 +1053,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 //
 // The classification is based on known error message patterns produced during:
 //   - DCGM exporter pod discovery
-//   - Helm-based DCGM enablement
+//   - Helm-based GPU operator and DCGM discovery
 //   - Metrics scraping
 //   - Prometheus parsing
 //
@@ -1112,14 +1088,15 @@ func GetGPUDiscoveryFailureReason(err error) string {
 	case strings.Contains(errMsg, "no GPUs detected"):
 		return "no GPUs detected in DCGM metrics (GPU model or metrics missing)"
 
-	case strings.Contains(errMsg, "failed to enable dcgm and dcgmExporter in gpu operator"):
-		return "failed to enable dcgm and dcgmExporter in gpu operator (check GPU Operator configuration and permissions)"
+	case strings.Contains(errMsg, "DCGM is not enabled in the GPU Operator"):
+		return "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"
 
 	case strings.Contains(errMsg, "failed to scrape any dcgm exporter pod"):
 		return "failed to scrape any DCGM exporter pod (check DCGM exporter pod status and network connectivity)"
 
 	case strings.Contains(errMsg, "no GPU metrics could be parsed from any dcgm pod"):
 		return "no GPU metrics could be parsed from any DCGM pod (check DCGM exporter pod status and network connectivity)"
+
 	case strings.Contains(errMsg, "failed to create helm path"):
 		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
 	}
@@ -1128,7 +1105,7 @@ func GetGPUDiscoveryFailureReason(err error) string {
 }
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource
-func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
 
 	// Delete any existing output ConfigMap to ensure fresh profiling results
@@ -1144,13 +1121,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		logger.Info("Deleting existing output ConfigMap to ensure fresh profiling results", "configMap", outputConfigMapName)
 		if err := r.Delete(ctx, existingCM); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "Failed to delete existing output ConfigMap", "configMap", outputConfigMapName)
-			return ctrl.Result{}, fmt.Errorf("failed to delete existing output ConfigMap: %w", err)
+			return fmt.Errorf("failed to delete existing output ConfigMap: %w", err)
 		}
 		logger.Info("Successfully deleted old output ConfigMap", "configMap", outputConfigMapName)
 	} else if !apierrors.IsNotFound(err) {
 		// Unexpected error checking for ConfigMap
 		logger.Error(err, "Failed to check for existing output ConfigMap", "configMap", outputConfigMapName)
-		return ctrl.Result{}, fmt.Errorf("failed to check for existing output ConfigMap: %w", err)
+		return fmt.Errorf("failed to check for existing output ConfigMap: %w", err)
 	}
 
 	// Ensure profiling job RBAC exists (only for cluster-wide installation)
@@ -1162,7 +1139,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			r.Config.RBAC.DGDRProfilingClusterRoleName,
 		); err != nil {
 			logger.Error(err, "Failed to ensure profiling job RBAC")
-			return ctrl.Result{}, fmt.Errorf("failed to ensure profiling job RBAC: %w", err)
+			return fmt.Errorf("failed to ensure profiling job RBAC: %w", err)
 		}
 	}
 
@@ -1170,10 +1147,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	var gpuInfo *gpu.GPUInfo
 	logger.Info("Attempting GPU discovery for profiling job")
 
-	discoveredInfo, res, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
-	if res.RequeueAfter > 0 {
-		return res, err
-	}
+	discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
 	if err != nil {
 		// This path is expected for namespace-restricted operators without node read permissions
 		// Refine the logger message
