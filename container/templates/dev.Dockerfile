@@ -15,6 +15,7 @@ FROM runtime AS dynamo_tools
 
 ARG ARCH
 ARG ARCH_ALT
+ARG DEVICE
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/usr/local/bin:${PATH}
