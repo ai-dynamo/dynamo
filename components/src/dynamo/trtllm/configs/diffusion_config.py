@@ -14,11 +14,12 @@ Fields map to TensorRT-LLM's DiffusionArgs sub-configs:
 - QuantConfig: quantization algorithm and dynamic flags
 """
 
-import os
 from dataclasses import dataclass, field
 from typing import Optional
 
-DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+from dynamo.common.utils.namespace import get_worker_namespace
+
+DYN_NAMESPACE = get_worker_namespace()
 
 # Default model paths
 DEFAULT_VIDEO_MODEL_PATH = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"

@@ -114,7 +114,7 @@ async def init_video_diffusion_worker(
     endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = endpoint.component()
+
     if shutdown_endpoints is not None:
         shutdown_endpoints[:] = [endpoint]
 
@@ -123,7 +123,7 @@ async def init_video_diffusion_worker(
     await engine.initialize()
 
     # Create the request handler
-    handler = VideoGenerationHandler(component, engine, diffusion_config)
+    handler = VideoGenerationHandler(engine, diffusion_config)
 
     # Register the model with Dynamo's discovery system
     model_name = config.served_model_name or config.model

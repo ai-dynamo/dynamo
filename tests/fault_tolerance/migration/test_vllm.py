@@ -104,9 +104,9 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.15",  # avoid assertion error on vLLM available memory checks
         ]
         if is_prefill is True:
-            command.append("--is-prefill-worker")
+            command.extend(["--disaggregation-mode", "prefill"])
         elif is_prefill is False:
-            command.append("--is-decode-worker")
+            command.extend(["--disaggregation-mode", "decode"])
 
         # Aggregated mode and prefill workers publish KV events
         if is_prefill is not False:

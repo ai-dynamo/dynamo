@@ -11,6 +11,7 @@ from typing import Optional
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
+from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.entrypoints.cli.serve import run_headless
 from vllm.usage.usage_lib import UsageContext
@@ -47,12 +48,13 @@ except ImportError:
     MediaFetcher = None
     MEDIA_DECODER_AVAILABLE = False
 
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from .args import Config, parse_args
 from .checkpoint_restore import get_checkpoint_config
+from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
     VllmHealthCheckPayload,
@@ -189,7 +191,7 @@ async def worker():
     elif config.omni:
         await init_omni(runtime, config, shutdown_event)
         logger.debug("init_omni completed")
-    elif config.is_prefill_worker:
+    elif config.disaggregation_mode == DisaggregationMode.PREFILL:
         await init_prefill(
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
         )
@@ -295,9 +297,8 @@ def setup_metrics_collection(config: Config, generate_endpoint, logger):
 
 def setup_kv_event_publisher(
     config: Config,
-    component,
-    generate_endpoint,
-    vllm_config,
+    generate_endpoint: Endpoint,
+    vllm_config: VllmConfig,
     consolidator_enabled: bool = False,
     consolidator_port: Optional[int] = 5558,
 ) -> Optional[KvEventPublisher]:
@@ -306,7 +307,6 @@ def setup_kv_event_publisher(
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
     Args:
         config: Worker configuration
-        component: Component for runtime integration
         generate_endpoint: Endpoint for worker ID
         vllm_config: vLLM configuration
         consolidator_enabled: If True, subscribe to kv eventconsolidator's ZMQ endpoint
@@ -319,7 +319,7 @@ def setup_kv_event_publisher(
         return None
 
     # Skip KV event publishing for decode workers
-    if config.is_decode_worker:
+    if config.disaggregation_mode == DisaggregationMode.DECODE:
         logger.info("Skipping KV event publisher setup for decode worker")
         return None
 
@@ -355,7 +355,7 @@ def setup_kv_event_publisher(
             )
 
         kv_publisher = KvEventPublisher(
-            component=component,
+            endpoint=generate_endpoint,
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
             zmq_topic="",
@@ -517,7 +517,8 @@ async def register_vllm_model(
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     runtime_config.enable_local_indexer = (
-        config.enable_local_indexer and not config.is_decode_worker
+        config.enable_local_indexer
+        and config.disaggregation_mode != DisaggregationMode.DECODE
     )
 
     # Add tool/reasoning parsers for decode models
@@ -573,8 +574,9 @@ async def init_prefill(
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = generate_endpoint.component()
-    clear_endpoint = component.endpoint("clear_kv_blocks")
+    clear_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.clear_kv_blocks"
+    )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
@@ -596,7 +598,6 @@ async def init_prefill(
 
     handler = PrefillWorkerHandler(
         runtime,
-        component,
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
@@ -627,7 +628,6 @@ async def init_prefill(
     # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
         config,
-        component,
         generate_endpoint,
         vllm_config,
         consolidator_enabled=consolidator_enabled,
@@ -717,8 +717,9 @@ async def init(
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = generate_endpoint.component()
-    clear_endpoint = component.endpoint("clear_kv_blocks")
+    clear_endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.clear_kv_blocks"
+    )
 
     shutdown_endpoints[:] = [
         generate_endpoint,
@@ -727,9 +728,15 @@ async def init(
 
     lora_enabled = config.engine_args.enable_lora
     if lora_enabled:
-        load_lora_endpoint = component.endpoint("load_lora")
-        unload_lora_endpoint = component.endpoint("unload_lora")
-        list_loras_endpoint = component.endpoint("list_loras")
+        load_lora_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.load_lora"
+        )
+        unload_lora_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.unload_lora"
+        )
+        list_loras_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.list_loras"
+        )
 
         shutdown_endpoints.extend(
             [
@@ -738,8 +745,6 @@ async def init(
                 list_loras_endpoint,
             ]
         )
-
-    model_name = config.served_model_name or config.model
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
     if pre_created_engine is not None:
@@ -752,19 +757,17 @@ async def init(
         ) = pre_created_engine
         # Factory is created after unpack so component_gauges is available
         factory = StatLoggerFactory(
-            component,
+            endpoint=generate_endpoint,
             component_gauges=component_gauges,
             dp_rank=config.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", model_name)],
         )
     else:
         # Factory is created without component_gauges; setup_vllm_engine() will
         # create the gauges after setup_multiprocess_prometheus() and set them
         # on the factory before vLLM calls create_stat_logger().
         factory = StatLoggerFactory(
-            component,
+            endpoint=generate_endpoint,
             dp_rank=config.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", model_name)],
         )
         (
             engine_client,
@@ -780,7 +783,6 @@ async def init(
 
     handler = DecodeWorkerHandler(
         runtime,
-        component,
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
@@ -811,7 +813,6 @@ async def init(
     # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
     kv_publishers = setup_kv_event_publisher(
         config,
-        component,
         generate_endpoint,
         vllm_config,
         consolidator_enabled=consolidator_enabled,
@@ -957,7 +958,7 @@ async def init_omni(
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = generate_endpoint.component()
+
     shutdown_endpoints[:] = [generate_endpoint]
 
     # Initialize media filesystem for storing generated images/videos
@@ -968,7 +969,6 @@ async def init_omni(
     # Initialize unified OmniHandler
     handler = OmniHandler(
         runtime=runtime,
-        component=component,
         config=config,
         default_sampling_params={},
         shutdown_event=shutdown_event,

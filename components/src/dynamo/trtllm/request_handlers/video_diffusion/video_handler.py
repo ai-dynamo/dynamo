@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
@@ -49,18 +49,15 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: DiffusionEngine,
         config: DiffusionConfig,
     ):
         """Initialize the handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The DiffusionEngine instance.
             config: Diffusion generation configuration.
         """
-        self.component = component
         self.engine = engine
         self.config = config
         if not config.media_output_fs_url:
