@@ -19,25 +19,18 @@ use dynamo_runtime::pipeline::{
 };
 use dynamo_runtime::protocols::{annotated::Annotated, maybe_error::MaybeError};
 
-/// Error types that indicate a transient failure where retrying on another worker may help.
-const MIGRATABLE_ERRORS: &[ErrorType] = &[
-    ErrorType::CannotConnect,
-    ErrorType::Disconnected,
-    ErrorType::ConnectionTimeout,
-    ErrorType::Backend(BackendError::EngineShutdown),
-];
-
-/// Error types that indicate a permanent failure where retrying would not help.
-const NON_MIGRATABLE_ERRORS: &[ErrorType] = &[
-    // Future: ErrorType::Cancelled, ErrorType::ValidationError, etc.
-];
-
 /// Check if an error chain indicates the request should be migrated.
-///
-/// Uses `match_error_chain` to check for migratable errors without non-migratable
-/// errors present. Falls back to legacy message-based detection for Unknown errors.
 fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
-    error::match_error_chain(err, MIGRATABLE_ERRORS, NON_MIGRATABLE_ERRORS)
+    const MIGRATABLE: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
+    const NON_MIGRATABLE: &[ErrorType] = &[
+        // Future: ErrorType::Cancelled, ErrorType::ValidationError, etc.
+    ];
+    error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
 }
 
 pub struct Migration {

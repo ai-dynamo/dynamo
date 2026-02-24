@@ -4,16 +4,15 @@
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, ErrorType, match_error_chain};
 
-/// Error types that indicate a worker should be reported as down.
-const INHIBITED_ERRORS: &[ErrorType] = &[
-    ErrorType::CannotConnect,
-    ErrorType::Disconnected,
-    ErrorType::ConnectionTimeout,
-    ErrorType::Backend(BackendError::EngineShutdown),
-];
-
+/// Check if an error chain indicates the worker should be reported as down.
 fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
-    match_error_chain(err, INHIBITED_ERRORS, &[])
+    const INHIBITED: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
+    match_error_chain(err, INHIBITED, &[])
 }
 use crate::{
     component::{Client, Endpoint},
