@@ -39,25 +39,6 @@ use std::fmt;
 // ErrorType Enum
 // ============================================================================
 
-/// Categorizes errors into a fixed set of standard types.
-///
-/// Consumers (e.g., the migration module) inspect the error type to decide
-/// what action to take, rather than the error defining its own behavior.
-/// Backend engine error subcategories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BackendError {
-    /// The engine process has shut down or crashed.
-    EngineShutdown,
-}
-
-impl fmt::Display for BackendError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BackendError::EngineShutdown => write!(f, "EngineShutdown"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorType {
     /// Uncategorized or unknown error.
@@ -80,6 +61,25 @@ impl fmt::Display for ErrorType {
             ErrorType::Disconnected => write!(f, "Disconnected"),
             ErrorType::ConnectionTimeout => write!(f, "ConnectionTimeout"),
             ErrorType::Backend(sub) => write!(f, "Backend.{sub}"),
+        }
+    }
+}
+
+/// Categorizes errors into a fixed set of standard types.
+///
+/// Consumers (e.g., the migration module) inspect the error type to decide
+/// what action to take, rather than the error defining its own behavior.
+/// Backend engine error subcategories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackendError {
+    /// The engine process has shut down or crashed.
+    EngineShutdown,
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackendError::EngineShutdown => write!(f, "EngineShutdown"),
         }
     }
 }
