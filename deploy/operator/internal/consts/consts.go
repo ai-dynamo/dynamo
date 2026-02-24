@@ -90,6 +90,17 @@ const (
 	// Records which operator version created the resource, enabling version-gated behavior changes.
 	KubeAnnotationDynamoOperatorOriginVersion = "nvidia.com/dynamo-operator-origin-version"
 
+	// vLLM distributed executor backend override annotation.
+	// Users can set this on a DGD to explicitly choose "mp" or "ray" for multi-node vLLM deployments.
+	// When present, takes priority over the version-based default.
+	KubeAnnotationVLLMDistributedExecutorBackend = "nvidia.com/vllm-distributed-executor-backend"
+
+	// VLLMMpMasterPort is the default port for vLLM multiprocessing coordination between nodes.
+	VLLMMpMasterPort = "29500"
+
+	// VLLMNixlSideChannelHostEnvVar is the env var that tells vLLM which host IP to use for the NIXL side channel.
+	VLLMNixlSideChannelHostEnvVar = "VLLM_NIXL_SIDE_CHANNEL_HOST"
+
 	// Metrics related constants
 	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
 	KubeLabelMetricsEnabled      = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection

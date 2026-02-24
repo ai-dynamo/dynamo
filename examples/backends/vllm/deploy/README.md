@@ -24,7 +24,7 @@ High-performance deployment with separated prefill and decode workers.
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
 - `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
+- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
@@ -33,7 +33,7 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 **Architecture:**
 - `Frontend`: HTTP API server with KV-aware routing
 - `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
+- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
 ## CRD Structure
 
@@ -85,7 +85,7 @@ extraPodSpec:
 **Common vLLM Flags:**
 - `--enable-prompt-embeds`: Enable prompt embeddings feature
 - `--enable-multimodal`: Enable multimodal (vision) support
-- `--is-prefill-worker`: Prefill-only mode for disaggregated serving
+- `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
 - `--connector [nixl|lmcache|kvbm|none]`: KV transfer backend selection
 
 ## Prerequisites
@@ -198,7 +198,7 @@ spec:
 vLLM workers are configured through command-line arguments. Key parameters include:
 
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
-- `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
+- `--disaggregation-mode prefill`: Enable prefill-only mode for disaggregated serving
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
 
 See the [vLLM CLI documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html?h=serve+arg) for the full list of configuration options.
