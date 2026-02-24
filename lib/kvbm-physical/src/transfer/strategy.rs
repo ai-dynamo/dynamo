@@ -277,7 +277,7 @@ fn select_remote_strategy_v2(
     unreachable!("Both src and dst are remote - this is not supported.");
 }
 
-#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
+#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
 mod tests {
     use super::*;
 

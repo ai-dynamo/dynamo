@@ -359,7 +359,7 @@ impl KvBlocks {
     }
 }
 
-#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
+#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
 mod tests {
     use super::*;
 

@@ -117,7 +117,7 @@ pub fn determine_compressed_shape(shape: &[usize]) -> usize {
     shape.iter().product()
 }
 
-#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
+#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
 mod tests {
 
     // Note: These tests would require mock TorchTensor implementations

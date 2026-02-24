@@ -89,8 +89,8 @@ notification.await?;
 
 All functional tests in `kvbm-physical` require a real NIXL installation and a CUDA GPU. They are gated behind two feature flags:
 
-- **`testing-full`** — enables tests that create `NixlAgent` instances (hard-aborts under NIXL stubs)
-- **`testing-full`** — enables tests that allocate device memory or launch CUDA kernels
+- **`testing-kvbm`** — enables tests that create `NixlAgent` instances (hard-aborts under NIXL stubs)
+- **`testing-kvbm`** — enables tests that allocate device memory or launch CUDA kernels
 
 ### Running tests
 
@@ -99,7 +99,7 @@ All functional tests in `kvbm-physical` require a real NIXL installation and a C
 cargo test -p kvbm-physical
 
 # With GPU + NIXL available
-cargo test -p kvbm-physical --features testing-full,testing-full
+cargo test -p kvbm-physical --features testing-kvbm,testing-kvbm
 ```
 
 When neither feature is enabled, a single **sentinel test** runs and prints a reminder message. This ensures `cargo test` never silently passes with zero tests.

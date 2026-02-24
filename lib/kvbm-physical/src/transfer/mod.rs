@@ -48,7 +48,7 @@ pub(crate) mod preferences;
 pub(crate) mod strategy;
 pub(crate) mod validation;
 
-#[cfg(all(test, feature = "testing-full", feature = "testing-full"))]
+#[cfg(all(test, feature = "testing-kvbm", feature = "testing-kvbm"))]
 mod tests;
 
 // Re-export StorageKind
