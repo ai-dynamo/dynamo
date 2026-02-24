@@ -294,7 +294,7 @@ jobs:
   unit-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always() && inputs.skip_tests != true && inputs.skip_heavy_jobs != true
+    if: always() && inputs.skip_tests != true
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
     strategy:
@@ -310,6 +310,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
         id: check_build
+        if: inputs.skip_heavy_jobs != true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
