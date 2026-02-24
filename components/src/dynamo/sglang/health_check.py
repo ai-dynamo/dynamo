@@ -85,37 +85,80 @@ class SglangHealthCheckPayload(HealthCheckPayload):
         super().__init__()
 
 
-class SglangPrefillHealthCheckPayload(HealthCheckPayload):
-    """SGLang-specific health check payload for prefill workers in disaggregated mode.
+class SglangDisaggHealthCheckPayload(HealthCheckPayload):
+    """SGLang-specific health check payload for PD-disaggregated mode (prefill or decode).
 
-    The prefill handler expects a wrapped structure with 'request' and 'sampling_params'.
+    Both prefill and decode handlers support flat format with bootstrap_info.
+    Uses FAKE_BOOTSTRAP_HOST to enable fake-transfer mode, so health checks
+    don't require real KV-transfer between prefill/decode workers.
+
+    Uses bootstrap_room=0 (same as SGLang). This means health checks always go to
+    DP rank 0. For proper DP coverage, runtime would need to support dynamic payload
+    generation per health check request.
     """
 
     def __init__(
-        self, engine: Optional[sgl.Engine] = None, use_text_input: bool = False
+        self,
+        engine: Optional[sgl.Engine] = None,
+        use_text_input: bool = False,
     ) -> None:
-        """Initialize SGLang prefill health check payload with proper wrapped structure.
+        """Initialize SGLang disaggregated health check payload.
 
         Args:
-            engine: Optional SGLang Engine instance to extract BOS token from.
+            engine: SGLang Engine instance to extract BOS token and bootstrap port from.
+            use_text_input: Whether to use text prompt instead of token IDs.
         """
+        from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+
         bos_token_id = _get_bos_token_id_from_engine(engine)
 
+        # Get bootstrap port from engine
+        bootstrap_port = 0
+        if engine is not None:
+            try:
+                inner_tm = engine.tokenizer_manager
+                bootstrap_port = getattr(
+                    inner_tm.server_args, "disaggregation_bootstrap_port", 0
+                )
+            except Exception as e:
+                logger.warning(f"Failed to get bootstrap port from engine: {e}")
+
+        # Create bootstrap_info for fake-transfer mode
+        # FAKE_BOOTSTRAP_HOST tells SGLang to skip real KV-transfer
+        # bootstrap_room=0 matches SGLang behavior (always routes to DP rank 0)
+        # TODO: For proper DP coverage, runtime needs to support dynamic payload generation
+        bootstrap_info = {
+            "bootstrap_host": FAKE_BOOTSTRAP_HOST,
+            "bootstrap_port": bootstrap_port,
+            "bootstrap_room": 0,
+        }
+
         self.default_payload = {
-            "request": {},
-            "sampling_params": {
-                "max_new_tokens": 1,  # Generate only 1 token
+            "bootstrap_info": bootstrap_info,
+            "stop_conditions": {
+                "max_tokens": 1,  # Generate only 1 token
+                "ignore_eos": False,
+            },
+            "sampling_options": {
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "top_k": -1,
-                "ignore_eos": False,
             },
+            "eos_token_ids": [],
+            "annotations": [],
         }
 
         if use_text_input:
-            self.default_payload["request"]["prompt"] = "Test"  # type: ignore
+            self.default_payload["prompt"] = "Test"
         else:
-            self.default_payload["request"]["token_ids"] = [bos_token_id]  # type: ignore
+            self.default_payload["token_ids"] = [bos_token_id]
+
+        logger.info(
+            f"Disagg health check configured: "
+            f"bootstrap_host={FAKE_BOOTSTRAP_HOST}, "
+            f"bootstrap_port={bootstrap_port}, "
+            f"bootstrap_room=0"
+        )
 
         super().__init__()
 

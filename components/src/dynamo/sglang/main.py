@@ -27,8 +27,8 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, parse_args
 from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
+    SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
-    SglangPrefillHealthCheckPayload,
     VideoGenerationHealthCheckPayload,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher, setup_sgl_metrics
@@ -332,9 +332,14 @@ async def init(
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
-    ).to_dict()
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(
+            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        ).to_dict()
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
@@ -420,7 +425,7 @@ async def init_prefill(
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -923,7 +928,10 @@ async def init_multimodal_worker(
 
     await handler.async_init()
 
-    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
+    if config.serving_mode == DisaggregationMode.DECODE:
+        health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
+    else:
+        health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     try:
         # Multimodal Worker is an internal component, should not register with Frontend.
@@ -966,7 +974,7 @@ async def init_multimodal_prefill_worker(
 
     await handler.async_init()
 
-    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangDisaggHealthCheckPayload(engine).to_dict()
 
     try:
         # Prefill Worker is an internal component, should not register with Frontend
