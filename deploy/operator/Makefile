@@ -71,7 +71,7 @@ ensure-yq:
 	fi
 
 .PHONY: manifests
-manifests: controller-gen ensure-yq generate-planner-schema ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
 	# allowDangerousTypes=true is needed for the EndpointPickerConfig from gateway-api-inference-extension which contains float fields
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000,allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
@@ -116,8 +116,6 @@ manifests: controller-gen ensure-yq generate-planner-schema ## Generate WebhookC
 		echo "Creating directory ../helm/charts/crds/templates/"; \
 		mkdir -p ../helm/charts/crds/templates/; \
 	fi
-	@echo "Injecting PlannerConfig JSON schema into DGDR CRD..."
-	@python3 api/scripts/inject_planner_schema.py
 	cp config/crd/bases/*.yaml ../helm/charts/crds/templates/
 	echo "Adding NVIDIA header to RBAC files"
 	for file in config/rbac/*.yaml; do \
@@ -148,22 +146,12 @@ generate: controller-gen generate-pydantic ## Generate code containing DeepCopy,
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
 
 .PHONY: generate-pydantic
-generate-pydantic: generate-planner-schema ## Generate Python Pydantic models from v1beta1 Go types (requires Python 3 + pydantic)
+generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (requires Python 3 + pydantic)
 	@python3 -c "import pydantic" 2>/dev/null || { echo "Error: pydantic not found. Install with: pip install pydantic"; exit 1; }
 	@echo "Generating Pydantic models from v1beta1 DGDR types..."
 	@python3 api/scripts/generate_pydantic_from_go.py
 	@echo "Running Pydantic validation tests..."
 	@python3 api/scripts/test_pydantic_models.py
-
-.PHONY: generate-planner-schema
-generate-planner-schema: ## Regenerate planner_config_json_schema.json from the PlannerConfig Pydantic model.
-	@python3 -c "import pydantic" 2>/dev/null || { echo "Error: pydantic not found. Install with: pip install pydantic"; exit 1; }
-	@echo "Regenerating planner_config_json_schema.json..."
-	@python3 api/scripts/generate_planner_schema.py
-
-.PHONY: inject-planner-schema
-inject-planner-schema: ## Inject PlannerConfig JSON schema into the DGDR CRD YAML (run after manifests).
-	@python3 api/scripts/inject_planner_schema.py
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.

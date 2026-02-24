@@ -15,7 +15,7 @@ RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
 # Install common dependencies (python3-pip needed for generate-pydantic target)
 RUN apt-get update && apt-get install -y --no-install-recommends git python3-pip && apt-get clean && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --no-cache-dir pydantic pyyaml --break-system-packages
+    && pip3 install --no-cache-dir pydantic --break-system-packages
 
 WORKDIR /workspace
 

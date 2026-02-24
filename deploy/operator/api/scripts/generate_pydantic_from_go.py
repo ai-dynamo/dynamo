@@ -630,6 +630,16 @@ def main():
 
     args = parser.parse_args()
 
+    # In the operator Docker build the context is deploy/operator/ only — components/src
+    # is not copied in. The generated file is already committed, so skip regeneration.
+    components_src = repo_root / "components" / "src"
+    if not components_src.exists():
+        print(
+            f"Note: {components_src} not found (operator-only build context). "
+            "Skipping Pydantic generation; using committed dgdr_v1beta1_types.py."
+        )
+        return 0
+
     if not args.input.exists():
         print(f"Error: Input file not found: {args.input}")
         return 1

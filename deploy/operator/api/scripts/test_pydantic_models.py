@@ -47,22 +47,31 @@ def _repo_root() -> Path:
     return start
 
 
+_components_src = _repo_root() / "components" / "src"
+
+# In the operator Docker build the context is deploy/operator/ only — components/src
+# is not copied in. The generated files are already committed, so skip validation.
+if not _components_src.exists():
+    print(
+        f"Note: {_components_src} not found (operator-only build context). "
+        "Skipping Pydantic validation tests."
+    )
+    sys.exit(0)
+
 # Add the components src to path so we can import the generated models
-sys.path.insert(0, str(_repo_root() / "components" / "src"))
+sys.path.insert(0, str(_components_src))
 
 # ---------------------------------------------------------------------------
 # Stub dynamo.runtime.logging and bypass the heavy dynamo.planner.__init__
-# before importing any dynamo module. Same technique as generate_planner_schema.py.
+# before importing any dynamo module.
 #
 # dynamo itself must be a namespace-like package (has __path__) so that
 # Python's import machinery can traverse down to dynamo.profiler from the
 # filesystem.  dynamo.planner is pre-registered as a stub to skip its heavy
 # __init__.py, while still allowing dynamo.planner.utils.* to load normally.
 # ---------------------------------------------------------------------------
-_repo = _repo_root()
-_components_src = str(_repo / "components" / "src")
-_dynamo_path = str(_repo / "components" / "src" / "dynamo")
-_planner_path = str(_repo / "components" / "src" / "dynamo" / "planner")
+_dynamo_path = str(_components_src / "dynamo")
+_planner_path = str(_components_src / "dynamo" / "planner")
 
 if "dynamo" not in sys.modules:
     _dynamo_mod = types.ModuleType("dynamo")
