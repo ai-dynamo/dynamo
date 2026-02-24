@@ -491,8 +491,7 @@ impl KvRouter {
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
-        self.scheduler
-            .add_output_block(request_id, decay_fraction)
+        self.scheduler.add_output_block(request_id, decay_fraction)
     }
 
     pub fn block_size(&self) -> u32 {

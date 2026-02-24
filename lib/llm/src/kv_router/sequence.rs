@@ -804,7 +804,9 @@ impl ActiveSequencesMultiWorker {
         let publisher = self.metrics_publisher.clone();
         tokio::spawn(async move {
             if let Err(e) = publisher.publish(&active_load).await {
-                tracing::trace!("Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}");
+                tracing::trace!(
+                    "Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}"
+                );
             }
         });
     }
