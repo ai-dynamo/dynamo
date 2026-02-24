@@ -148,7 +148,7 @@ class VLLMProcess:
         # - When data_parallel_size is set, launch one process per DP rank
         # - Each process gets --data-parallel-rank and --data-parallel-size
         # - Each process runs on its own GPU via CUDA_VISIBLE_DEVICES
-        # - --connector nixl enables KV cache transfer between ranks
+        # - --kv-transfer-config enables KV cache transfer between ranks
 
         for worker_idx in range(num_workers):
             # Calculate GPU device for this process
@@ -207,7 +207,7 @@ class VLLMProcess:
                         str(data_parallel_size),
                         # "--data-parallel-address", "127.0.0.1",  # Required for DP coordination
                         # "--data-parallel-rpc-port", "13345",  # RPC port for DP coordination
-                        # "--connector", "nixl",  # Required for KV transfer between DP ranks
+                        # "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',  # Required for KV transfer between DP ranks
                     ]
                 )
 

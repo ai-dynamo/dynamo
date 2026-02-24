@@ -1373,7 +1373,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `planner` _[PlannerSpec](#plannerspec)_ | Planner configures the SLA planner for autoscaling in the generated DGD. |  | Optional: \{\} <br /> |
+| `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner is the raw SLA planner configuration passed to the planner service.<br />Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.<br />Go treats this as opaque bytes; the Planner service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
 | `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
 
 
@@ -1483,43 +1483,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `config` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Config is the full deployment configuration for this Pareto point. |  | Type: object <br /> |
-
-
-#### PlannerPreDeploymentSweepMode
-
-_Underlying type:_ _string_
-
-PlannerPreDeploymentSweepMode controls pre-deployment sweeping thoroughness for planner profiling.
-
-_Validation:_
-- Enum: [none rapid thorough]
-
-_Appears in:_
-- [PlannerSpec](#plannerspec)
-
-| Field | Description |
-| --- | --- |
-| `none` |  |
-| `rapid` |  |
-| `thorough` |  |
-
-
-#### PlannerSpec
-
-
-
-PlannerSpec configures the SLA planner for autoscaling in the generated DGD.
-
-
-
-_Appears in:_
-- [FeaturesSpec](#featuresspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled indicates whether the planner is enabled. |  | Optional: \{\} <br /> |
-| `plannerPreDeploymentSweeping` _[PlannerPreDeploymentSweepMode](#plannerpredeploymentsweepmode)_ | PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling.<br />"none" means no pre-deployment sweep (only load-based scaling).<br />"rapid" uses AI Configurator to simulate engine performance.<br />"thorough" uses real GPUs to measure engine performance (takes several hours). |  | Enum: [none rapid thorough] <br />Optional: \{\} <br /> |
-| `plannerArgsList` _string array_ | PlannerArgsList is a list of additional planner arguments. |  | Optional: \{\} <br /> |
 
 
 #### ProfilingPhase
