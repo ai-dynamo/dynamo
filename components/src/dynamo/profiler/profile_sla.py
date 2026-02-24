@@ -64,7 +64,7 @@ def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
     else:
         target_ttft = dgdr.sla.ttft
         target_tpot = dgdr.sla.itl
-    search_strategy = SearchStrategy(dgdr.searchStrategy.value)
+    search_strategy = SearchStrategy(dgdr.searchStrategy)
     picking_mode = determine_picking_mode(dgdr)
     logger.info(
         "Profiler config: model=%s, backend=%s, system=%s, total_gpus=%s, "
