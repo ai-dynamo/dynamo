@@ -10,10 +10,7 @@ hardware:
   totalGpus: 64
   numGpusPerNode: 8
 workload:
-  isl: 4000
-  osl: 1000
   requestRate: 5.0
 sla:
-  ttft: 2000.0
   itl: 50.0
 searchStrategy: thorough

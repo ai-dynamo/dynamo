@@ -10,11 +10,8 @@ hardware:
   totalGpus: 64
   numGpusPerNode: 8
 workload:
-  isl: 4000
-  osl: 1000
   requestRate: 5.0
 sla:
   ttft: null
   itl: null
   e2eLatency: 35000.0
-searchStrategy: rapid

@@ -11,10 +11,5 @@ hardware:
   totalGpus: 4
   numGpusPerNode: 4
   vramMb: 48000
-workload:
-  isl: 4000
-  osl: 1000
 sla:
-  ttft: 2000.0
   itl: 50.0
-searchStrategy: rapid
