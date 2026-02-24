@@ -413,9 +413,7 @@ async def parse_args(args: list[str]) -> Config:
         and getattr(server_args, "max_running_requests", None) is None
     ):
         server_args.max_running_requests = 8
-        logging.info(
-            "Defaulting max_running_requests to 8 for diffusion worker"
-        )
+        logging.info("Defaulting max_running_requests to 8 for diffusion worker")
 
     dynamo_config.namespace = parsed_namespace
     dynamo_config.component = parsed_component_name
