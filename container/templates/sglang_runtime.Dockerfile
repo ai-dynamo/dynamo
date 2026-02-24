@@ -9,6 +9,9 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+# NOTE: Unlike vLLM/TRTLLM, the SGLang upstream runtime image already ships with the full CUDA
+# toolkit (nvcc, nvlink, ptxas, etc.), so no selective COPY of CUDA binaries is needed here.
+
 # cleanup unnecessary libs (python3-blinker conflicts with pip-installed blinker from Flask/dash)
 RUN apt remove -y python3-apt python3-blinker && \
     pip uninstall -y termplotlib

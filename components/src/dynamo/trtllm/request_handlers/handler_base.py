@@ -55,7 +55,6 @@ class RequestHandlerConfig:
     Configuration for the request handler
     """
 
-    component: object
     engine: TensorRTLLMEngine
     default_sampling_params: SamplingParams
     publisher: Publisher
@@ -89,7 +88,6 @@ class HandlerBase(BaseGenerativeHandler):
 
     def __init__(self, config: RequestHandlerConfig):
         self.engine = config.engine
-        self.component = config.component
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
@@ -804,13 +802,24 @@ class HandlerBase(BaseGenerativeHandler):
                         )
 
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
                     if (
                         res.finished
                         and self.metrics_collector
                         and hasattr(res, "metrics_dict")
                     ):
                         try:
-                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                            if hasattr(
+                                self.metrics_collector,
+                                "log_request_metrics_dict",
+                            ):
+                                self.metrics_collector.log_request_metrics_dict(
+                                    res.metrics_dict
+                                )
+                            else:
+                                self.metrics_collector.log_metrics_dict(
+                                    res.metrics_dict
+                                )
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 

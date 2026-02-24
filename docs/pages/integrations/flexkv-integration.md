@@ -107,7 +107,7 @@ FLEXKV_CPU_CACHE_GB=32 \
 CUDA_VISIBLE_DEVICES=1 \
   python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
-  --is-prefill-worker \
+  --disaggregation-mode prefill \
   --connector nixl flexkv
 ```
 

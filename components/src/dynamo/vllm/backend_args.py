@@ -3,13 +3,15 @@
 
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
-from typing import Optional
+import warnings
+from typing import Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
+from .constants import DisaggregationMode
 
 
 class DynamoVllmArgGroup(ArgGroup):
@@ -25,12 +27,23 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         g = parser.add_argument_group("Dynamo vLLM Options")
 
+        add_argument(
+            g,
+            flag_name="--disaggregation-mode",
+            env_var="DYN_VLLM_DISAGGREGATION_MODE",
+            default=None,
+            help="Worker disaggregation mode: 'agg' (default, aggregated), "
+            "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
+            choices=[m.value for m in DisaggregationMode],
+        )
+
         add_negatable_bool_argument(
             g,
             flag_name="--is-prefill-worker",
             env_var="DYN_VLLM_IS_PREFILL_WORKER",
             default=False,
-            help="Enable prefill functionality for this worker. Uses the provided namespace to construct dyn://namespace.prefill.generate",
+            help="DEPRECATED: use --disaggregation-mode=prefill. "
+            "Enable prefill functionality for this worker.",
         )
 
         add_negatable_bool_argument(
@@ -38,7 +51,8 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--is-decode-worker",
             env_var="DYN_VLLM_IS_DECODE_WORKER",
             default=False,
-            help="Mark this as a decode worker which does not publish KV events",
+            help="DEPRECATED: use --disaggregation-mode=decode. "
+            "Mark this as a decode worker which does not publish KV events.",
         )
 
         add_negatable_bool_argument(
@@ -295,6 +309,9 @@ class DynamoVllmArgGroup(ArgGroup):
 class DynamoVllmConfig(ConfigBase):
     """Configuration for Dynamo vLLM wrapper (vLLM-specific only). All fields optional."""
 
+    disaggregation_mode: Union[
+        None, str, DisaggregationMode
+    ]  # None when not provided; resolved to enum in validate()
     is_prefill_worker: bool
     is_decode_worker: bool
     use_vllm_tokenizer: bool
@@ -344,17 +361,63 @@ class DynamoVllmConfig(ConfigBase):
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
-        self._validate_prefill_decode_exclusive()
+        self._resolve_disaggregation_mode()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_omni_stage_config()
 
-    def _validate_prefill_decode_exclusive(self) -> None:
-        """Ensure at most one of is_prefill_worker and is_decode_worker is set."""
-        if self.is_prefill_worker and self.is_decode_worker:
+    def _resolve_disaggregation_mode(self) -> None:
+        """Resolve disaggregation_mode from new enum or legacy boolean flags.
+
+        Priority:
+        1. If --disaggregation-mode was explicitly provided, use it.
+           Raise if legacy booleans are also set.
+        2. If legacy --is-prefill-worker or --is-decode-worker is set,
+           emit DeprecationWarning and translate to enum.
+        3. Apply default (AGGREGATED) if nothing was provided.
+        4. Sync boolean fields from the resolved enum value.
+        """
+        # Convert string to enum (non-None means explicitly provided)
+        explicit_mode = self.disaggregation_mode is not None
+        if isinstance(self.disaggregation_mode, str):
+            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+
+        # Check for legacy boolean flags
+        has_legacy = self.is_prefill_worker or self.is_decode_worker
+
+        if has_legacy and explicit_mode:
             raise ValueError(
-                "Cannot set both --is-prefill-worker and --is-decode-worker"
+                "Cannot combine --is-prefill-worker/--is-decode-worker with "
+                "--disaggregation-mode. Use only --disaggregation-mode."
             )
+
+        if has_legacy:
+            if self.is_prefill_worker and self.is_decode_worker:
+                raise ValueError(
+                    "Cannot set both --is-prefill-worker and --is-decode-worker"
+                )
+            if self.is_prefill_worker:
+                warnings.warn(
+                    "--is-prefill-worker is deprecated, use --disaggregation-mode=prefill",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                self.disaggregation_mode = DisaggregationMode.PREFILL
+            elif self.is_decode_worker:
+                warnings.warn(
+                    "--is-decode-worker is deprecated, use --disaggregation-mode=decode",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                self.disaggregation_mode = DisaggregationMode.DECODE
+
+        # Apply default if neither new flag nor legacy flags were provided
+        if self.disaggregation_mode is None:
+            self.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+        # Sync booleans from enum (canonical source of truth)
+        self.is_prefill_worker = self.disaggregation_mode == DisaggregationMode.PREFILL
+        self.is_decode_worker = self.disaggregation_mode == DisaggregationMode.DECODE
 
     def _count_multimodal_roles(self) -> int:
         """Return the number of multimodal worker roles set (0 or 1 allowed).

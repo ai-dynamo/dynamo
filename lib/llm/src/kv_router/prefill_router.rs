@@ -34,10 +34,13 @@ pub enum PrefillError {
     #[error("Prefill router not yet activated")]
     NotActivated,
 
-    /// Error during prefill execution
     /// TODO: Separate prefill worker error from prefill router error
+    /// Error during prefill execution
     #[error("Prefill execution failed: {0}")]
-    PrefillError(String),
+    PrefillError(
+        String,
+        #[source] Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    ),
 
     /// Disaggregated params not found in prefill response
     #[error("No disaggregated params in prefill response: {0}")]
@@ -100,6 +103,8 @@ pub struct PrefillRouter {
     enforce_disagg: bool,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
+    /// Namespace used to look up the correct WorkerSet's worker monitor
+    namespace: String,
 }
 
 impl PrefillRouter {
@@ -117,9 +122,11 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             model_name: String::new(), // Not used for disabled router
+            namespace: String::new(),  // Not used for disabled router
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
@@ -128,6 +135,7 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         enforce_disagg: bool,
         model_name: String,
+        namespace: String,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -140,6 +148,7 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             model_name,
+            namespace,
         });
 
         // Spawn background task to wait for activation
@@ -207,7 +216,9 @@ impl PrefillRouter {
             let client = kv_chooser.client().clone();
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 
@@ -227,7 +238,9 @@ impl PrefillRouter {
             let client = endpoint.client().await?;
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 
@@ -350,7 +363,12 @@ impl PrefillRouter {
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
-            .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
+            .map_err(|e| {
+                PrefillError::PrefillError(
+                    "failed to route to prefill worker".to_string(),
+                    Some(e.into()),
+                )
+            })?;
 
         // Drop phase permit now - routing is complete, record_worker_full was called in select_worker.
         // This unblocks set_phase(Decode) in the main task without waiting for prefill output.
@@ -359,6 +377,7 @@ impl PrefillRouter {
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
+                None,
             ));
         };
 
@@ -380,9 +399,10 @@ impl PrefillRouter {
         }
 
         if let Some(err) = first_output.err() {
-            return Err(PrefillError::PrefillError(format!(
-                "Prefill router returned error in output: {err:?}"
-            )));
+            return Err(PrefillError::PrefillError(
+                "Prefill router returned error in output".to_string(),
+                Some(Box::new(err)),
+            ));
         }
 
         let Some(output) = &first_output.data else {

@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator, Optional
 
 import torch
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
@@ -35,7 +35,6 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         generator: Any,  # DiffGenerator, not sgl.Engine
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
@@ -44,14 +43,13 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         """Initialize video generation worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             generator: The SGLang DiffGenerator instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher (not used for video currently).
             fs: Optional fsspec filesystem for primary video storage.
         """
         # Call parent constructor for common setup
-        super().__init__(component, config, publisher)
+        super().__init__(config, publisher)
 
         # Video generation-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
