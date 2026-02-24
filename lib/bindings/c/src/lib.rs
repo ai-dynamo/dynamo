@@ -708,7 +708,9 @@ pub unsafe extern "C" fn create_routers(
                 )
             }
             None if !decode_fallback => {
-                tracing::error!("Prefill workers required but none found and decode fallback is disabled");
+                tracing::error!(
+                    "Prefill workers required but none found and decode fallback is disabled"
+                );
                 return Err(QueryRouterResult::ErrDisaggEnforced);
             }
             None => {
