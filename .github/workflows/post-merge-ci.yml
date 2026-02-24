@@ -33,7 +33,6 @@ jobs:
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 35
       multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
       cpu_only_test_timeout_minutes: 60
       single_gpu_test_timeout_minutes: 60
