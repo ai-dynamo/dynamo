@@ -142,9 +142,15 @@ Use the proper folder in commands below.
 
 ```bash
 # Deploy your Dynamo Graph.
+
+# agg
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
 # Deploy the GAIE http-route CR.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
+
+# or disagg
+kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/deploy.yaml  -n ${NAMESPACE}
+kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yaml -n ${NAMESPACE}
 ```
 
 - When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.

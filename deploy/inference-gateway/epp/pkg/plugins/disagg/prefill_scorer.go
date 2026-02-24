@@ -103,6 +103,9 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 	}
 
 	podsJSON := serializePods(pods)
+	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: pods received for scoring",
+		"podCount", len(pods),
+		"podsJSON", string(podsJSON))
 
 	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, podsJSON)
 	if err != nil {

@@ -143,6 +143,9 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	}
 
 	podsJSON := serializePods(pods)
+	logger.V(logutil.DEFAULT).Info("DynDecodeScorer: pods received for scoring",
+		"podCount", len(pods),
+		"podsJSON", string(podsJSON))
 
 	result, err := dynscorer.CallRouteDecodeRequest(requestJSON, podsJSON, isDisaggregated)
 	if err != nil {
