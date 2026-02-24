@@ -226,8 +226,8 @@ def test_env_var_dyn_connector_raises_error(monkeypatch, mock_vllm_cli):
 
 
 def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
-    """Test that --is-prefill-worker without --kv-transfer-config raises ValueError."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--is-prefill-worker")
+    """Test that --disaggregation-mode prefill without --kv-transfer-config raises ValueError."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill")
     with pytest.raises(ValueError, match="--kv-transfer-config"):
         parse_args()
 

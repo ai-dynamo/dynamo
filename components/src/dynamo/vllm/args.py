@@ -189,16 +189,19 @@ def update_dynamo_config_with_engine(
     # --connector is no longer supported for vLLM. Raise hard error if explicitly set.
     _reject_connector_flag(dynamo_config)
 
-    # If --is-prefill-worker is set, require explicit --kv-transfer-config
+    # If disaggregation mode is prefill, require explicit --kv-transfer-config
     has_kv_transfer_config = (
         hasattr(engine_config, "kv_transfer_config")
         and engine_config.kv_transfer_config is not None
     )
-    if dynamo_config.is_prefill_worker and not has_kv_transfer_config:
+    if (
+        dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
+        and not has_kv_transfer_config
+    ):
         raise ValueError(
             "--connector is deprecated and the default is no longer nixl. "
-            "When using --is-prefill-worker, you must explicitly provide "
-            "--kv-transfer-config. Example:\n"
+            "When using --disaggregation-mode prefill, you must explicitly "
+            "provide --kv-transfer-config. Example:\n"
             "  --kv-transfer-config "
             '\'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\''
         )
