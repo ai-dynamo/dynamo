@@ -92,7 +92,7 @@ class DiffusionEngine:
         )
 
         # Import TensorRT-LLM visual_gen components
-        from tensorrt_llm._torch.visual_gen import DiffusionArgs, PipelineLoader
+        from tensorrt_llm._torch.visual_gen import PipelineLoader
 
         # Build DiffusionArgs from DiffusionConfig
         diffusion_args = self._build_diffusion_args()
@@ -137,7 +137,11 @@ class DiffusionEngine:
             }
 
         # Build skip_components list
-        skip_components = [c for c in self.config.skip_components] if self.config.skip_components else []
+        skip_components = (
+            [c for c in self.config.skip_components]
+            if self.config.skip_components
+            else []
+        )
 
         args_kwargs: dict = dict(
             checkpoint_path=self.config.model_path,
