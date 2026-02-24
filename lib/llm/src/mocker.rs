@@ -175,6 +175,14 @@ fn convert_to_zmq_events(
                 .map(|tids| tids.iter().flatten().copied().collect())
                 .unwrap_or_default();
 
+            assert_eq!(
+                token_ids.len(),
+                block_hashes.len() * block_size as usize,
+                "token_ids length ({}) must equal block_hashes.len() ({}) * block_size ({block_size})",
+                token_ids.len(),
+                block_hashes.len(),
+            );
+
             vec![ZmqRawKvEvent::BlockStored {
                 block_hashes,
                 parent_block_hash,
