@@ -7,15 +7,15 @@
 //! ensuring that layouts can be transmitted to remote nodes and reconstructed
 //! with all necessary metadata intact.
 
+#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
+use crate::layout::BlockDimension;
 use crate::layout::physical::PhysicalLayout;
 use crate::layout::{LayoutConfig, LayoutDescriptor};
 #[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
-use crate::layout::BlockDimension;
-use dynamo_memory::nixl::{MemType, NixlDescriptor};
+use dynamo_memory::Buffer;
 #[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 use dynamo_memory::nixl::NixlAgent;
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
-use dynamo_memory::Buffer;
+use dynamo_memory::nixl::{MemType, NixlDescriptor};
 use dynamo_memory::{MemoryDescriptor, MemoryRegion, StorageKind};
 use std::any::Any;
 use std::sync::Arc;
