@@ -98,8 +98,11 @@ impl ImageNvExt {
     fn __repr__(&self) -> String {
         format!(
             "ImageNvExt(annotations={:?}, negative_prompt={:?}, num_inference_steps={:?}, guidance_scale={:?}, seed={:?})",
-            self.inner.annotations, self.inner.negative_prompt, self.inner.num_inference_steps,
-            self.inner.guidance_scale, self.inner.seed,
+            self.inner.annotations,
+            self.inner.negative_prompt,
+            self.inner.num_inference_steps,
+            self.inner.guidance_scale,
+            self.inner.seed,
         )
     }
 }
@@ -291,11 +294,7 @@ pub struct ImageData {
 impl ImageData {
     #[new]
     #[pyo3(signature = (*, url=None, b64_json=None, revised_prompt=None))]
-    fn new(
-        url: Option<String>,
-        b64_json: Option<String>,
-        revised_prompt: Option<String>,
-    ) -> Self {
+    fn new(url: Option<String>, b64_json: Option<String>, revised_prompt: Option<String>) -> Self {
         Self {
             url,
             b64_json,
@@ -378,10 +377,7 @@ impl ImageData {
     /// Parse from a JSON value.
     fn from_json_value(val: &serde_json::Value) -> Self {
         Self {
-            url: val
-                .get("url")
-                .and_then(|v| v.as_str())
-                .map(String::from),
+            url: val.get("url").and_then(|v| v.as_str()).map(String::from),
             b64_json: val
                 .get("b64_json")
                 .and_then(|v| v.as_str())
@@ -850,8 +846,7 @@ impl NvVideosResponse {
 
     #[staticmethod]
     fn model_validate(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let inner: rs_videos::NvVideosResponse =
-            pythonize::depythonize(obj).map_err(to_pyerr)?;
+        let inner: rs_videos::NvVideosResponse = pythonize::depythonize(obj).map_err(to_pyerr)?;
         Ok(Self { inner })
     }
 
