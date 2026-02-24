@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from importlib.metadata import files
+from importlib.metadata import PackageNotFoundError, files
 
 import pytest
 
@@ -33,8 +33,10 @@ def test_no_bundled_shared_libraries():
     add --exclude flags to the auditwheel repair command in
     container/templates/wheel_builder.Dockerfile.
     """
-    installed_files = files("ai-dynamo-runtime")
-    assert installed_files is not None, "ai-dynamo-runtime is not installed"
+    try:
+        installed_files = files("ai-dynamo-runtime")
+    except PackageNotFoundError:
+        pytest.fail("ai-dynamo-runtime is not installed")
 
     bundled_libs = [
         str(f) for f in installed_files if ".libs/" in str(f) and ".so" in str(f)
