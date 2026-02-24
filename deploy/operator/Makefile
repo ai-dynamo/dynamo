@@ -151,7 +151,7 @@ generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (req
 	@echo "Generating Pydantic models from v1beta1 DGDR types..."
 	@python3 api/scripts/generate_pydantic_from_go.py
 	@echo "Running Pydantic validation tests..."
-	@python3 api/scripts/test_pydantic_models.py
+	@python3 api/scripts/validate_pydantic_models.py
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
