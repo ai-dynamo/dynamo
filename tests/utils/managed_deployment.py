@@ -939,14 +939,10 @@ class ManagedDeployment:
                     key=lambda e: e.last_timestamp or e.event_time or "",
                 ):
                     ts = event.last_timestamp or event.event_time or "unknown"
-                    line = (
-                        f"[{ts}] [{event.type}] {event.reason}: {event.message}"
-                    )
+                    line = f"[{ts}] [{event.type}] {event.reason}: {event.message}"
                     f.write(line + "\n")
                     if event.type != "Normal":
-                        self._logger.warning(
-                            f"K8s event for {pod_name}: {line}"
-                        )
+                        self._logger.warning(f"K8s event for {pod_name}: {line}")
         except Exception as e:
             self._logger.warning(f"Failed to collect events for {pod_name}: {e}")
 
