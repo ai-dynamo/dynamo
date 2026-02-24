@@ -85,6 +85,34 @@ let notification = manager.execute_transfer(
 notification.await?;
 ```
 
+## Testing
+
+All functional tests in `kvbm-physical` require a real NIXL installation and a CUDA GPU. They are gated behind two feature flags:
+
+- **`testing-nixl`** — enables tests that create `NixlAgent` instances (hard-aborts under NIXL stubs)
+- **`testing-cuda`** — enables tests that allocate device memory or launch CUDA kernels
+
+### Running tests
+
+```bash
+# Without GPU/NIXL — only the sentinel test runs (confirms skipping)
+cargo test -p kvbm-physical
+
+# With GPU + NIXL available
+cargo test -p kvbm-physical --features testing-nixl,testing-cuda
+```
+
+When neither feature is enabled, a single **sentinel test** runs and prints a reminder message. This ensures `cargo test` never silently passes with zero tests.
+
+### What the sentinel test looks like
+
+```
+running 1 test
+test sentinel::all_functional_tests_skipped___enable_testing_nixl_and_testing_cuda ... ok
+```
+
+The `test_version_check_on_deserialization` test in `layout::tests` is the only functional test that runs without feature flags, as it does not require NIXL or CUDA.
+
 ## Documentation
 
 - [v1 Migration Guide](docs/v1_migration.md) — Migration from `dynamo-llm::block_manager` to `kvbm-physical`

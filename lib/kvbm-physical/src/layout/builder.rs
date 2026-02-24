@@ -787,7 +787,7 @@ fn derive_nixl_metadata(agent: &NixlAgent, entries: &[MemoryEntry]) -> Result<Ni
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
 mod tests {
     use super::super::{BlockDimension, LayoutConfig};
     use super::*;

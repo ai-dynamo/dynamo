@@ -32,11 +32,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 validator = { workspace = true }
 
-# nixl-sys = { workspace = true, optional = true }
-
 [features]
 default = []
-# collectives = ["dep:nixl-sys"]
 collectives = []
 testing-cuda = []
 testing-nixl = []

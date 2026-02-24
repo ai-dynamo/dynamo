@@ -34,6 +34,7 @@ macro_rules! skip_if_stubs {
 /// Check if any of the storage kinds require CUDA, and skip if stubs are in use.
 ///
 /// Call this at the start of parameterized tests that may or may not use Device storage.
+#[allow(unused_macros)]
 macro_rules! skip_if_stubs_and_device {
     ($($kind:expr),+ $(,)?) => {
         if kvbm_kernels::is_using_stubs() {
@@ -52,6 +53,7 @@ macro_rules! skip_if_stubs_and_device {
 // Make the macros available to submodules
 #[allow(unused_imports)]
 pub(crate) use skip_if_stubs;
+#[allow(unused_imports)]
 pub(crate) use skip_if_stubs_and_device;
 
 use super::{
@@ -66,17 +68,12 @@ use crate::{
     },
 };
 use anyhow::Result;
-#[cfg(feature = "testing-cuda")]
 use cudarc::driver::sys::CUdevice_attribute_enum;
-#[cfg(feature = "testing-cuda")]
 use cudarc::driver::{CudaContext, CudaStream, LaunchConfig, PushKernelArg};
-#[cfg(feature = "testing-cuda")]
 use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 use std::collections::HashMap;
 use std::ops::Range;
-#[cfg(feature = "testing-cuda")]
 use std::sync::{Arc, OnceLock};
-#[cfg(feature = "testing-cuda")]
 use std::time::{Duration, Instant};
 
 /// Layout kind for parameterized testing.
@@ -408,7 +405,6 @@ pub fn verify_guard_blocks_unchanged(
     Ok(())
 }
 
-#[cfg(feature = "testing-cuda")]
 /// CUDA sleep kernel source code.
 const SLEEP_KERNEL_SRC: &str = r#"
 extern "C" __global__ void sleep_kernel(unsigned long long min_cycles) {
@@ -419,7 +415,6 @@ extern "C" __global__ void sleep_kernel(unsigned long long min_cycles) {
 }
 "#;
 
-#[cfg(feature = "testing-cuda")]
 /// A reusable CUDA sleep utility for tests.
 ///
 /// This struct provides a simple interface to execute GPU sleep operations
@@ -433,7 +428,6 @@ pub struct CudaSleep {
     cycles_per_ms: f64,
 }
 
-#[cfg(feature = "testing-cuda")]
 impl CudaSleep {
     /// Get or create a CudaSleep instance for the given CUDA context.
     ///
