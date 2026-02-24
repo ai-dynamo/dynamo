@@ -360,7 +360,9 @@ async def init(
         ),
     ]
     if enable_cache_control:
-        cache_control_endpoint = component.endpoint("cache_control")
+        cache_control_endpoint = runtime.endpoint(
+            f"{dynamo_args.namespace}.{dynamo_args.component}.cache_control"
+        )
         serve_tasks.append(
             cache_control_endpoint.serve_endpoint(
                 handler.cache_control,
