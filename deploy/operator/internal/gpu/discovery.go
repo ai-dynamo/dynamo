@@ -20,8 +20,15 @@ package gpu
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
+
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,14 +40,414 @@ const (
 	LabelGPUCount   = "nvidia.com/gpu.count"
 	LabelGPUProduct = "nvidia.com/gpu.product"
 	LabelGPUMemory  = "nvidia.com/gpu.memory"
+	// DCGM exporter label constants
+	LabelApp                     = "app"
+	LabelAppKubernetesName       = "app.kubernetes.io/name"
+	LabelValueNvidiaDCGMExporter = "nvidia-dcgm-exporter"
+	LabelValueDCGMExporter       = "dcgm-exporter"
 )
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
-	GPUsPerNode int    // Maximum GPUs per node found in the cluster
-	Model       string // GPU product name (e.g., "H100-SXM5-80GB")
-	VRAMPerGPU  int    // VRAM in MiB per GPU
-	System      string // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	NodeName    string         // Name of the node with this GPU configuration
+	GPUsPerNode int            // Maximum GPUs per node found in the cluster
+	Model       string         // GPU product name (e.g., "H100-SXM5-80GB")
+	VRAMPerGPU  int            // VRAM in MiB per GPU
+	System      string         // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	MIGEnabled  bool           // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
+	MIGProfiles map[string]int // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
+}
+
+type GPUDiscoveryCache struct {
+	mu        sync.RWMutex
+	value     *GPUInfo
+	expiresAt time.Time
+}
+
+// NewGPUDiscoveryCache creates a new GPUDiscoveryCache instance.
+//
+// The cache stores a single discovered GPUInfo value with an expiration time.
+// It is safe for concurrent use and is intended to reduce repeated DCGM
+// scraping during reconciliation loops.
+func NewGPUDiscoveryCache() *GPUDiscoveryCache {
+	return &GPUDiscoveryCache{}
+}
+
+// Get returns the cached GPUInfo if it exists and has not expired.
+//
+// The boolean return value indicates whether a valid cached value was found.
+// If the cache is empty or expired, it returns (nil, false).
+//
+// This method is safe for concurrent use.
+func (c *GPUDiscoveryCache) Get() (*GPUInfo, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if time.Now().Before(c.expiresAt) && c.value != nil {
+		return c.value, true
+	}
+	return nil, false
+}
+
+// Set stores the provided GPUInfo in the cache with the given TTL (time-to-live).
+//
+// The cached value will be considered valid until the TTL duration elapses.
+// After expiration, Get will return (nil, false) until a new value is set.
+//
+// This method is safe for concurrent use.
+func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.value = info
+	c.expiresAt = time.Now().Add(ttl)
+}
+
+// DiscoverGPUsFromDCGM discovers GPU information by scraping metrics directly
+// from DCGM exporter pods running in the cluster.
+//
+// The function performs the following:
+//
+//  1. Returns cached GPU information if still valid.
+//  2. Lists DCGM exporter pods across all namespaces using supported labels.
+//  3. If no pods are found, attempts to enable DCGM via Helm.
+//  4. Waits for DCGM exporter pods to become ready.
+//  5. Scrapes each running pods metrics endpoint (http://<podIP>:9400/metrics).
+//  6. Selects the "best" GPU node based on:
+//     - Highest GPU count
+//     - Highest VRAM per GPU (tie-breaker)
+//  7. Caches the result for a short duration to avoid repeated scraping.
+//
+// Behavior Notes:
+//
+//   - Scrapes pods directly instead of using a Service ClusterIP to avoid
+//     load-balancing ambiguity in multi-node clusters.
+//   - If at least one pod is successfully scraped, partial failures are tolerated.
+//   - If all pods fail to scrape, an aggregated error is returned.
+//   - Assumes DCGM exporter runs as a DaemonSet (one pod per GPU node).
+//   - Designed for homogeneous clusters; heterogeneous cluster aggregation
+//     is not yet implemented.
+//
+// Returns:
+//   - *GPUInfo for the selected node
+//   - error if no GPU data can be retrieved
+//
+// TODO: Current implementation selects a single "best" GPU node (highest GPU count,
+// tie-broken by VRAM). This works for homogeneous clusters where all GPU
+// nodes are identical.
+// For Heterogeneous GPU Support (mixed GPU models or capacities), this logic
+// does not represent full cluster GPU inventory. Future improvements should
+// aggregate and return GPU information for all nodes instead of selecting
+// only one.
+func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *GPUDiscoveryCache) (*GPUInfo, error) {
+
+	// Return cached result if still valid
+	if cached, ok := cache.Get(); ok {
+		return cached, nil
+	}
+
+	// List ALL pods (we'll filter manually to support OR label logic)
+	podList := &corev1.PodList{}
+	if err := k8sClient.List(ctx, podList); err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	var dcgmPods []corev1.Pod
+
+	// Filter pods matching ANY of the supported DCGM label combinations
+	for _, pod := range podList.Items {
+
+		labels := pod.GetLabels()
+
+		if labels == nil {
+			continue
+		}
+
+		// Supported label combinations:
+		if labels[LabelApp] == LabelValueNvidiaDCGMExporter ||
+			labels[LabelApp] == LabelValueDCGMExporter ||
+			labels[LabelAppKubernetesName] == LabelValueDCGMExporter {
+
+			dcgmPods = append(dcgmPods, pod)
+		}
+	}
+
+	// If no pods found → attempt enablement
+	if len(dcgmPods) == 0 {
+
+		if err := EnsureDCGMEnabled(ctx); err != nil {
+			return nil, fmt.Errorf("install dcgm via helm: %w", err)
+		}
+
+		if err := WaitForDCGMPods(ctx, k8sClient, 3*time.Minute); err != nil {
+			return nil, err
+		}
+
+		// Re-list and re-filter
+		if err := k8sClient.List(ctx, podList); err != nil {
+			return nil, err
+		}
+
+		dcgmPods = nil
+
+		for _, pod := range podList.Items {
+			labels := pod.GetLabels()
+			if labels == nil {
+				continue
+			}
+
+			if labels[LabelApp] == LabelValueNvidiaDCGMExporter ||
+				labels[LabelApp] == LabelValueDCGMExporter ||
+				labels[LabelAppKubernetesName] == LabelValueDCGMExporter {
+
+				dcgmPods = append(dcgmPods, pod)
+			}
+		}
+	}
+
+	if len(dcgmPods) == 0 {
+		return nil, fmt.Errorf("no dcgm exporter pods found")
+	}
+
+	var bestNode *GPUInfo
+	var scrapeErrors []error
+	// Scrape each running pod individually
+	for _, pod := range dcgmPods {
+
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+
+		if pod.Status.PodIP == "" {
+			continue
+		}
+
+		endpoint := fmt.Sprintf("http://%s:9400/metrics", pod.Status.PodIP)
+
+		info, err := scrapeMetricsEndpoint(ctx, endpoint)
+		if err != nil {
+			scrapeErrors = append(scrapeErrors, fmt.Errorf("pod %s (%s): %w", pod.Name, pod.Status.PodIP, err))
+			continue
+		}
+
+		// Select best node:
+		// 1. Highest GPU count
+		// 2. Highest VRAM per GPU (tie-breaker)
+		if bestNode == nil ||
+			info.GPUsPerNode > bestNode.GPUsPerNode ||
+			(info.GPUsPerNode == bestNode.GPUsPerNode &&
+				info.VRAMPerGPU > bestNode.VRAMPerGPU) {
+
+			bestNode = info
+		}
+	}
+
+	if bestNode == nil {
+		if len(scrapeErrors) > 0 {
+			return nil, fmt.Errorf("failed to scrape any dcgm exporter pod: %v", scrapeErrors)
+		}
+		return nil, fmt.Errorf("no GPU metrics could be parsed from any dcgm pod")
+	}
+
+	// Cache result for 60 seconds
+	cache.Set(bestNode, 60*time.Second)
+
+	return bestNode, nil
+}
+
+// scrapeMetricsEndpoint retrieves and parses Prometheus metrics from a
+// DCGM exporter pod endpoint.
+//
+// The function performs an HTTP GET request against the provided endpoint
+// (expected format: http://<podIP>:9400/metrics), validates the response,
+// and parses the Prometheus text exposition format into metric families.
+//
+// Parsed metric families are passed to parseMetrics to extract high-level
+// GPU information.
+//
+// Returns:
+//   - *GPUInfo derived from the parsed metrics
+//   - error if the HTTP request fails, the response is non-200,
+//     or metric parsing fails
+//
+// This function does not implement retries or fallback logic.
+// Error handling and multi-pod aggregation are managed by the caller.
+func scrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request for %s: %w", endpoint, err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s failed: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"metrics endpoint %s returned status %d",
+			endpoint,
+			resp.StatusCode,
+		)
+	}
+
+	parser := expfmt.NewTextParser(model.UTF8Validation)
+	metricFamilies, err := parser.TextToMetricFamilies(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("parse prometheus metrics: %w", err)
+	}
+
+	return parseMetrics(ctx, metricFamilies)
+}
+
+// parseMetrics extracts GPU information for a node from DCGM Prometheus metrics.
+//
+// It parses the provided Prometheus metric families exported by the NVIDIA
+// DCGM exporter and derives high-level GPU inventory information for the node.
+//
+// The function performs the following:
+//
+//   - Detects the number of GPUs by counting unique "gpu" label values
+//     from DCGM_FI_DEV_GPU_TEMP (used as a reliable per-GPU metric).
+//
+//   - Extracts the GPU model name from the "modelName" label.
+//
+//   - Calculates total VRAM per GPU using framebuffer metrics:
+//     VRAM = FB_FREE + FB_USED + FB_RESERVED
+//     (values are in MiB).
+//
+//   - Assumes MIG is disabled unless explicit MIG metrics are present
+//     (not included in the provided DCGM metric set).
+//
+// Parameters:
+//
+//	ctx       - Context for logging and cancellation.
+//	families  - Map of Prometheus metric families keyed by metric name.
+//
+// Returns:
+//
+//	*GPUInfo containing:
+//	  - NodeName
+//	  - GPUsPerNode
+//	  - Model
+//	  - VRAMPerGPU (MiB)
+//	  - MIGEnabled: false because no MIG metrics were collected in the DCGM families
+//	  - MIGProfiles: empty map; would contain MIG profile counts if MIG metrics were available
+//	  - System (inferred from model)
+//
+// Returns an error if no GPUs can be detected from the metrics.
+//
+// Notes:
+//   - This function relies on DCGM exporter metrics.
+//   - If required metrics are missing, zero values may be returned.
+//   - The implementation assumes homogeneous GPUs per node.
+//   - For heterogeneous configurations, per-GPU parsing should be implemented.
+func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*GPUInfo, error) {
+	logger := log.FromContext(ctx)
+
+	getLabel := func(m *dto.Metric, name string) string {
+		for _, l := range m.GetLabel() {
+			if l.GetName() == name {
+				return l.GetValue()
+			}
+		}
+		return ""
+	}
+
+	// Track unique GPUs
+	gpuSet := map[string]struct{}{}
+
+	var model string
+	var vram int
+	var hostName string
+
+	fbFree := map[string]float64{}
+	fbUsed := map[string]float64{}
+	fbReserved := map[string]float64{}
+
+	// --- Detect GPUs + Model + Hostname ---
+	if mf, ok := families["DCGM_FI_DEV_GPU_TEMP"]; ok {
+		for _, m := range mf.Metric {
+			gpuID := getLabel(m, "gpu")
+			gpuSet[gpuID] = struct{}{}
+
+			// Extract model from label
+			if model == "" {
+				model = getLabel(m, "modelName")
+			}
+
+			// Extract Hostname label
+			if hostName == "" {
+				hostName = getLabel(m, "Hostname")
+			}
+		}
+	}
+
+	// --- Collect framebuffer metrics ---
+	if mf, ok := families["DCGM_FI_DEV_FB_FREE"]; ok {
+		for _, m := range mf.Metric {
+			gpuID := getLabel(m, "gpu")
+			fbFree[gpuID] = m.GetGauge().GetValue()
+
+			if hostName == "" {
+				hostName = getLabel(m, "Hostname")
+			}
+		}
+	}
+
+	if mf, ok := families["DCGM_FI_DEV_FB_USED"]; ok {
+		for _, m := range mf.Metric {
+			gpuID := getLabel(m, "gpu")
+			fbUsed[gpuID] = m.GetGauge().GetValue()
+
+			if hostName == "" {
+				hostName = getLabel(m, "Hostname")
+			}
+		}
+	}
+
+	if mf, ok := families["DCGM_FI_DEV_FB_RESERVED"]; ok {
+		for _, m := range mf.Metric {
+			gpuID := getLabel(m, "gpu")
+			fbReserved[gpuID] = m.GetGauge().GetValue()
+
+			if hostName == "" {
+				hostName = getLabel(m, "Hostname")
+			}
+		}
+	}
+
+	// --- Calculate VRAM from first GPU ---
+	for gpuID := range gpuSet {
+		vram = int(fbFree[gpuID] + fbUsed[gpuID] + fbReserved[gpuID])
+		break
+	}
+
+	gpuCount := len(gpuSet)
+
+	if gpuCount == 0 {
+		return nil, fmt.Errorf("no GPUs detected from DCGM metrics")
+	}
+
+	// --- Infer system from model ---
+	system := InferHardwareSystem(model)
+
+	logger.Info("Parsed GPU info",
+		"node", hostName,
+		"gpuCount", gpuCount,
+		"model", model,
+		"vramMiB", vram,
+		"system", system,
+	)
+
+	return &GPUInfo{
+		NodeName:    hostName,
+		GPUsPerNode: gpuCount,
+		Model:       model,
+		VRAMPerGPU:  vram,
+		MIGEnabled:  false,
+		MIGProfiles: map[string]int{},
+		System:      system, // populated from InferHardwareSystem
+	}, nil
 }
 
 // DiscoverGPUs queries Kubernetes nodes to determine GPU configuration.

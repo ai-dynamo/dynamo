@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"text/template"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -298,9 +299,9 @@ echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
-	Config   commonController.Config
-
+	Recorder          record.EventRecorder
+	Config            commonController.Config
+	GPUDiscoveryCache *gpu.GPUDiscoveryCache
 	// RBACMgr handles RBAC setup for profiling jobs
 	RBACManager RBACManager
 }
@@ -1007,13 +1008,36 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		return nil
 	}
 
-	_, err := gpu.DiscoverGPUs(ctx, r.Client)
+	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
 	if err == nil {
 		// GPU discovery is available, validation passes
 		return nil
 	}
 
-	logger.Info("GPU discovery not available", "reason", err.Error())
+	// Refine the logger message
+	var reason string = "unknown"
+	switch {
+	case strings.Contains(err.Error(), "list pods"):
+		reason = "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
+	case strings.Contains(err.Error(), "install dcgm via helm"):
+		reason = "failed to install DCGM exporter via Helm (check Helm/namespace privileges)"
+	case strings.Contains(err.Error(), "gpu operator is not installed"):
+		reason = "GPU Operator not installed in expected namespace"
+	case strings.Contains(err.Error(), "helm init failed"):
+		reason = "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
+	case strings.Contains(err.Error(), "timeout waiting for DCGM exporter pods"):
+		reason = "timeout while waiting for DCGM exporter pods to become ready"
+	case strings.Contains(err.Error(), "GET"):
+		reason = "failed to reach DCGM metrics endpoint on pod (network/port issue)"
+	case strings.Contains(err.Error(), "metrics endpoint") && strings.Contains(err.Error(), "status"):
+		reason = "DCGM pod metrics endpoint returned non-200 status"
+	case strings.Contains(err.Error(), "parse prometheus metrics"):
+		reason = "failed to parse DCGM Prometheus metrics (invalid format)"
+	case strings.Contains(err.Error(), "no GPUs detected"):
+		reason = "no GPUs detected in DCGM metrics (GPU model or metrics missing)"
+	}
+
+	logger.Info("GPU discovery not available", "reason", reason, err.Error())
 
 	isNamespaceScoped := r.Config.RestrictedNamespace != ""
 	if isNamespaceScoped {
@@ -1088,11 +1112,33 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	// Run GPU discovery before creating job (cluster-wide and namespace-restricted operators if they have node read permissions)
 	var gpuInfo *gpu.GPUInfo
 	logger.Info("Attempting GPU discovery for profiling job")
-	discoveredInfo, err := gpu.DiscoverGPUs(ctx, r.Client)
+	discoveredInfo, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
 	if err != nil {
 		// This path is expected for namespace-restricted operators without node read permissions
+		// Refine the logger message
+		var reason string = "unknown"
+		switch {
+		case strings.Contains(err.Error(), "list pods"):
+			reason = "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
+		case strings.Contains(err.Error(), "install dcgm via helm"):
+			reason = "failed to install DCGM exporter via Helm (check Helm/namespace privileges)"
+		case strings.Contains(err.Error(), "gpu operator is not installed"):
+			reason = "GPU Operator not installed in expected namespace"
+		case strings.Contains(err.Error(), "helm init failed"):
+			reason = "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
+		case strings.Contains(err.Error(), "timeout waiting for DCGM exporter pods"):
+			reason = "timeout while waiting for DCGM exporter pods to become ready"
+		case strings.Contains(err.Error(), "GET"):
+			reason = "failed to reach DCGM metrics endpoint on pod (network/port issue)"
+		case strings.Contains(err.Error(), "metrics endpoint") && strings.Contains(err.Error(), "status"):
+			reason = "DCGM pod metrics endpoint returned non-200 status"
+		case strings.Contains(err.Error(), "parse prometheus metrics"):
+			reason = "failed to parse DCGM Prometheus metrics (invalid format)"
+		case strings.Contains(err.Error(), "no GPUs detected"):
+			reason = "no GPUs detected in DCGM metrics (GPU model or metrics missing)"
+		}
 		logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
-			"reason", err.Error())
+			"reason", reason, err.Error())
 	} else {
 		gpuInfo = discoveredInfo
 		logger.Info("GPU discovery completed successfully",

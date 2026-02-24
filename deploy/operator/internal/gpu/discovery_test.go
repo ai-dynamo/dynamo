@@ -19,8 +19,12 @@ package gpu
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +32,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+var scrapeMetricsFunc = scrapeMetricsEndpoint
+var ensureDCGMFunc = EnsureDCGMEnabled
 
 // newFakeClient creates a fake Kubernetes client with the given objects
 func newFakeClient(objs ...client.Object) client.Client {
@@ -372,3 +380,301 @@ func TestInferHardwareSystem_SpacesAndDashes(t *testing.T) {
 		assert.Equal(t, "h100_sxm", result, "Should normalize spaces/dashes: %s", variant)
 	}
 }
+
+func TestParseMetrics(t *testing.T) {
+	ctx := context.Background()
+
+	// Fake DCGM metrics for a node with 2 GPUs
+	metricFamilies := map[string]*dto.MetricFamily{
+		"DCGM_FI_DEV_GPU_TEMP": {
+			Metric: []*dto.Metric{
+				{
+					Label: []*dto.LabelPair{
+						{Name: strPtr("gpu"), Value: strPtr("0")},
+						{Name: strPtr("modelName"), Value: strPtr("H100-SXM5-80GB")},
+						{Name: strPtr("Hostname"), Value: strPtr("node1")},
+					},
+				},
+				{
+					Label: []*dto.LabelPair{
+						{Name: strPtr("gpu"), Value: strPtr("1")},
+						{Name: strPtr("modelName"), Value: strPtr("H100-SXM5-80GB")},
+						{Name: strPtr("Hostname"), Value: strPtr("node1")},
+					},
+				},
+			},
+		},
+		"DCGM_FI_DEV_FB_FREE": {
+			Metric: []*dto.Metric{
+				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("0")}}, Gauge: &dto.Gauge{Value: float64Ptr(10000)}},
+				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("1")}}, Gauge: &dto.Gauge{Value: float64Ptr(12000)}},
+			},
+		},
+		"DCGM_FI_DEV_FB_USED": {
+			Metric: []*dto.Metric{
+				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("0")}}, Gauge: &dto.Gauge{Value: float64Ptr(5000)}},
+				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("1")}}, Gauge: &dto.Gauge{Value: float64Ptr(6000)}},
+			},
+		},
+		"DCGM_FI_DEV_FB_RESERVED": {
+			Metric: []*dto.Metric{
+				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("0")}}, Gauge: &dto.Gauge{Value: float64Ptr(0)}},
+				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("1")}}, Gauge: &dto.Gauge{Value: float64Ptr(0)}},
+			},
+		},
+	}
+
+	info, err := parseMetrics(ctx, metricFamilies)
+	require.NoError(t, err)
+
+	assert.Equal(t, "node1", info.NodeName)
+	assert.Equal(t, 2, info.GPUsPerNode)
+	assert.Equal(t, "H100-SXM5-80GB", info.Model)
+	// VRAM for the first GPU: 10000 + 5000 + 0 = 15000
+	assert.Equal(t, 15000, info.VRAMPerGPU)
+	assert.False(t, info.MIGEnabled)
+	assert.Empty(t, info.MIGProfiles)
+}
+
+func TestScrapeMetricsEndpoint(t *testing.T) {
+	// Create a test HTTP server to simulate DCGM exporter
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `
+# HELP DCGM_FI_DEV_GPU_TEMP Dummy temperature metric
+# TYPE DCGM_FI_DEV_GPU_TEMP gauge
+DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="H100-SXM5-80GB",Hostname="node1"} 50
+`)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	info, err := scrapeMetricsEndpoint(ctx, ts.URL)
+	require.NoError(t, err)
+
+	assert.Equal(t, "node1", info.NodeName)
+	assert.Equal(t, 1, info.GPUsPerNode)
+	assert.Equal(t, "H100-SXM5-80GB", info.Model)
+}
+
+func TestDiscoverGPUsFromDCGM_WithService(t *testing.T) {
+	ctx := context.Background()
+
+	// Fake Kubernetes Service for DCGM
+	svc := &corev1.Service{}
+	svc.Name = "nvidia-dcgm-exporter"
+	svc.Namespace = "gpu-namespace"
+	svc.Spec.ClusterIP = "1.2.3.4"
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+
+	cache := NewGPUDiscoveryCache()
+
+	// Patch scrapeMetricsEndpoint to return dummy GPUInfo
+	origScrape := scrapeMetricsFunc
+	defer func() { scrapeMetricsFunc = origScrape }()
+	scrapeMetricsFunc = func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+		return &GPUInfo{
+			NodeName:    "node1",
+			GPUsPerNode: 2,
+			Model:       "H100-SXM5-80GB",
+			VRAMPerGPU:  15000,
+		}, nil
+	}
+
+	info, err := DiscoverGPUsFromDCGM(ctx, cl, cache)
+	require.NoError(t, err)
+	assert.Equal(t, "node1", info.NodeName)
+	assert.Equal(t, 2, info.GPUsPerNode)
+
+	// Cache should return same info on second call
+	info2, err := DiscoverGPUsFromDCGM(ctx, cl, cache)
+	require.NoError(t, err)
+	assert.Equal(t, info, info2)
+}
+
+func TestDiscoverGPUsFromDCGM_NoService(t *testing.T) {
+	ctx := context.Background()
+
+	// Empty client: no services exist
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cache := NewGPUDiscoveryCache()
+
+	// Patch EnsureDCGMEnabled to simulate an error
+	origEnsure := ensureDCGMFunc
+	defer func() { ensureDCGMFunc = origEnsure }()
+	ensureDCGMFunc = func(ctx context.Context) error {
+		return fmt.Errorf("failed to install DCGM")
+	}
+
+	info, err := DiscoverGPUsFromDCGM(ctx, cl, cache)
+	require.Error(t, err)
+	assert.Nil(t, info)
+	assert.Contains(t, err.Error(), "install dcgm via helm")
+}
+
+func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
+	ctx := context.Background()
+
+	// Fake pod representing DCGM exporter
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcgm-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				LabelApp: LabelValueNvidiaDCGMExporter,
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.1",
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pod).
+		Build()
+
+	cache := &GPUDiscoveryCache{}
+
+	// Track number of times scrape is called
+	callCount := 0
+
+	// Override scrape function
+	originalScrape := scrapeMetricsFunc
+	defer func() { scrapeMetricsFunc = originalScrape }()
+
+	scrapeMetricsFunc = func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+		callCount++
+		return &GPUInfo{
+			NodeName:    "node-a",
+			GPUsPerNode: 4,
+			Model:       "A100",
+			VRAMPerGPU:  40960,
+			MIGEnabled:  false,
+			MIGProfiles: map[string]int{},
+			System:      "DGX",
+		}, nil
+	}
+
+	// First call → should scrape
+	info1, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	require.NoError(t, err)
+	require.NotNil(t, info1)
+	require.Equal(t, 1, callCount)
+
+	// Second call → should hit cache
+	info2, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	require.NoError(t, err)
+	require.NotNil(t, info2)
+
+	// Scrape should NOT be called again
+	require.Equal(t, 1, callCount)
+
+	// Results should be identical
+	require.Equal(t, info1, info2)
+}
+
+// --- Helper functions ---
+func strPtr(s string) *string       { return &s }
+func float64Ptr(f float64) *float64 { return &f }
+
+// fakeScrapePod allows us to override scrapePod during tests
+/*var fakeScrapePod = func(ctx context.Context, pod corev1.Pod) (*GPUInfo, error) {
+	// Return deterministic GPU info based on pod name
+	switch pod.Name {
+	case "gpu-pod-1":
+		return &GPUInfo{
+			NodeName:    pod.Spec.NodeName,
+			GPUsPerNode: 4,
+			Model:       "A100-SXM4-40GB",
+			VRAMPerGPU:  40960,
+		}, nil
+	case "gpu-pod-2":
+		return &GPUInfo{
+			NodeName:    pod.Spec.NodeName,
+			GPUsPerNode: 8,
+			Model:       "H100-SXM5-80GB",
+			VRAMPerGPU:  81920,
+		}, nil
+	default:
+		return nil, fmt.Errorf("no GPU info")
+	}
+}
+
+// patchScrapeMetrics temporarily overrides the package-level scrapeMetricsFunc function for testing
+func patchScrapeMetrics(f func(ctx context.Context, pod corev1.Pod) (*GPUInfo, error)) func() {
+	old := scrapeMetricsFunc
+	scrapeMetricsFunc = f
+	return func() { scrapeMetricsFunc = old }
+}
+func TestDiscoverGPUsFromDCGM_NoValidPods(t *testing.T) {
+	ctx := context.Background()
+
+	defer patchScrapeMetrics(func(ctx context.Context, pod corev1.Pod) (*GPUInfo, error) {
+		return nil, fmt.Errorf("scrape failed")
+	})()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-pod-bad",
+			Labels: map[string]string{
+				"app": "dcgm-exporter",
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-bad",
+		},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.3",
+		},
+	}
+
+	k8sClient := newFakeClient(pod)
+	cache := NewGPUDiscoveryCache()
+
+	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	assert.Error(t, err)
+	assert.Nil(t, info)
+	assert.Contains(t, err.Error(), "no valid GPU info found")
+}
+
+func TestDiscoverGPUsFromDCGM_SinglePod(t *testing.T) {
+	ctx := context.Background()
+
+	defer patchScrapeMetrics(fakeScrapePod)()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-pod-1",
+			Labels: map[string]string{
+				"app": "dcgm-exporter",
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "gpu-node-1",
+		},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.1",
+		},
+	}
+
+	k8sClient := newFakeClient(pod)
+	cache := NewGPUDiscoveryCache()
+
+	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+
+	assert.Equal(t, 4, info.GPUsPerNode)
+	assert.Equal(t, "A100-SXM4-40GB", info.Model)
+	assert.Equal(t, 40960, info.VRAMPerGPU)
+}*/
