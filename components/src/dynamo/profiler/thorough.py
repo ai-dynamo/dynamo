@@ -277,8 +277,9 @@ def _pick_thorough_best_config(
             lm_kwargs["target_request_latency"] = request_latency
         else:
             lm_kwargs["target_tpot"] = target_tpot
-        if dgdr.workload:
+        if dgdr.workload and dgdr.workload.requestRate is not None:
             lm_kwargs["target_request_rate"] = dgdr.workload.requestRate
+        if dgdr.workload and dgdr.workload.concurrency is not None:
             lm_kwargs["target_concurrency"] = dgdr.workload.concurrency
         if total_gpus:
             lm_kwargs["max_total_gpus"] = total_gpus
