@@ -185,10 +185,9 @@ async def worker(runtime: DistributedRuntime):
     )
     await handler.initialize()
 
-    # Create endpoints (get component from first endpoint to avoid duplicate metrics registries)
+    # Create endpoints
     generate_endpoint = runtime.endpoint(f"{config.namespace}.router.generate")
-    component = generate_endpoint.component()
-    best_worker_endpoint = component.endpoint("best_worker_id")
+    best_worker_endpoint = runtime.endpoint(f"{config.namespace}.router.best_worker_id")
 
     logger.debug("Starting to serve endpoints...")
 
