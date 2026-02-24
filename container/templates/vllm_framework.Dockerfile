@@ -10,7 +10,7 @@
 # PURPOSE: Framework development and vLLM compilation
 #
 # This stage builds and compiles framework dependencies including:
-# - vLLM inference engine with CUDA support
+# - vLLM inference engine with CUDA/XPU support
 # - DeepGEMM and FlashInfer optimizations
 # - All necessary build tools and compilation dependencies
 # - Framework-level Python packages and extensions
@@ -27,6 +27,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 ARG PYTHON_VERSION
+ARG DEVICE
 
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -65,15 +66,27 @@ ARG ARCH
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
 ARG VLLM_GIT_URL
-ARG DEEPGEMM_REF
-ARG FLASHINF_REF
 ARG LMCACHE_REF
 ARG VLLM_OMNI_REF
+
+{% if device == "cuda" %}
+ARG DEEPGEMM_REF
+ARG FLASHINF_REF
 ARG CUDA_VERSION
+{% endif %}
 
 ARG MAX_JOBS
 ENV MAX_JOBS=$MAX_JOBS
+
+{% if device == "cuda" %}
 ENV CUDA_HOME=/usr/local/cuda
+{% endif %}
+
+{% if device == "xpu" %}
+RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/zxue2/llm-scaler/3d9015157c6341ae5810eadfe3987cb9d1080a77/vllm/patches/ai-dynamo-xpu/patches/vllm-xpu-v0.14.0.patch -O /tmp/vllm-xpu.patch
+ENV VLLM_TARGET_DEVICE=xpu
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+{% endif %}
 
 # Install VLLM and related dependencies
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
@@ -82,16 +95,19 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
     /tmp/install_vllm.sh \
+        --device $DEVICE \
         --vllm-ref $VLLM_REF \
         --max-jobs $MAX_JOBS \
         --arch $ARCH \
         --installation-dir /opt \
-        ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} \
-        ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} \
         ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} \
         ${VLLM_OMNI_REF:+--vllm-omni-ref "$VLLM_OMNI_REF"} \
-        --cuda-version $CUDA_VERSION
+        ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} \
+        ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} \
+        ${CUDA_VERSION:+--cuda-version "$CUDA_VERSION"}
 
+{% if device == "cuda" %}
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $LD_LIBRARY_PATH
+{% endif %}

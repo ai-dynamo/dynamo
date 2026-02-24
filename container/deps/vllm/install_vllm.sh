@@ -14,6 +14,7 @@ set -euo pipefail
 
 VLLM_VER="0.15.1"
 VLLM_REF="v${VLLM_VER}"
+DEVICE="cuda"
 
 # Basic Configurations
 ARCH=$(uname -m)
@@ -30,6 +31,10 @@ VLLM_OMNI_REF="0.14.0"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --device)
+            DEVICE="$2"
+            shift 2
+            ;;
         --vllm-ref)
             VLLM_REF="$2"
             shift 2
@@ -71,8 +76,9 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--vllm-omni-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
+            echo "Usage: $0 [--device DEVICE] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--vllm-omni-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
             echo "Options:"
+            echo "  --device DEVICE     Device Selection (default: cuda)"
             echo "  --vllm-ref REF      vLLM release version (default: ${VLLM_REF})"
             echo "  --max-jobs NUM      Maximum parallel jobs (default: ${MAX_JOBS})"
             echo "  --arch ARCH         Architecture amd64|arm64 (default: auto-detect)"
@@ -107,34 +113,49 @@ elif [ "$ARCH" = "arm64" ]; then
 fi
 
 export MAX_JOBS=$MAX_JOBS
-export CUDA_HOME=/usr/local/cuda
+if [ "$DEVICE" = "cuda" ]; then
+    export CUDA_HOME=/usr/local/cuda
 
-# Derive torch backend from CUDA version (e.g., "12.9" -> "cu129")
-TORCH_BACKEND="cu$(echo $CUDA_VERSION | tr -d '.')"
-CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
+    # Derive torch backend from CUDA version (e.g., "12.9" -> "cu129")
+    TORCH_BACKEND="cu$(echo $CUDA_VERSION | tr -d '.')"
+    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
 
-echo "=== Installing prerequisites ==="
-uv pip install pip cuda-python
-
-echo "\n=== Configuration Summary ==="
-echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | CUDA_VERSION=$CUDA_VERSION | TORCH_BACKEND=$TORCH_BACKEND"
-echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST | INSTALLATION_DIR=$INSTALLATION_DIR"
-
-if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
-    echo "  FLASHINF_REF=$FLASHINF_REF | LMCACHE_REF=$LMCACHE_REF | DEEPGEMM_REF=$DEEPGEMM_REF"
-    echo "\n=== Installing LMCache ==="
-    if [ "$ARCH" = "amd64" ]; then
-        # LMCache installation currently fails on arm64 due to CUDA dependency issues
-        # Install LMCache BEFORE vLLM so vLLM's dependencies take precedence
-        uv pip install lmcache==${LMCACHE_REF} --torch-backend=${TORCH_BACKEND}
-        echo "✓ LMCache ${LMCACHE_REF} installed"
-    else
-        echo "⚠ Skipping LMCache on ARM64 (compatibility issues)"
-    fi
-else
-    echo "  FLASHINF_REF=$FLASHINF_REF | LMCache will not be installed as it doesn't support CUDA 13 yet | DEEPGEMM_REF=$DEEPGEMM_REF"
+    echo "=== Installing prerequisites ==="
+    uv pip install pip cuda-python
 fi
 
+if [ "$DEVICE" = "cuda" ]; then
+    echo "\n=== Configuration Summary ==="
+    echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | CUDA_VERSION=$CUDA_VERSION | TORCH_BACKEND=$TORCH_BACKEND"
+    echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST | INSTALLATION_DIR=$INSTALLATION_DIR"
+elif [ "$DEVICE" = "xpu" ]; then
+    echo "\n=== Configuration Summary ==="
+    echo "  VLLM_REF=$VLLM_REF | ARCH=$ARCH | INSTALLATION_DIR=$INSTALLATION_DIR"
+fi
+
+if [ "$DEVICE" = "cuda" ]; then
+    if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
+        echo "  FLASHINF_REF=$FLASHINF_REF | LMCACHE_REF=$LMCACHE_REF | DEEPGEMM_REF=$DEEPGEMM_REF"
+        echo "\n=== Installing LMCache ==="
+        if [ "$ARCH" = "amd64" ]; then
+            # LMCache installation currently fails on arm64 due to CUDA dependency issues
+            # Install LMCache BEFORE vLLM so vLLM's dependencies take precedence
+            uv pip install lmcache==${LMCACHE_REF} --torch-backend=${TORCH_BACKEND}
+            echo "✓ LMCache ${LMCACHE_REF} installed"
+        else
+            echo "⚠ Skipping LMCache on ARM64 (compatibility issues)"
+        fi
+    else
+        echo "  FLASHINF_REF=$FLASHINF_REF | LMCache will not be installed as it doesn't support CUDA 13 yet | DEEPGEMM_REF=$DEEPGEMM_REF"
+    fi
+elif [ "$DEVICE" = "xpu" ]; then
+    echo " LMCACHE_REF=$LMCACHE_REF "
+    echo "\n=== Installing LMCache ==="
+    if [ "$ARCH" = "amd64" ]; then
+        uv pip install lmcache==${LMCACHE_REF}
+        echo "✓ LMCache ${LMCACHE_REF} installed"
+    fi
+fi
 
 echo "\n=== Cloning vLLM repository ==="
 # Clone needed for DeepGEMM and EP kernels install scripts
@@ -144,26 +165,34 @@ cd vllm
 git checkout $VLLM_REF
 echo "✓ vLLM repository cloned"
 
+if [ "$DEVICE" = "xpu" ]; then
+    echo "\n=== Installing vLLM ==="
+    git apply --ignore-whitespace /tmp/vllm-xpu.patch
+    uv pip install -r requirements/xpu.txt --index-strategy unsafe-best-match
+    uv pip install --verbose --no-build-isolation .
+fi
 
-echo "\n=== Installing vLLM & FlashInfer ==="
-if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
-    echo "Installing vLLM $VLLM_REF from PyPI..."
-    uv pip install vllm[flashinfer,runai]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
-    uv pip install flashinfer-cubin==$FLASHINF_REF
-    uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
-elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
-    echo "⚠ Skipping LMCache on CUDA 13 env since LMCache doesn't support CUDA 13 "
-    echo "Installing vLLM $VLLM_REF from GitHub since CUDA 13 x86_64 wheel is only present on GitHub..."
-    uv pip install \
-        --index-strategy=unsafe-best-match \
-        --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
-        https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_35_${ALT_ARCH}.whl[flashinfer,runai] \
-        --torch-backend=${TORCH_BACKEND}
-    uv pip install flashinfer-cubin==$FLASHINF_REF
-    uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
-else
-    echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
-    exit 1
+if [ "$DEVICE" = "cuda" ]; then
+    echo "\n=== Installing vLLM & FlashInfer ==="
+    if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
+        echo "Installing vLLM $VLLM_REF from PyPI..."
+        uv pip install vllm[flashinfer,runai]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
+        uv pip install flashinfer-cubin==$FLASHINF_REF
+        uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+    elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
+        echo "⚠ Skipping LMCache on CUDA 13 env since LMCache doesn't support CUDA 13 "
+        echo "Installing vLLM $VLLM_REF from GitHub since CUDA 13 x86_64 wheel is only present on GitHub..."
+        uv pip install \
+            --index-strategy=unsafe-best-match \
+            --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
+            https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_35_${ALT_ARCH}.whl[flashinfer,runai] \
+            --torch-backend=${TORCH_BACKEND}
+        uv pip install flashinfer-cubin==$FLASHINF_REF
+        uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+    else
+        echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
+        exit 1
+    fi
 fi
 echo "✓ vLLM installation completed"
 
@@ -180,18 +209,19 @@ else
     echo "⚠ Skipping vLLM-Omni (no ref provided or ARM64 not supported)"
 fi
 
-echo "\n=== Installing DeepGEMM ==="
-cd $INSTALLATION_DIR/vllm/tools
-if [ -n "$DEEPGEMM_REF" ]; then
-    bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}" --ref "$DEEPGEMM_REF"
-else
-    bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}"
+if [ "$DEVICE" = "cuda" ]; then
+    echo "\n=== Installing DeepGEMM ==="
+    cd $INSTALLATION_DIR/vllm/tools
+    if [ -n "$DEEPGEMM_REF" ]; then
+        bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}" --ref "$DEEPGEMM_REF"
+    else
+        bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}"
+    fi
+    echo "✓ DeepGEMM installation completed"
+
+    echo "\n=== Installing EP Kernels (PPLX and DeepEP) ==="
+    cd ep_kernels/
+    # TODO we will be able to specify which pplx and deepep commit we want in future
+    TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
 fi
-echo "✓ DeepGEMM installation completed"
-
-echo "\n=== Installing EP Kernels (PPLX and DeepEP) ==="
-cd ep_kernels/
-# TODO we will be able to specify which pplx and deepep commit we want in future
-TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
-
 echo "\n✅ All installations completed successfully!"

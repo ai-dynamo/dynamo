@@ -24,10 +24,19 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+ARG DEVICE
 WORKDIR /workspace
 ENV DYNAMO_HOME=/opt/dynamo
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+{% if device == "xpu" %}
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics
+{% endif %}
+
+{% if device == "cuda" %}
 # Set CUDA_DEVICE_ORDER to ensure CUDA logical device IDs match NVML physical device IDs
 # This fixes NVML InvalidArgument errors when CUDA_VISIBLE_DEVICES is set
 ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
@@ -45,13 +54,19 @@ RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
 # DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
 # is not properly set for complilation. Set CPATH to help nvcc find the headers.
 ENV CPATH=/usr/local/cuda/include
+{% endif %}
 
 ### COPY NATS & ETCD ###
 # Copy nats and etcd from dev image
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+
+{% if device == "xpu" %}
+ENV PATH=/usr/local/bin/etcd/:$PATH
+{% else %}
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+{% endif %}
 
 # Copy uv to system /bin
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
@@ -76,8 +91,10 @@ ENV PYTHON_VERSION=${PYTHON_VERSION}
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
-    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} &&\
-    CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1) && \
+    if [ "$DEVICE" = "cuda" ]; then \
+        CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} &&\
+        CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1); \
+    fi && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
@@ -98,10 +115,38 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         # prometheus dependencies
         ca-certificates \
         # opencv-python-headless (vLLM dependency) requires libxcb for some functions
-        libxcb1 \
+        libxcb1 && \
+    if [ "$DEVICE" = "cuda" ]; then \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR} && \
+        cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR}; \
+    fi && \
     rm -rf /var/lib/apt/lists/*
+
+{% if device == "xpu" %}
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    #ffmpeg \
+    libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    lsb-release \
+    numactl \
+    wget \
+    vim \
+    linux-libc-dev && \
+    # Install Intel GPU runtime packages
+    apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing \
+    intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/intel-oneccl-2021.15.7.8_offline.sh && \
+    bash intel-oneccl-2021.15.7.8_offline.sh -a --silent --eula accept && \
+    echo "source /opt/intel/oneapi/setvars.sh --force" >> /etc/bash.bashrc && \
+    rm -f /opt/intel/oneapi/ccl/latest && \
+    ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/latest
+{% endif %}
 
 {% if context.vllm.enable_media_ffmpeg == "true" %}
 # Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
@@ -118,9 +163,15 @@ ENV HOME=/home/dynamo
 # This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
 SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
+{% if device == "xpu" %}
+ENV NIXL_PREFIX=/opt/intel/intel_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+{% else %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+{% endif %}
 
 # Site-packages path derived from PYTHON_VERSION ARG
 ARG SITE_PACKAGES=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages
@@ -132,15 +183,19 @@ ARG SITE_PACKAGES=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages
 #
 # Layer sizes (uncompressed): nvidia=4.5GB, flashinfer_jit_cache=4.1GB, torch=2.1GB,
 #                             vllm=1.2GB, triton=592MB, flashinfer_cubin=437MB
+{% if device == "cuda" %}
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/nvidia ${SITE_PACKAGES}/nvidia
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_jit_cache ${SITE_PACKAGES}/flashinfer_jit_cache
+{% endif %}
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/torch ${SITE_PACKAGES}/torch
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm ${SITE_PACKAGES}/vllm
 {% if platform == "amd64" -%}
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm_omni ${SITE_PACKAGES}/vllm_omni
 {% endif -%}
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/triton ${SITE_PACKAGES}/triton
+{% if device == "cuda" %}
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_cubin ${SITE_PACKAGES}/flashinfer_cubin
+{% endif %}
 # Remaining packages and venv structure (bin/, include/, share/, etc.)
 COPY --chmod=775 --chown=dynamo:0 --from=framework \
     --exclude=lib/python*/site-packages/nvidia \
@@ -160,26 +215,37 @@ COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
 # Copy UCX and NIXL to system directories (read-only, no group-write needed)
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+{% if device == "xpu" %}
+COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl/lib/${ARCH_ALT}-linux-gnu/. ${NIXL_LIB_DIR}/
+{% else %}
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
+{% endif %}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
+{% if device == "cuda" %}
 # Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
 COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws* /usr/local/lib/
 COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n* /usr/local/lib/
 COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libcrypto.so.1.1* /usr/local/lib/
 COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/lib/
+{% endif %}
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 
 ENV LD_LIBRARY_PATH=\
-/opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH
+
+{% if device == "cuda" %}
+ENV LD_LIBRARY_PATH=\
+/opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
+$LD_LIBRARY_PATH
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
 
 # Copy attribution files
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
@@ -189,7 +255,9 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 # Install dynamo, NIXL, and dynamo-specific dependencies
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 ARG ENABLE_KVBM
+{% if device == "cuda" %}
 ARG ENABLE_GPU_MEMORY_SERVICE
+{% endif %}
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
@@ -197,13 +265,15 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -z "$GMS_WHEEL" ]; then \
-            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$GMS_WHEEL"; \
+    if [ "${DEVICE}" = "cuda" ]; then \
+        if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+            GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+            if [ -z "$GMS_WHEEL" ]; then \
+                echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+                exit 1; \
+            fi; \
+            uv pip install "$GMS_WHEEL"; \
+        fi \
     fi && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
@@ -219,7 +289,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
 
-
+{% if device == "cuda" %}
 # Install ModelExpress for P2P weight transfer (optional)
 ARG ENABLE_MODELEXPRESS_P2P
 ARG MODELEXPRESS_REF
@@ -227,6 +297,7 @@ RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
         echo "Installing ModelExpress from ref: ${MODELEXPRESS_REF}" && \
         uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
     fi
+{% endif %}
 
 # Install common and test dependencies. Cache uv downloads; uv handles its own locking for this cache.
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -258,6 +329,7 @@ RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* ${VIRTUAL_ENV} &
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
+{% if device == "cuda" %}
 # Fix library symlinks that Docker COPY dereferenced (COPY always follows symlinks)
 # This recreates proper symlinks to save space and suppress ldconfig warnings
 RUN cd /usr/local/lib && \
@@ -288,15 +360,25 @@ RUN cd /usr/local/lib && \
         fi; \
     done && \
     ldconfig
+{% endif %}
 
 USER dynamo
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
+{% if device == "xpu" %}
+RUN uv pip uninstall triton triton-xpu && \
+    uv pip install triton-xpu==3.6.0 --extra-index-url=https://download.pytorch.org/whl/test/xpu && \
+    uv pip uninstall oneccl && \
+    uv pip uninstall oneccl-devel
+
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
+{% else %}
 # In vLLM 0.12 the default sampler changed on the forward pass.
 # We need to enable this to enable the cuda kernels.
 ENV VLLM_USE_FLASHINFER_SAMPLER=1
-
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+{% endif %}
