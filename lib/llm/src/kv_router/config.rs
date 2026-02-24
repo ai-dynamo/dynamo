@@ -110,6 +110,12 @@ impl Default for KvRouterConfig {
 }
 
 fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationError> {
+    if config.durable_kv_events {
+        tracing::warn!(
+            "--durable-kv-events is deprecated and will be removed in a future release. \
+             The event-plane subscriber (local_indexer mode) is now the recommended path."
+        );
+    }
     if config.durable_kv_events && !config.use_kv_events {
         return Err(ValidationError::new(
             "durable_kv_events requires use_kv_events=true",
