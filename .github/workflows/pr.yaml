@@ -199,7 +199,7 @@ jobs:
       cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
       single_gpu_test_timeout_minutes: 35
-      multi_gpu_test_markers: 'pre_merge and vllm and (gpu_2 or gpu_4)'
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
     secrets: inherit
 
   # ============================================================================
@@ -222,7 +222,7 @@ jobs:
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
-      multi_gpu_test_markers: 'pre_merge and sglang and (gpu_2 or gpu_4)'
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
     secrets: inherit
 
   # ============================================================================
@@ -245,7 +245,7 @@ jobs:
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
       cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
       single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
-      multi_gpu_test_markers: 'pre_merge and trtllm and (gpu_2 or gpu_4)'
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
     secrets: inherit
 
 
