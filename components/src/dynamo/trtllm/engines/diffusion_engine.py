@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 if TYPE_CHECKING:
+    from tensorrt_llm._torch.visual_gen import DiffusionArgs
     from tensorrt_llm._torch.visual_gen.output import MediaOutput
     from tensorrt_llm._torch.visual_gen.pipeline import BasePipeline
 

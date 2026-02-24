@@ -233,6 +233,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
             if output is None:
                 raise RuntimeError("Pipeline returned no output (MediaOutput is None)")
 
+            # Determine output format
+            response_format = req.response_format or "url"
+            fps = nvext.fps or self.config.default_fps
+
             # Encode media based on what the pipeline returned
             if output.video is not None:
                 # Video output: torch.Tensor (num_frames, H, W, 3) uint8 → MP4
