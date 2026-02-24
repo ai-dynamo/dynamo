@@ -95,17 +95,10 @@ data:
     {{- if and (hasKey .Values.dynamo "ingressHostSuffix") .Values.dynamo.ingressHostSuffix }}
       {{- $ingressHostSuffix = .Values.dynamo.ingressHostSuffix }}
     {{- end }}
-    {{- $vsSupportsHTTPS := false }}
-    {{- if and (hasKey .Values.dynamo "virtualServiceSupportsHTTPS") .Values.dynamo.virtualServiceSupportsHTTPS }}
-      {{- $vsSupportsHTTPS = true }}
-    {{- end }}
-    {{- if or $vsGateway $ingressClassName $ingressTLSSecret $ingressHostSuffix $vsSupportsHTTPS }}
+    {{- if or $vsGateway $ingressClassName $ingressTLSSecret $ingressHostSuffix }}
     ingress:
       {{- if $vsGateway }}
       virtualServiceGateway: {{ $vsGateway | quote }}
-      {{- end }}
-      {{- if $vsSupportsHTTPS }}
-      virtualServiceSupportsHTTPS: true
       {{- end }}
       {{- if $ingressClassName }}
       controllerClassName: {{ $ingressClassName | quote }}

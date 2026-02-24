@@ -2072,8 +2072,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `metrics` _[MetricsServer](#metricsserver)_ | Metrics server configuration | \{ port:8080 \} |  |
-| `healthProbe` _[Server](#server)_ | Health probe server configuration | \{ port:8081 \} |  |
+| `metrics` _[MetricsServer](#metricsserver)_ | Metrics server configuration | \{ bindAddress:127.0.0.1 port:8080 \} |  |
+| `healthProbe` _[Server](#server)_ | Health probe server configuration | \{ bindAddress:127.0.0.1 port:8081 \} |  |
 | `webhook` _[WebhookServer](#webhookserver)_ | Webhook server configuration | \{ certDir:/tmp/k8s-webhook-server/serving-certs host:0.0.0.0 port:9443 \} |  |
 
 
