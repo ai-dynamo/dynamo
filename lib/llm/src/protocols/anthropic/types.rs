@@ -1751,10 +1751,7 @@ mod tests {
         // Must be Segments, not Text.  Text("A\nB") is the old (broken) behaviour:
         // it loses which reasoning block preceded which tool call.
         assert!(
-            !matches!(
-                msg.reasoning_content,
-                Some(ReasoningContent::Text(_))
-            ),
+            !matches!(msg.reasoning_content, Some(ReasoningContent::Text(_))),
             "reasoning_content must NOT be flat Text when tool calls are interleaved; \
              Text loses positional info and forces a KV cache miss on every multi-tool turn"
         );

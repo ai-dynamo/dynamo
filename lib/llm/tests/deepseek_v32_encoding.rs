@@ -379,8 +379,14 @@ fn test_reasoning_segments_roundtrip_through_parse_and_render() {
     let formatter =
         dynamo_llm::preprocessor::prompt::deepseek_v32::DeepSeekV32Formatter::new_thinking();
     let rendered = formatter.render(&request).unwrap();
-    assert!(rendered.contains("A"), "segment A must appear in rendered output");
-    assert!(rendered.contains("B"), "segment B must appear in rendered output");
+    assert!(
+        rendered.contains("A"),
+        "segment A must appear in rendered output"
+    );
+    assert!(
+        rendered.contains("B"),
+        "segment B must appear in rendered output"
+    );
     assert!(rendered.contains("<think>"));
     assert!(rendered.contains("</think>"));
 }
