@@ -84,34 +84,6 @@ impl fmt::Display for BackendError {
     }
 }
 
-/// Walk an error chain and check if any `DynamoError` in it matches the given set.
-///
-/// Returns `true` if any error in the chain (via `source()`) can be downcast to
-/// `DynamoError` and its `ErrorType` is in `match_set`, unless an error in
-/// `exclude_set` is also found (in which case returns `false` immediately).
-pub fn chain_contains(
-    err: &(dyn std::error::Error + 'static),
-    match_set: &[ErrorType],
-    exclude_set: &[ErrorType],
-) -> bool {
-    let mut found = false;
-    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
-
-    while let Some(e) = current {
-        if let Some(dynamo_err) = e.downcast_ref::<DynamoError>() {
-            if exclude_set.contains(&dynamo_err.error_type()) {
-                return false;
-            }
-            if match_set.contains(&dynamo_err.error_type()) {
-                found = true;
-            }
-        }
-        current = e.source();
-    }
-
-    found
-}
-
 // ============================================================================
 // DynamoError - The Standardized Error Type
 // ============================================================================
@@ -264,6 +236,40 @@ impl DynamoErrorBuilder {
             caused_by: self.caused_by,
         }
     }
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Check whether an error chain contains a specific set of error types
+/// while not containing any of the excluded error types.
+///
+/// Walks the chain via `source()`, inspecting each error that can be downcast
+/// to `DynamoError`. Returns `false` immediately if any error's type is in
+/// `exclude_set`. Otherwise, returns `true` if at least one error's type is
+/// in `match_set`. Errors that are not `DynamoError` are skipped.
+pub fn match_error_chain(
+    err: &(dyn std::error::Error + 'static),
+    match_set: &[ErrorType],
+    exclude_set: &[ErrorType],
+) -> bool {
+    let mut found = false;
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+
+    while let Some(e) = current {
+        if let Some(dynamo_err) = e.downcast_ref::<DynamoError>() {
+            if exclude_set.contains(&dynamo_err.error_type()) {
+                return false;
+            }
+            if match_set.contains(&dynamo_err.error_type()) {
+                found = true;
+            }
+        }
+        current = e.source();
+    }
+
+    found
 }
 
 // ============================================================================

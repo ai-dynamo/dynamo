@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{AsyncEngineContextProvider, ResponseStream};
-use crate::error::{BackendError, ErrorType, chain_contains};
+use crate::error::{BackendError, ErrorType, match_error_chain};
 
 /// Error types that indicate a worker should be reported as down.
 const INHIBITED_ERRORS: &[ErrorType] = &[
@@ -13,7 +13,7 @@ const INHIBITED_ERRORS: &[ErrorType] = &[
 ];
 
 fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
-    chain_contains(err, INHIBITED_ERRORS, &[])
+    match_error_chain(err, INHIBITED_ERRORS, &[])
 }
 use crate::{
     component::{Client, Endpoint},

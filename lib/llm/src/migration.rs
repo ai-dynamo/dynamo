@@ -34,10 +34,10 @@ const NON_MIGRATABLE_ERRORS: &[ErrorType] = &[
 
 /// Check if an error chain indicates the request should be migrated.
 ///
-/// Uses `chain_contains` to check for migratable errors without non-migratable
+/// Uses `match_error_chain` to check for migratable errors without non-migratable
 /// errors present. Falls back to legacy message-based detection for Unknown errors.
 fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
-    error::chain_contains(err, MIGRATABLE_ERRORS, NON_MIGRATABLE_ERRORS)
+    error::match_error_chain(err, MIGRATABLE_ERRORS, NON_MIGRATABLE_ERRORS)
 }
 
 pub struct Migration {
