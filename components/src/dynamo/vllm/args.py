@@ -523,10 +523,10 @@ def _is_routable(ip_str: str) -> bool:
 
 
 def _try_hostname_resolution() -> str | None:
-    """Resolve hostname to IP and validate it's bindable.
+    """Resolve hostname to a routable, bindable IP.
 
     Uses getaddrinfo with AF_UNSPEC to support both IPv4 and IPv6.
-    Returns the first bindable address, or None on failure.
+    Returns the first routable and bindable address, or None on failure.
     """
     try:
         host_name = socket.gethostname()
@@ -535,6 +535,8 @@ def _try_hostname_resolution() -> str | None:
         )
         for family, socktype, _, _, sockaddr in infos:
             host_ip = sockaddr[0]
+            if not _is_routable(host_ip):
+                continue
             try:
                 with socket.socket(family, socktype) as s:
                     s.bind((host_ip, 0))
