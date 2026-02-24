@@ -5,6 +5,7 @@
 
 import base64
 import io
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -134,7 +135,7 @@ class TestImageDiffusionWorkerHandler:
 
         # Mock generator response
         handler.generator.generate = Mock(
-            return_value={"frames": [test_image.convert("RGB")]}
+            return_value=SimpleNamespace(frames=[test_image.convert("RGB")])
         )
 
         request = {
@@ -173,7 +174,7 @@ class TestImageDiffusionWorkerHandler:
 
         # Mock generator response
         handler.generator.generate = Mock(
-            return_value={"frames": [test_image.convert("RGB")]}
+            return_value=SimpleNamespace(frames=[test_image.convert("RGB")])
         )
 
         request = {
@@ -213,7 +214,9 @@ class TestImageDiffusionWorkerHandler:
     ):
         """Test that num_inference_steps defaults to 50."""
         test_image = Image.new("RGB", (256, 256), color="green")
-        handler.generator.generate = Mock(return_value={"frames": [test_image]})
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
 
         request = {
             "prompt": "A green square",
@@ -281,7 +284,9 @@ class TestImageDiffusionWorkerHandler:
         # Create a numpy array representing an image
         np_image = np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8)
 
-        handler.generator.generate = Mock(return_value={"frames": [np_image]})
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[np_image])
+        )
 
         images = await handler._generate_images(
             prompt="test",
@@ -300,7 +305,9 @@ class TestImageDiffusionWorkerHandler:
         """Test _generate_images handles PIL Images."""
         pil_image = Image.new("RGB", (256, 256), color="red")
 
-        handler.generator.generate = Mock(return_value={"frames": [pil_image]})
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[pil_image])
+        )
 
         images = await handler._generate_images(
             prompt="test",
@@ -319,7 +326,9 @@ class TestImageDiffusionWorkerHandler:
         """Test _generate_images handles bytes directly."""
         img_bytes = b"raw image bytes"
 
-        handler.generator.generate = Mock(return_value={"frames": [img_bytes]})
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[img_bytes])
+        )
 
         images = await handler._generate_images(
             prompt="test",
