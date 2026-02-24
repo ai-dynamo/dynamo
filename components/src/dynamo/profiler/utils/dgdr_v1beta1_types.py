@@ -239,7 +239,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Must reference the published Dynamo frontend image containing "dynamo-frontend" in the image name. Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0". The profiler auto-derives the backend runtime image from this by substituting the backend-specific name (e.g. "vllm-runtime", "sglang-runtime", "tensorrtllm-runtime"), preserving the registry and tag.',
+        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
