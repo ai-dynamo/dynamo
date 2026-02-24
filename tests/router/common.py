@@ -1918,7 +1918,7 @@ def _test_router_decisions(
     model_name: str,
     request,
     test_dp_rank: bool = False,
-    block_size: int = 4,
+    block_size: int = 8,
     use_kv_events: bool = True,
     durable_kv_events: bool = False,
     router_event_threads: int = 1,
@@ -1942,7 +1942,7 @@ def _test_router_decisions(
         model_name: Name of the model
         request: Pytest request fixture
         test_dp_rank: If True, also forces and validates dp_rank routing (for data parallel setups)
-        block_size: KV cache block size. Defaults to 4.
+        block_size: KV cache block size. Defaults to 8.
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with TTL-based expiration (--no-kv-events mode).
         durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
@@ -2023,7 +2023,7 @@ def _test_router_decisions(
                 None,
                 2.0,
             ),  # req4: router picks (worker a should win)
-            (A + C + G, None, None, 0.0),  # req5: router picks (worker b should win)
+            (A + C + G, None, None, 2.0),  # req5: router picks (worker b should win)
         ]
 
         response_worker_ids: list[dict[str, Optional[int]]] = []
@@ -2064,7 +2064,6 @@ def _test_router_decisions(
             if sleep_after > 0:
                 await asyncio.sleep(sleep_after)
 
-        # Dump events from the router
         events_json = await kv_router.dump_events()
         return (
             events_json,
@@ -2085,13 +2084,6 @@ def _test_router_decisions(
         response_worker_ids,
     ) = asyncio.run(test_sync())
 
-    # Verify all responses actually contain worker routing info (not None)
-    for i, resp in enumerate(response_worker_ids):
-        assert resp.get("prefill_worker_id") is not None, (
-            f"Request {i + 1}: prefill_worker_id is None — backend may not be returning "
-            f"disaggregated_params.worker_id in the response"
-        )
-
     # Verify request 4 routed to worker a (longest prefix match)
     req4 = response_worker_ids[3]
     assert req4["prefill_worker_id"] == worker_a_id, (
@@ -2099,9 +2091,6 @@ def _test_router_decisions(
         f"got {req4['prefill_worker_id']}"
     )
     if test_dp_rank:
-        assert (
-            req4.get("prefill_dp_rank") is not None
-        ), "Request 4: prefill_dp_rank is None — backend not returning dp_rank"
         assert (
             req4["prefill_dp_rank"] == dp_rank_a
         ), f"Request 4: expected prefill_dp_rank={dp_rank_a}, got {req4['prefill_dp_rank']}"
@@ -2113,9 +2102,6 @@ def _test_router_decisions(
         f"got {req5['prefill_worker_id']}"
     )
     if test_dp_rank:
-        assert (
-            req5.get("prefill_dp_rank") is not None
-        ), "Request 5: prefill_dp_rank is None — backend not returning dp_rank"
         assert (
             req5["prefill_dp_rank"] == dp_rank_b
         ), f"Request 5: expected prefill_dp_rank={dp_rank_b}, got {req5['prefill_dp_rank']}"

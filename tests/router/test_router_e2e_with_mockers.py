@@ -680,7 +680,7 @@ def test_router_decisions(
     # durable_kv_events=True enables JetStream mode; False (default) uses NATS Core with local indexer
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
-        "block_size": 4,
+        "block_size": 8,
         "dp_size": 4,
         "durable_kv_events": durable_kv_events and use_kv_events,
     }
