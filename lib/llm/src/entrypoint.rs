@@ -31,24 +31,13 @@ pub type ChatEngineFactoryCallback = Arc<
         + Sync,
 >;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
     /// Load threshold configuration for busy detection
     pub load_threshold_config: LoadThresholdConfig,
     pub decode_fallback: bool,
-}
-
-impl Default for RouterConfig {
-    fn default() -> Self {
-        Self {
-            router_mode: RouterMode::default(),
-            kv_router_config: KvRouterConfig::default(),
-            load_threshold_config: LoadThresholdConfig::default(),
-            decode_fallback: false,
-        }
-    }
 }
 
 impl RouterConfig {
