@@ -509,7 +509,10 @@ pub async fn drain_rejects_messages<F: TransportFactory>() {
         transport_b.streams.message_stream.recv_async(),
     )
     .await;
-    assert!(result.is_err(), "Expected timeout — messages should be rejected during drain");
+    assert!(
+        result.is_err(),
+        "Expected timeout — messages should be rejected during drain"
+    );
 
     transport_a.transport.shutdown();
     transport_b.streams.shutdown_state.teardown_token().cancel();
@@ -604,7 +607,11 @@ pub async fn health_during_drain<F: TransportFactory>() {
         .transport
         .check_health(transport_b.instance_id, Duration::from_secs(2))
         .await;
-    assert!(result.is_ok(), "Health check should succeed during drain: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Health check should succeed during drain: {:?}",
+        result.err()
+    );
 
     transport_a.transport.shutdown();
     transport_b.streams.shutdown_state.teardown_token().cancel();

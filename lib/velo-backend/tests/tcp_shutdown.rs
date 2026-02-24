@@ -33,9 +33,7 @@ async fn connect_and_send_frame(
 }
 
 /// Helper: read one frame from a raw TCP stream.
-async fn read_one_frame(
-    stream: &mut tokio::net::TcpStream,
-) -> (MessageType, Bytes, Bytes) {
+async fn read_one_frame(stream: &mut tokio::net::TcpStream) -> (MessageType, Bytes, Bytes) {
     use futures::StreamExt;
     use tokio_util::codec::Framed;
 
@@ -68,7 +66,8 @@ async fn test_tcp_drain_rejects_messages() {
     sleep(Duration::from_millis(50)).await;
 
     // Connect and send a Message frame
-    let mut stream = connect_and_send_frame(addr, MessageType::Message, b"req-header", b"req-payload").await;
+    let mut stream =
+        connect_and_send_frame(addr, MessageType::Message, b"req-header", b"req-payload").await;
 
     // Should get ShuttingDown back
     let (msg_type, header, payload) = read_one_frame(&mut stream).await;
@@ -171,8 +170,7 @@ fn test_shutting_down_frame_roundtrip() {
 
     // Encode ShuttingDown frame
     let mut buf = Vec::new();
-    TcpFrameCodec::encode_frame_sync(&mut buf, MessageType::ShuttingDown, header, payload)
-        .unwrap();
+    TcpFrameCodec::encode_frame_sync(&mut buf, MessageType::ShuttingDown, header, payload).unwrap();
 
     // Decode it
     let mut codec = TcpFrameCodec::new();
@@ -246,7 +244,13 @@ async fn test_tcp_graceful_shutdown_lifecycle() {
         .expect("shutdown should complete")
         .unwrap();
 
-    assert!(handle.streams.shutdown_state.teardown_token().is_cancelled());
+    assert!(
+        handle
+            .streams
+            .shutdown_state
+            .teardown_token()
+            .is_cancelled()
+    );
 }
 
 // --- Test 24: Shutdown timeout forces teardown ---
@@ -262,11 +266,8 @@ async fn test_tcp_shutdown_timeout_forces_teardown() {
         shutdown_state.begin_drain();
 
         // Phase 2: wait with short timeout
-        let _ = tokio::time::timeout(
-            Duration::from_millis(100),
-            shutdown_state.wait_for_drain(),
-        )
-        .await;
+        let _ =
+            tokio::time::timeout(Duration::from_millis(100), shutdown_state.wait_for_drain()).await;
 
         // Phase 3: teardown (forced, guard still held)
         shutdown_state.teardown_token().cancel();
@@ -278,7 +279,13 @@ async fn test_tcp_shutdown_timeout_forces_teardown() {
         .unwrap();
 
     // Teardown should have fired even though guard is held
-    assert!(handle.streams.shutdown_state.teardown_token().is_cancelled());
+    assert!(
+        handle
+            .streams
+            .shutdown_state
+            .teardown_token()
+            .is_cancelled()
+    );
     // Guard is still held (not a problem — teardown was forced)
     assert_eq!(handle.streams.shutdown_state.in_flight_count(), 1);
 }

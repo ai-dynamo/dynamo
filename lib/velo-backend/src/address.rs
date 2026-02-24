@@ -7,9 +7,9 @@
 //! from transport-specific endpoint data. It is internal to velo-backend.
 
 use bytes::Bytes;
-use velo_common::{WorkerAddress, WorkerAddressError};
 use std::collections::HashMap;
 use std::sync::Arc;
+use velo_common::{WorkerAddress, WorkerAddressError};
 
 /// Builder for constructing WorkerAddress instances.
 ///
