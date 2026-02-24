@@ -52,7 +52,7 @@ from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
-from .args import Config, parse_args
+from .args import Config, _uses_dynamo_connector, parse_args
 from .checkpoint_restore import get_checkpoint_config
 from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
@@ -466,9 +466,9 @@ def setup_vllm_engine(config, stat_logger=None):
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    # Set up consolidator endpoints if KVBM is enabled
+    # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
     consolidator_endpoints = None
-    if config.has_connector("kvbm"):
+    if _uses_dynamo_connector(config.engine_args):
         try:
             from kvbm.vllm_integration.consolidator_config import (
                 get_consolidator_endpoints,

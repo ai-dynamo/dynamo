@@ -236,7 +236,8 @@ class ModelCardInstanceId:
 def compute_block_hash_for_seq(
     tokens: List[int],
     kv_block_size: int,
-    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
+    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+    lora_name: Optional[str] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -562,7 +563,7 @@ class KvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_id: int
+        self, token_ids: List[int], lora_name: Optional[str] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -610,13 +611,14 @@ class ApproxKvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int]
+        self, token_ids: List[int], lora_name: Optional[str] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
 
         Args:
             token_ids: List of token IDs to find matches for
+            lora_name: Optional LoRA adapter name for adapter-aware matching
 
         Returns:
             OverlapScores containing worker matching scores and frequencies
@@ -689,9 +691,9 @@ class KvEventPublisher:
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
-        lora_id: int,
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -702,11 +704,11 @@ class KvEventPublisher:
             token_ids: List of token IDs
             num_block_tokens: Number of tokens per block
             block_hashes: List of block hashes (signed 64-bit integers)
-            lora_id: The LoRA ID
             parent_hash: Optional parent hash (signed 64-bit integer)
             block_mm_infos: Optional list of multimodal info for each block.
                 Each item is either None or a dict with "mm_objects" key containing
                 a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
+            lora_name: Optional LoRA adapter name for adapter-aware block hashing.
         """
         ...
 
@@ -945,7 +947,7 @@ class RouterConfig:
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
-        enforce_disagg: bool = False,
+        decode_fallback: bool = False,
     ) -> None:
         """
         Create a RouterConfig.
@@ -956,7 +958,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            enforce_disagg: Enforce disaggregated prefill-decode mode
+            decode_fallback: Allow falling back to decode-only mode when prefill workers are unavailable
         """
         ...
 
@@ -1388,6 +1390,7 @@ class KvRouter:
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -1413,6 +1416,7 @@ class KvRouter:
     async def get_potential_loads(
         self,
         token_ids: List[int],
+        lora_name: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
         Get potential prefill and decode loads for all workers.

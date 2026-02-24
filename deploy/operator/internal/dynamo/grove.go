@@ -316,11 +316,11 @@ func ResolveKaiSchedulerQueue(annotations map[string]string) string {
 // injectKaiSchedulerIfEnabled injects kai-scheduler settings into a clique if kai-scheduler is enabled and grove is enabled
 func injectKaiSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
-	controllerConfig controller_common.Config,
+	runtimeConfig *controller_common.RuntimeConfig,
 	validatedQueueName string,
 ) {
 	// Only proceed if grove is enabled, kai-scheduler is enabled, and no manual schedulerName is set
-	if !controllerConfig.Grove.Enabled || !controllerConfig.KaiScheduler.Enabled {
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
 		return
 	}
 

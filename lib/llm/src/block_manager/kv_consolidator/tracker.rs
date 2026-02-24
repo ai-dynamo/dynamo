@@ -188,8 +188,8 @@ pub enum ConsolidatedEvent {
         parent_hash: Option<String>,
         token_ids: Vec<u32>,
         block_size: usize,
-        lora_id: Option<i32>,
-        source: String, // The source where it was first stored (vllm or kvbm)
+        lora_name: Option<String>,
+        source: String,
     },
     /// Block removed (removed from all sources)
     Remove {
@@ -257,7 +257,7 @@ impl CacheStatusTracker {
         token_ids: Vec<u32>,
         parent_hash: Option<String>,
         block_size: usize,
-        lora_id: Option<i32>,
+        lora_name: Option<String>,
         tier: Option<StorageTier>,
         data_parallel_rank: Option<i32>,
     ) -> bool {
@@ -327,7 +327,7 @@ impl CacheStatusTracker {
                     .as_ref()
                     .map(|p| &p[..16.min(p.len())])
                     .unwrap_or("none"),
-                lora_id,
+                lora_name,
                 data_parallel_rank,
                 &token_ids
             );
@@ -366,7 +366,7 @@ impl CacheStatusTracker {
                 parent_hash: resolved_parent_hash,
                 token_ids,
                 block_size,
-                lora_id,
+                lora_name,
                 source: source.to_str().to_string(),
             });
 

@@ -83,8 +83,6 @@ spec:
             - --enable-multimodal
             - --model
             - Qwen/Qwen3-VL-2B-Instruct
-            - --connector
-            - none
             - --enable-lora
             - --max-lora-rank
             - "64"

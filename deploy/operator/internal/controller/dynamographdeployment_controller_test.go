@@ -21,6 +21,7 @@ import (
 	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -674,10 +675,11 @@ func Test_reconcileGroveResources(t *testing.T) {
 
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:      fakeKubeClient,
-				Recorder:    recorder,
-				Config:      controller_common.Config{},
-				ScaleClient: &mockScaleClient{},
+				Client:        fakeKubeClient,
+				Recorder:      recorder,
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1486,10 +1488,9 @@ func Test_computeRestartStatus(t *testing.T) {
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:   fakeKubeClient,
 				Recorder: recorder,
-				Config: controller_common.Config{
-					Grove: controller_common.GroveConfig{
-						Enabled: tt.groveEnabled,
-					},
+				Config:   &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{
+					GroveEnabled: tt.groveEnabled,
 				},
 			}
 
@@ -2060,9 +2061,10 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:   fakeKubeClient,
-				Recorder: recorder,
-				Config:   controller_common.Config{},
+				Client:        fakeKubeClient,
+				Recorder:      recorder,
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 
 			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd, nil)

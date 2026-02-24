@@ -81,7 +81,6 @@ The LoRA system consists of:
 # Start vLLM worker with LoRA flags
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
     python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager \
-    --connector none \
     --enable-lora \
     --max-lora-rank 64
 ```
@@ -307,9 +306,20 @@ kubectl logs deployment/my-worker | grep -i lora
 - Check that the LoRA is loaded on the worker handling your request
 - For disaggregated serving, ensure both prefill and decode workers have the LoRA
 
+## KV Cache-Aware LoRA Routing
+
+When KV-aware routing is enabled, the router automatically accounts for LoRA adapter identity when computing block hashes. This means:
+
+- **Distinct hash spaces per adapter**: Blocks cached under adapter `A` will never be confused with blocks cached under adapter `B` or the base model, even if the token sequences are identical. The adapter name is mixed into the `LocalBlockHash` computation.
+- **Automatic prefix sharing within the same adapter**: Requests targeting the same LoRA adapter benefit from KV cache prefix matching just like base model requests do.
+- **No configuration required**: The LoRA name is propagated automatically through KV events (`BlockStored`) from the engine to the router. The router uses the `lora_name` field on events to route LoRA requests to workers that have matching cached blocks.
+
+This works end-to-end across the publisher pipeline, the KV consolidator (for deduplication), and the routing query path.
+
 ## See Also
 
 - [Feature Matrix](../../reference/feature-matrix.md) - Backend compatibility overview
 - [vLLM Backend](../../backends/vllm/README.md) - vLLM-specific configuration
 - [Dynamo Operator](../../kubernetes/dynamo-operator.md) - Kubernetes operator overview
 - [KV-Aware Routing](../../components/router/router-guide.md) - LoRA-aware request routing
+- [KV Events for Custom Engines](../../integrations/kv-events-custom-engines.md) - Publishing LoRA-aware KV events

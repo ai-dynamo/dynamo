@@ -64,7 +64,7 @@ class FrontendConfig(ConfigBase):
     router_track_output_blocks: bool
     router_event_threads: int
     router_queue_threshold: Optional[float]
-    enforce_disagg: bool
+    decode_fallback: bool
 
     migration_limit: int
     active_decode_blocks_threshold: Optional[float]
@@ -376,12 +376,14 @@ class FrontendArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enforce-disagg",
-            env_var="DYN_ENFORCE_DISAGG",
+            flag_name="--decode-fallback",
+            env_var="DYN_DECODE_FALLBACK",
             default=False,
+            dest="decode_fallback",
             help=(
-                "Enforce disaggregated prefill-decode. When set, unactivated prefill router will "
-                "return an error instead of falling back to decode-only mode."
+                "Allow falling back to decode-only (aggregated) mode when prefill workers are "
+                "unavailable. By default, disaggregated prefill-decode is enforced and requests "
+                "fail if no prefill workers are found."
             ),
         )
 
