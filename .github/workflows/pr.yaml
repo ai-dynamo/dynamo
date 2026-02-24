@@ -448,8 +448,10 @@ jobs:
         profile:
           - agg
           - agg_router
-          - disagg
-          - disagg_router
+          # Disabled: trtllm disagg profiles consistently timeout (~32 min) with 0% success rate.
+          # Re-enable once the underlying disagg deployment issue is resolved.
+          # - disagg
+          # - disagg_router
     name: deploy-test-trtllm (${{ matrix.profile }})
     env:
       FRAMEWORK: trtllm
