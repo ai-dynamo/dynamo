@@ -573,7 +573,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `enforce_disagg`: If true, disaggregated mode is required (fails if no prefill workers found)
+/// - `decode_fallback`: If true, allows falling back to decode-only mode when no prefill workers are found
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -583,7 +583,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 pub unsafe extern "C" fn create_routers(
     namespace: *const c_char,
     component: *const c_char,
-    enforce_disagg: bool,
+    decode_fallback: bool,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     if namespace.is_null() || out_handle.is_null() {
@@ -715,18 +715,20 @@ pub unsafe extern "C" fn create_routers(
                     RouterMode::KV,
                     block_size,
                     Some(prefill_config),
-                    enforce_disagg,
+                    decode_fallback,
                     model_name.clone(),
                     namespace_str.clone(),
                 )
             }
-            None if enforce_disagg => {
-                tracing::error!("Prefill workers required (enforce_disagg=true) but none found");
+            None if !decode_fallback => {
+                tracing::error!(
+                    "Prefill workers required but none found and decode fallback is disabled"
+                );
                 return Err(QueryRouterResult::ErrDisaggEnforced);
             }
             None => {
                 tracing::info!("No prefill workers found, running in aggregated mode");
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, decode_fallback)
             }
         };
 
