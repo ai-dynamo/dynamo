@@ -3,15 +3,10 @@
 
 """Constants for vLLM backend.
 
-This module defines enums and constants used throughout the vllm module.
+DisaggregationMode is defined in dynamo.common.constants and re-exported here
+so that existing imports from dynamo.vllm.constants continue to work.
 """
 
-from enum import Enum
+from dynamo.common.constants import DisaggregationMode
 
-
-class DisaggregationMode(Enum):
-    """Disaggregation mode for vLLM workers."""
-
-    AGGREGATED = "prefill_and_decode"
-    PREFILL = "prefill"
-    DECODE = "decode"
+__all__ = ["DisaggregationMode"]

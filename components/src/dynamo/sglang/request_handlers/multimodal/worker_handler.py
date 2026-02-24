@@ -11,8 +11,9 @@ import torch
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Context
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.sglang.args import Config, DisaggregationMode
+from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
     SglangMultimodalRequest,

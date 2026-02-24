@@ -32,7 +32,7 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--disaggregation-mode",
             env_var="DYN_VLLM_DISAGGREGATION_MODE",
             default=None,
-            help="Worker disaggregation mode: 'prefill_and_decode' (default, aggregated), "
+            help="Worker disaggregation mode: 'agg' (default, aggregated), "
             "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
             choices=[m.value for m in DisaggregationMode],
         )

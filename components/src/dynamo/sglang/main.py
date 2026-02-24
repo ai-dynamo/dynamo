@@ -16,6 +16,7 @@ import uvloop
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.graceful_shutdown import graceful_shutdown_with_discovery
@@ -23,7 +24,7 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang.args import Config, DisaggregationMode, parse_args
+from dynamo.sglang.args import Config, parse_args
 from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
