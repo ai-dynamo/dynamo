@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
+import PIL.Image
 from diffusers.utils import export_to_video
 from fsspec.implementations.dirfs import DirFileSystem
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
+from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.image_protocol import (
     ImageData,
     NvCreateImageRequest,
@@ -93,6 +95,7 @@ class OmniHandler(BaseOmniHandler):
         )
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
+        self._image_loader = ImageLoader()
 
     async def generate(
         self, request: Dict[str, Any], context
@@ -120,7 +123,17 @@ class OmniHandler(BaseOmniHandler):
         parsed_request, request_type = parse_request_type(
             request, self.config.output_modalities
         )
-        inputs = self.build_engine_inputs(parsed_request, request_type)
+
+        # Pre-load input image for I2V requests (async I/O before sync build)
+        image = None
+        if (
+            request_type == RequestType.VIDEO_GENERATION
+            and isinstance(parsed_request, NvCreateVideoRequest)
+            and parsed_request.input_reference
+        ):
+            image = await self._image_loader.load_image(parsed_request.input_reference)
+
+        inputs = self.build_engine_inputs(parsed_request, request_type, image=image)
 
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
@@ -186,6 +199,7 @@ class OmniHandler(BaseOmniHandler):
             NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]
         ],
         request_type: RequestType,
+        image: PIL.Image.Image | None = None,
     ) -> EngineInputs:
         """Convert a parsed request into AsyncOmni engine inputs.
 
@@ -193,6 +207,7 @@ class OmniHandler(BaseOmniHandler):
             parsed_request: Output from parse_request_type -- a Pydantic model
                 for image/video requests, or a raw dict for chat completions.
             request_type: The RequestType determined by parse_request_type.
+            image: Pre-loaded PIL Image for I2V requests (from input_reference).
 
         Returns:
             EngineInputs ready for engine_client.generate().
@@ -202,7 +217,7 @@ class OmniHandler(BaseOmniHandler):
         elif request_type == RequestType.IMAGE_GENERATION:
             return self._engine_inputs_from_image(parsed_request)
         elif request_type == RequestType.VIDEO_GENERATION:
-            return self._engine_inputs_from_video(parsed_request)
+            return self._engine_inputs_from_video(parsed_request, image=image)
 
         elif request_type == RequestType.AUDIO_GENERATION:
             raise NotImplementedError("Audio generation is not yet supported")
@@ -263,8 +278,19 @@ class OmniHandler(BaseOmniHandler):
             response_format=req.response_format,
         )
 
-    def _engine_inputs_from_video(self, req: NvCreateVideoRequest) -> EngineInputs:
-        """Build engine inputs from an NvCreateVideoRequest."""
+    def _engine_inputs_from_video(
+        self,
+        req: NvCreateVideoRequest,
+        image: PIL.Image.Image | None = None,
+    ) -> EngineInputs:
+        """Build engine inputs from an NvCreateVideoRequest.
+
+        Args:
+            req: Parsed video generation request.
+            image: Pre-loaded PIL Image for I2V. When provided, the image is
+                attached to the prompt via ``multi_modal_data`` so vllm-omni's
+                I2V pipeline pre-process can use it.
+        """
         width, height = parse_size(req.size)
         nvext = req.nvext
 
@@ -286,6 +312,11 @@ class OmniHandler(BaseOmniHandler):
             else None,
         )
 
+        # Attach image for I2V — vllm-omni's pre-process reads from
+        # prompt["multi_modal_data"]["image"]
+        if image is not None:
+            prompt["multi_modal_data"] = {"image": image}
+
         sp = OmniDiffusionSamplingParams(
             height=height,
             width=width,
@@ -298,6 +329,10 @@ class OmniHandler(BaseOmniHandler):
                 sp.guidance_scale = nvext.guidance_scale
             if nvext.seed is not None:
                 sp.seed = nvext.seed
+            if nvext.boundary_ratio is not None:
+                sp.boundary_ratio = nvext.boundary_ratio
+            if nvext.guidance_scale_2 is not None:
+                sp.guidance_scale_2 = nvext.guidance_scale_2
         if fps is not None:
             sp.fps = fps
 
