@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from dynamo.vllm.args import _connector_to_kv_transfer_json, parse_args
+from dynamo.vllm.args import (
+    _connector_to_kv_transfer_json,
+    _uses_dynamo_connector,
+    _uses_nixl_connector,
+    parse_args,
+)
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -233,18 +238,66 @@ def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
 
 
 def test_connector_to_kv_transfer_json_single():
-    """Test _connector_to_kv_transfer_json for single connector."""
-    result = _connector_to_kv_transfer_json(["nixl"])
-    assert '"NixlConnector"' in result
-    assert '"kv_both"' in result
+    """Test _connector_to_kv_transfer_json returns valid JSON for a single connector."""
+    import json
+
+    result = json.loads(_connector_to_kv_transfer_json(["nixl"]))
+    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
 
 
 def test_connector_to_kv_transfer_json_multi():
-    """Test _connector_to_kv_transfer_json for multiple connectors."""
-    result = _connector_to_kv_transfer_json(["kvbm", "nixl"])
-    assert '"PdConnector"' in result
-    assert '"DynamoConnector"' in result
-    assert '"NixlConnector"' in result
+    """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
+    import json
+
+    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"]))
+    assert result["kv_connector"] == "PdConnector"
+    nested = result["kv_connector_extra_config"]["connectors"]
+    nested_names = [c["kv_connector"] for c in nested]
+    assert "DynamoConnector" in nested_names
+    assert "NixlConnector" in nested_names
+
+
+# _uses_nixl_connector / _uses_dynamo_connector tests
+
+
+def _make_engine_cfg(kv_connector=None, extra_config=None):
+    """Build a minimal fake engine config for connector detection tests."""
+    from types import SimpleNamespace
+
+    if kv_connector is None:
+        return SimpleNamespace(kv_transfer_config=None)
+    return SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector=kv_connector,
+            kv_connector_extra_config=extra_config,
+        )
+    )
+
+
+_PD_KVBM_NIXL = {
+    "connectors": [
+        {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
+        {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
+    ]
+}
+
+
+def test_uses_nixl_connector_direct_and_nested():
+    """Test _uses_nixl_connector for direct, nested-in-PdConnector, and absent cases."""
+    assert _uses_nixl_connector(_make_engine_cfg("NixlConnector")) is True
+    assert _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
+    assert _uses_nixl_connector(_make_engine_cfg("LMCacheConnectorV1")) is False
+    assert _uses_nixl_connector(_make_engine_cfg()) is False
+
+
+def test_uses_dynamo_connector_direct_and_nested():
+    """Test _uses_dynamo_connector for direct, nested-in-PdConnector, and absent cases."""
+    assert _uses_dynamo_connector(_make_engine_cfg("DynamoConnector")) is True
+    assert (
+        _uses_dynamo_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
+    )
+    assert _uses_dynamo_connector(_make_engine_cfg("NixlConnector")) is False
+    assert _uses_dynamo_connector(_make_engine_cfg()) is False
 
 
 def test_headless_namespace_has_required_fields(mock_vllm_cli):

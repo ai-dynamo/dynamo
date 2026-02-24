@@ -332,12 +332,13 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
         return False
     if kv_cfg.kv_connector == "NixlConnector":
         return True
-    # PdConnector wraps multiple connectors in kv_connector_extra_config
+    # PdConnector wraps multiple connectors in kv_connector_extra_config.
+    # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
     if kv_cfg.kv_connector == "PdConnector":
         extra = kv_cfg.kv_connector_extra_config or {}
-        connectors = extra.get("connectors", [])
-        if "NixlConnector" in connectors:
-            return True
+        for entry in extra.get("connectors", []):
+            if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
+                return True
     return False
 
 
@@ -353,9 +354,12 @@ def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
         return True
     if kv_cfg.kv_connector == "PdConnector":
         extra = kv_cfg.kv_connector_extra_config or {}
-        connectors = extra.get("connectors", [])
-        if "DynamoConnector" in connectors:
-            return True
+        for entry in extra.get("connectors", []):
+            if (
+                isinstance(entry, dict)
+                and entry.get("kv_connector") == "DynamoConnector"
+            ):
+                return True
     return False
 
 
