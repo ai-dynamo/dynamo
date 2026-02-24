@@ -110,33 +110,34 @@ impl TcpTransport {
 
     /// Get or create a connection to a peer (lazy initialization)
     fn get_or_create_connection(&self, instance_id: crate::InstanceId) -> Result<ConnectionHandle> {
-        // Fast path: check if connection exists
+        // Fast path: connection already exists
         if let Some(handle) = self.connections.get(&instance_id) {
             return Ok(handle.clone());
         }
 
         let rt = self.runtime.get().ok_or(TransportError::NotStarted)?;
 
-        // Slow path: create new connection
-        let addr = *self
-            .peers
-            .get(&instance_id)
-            .ok_or(TransportError::PeerNotRegistered(instance_id))?
-            .value();
+        // Atomic check-and-insert via entry API
+        let handle = match self.connections.entry(instance_id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let addr = *self
+                    .peers
+                    .get(&instance_id)
+                    .ok_or(TransportError::PeerNotRegistered(instance_id))?
+                    .value();
 
-        // Create channel (bounded for backpressure)
-        let (tx, rx) = flume::bounded(self.channel_capacity);
+                let (tx, rx) = flume::bounded(self.channel_capacity);
+                let handle = ConnectionHandle { tx };
+                entry.insert(handle.clone());
 
-        let handle = ConnectionHandle { tx };
+                let cancel = self.cancel_token.clone();
+                rt.spawn(connection_writer_task(addr, rx, cancel));
 
-        // Insert into connection map
-        self.connections.insert(instance_id, handle.clone());
-
-        // Spawn writer task using stored runtime handle
-        let cancel = self.cancel_token.clone();
-        rt.spawn(connection_writer_task(addr, rx, cancel));
-
-        debug!("Created new connection to {} ({})", instance_id, addr);
+                debug!("Created new connection to {} ({})", instance_id, addr);
+                handle
+            }
+        };
 
         Ok(handle)
     }
