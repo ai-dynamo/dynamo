@@ -258,7 +258,7 @@ func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
 //  1. Mark pod as in_progress
 //  2. Resolve the container ID and host PID
 //  3. Call orchestrate.Checkpoint (inspect → configure → CUDA lock/checkpoint → CRIU dump → rootfs diff)
-//  4. SIGUSR1 the process on success (notify workload), SIGUSR2 on failure (wake it up)
+//  4. SIGUSR1 the process on success (notify workload), SIGKILL on failure (terminate immediately)
 //  5. Mark pod as completed or failed
 func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointHash, podKey string) {
 	defer w.release(podKey)
@@ -315,8 +315,8 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointH
 	if err := orchestrate.Checkpoint(ctx, w.containerd, log, req, w.config); err != nil {
 		log.Error(err, "Checkpoint failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "chrek", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		// SIGUSR2 on failure: tell the workload to wake up and continue
-		if signalErr := common.SendSignalToPID(log, containerPID, syscall.SIGUSR2, "checkpoint failed"); signalErr != nil {
+		// SIGKILL on failure: process is unrecoverable (CUDA locked), terminate immediately
+		if signalErr := common.SendSignalToPID(log, containerPID, syscall.SIGKILL, "checkpoint failed"); signalErr != nil {
 			log.Error(signalErr, "Failed to signal checkpoint failure to runtime process")
 		}
 		annotatePod(ctx, w.clientset, log, pod, map[string]string{kubeAnnotationCheckpointStatus: "failed"})

@@ -27,19 +27,39 @@ import (
  *
  * The needsShell flag indicates when environment variables require shell interpretation
  */
+// shellQuoteForBashC quotes a string so it survives shell interpretation inside sh -c.
+// Simple args (flags, paths) pass through unchanged; args containing special characters
+// (JSON, env vars, spaces, quotes) are wrapped in double quotes with inner escaping.
+func shellQuoteForBashC(s string) string {
+	if strings.ContainsAny(s, " \t\n'\"\\{}[]$`!") {
+		escaped := s
+		escaped = strings.ReplaceAll(escaped, `\`, `\\`) // must be first
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		escaped = strings.ReplaceAll(escaped, `$`, `\$`)
+		escaped = strings.ReplaceAll(escaped, "`", "\\`")
+		escaped = strings.ReplaceAll(escaped, "'", `'"'"'`)
+		return `"` + escaped + `"`
+	}
+	return s
+}
+
 func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, needsShell bool, framework string) {
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct python command case
 		if needsShell {
-			// Transform to shell wrapper for env var interpretation
+			// Transform to shell wrapper for env var interpretation.
+			// Quote each original arg individually so JSON and other special
+			// characters survive shell interpretation.
 			fullCommand := strings.Join(container.Command, " ")
-			originalArgs := strings.Join(container.Args, " ")
+			quotedArgs := make([]string, len(container.Args))
+			for i, arg := range container.Args {
+				quotedArgs[i] = shellQuoteForBashC(arg)
+			}
+			originalArgs := strings.Join(quotedArgs, " ")
 			var shellCommand string
 			if len(container.Args) > 0 {
-				// Use exec to ensure PID 1 is given to the python command
 				shellCommand = fmt.Sprintf("exec %s %s %s", fullCommand, originalArgs, flags)
 			} else {
-				// Use exec to ensure PID 1 is given to the python command
 				shellCommand = fmt.Sprintf("exec %s %s", fullCommand, flags)
 			}
 			container.Command = []string{"sh", "-c"}

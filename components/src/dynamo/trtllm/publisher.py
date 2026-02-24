@@ -296,9 +296,8 @@ class Publisher:
 
     def __init__(
         self,
-        component,
+        endpoint,
         engine,
-        kv_listener,
         worker_id,
         kv_block_size,
         metrics_labels,
@@ -306,9 +305,8 @@ class Publisher:
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
     ):
-        self.component = component
+        self.endpoint = endpoint
         self.engine = engine
-        self.kv_listener = kv_listener
         self.worker_id = worker_id
         self.kv_block_size = kv_block_size
         self.max_window_size = None
@@ -356,7 +354,7 @@ class Publisher:
         if self.metrics_publisher is None:
             logging.error("KV metrics publisher not initialized!")
             return
-        await self.metrics_publisher.create_endpoint(self.component)
+        await self.metrics_publisher.create_endpoint(self.endpoint)
 
     def initialize(self):
         # Setup the metrics publisher
@@ -385,9 +383,9 @@ class Publisher:
             self.kv_event_publishers = {}
             for rank in range(self.attention_dp_size):
                 self.kv_event_publishers[rank] = KvEventPublisher(
-                    self.kv_listener,
-                    self.worker_id,
-                    self.kv_block_size,
+                    endpoint=self.endpoint,
+                    worker_id=self.worker_id,
+                    kv_block_size=self.kv_block_size,
                     dp_rank=rank,
                     enable_local_indexer=self.enable_local_indexer,
                 )
@@ -760,9 +758,8 @@ class Publisher:
 
 @asynccontextmanager
 async def get_publisher(
-    component,
+    endpoint,
     engine,
-    kv_listener,
     worker_id,
     kv_block_size,
     metrics_labels,
@@ -771,9 +768,8 @@ async def get_publisher(
     enable_local_indexer: bool = False,
 ):
     publisher = Publisher(
-        component,
+        endpoint,
         engine,
-        kv_listener,
         worker_id,
         kv_block_size,
         metrics_labels,
