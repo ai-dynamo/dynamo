@@ -272,17 +272,16 @@ impl KvScheduler {
         self.slots.worker_type()
     }
 
-    pub async fn add_output_block(
+    pub fn add_output_block(
         &self,
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
         self.slots
             .add_output_block(&request_id.to_string(), decay_fraction)
-            .await
     }
 
-    pub async fn get_potential_loads(
+    pub fn get_potential_loads(
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
@@ -290,8 +289,7 @@ impl KvScheduler {
     ) -> Vec<PotentialLoad> {
         let (decode_blocks, prefill_tokens) = self
             .slots
-            .potential_blocks_and_tokens(token_seq, isl_tokens, overlaps)
-            .await;
+            .potential_blocks_and_tokens(token_seq, isl_tokens, overlaps);
 
         // Get all unique WorkerWithDpRank from both hashmaps
         let mut workers: HashSet<WorkerWithDpRank> = HashSet::new();
