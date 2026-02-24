@@ -19,6 +19,7 @@ import logging
 
 import pandas as pd
 import yaml
+
 from aiconfigurator.cli.main import _execute_task_configs, build_default_task_configs
 from aiconfigurator.generator.api import (
     generate_backend_artifacts,
@@ -26,9 +27,9 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.profile_common import derive_backend_image
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ def _generate_dgd_from_pick(
     generator_overrides: dict = {}
 
     k8s_overrides: dict = {}
-    k8s_overrides["k8s_image"] = dgdr.image
+    k8s_overrides["k8s_image"] = derive_backend_image(dgdr.image, tc.backend_name)
     if dgdr.modelCache:
         if dgdr.modelCache.pvcName:
             k8s_overrides["k8s_pvc_name"] = dgdr.modelCache.pvcName
@@ -115,7 +116,9 @@ def run_rapid(
         dgd_config = yaml.safe_load(dgd_yaml) if dgd_yaml else None
         if dgd_config:
             config_modifier = CONFIG_MODIFIERS[backend]
-            dgd_config = config_modifier.update_image(dgd_config, dgdr.image)
+            dgd_config = config_modifier.update_image(
+                dgd_config, derive_backend_image(dgdr.image, backend)
+            )
             if dgdr.modelCache and dgdr.modelCache.pvcName:
                 dgd_config = config_modifier.update_model_from_pvc(
                     dgd_config,

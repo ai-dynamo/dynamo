@@ -20,10 +20,10 @@ import os
 
 import pandas as pd
 import yaml
+
 from aiconfigurator.generator.enumerate import enumerate_profiling_configs
 from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_match
 from aiconfigurator.sdk.task import TaskConfig
-
 from deploy.utils.dynamo_deployment import DynamoDeploymentClient
 from dynamo.planner.defaults import SubComponentType
 from dynamo.profiler.rapid import _generate_dgd_from_pick
@@ -40,7 +40,10 @@ from dynamo.profiler.utils.aiperf import (
 from dynamo.profiler.utils.config import Config, get_service_name_by_type
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
-from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
+from dynamo.profiler.utils.profile_common import (
+    ProfilerOperationalConfig,
+    derive_backend_image,
+)
 from dynamo.profiler.utils.profile_decode import get_num_request_range
 
 logger = logging.getLogger(__name__)
@@ -69,7 +72,7 @@ async def run_thorough(
         model_path=model,
         system=system,
         backend=backend,
-        image=dgdr.image,
+        image=derive_backend_image(dgdr.image, backend),
         isl=isl,
         osl=osl,
         num_gpus_per_node=dgdr.hardware.numGpusPerNode,

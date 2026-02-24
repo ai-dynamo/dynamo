@@ -4,7 +4,7 @@
 # Case 3b: AIC supported model, rapid, with planner, rapid pre-deployment sweeping, enable mocker
 model: "Qwen/Qwen3-32B"
 backend: trtllm
-image: "nvcr.io/nvidia/dynamo:latest"
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
 hardware:
   gpuSku: h200_sxm
   totalGpus: 8

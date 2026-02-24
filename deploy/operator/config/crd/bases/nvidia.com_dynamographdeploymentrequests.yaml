@@ -594,8 +594,7 @@ spec:
                 image:
                   description: |-
                     Image is the container image reference for the profiling job (frontend image).
-                    Example: "nvcr.io/nvidia/dynamo-runtime:latest"
-                    backend type automatically; backend images can be overridden via overrides.dgd.
+                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".
                   type: string
                 model:
                   description: |-

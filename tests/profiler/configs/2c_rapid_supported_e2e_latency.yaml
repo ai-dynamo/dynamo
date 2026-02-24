@@ -4,7 +4,7 @@
 # Case 2c: AIC supported model, rapid, without planner, e2eLatency instead of ttft/itl
 model: "Qwen/Qwen3-32B"
 backend: trtllm
-image: "nvcr.io/nvidia/dynamo:latest"
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
 hardware:
   gpuSku: h200_sxm
   totalGpus: 64

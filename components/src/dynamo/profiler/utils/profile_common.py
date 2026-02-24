@@ -29,6 +29,66 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentReques
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Published container image naming conventions
+# ---------------------------------------------------------------------------
+
+# Mapping from backend name to the image-name component of the published
+# backend runtime image.
+# e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+BACKEND_IMAGE_NAMES: dict[str, str] = {
+    "vllm": "vllm-runtime",
+    "sglang": "sglang-runtime",
+    "trtllm": "tensorrtllm-runtime",
+}
+
+
+def derive_backend_image(profiler_image: str, backend: str) -> str:
+    """Derive the backend worker image from the profiler image.
+
+    Replaces the image name (the last ``/``-delimited component, before any
+    ``:tag``) with the backend-specific runtime image name, preserving the
+    registry path and tag unchanged.
+
+    Examples::
+
+        derive_backend_image(
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0", "vllm"
+        )
+        # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
+
+        derive_backend_image("myregistry.io/sglang-runtime:1.0.0", "sglang")
+        # → "myregistry.io/sglang-runtime:1.0.0"
+
+    Args:
+        profiler_image: Any Docker image reference of the form
+            ``[REGISTRY/]NAME[:TAG]``.
+        backend: The resolved backend type (``'vllm'``, ``'sglang'``, or
+            ``'trtllm'``).
+
+    Returns:
+        The backend container image string.
+
+    Raises:
+        ValueError: If *backend* is not a recognised backend.
+    """
+    backend_image_name = BACKEND_IMAGE_NAMES.get(backend)
+    if backend_image_name is None:
+        raise ValueError(
+            f"Cannot derive backend image for unknown backend '{backend}'. "
+            f"Supported backends: {list(BACKEND_IMAGE_NAMES.keys())}"
+        )
+
+    # Split off the last path component: "registry/path/name:tag" → "name:tag"
+    slash_idx = profiler_image.rfind("/")
+    prefix = profiler_image[: slash_idx + 1] if slash_idx >= 0 else ""
+    suffix = profiler_image[slash_idx + 1 :]
+    colon_idx = suffix.find(":")
+    tag = suffix[colon_idx:] if colon_idx >= 0 else ""
+
+    return f"{prefix}{backend_image_name}{tag}"
+
+
+# ---------------------------------------------------------------------------
 # Operational defaults not part of DynamoGraphDeploymentRequestSpec
 # ---------------------------------------------------------------------------
 
