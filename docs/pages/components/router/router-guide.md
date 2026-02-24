@@ -150,7 +150,7 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--no-router-kv-events`: Disables KV event tracking. By default (when this flag is not provided), the router uses KV events to monitor block creation and deletion from workers. When disabled with this flag, the router predicts cache state based on routing decisions with TTL-based expiration (default 120s) and pruning. Use this flag if your backend doesn't support KV events (or you are not confident in the accuracy or responsiveness of the events).
 
-- `--router-durable-kv-events`: Enables JetStream mode for KV event transport. Must be specified on **both** the frontend **and** all workers. When enabled, workers publish to JetStream instead of the local indexer, and the frontend consumes from JetStream as a durable consumer. Without this flag (default), workers use the local indexer with NATS Core or ZMQ event plane. .
+- `--router-durable-kv-events`: **(Deprecated — will be removed in a future release.)** Enables JetStream mode for KV event transport. The event-plane subscriber (local_indexer mode) is now the recommended path. When enabled, workers publish to JetStream instead of the local indexer, and the frontend consumes from JetStream as a durable consumer. Without this flag (default), workers use the local indexer with NATS Core or ZMQ event plane.
 
 - `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - in JetStream mode those are synchronized through JetStream events; in local indexer mode (default) each router queries workers directly.
 
@@ -191,12 +191,12 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 >
 > When `--router-kv-overlap-score-weight` is set to 0, no KVIndexer is created and prefix matching is disabled (pure load balancing). When `--no-router-kv-events` is set, a KVIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning.
 >
-> **Backend Configuration:** When using `--no-router-kv-events`, configure your backend workers to disable KV event publishing:
-> - **vLLM**: Use `--kv-events-config '{"enable_kv_cache_events": false}'`
+> **Backend Configuration:** When using `--no-router-kv-events`, no additional backend flags are needed — SGLang and TRT-LLM disable KV events by default. For vLLM, KV events are currently enabled by default when prefix caching is active (deprecated — will change in a future release). Use `--kv-events-config` explicitly to control behavior:
+> - **vLLM**: Use `--kv-events-config '{"enable_kv_cache_events": false}'` to disable, or omit (auto-enabled, deprecated)
 > - **SGLang**: Do not use `--kv-events-config`
 > - **TRT-LLM**: Do not use `--publish-events-and-metrics`
 >
-> The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When KV events are enabled (default), the router relies on worker-side eviction events and these parameters are ignored.
+> The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When workers are configured to publish KV events (via `--kv-events-config`), the router relies on worker-side eviction events and these parameters are ignored.
 >
 > **Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`.
 

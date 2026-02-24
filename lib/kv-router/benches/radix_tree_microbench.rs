@@ -302,7 +302,7 @@ fn bench_hash(args: &Args) {
 
     for (i, tokens) in token_sequences.iter().enumerate() {
         let start = Instant::now();
-        let _ = compute_block_hash_for_seq(tokens, args.block_size, None);
+        let _ = compute_block_hash_for_seq(tokens, args.block_size, None, None);
         let elapsed = start.elapsed();
 
         if i >= warmup_iters {

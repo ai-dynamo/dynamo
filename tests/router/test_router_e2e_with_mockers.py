@@ -125,9 +125,9 @@ def _build_mocker_command(
 
     # Add worker type flag for disaggregated mode
     if worker_type == "prefill":
-        command.append("--is-prefill-worker")
+        command.extend(["--disaggregation-mode", "prefill"])
     elif worker_type == "decode":
-        command.append("--is-decode-worker")
+        command.extend(["--disaggregation-mode", "decode"])
 
     # Add individual CLI arguments from mocker_args
     if "speedup_ratio" in mocker_args:
@@ -507,9 +507,9 @@ def test_kv_router_bindings(
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(mockers.namespace)
-        component = namespace.component(mockers.component_name)
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(
+            f"{mockers.namespace}.{mockers.component_name}.generate"
+        )
 
         # Run Python router bindings test
         _test_python_router_bindings(
@@ -537,7 +537,7 @@ def test_kv_router_bindings(
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
-@pytest.mark.timeout(180)  # bumped for xdist contention (was 90s; up to 33s under load)
+@pytest.mark.timeout(180)
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
@@ -680,7 +680,7 @@ def test_router_decisions(
     # durable_kv_events=True enables JetStream mode; False (default) uses NATS Core with local indexer
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
-        "block_size": BLOCK_SIZE,
+        "block_size": 8,
         "dp_size": 4,
         "durable_kv_events": durable_kv_events and use_kv_events,
     }
@@ -697,9 +697,7 @@ def test_router_decisions(
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the mockers
-        namespace = runtime.namespace(mockers.namespace)
-        component = namespace.component("mocker")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{mockers.namespace}.mocker.generate")
 
         _test_router_decisions(
             mockers,

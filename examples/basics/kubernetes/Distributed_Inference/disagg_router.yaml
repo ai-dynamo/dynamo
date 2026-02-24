@@ -42,7 +42,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 8 --is-decode-worker
+            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 8 --disaggregation-mode decode
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -69,4 +69,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 4 --is-prefill-worker
+            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 4 --disaggregation-mode prefill --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'

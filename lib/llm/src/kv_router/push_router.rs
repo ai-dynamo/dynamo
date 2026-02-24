@@ -108,7 +108,6 @@ impl RequestGuard {
                 if let Err(e) = self
                     .chooser
                     .add_output_block(&self.context_id, decay_fraction)
-                    .await
                 {
                     tracing::warn!(
                         "Failed to add output block for request {}: {e}",
@@ -263,7 +262,7 @@ impl KvPushRouter {
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
-            .get_overlap_blocks(routing_token_ids, worker)
+            .get_overlap_blocks(routing_token_ids, worker, lora_name.as_deref())
             .await?;
 
         if !is_query_only {
@@ -381,6 +380,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 overlap_amount as usize * block_size,
             );
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
+            if let Some(hit_rate) = tracker.kv_hit_rate() {
+                request_metrics.kv_hit_rate.observe(hit_rate);
+            }
         }
         request_metrics
             .input_sequence_tokens

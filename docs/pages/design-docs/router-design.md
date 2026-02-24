@@ -88,7 +88,7 @@ To get a feel for how KV Cache management works on a single worker with KV Cache
 
 1. **Request tokenization**: The incoming prompt is converted into tokens
 2. **Block partitioning**: The token sequence is divided into fixed-size blocks (e.g., 16 or 64 tokens per block)
-3. **Block hashing**: Each block of tokens is hashed to create a unique identifier
+3. **Block hashing**: Each block of tokens is hashed to create a unique identifier. When a LoRA adapter is active, the adapter name is incorporated into the hash so that blocks cached under different adapters produce distinct identifiers.
 4. **Cache lookup**:
     - For each block, the system checks if a matching block already exists in the KV cache
     - If a match is found, the existing KV cache block is reused

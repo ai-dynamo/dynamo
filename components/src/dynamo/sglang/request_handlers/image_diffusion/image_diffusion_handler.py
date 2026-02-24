@@ -13,7 +13,8 @@ from typing import Any, AsyncGenerator, Optional
 import torch
 from PIL import Image
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
+from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse, NvExt
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -33,7 +34,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         generator: Any,  # DiffGenerator, not sgl.Engine
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
@@ -42,18 +42,17 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         """Initialize diffusion worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             generator: The SGLang DiffGenerator instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher (not used for diffusion currently).
             fs: Optional fsspec filesystem for primary image storage.
         """
-        super().__init__(component, config, publisher)
+        super().__init__(config, publisher)
 
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
-        self.fs_url = config.dynamo_args.image_diffusion_fs_url
-        self.base_url = config.dynamo_args.image_diffusion_base_url
+        self.fs_url = config.dynamo_args.media_output_fs_url
+        self.base_url = config.dynamo_args.media_output_http_url
 
         logger.info(
             f"Image diffusion worker handler initialized with fs_url={self.fs_url}, url_base={self.base_url}"
@@ -225,10 +224,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # Per-user storage path
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
 
-        # send image to filesystem
-        await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
-
-        return f"{self.base_url}/{storage_path}"
+        return await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""

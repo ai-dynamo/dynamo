@@ -1,109 +1,90 @@
-// Package main provides the CRIU node agent with HTTP API and/or pod watching.
-// The agent supports two modes that can be enabled independently:
-// - HTTP API mode: Exposes REST endpoints for checkpoint/restore operations
-// - Watcher mode: Automatically checkpoints pods with nvidia.com/checkpoint-source=true label
+// Package main provides the chrek DaemonSet agent.
+// The agent watches for pods with checkpoint/restore labels on its node
+// and triggers operations via the orchestrators.
 package main
 
 import (
 	"context"
-	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
-	httpApiServer "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/http_api_server"
+	"github.com/containerd/containerd"
+	"github.com/go-logr/logr"
+
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/common"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/logging"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/watcher"
 )
 
 func main() {
-	// Load configuration from ConfigMap (or use defaults if not found)
+	rootLog := logging.ConfigureLogger("stdout")
+	agentLog := rootLog.WithName("agent")
+
 	cfg, err := LoadConfigOrDefault(ConfigMapPath)
 	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		fatal(agentLog, err, "Failed to load configuration")
+	}
+	if err := cfg.Validate(); err != nil {
+		fatal(agentLog, err, "Invalid configuration")
 	}
 
-	// Validate configuration
-	if err := cfg.Agent.Validate(); err != nil {
-		log.Fatalf("Invalid configuration: %v", err)
-	}
-
-	// Create discovery client
-	discoveryClient, err := checkpoint.NewDiscoveryClient()
+	ctrd, err := containerd.New(common.ContainerdSocket)
 	if err != nil {
-		log.Fatalf("Failed to create discovery client: %v", err)
+		fatal(agentLog, err, "Failed to connect to containerd")
 	}
-	defer discoveryClient.Close()
+	defer ctrd.Close()
 
-	// Create checkpointer
-	checkpointer := checkpoint.NewCheckpointer(discoveryClient)
-
-	// Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	log.Printf("CRIU Node Agent starting (node: %s)", cfg.Agent.NodeName)
-	log.Printf("Checkpoint directory: %s", cfg.Checkpoint.BasePath)
-	log.Printf("Signal source: %s", cfg.Agent.SignalSource)
+	agentLog.Info("Starting chrek agent",
+		"node", cfg.NodeName,
+		"checkpoint_dir", cfg.BasePath,
+		"watch_namespace", cfg.RestrictedNamespace,
+	)
 
-	switch cfg.Agent.GetSignalSource() {
-	case SignalFromHTTP:
-		serverCfg := httpApiServer.ServerConfig{
-			ListenAddr:     cfg.Agent.ListenAddr,
-			NodeName:       cfg.Agent.NodeName,
-			CheckpointSpec: &cfg.Checkpoint,
-		}
-		srv := httpApiServer.NewServer(serverCfg, checkpointer)
-
-		// Handle graceful shutdown
-		go func() {
-			<-sigChan
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer shutdownCancel()
-			if err := srv.Shutdown(shutdownCtx); err != nil {
-				log.Printf("HTTP server shutdown error: %v", err)
-			}
-		}()
-
-		if err := srv.Start(); err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
-		}
-
-	case SignalFromWatcher:
-		watcherConfig := watcher.WatcherConfig{
-			NodeName:            cfg.Agent.NodeName,
-			ListenAddr:          cfg.Agent.ListenAddr,
-			RestrictedNamespace: cfg.Agent.RestrictedNamespace,
-			CheckpointSpec:      &cfg.Checkpoint,
-		}
-
-		podWatcher, err := watcher.NewWatcher(watcherConfig, discoveryClient, checkpointer)
-		if err != nil {
-			log.Fatalf("Failed to create pod watcher: %v", err)
-		}
-
-		// Handle graceful shutdown
-		go func() {
-			<-sigChan
-			log.Println("Shutting down pod watcher...")
-			cancel()
-		}()
-
-		log.Printf("Pod watcher started (watching for label: %s=true)", checkpoint.KubeLabelCheckpointSource)
-		log.Printf("Health check endpoint: http://0.0.0.0%s/health", cfg.Agent.ListenAddr)
-		if err := podWatcher.Start(ctx); err != nil {
-			log.Printf("Pod watcher error: %v", err)
-		}
-
-	default:
-		log.Fatalf("Unknown signal source: %s", cfg.Agent.SignalSource)
+	podWatcher, err := watcher.NewWatcher(cfg, ctrd, rootLog.WithName("watcher"))
+	if err != nil {
+		fatal(agentLog, err, "Failed to create pod watcher")
 	}
 
-	log.Println("Agent stopped")
+	// Run watcher in the background
+	watcherDone := make(chan error, 1)
+	go func() {
+		agentLog.Info("Pod watcher started")
+		watcherDone <- podWatcher.Start(ctx)
+	}()
+
+	// Wait for signal or watcher exit
+	select {
+	case <-sigChan:
+		agentLog.Info("Shutting down")
+		cancel()
+		select {
+		case err := <-watcherDone:
+			if err != nil {
+				agentLog.Error(err, "Pod watcher exited with error during shutdown")
+			}
+		default:
+		}
+	case err := <-watcherDone:
+		if err != nil {
+			fatal(agentLog, err, "Pod watcher exited with error")
+		}
+	}
+
+	agentLog.Info("Agent stopped")
+}
+
+func fatal(log logr.Logger, err error, msg string, keysAndValues ...interface{}) {
+	if err != nil {
+		log.Error(err, msg, keysAndValues...)
+	} else {
+		log.Info(msg, keysAndValues...)
+	}
+	os.Exit(1)
 }

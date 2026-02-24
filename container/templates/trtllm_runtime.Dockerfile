@@ -34,6 +34,7 @@ ENV OMPI_MCA_coll_ucc_enable=0
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from PyTorch base image
 COPY --from=pytorch_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=pytorch_base /usr/local/cuda/bin/nvlink /usr/local/cuda/bin/nvlink
 COPY --from=pytorch_base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
 COPY --from=pytorch_base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
 COPY --from=pytorch_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
@@ -142,6 +143,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     # Create libnccl.so symlink pointing to libnccl.so.2. TensorRT-LLM requires explicit libnccl.so
     ln -sf /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so.2 /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so
 
+{% if context.trtllm.enable_media_ffmpeg == "true" %}
+# Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+{% endif %}
+
 # Switch to dynamo user
 USER dynamo
 ENV HOME=/home/dynamo
@@ -169,14 +180,6 @@ COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
-
-# Copy ffmpeg
-RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
-    true # in case ffmpeg not enabled
 
 ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"

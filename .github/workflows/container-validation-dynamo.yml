@@ -88,15 +88,15 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           CUDA_MAJOR=${CUDA_VERSION%%.*}
-          IMAGE_TAG_SUFFIX="${{ github.sha }}-dynamo-dev-cuda${CUDA_MAJOR}-amd64"
+          IMAGE_TAG_SUFFIX="${{ github.sha }}-dynamo-runtime-cuda${CUDA_MAJOR}-amd64"
           echo "image_tag_suffix=${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
           echo "remote_tag=${ECR_HOSTNAME}/ai-dynamo/dynamo:${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
       - name: Generate Dockerfile
         shell: bash
         run: |
-          echo "Generating Dockerfile for target: dev and framework: dynamo"
+          echo "Generating Dockerfile for target: runtime and framework: dynamo"
           python ./container/render.py \
-              --target=dev \
+              --target=runtime \
               --framework=dynamo \
               --platform=amd64 \
               --cuda-version=${{ env.CUDA_VERSION }} \
@@ -107,7 +107,7 @@ jobs:
         with:
           image_tag: ${{ steps.define_image_tag.outputs.remote_tag }}
           framework: dynamo
-          target: dev
+          target: runtime
           platform: amd64
           cuda_version: ${{ env.CUDA_VERSION }}
           ci_token: ${{ secrets.CI_TOKEN }}
@@ -139,7 +139,7 @@ jobs:
         run: docker pull ${{ env.IMAGE_TAG }}
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
-          docker run --rm -w /workspace/lib/llm \
+          docker run --rm --user root -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             -e SCCACHE_BUCKET=${{ secrets.SCCACHE_S3_BUCKET }} \
             -e SCCACHE_REGION=${{ secrets.AWS_DEFAULT_REGION }} \
@@ -213,14 +213,3 @@ jobs:
           enable_mypy: 'false'
           parallel_mode: 'none'
           dind_as_sidecar: 'false'
-
-  event_file:
-    name: "Event File"
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
-    steps:
-      - name: Upload
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
-        with:
-          name: Event File
-          path: ${{ github.event_path }}

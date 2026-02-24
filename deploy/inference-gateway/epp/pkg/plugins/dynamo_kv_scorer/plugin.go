@@ -59,7 +59,7 @@ typedef struct {
 // Router bindings API
 query_router_result_t create_routers(const char *namespace_c_str,
                                      const char *component_c_str,
-                                     bool enforce_disagg,
+                                     bool decode_fallback,
                                      RouterHandles **out_handle);
 
 query_router_result_t route_prefill_request(RouterHandles *handle,
@@ -110,7 +110,7 @@ var (
 
 	ffiNamespace     string
 	ffiComponent     string
-	ffiEnforceDisagg bool
+	ffiDecodeFallback bool
 
 	routerInitialized bool
 
@@ -122,10 +122,10 @@ var (
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
-	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
+	ffiDecodeFallback = getEnvBoolOrDefault("DYN_DECODE_FALLBACK", false)
 	// Note: model name and kv_cache_block_size are now auto-discovered from the model card
-	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, enforce_disagg=%v\n",
-		ffiNamespace, ffiComponent, ffiEnforceDisagg)
+	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, decode_fallback=%v\n",
+		ffiNamespace, ffiComponent, ffiDecodeFallback)
 }
 
 func getEnvOrDefault(key, def string) string {
@@ -164,7 +164,7 @@ func initFFI() error {
 		rc := C.create_routers(
 			ns,
 			cm,
-			C.bool(ffiEnforceDisagg),
+			C.bool(ffiDecodeFallback),
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {

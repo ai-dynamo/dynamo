@@ -62,12 +62,21 @@ impl Client {
         );
         let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
 
-        let (avail_tx, avail_rx) = tokio::sync::watch::channel(vec![]);
+        // Seed instance_avail from the current instance_source snapshot so that
+        // callers who proceed immediately after wait_for_instances (which reads
+        // instance_source directly) will also find instances in instance_avail
+        // (which is read by the routing methods like random/round_robin).
+        let initial_ids: Vec<u64> = instance_source
+            .borrow()
+            .iter()
+            .map(|instance| instance.id())
+            .collect();
+        let (avail_tx, avail_rx) = tokio::sync::watch::channel(initial_ids.clone());
         let client = Client {
             endpoint: endpoint.clone(),
             instance_source: instance_source.clone(),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
+            instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
             reconcile_interval,

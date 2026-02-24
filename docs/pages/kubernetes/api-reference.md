@@ -10,6 +10,8 @@
 
 ## Packages
 - [nvidia.com/v1alpha1](#nvidiacomv1alpha1)
+- [nvidia.com/v1beta1](#nvidiacomv1beta1)
+- [operator.config.dynamo.nvidia.com/v1alpha1](#operatorconfigdynamonvidiacomv1alpha1)
 
 
 ## nvidia.com/v1alpha1
@@ -474,6 +476,10 @@ Lifecycle:
 
 The spec becomes immutable once profiling starts. Users must delete and recreate
 the DGDR to modify configuration after this point.
+
+DEPRECATION NOTICE: v1alpha1 DynamoGraphDeploymentRequest is deprecated.
+Please migrate to nvidia.com/v1beta1 DynamoGraphDeploymentRequest.
+v1alpha1 will be removed in a future release.
 
 
 
@@ -1204,6 +1210,853 @@ _Appears in:_
 | `name` _string_ | Name references a PVC name defined in the top-level PVCs map |  | Required: \{\} <br /> |
 | `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />a backend-specific default will be used. |  |  |
 | `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />When true, backend-specific environment variables will be set and default mount points may be used. | false |  |
+
+
+
+## nvidia.com/v1beta1
+
+Package v1beta1 contains API Schema definitions for the nvidia.com v1beta1 API group.
+
+### Resource Types
+- [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
+
+
+
+#### BackendType
+
+_Underlying type:_ _string_
+
+BackendType specifies the inference backend.
+
+_Validation:_
+- Enum: [auto sglang trtllm vllm]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description |
+| --- | --- |
+| `auto` |  |
+| `sglang` |  |
+| `trtllm` |  |
+| `vllm` |  |
+
+
+#### DGDRPhase
+
+_Underlying type:_ _string_
+
+DGDRPhase represents the lifecycle phase of a DynamoGraphDeploymentRequest.
+
+_Validation:_
+- Enum: [Pending Profiling Ready Deploying Deployed Failed]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` |  |
+| `Profiling` |  |
+| `Ready` |  |
+| `Deploying` |  |
+| `Deployed` |  |
+| `Failed` |  |
+
+
+#### DeploymentInfoStatus
+
+
+
+DeploymentInfoStatus tracks the state of the deployed DynamoGraphDeployment.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | Replicas is the desired number of replicas. |  | Optional: \{\} <br /> |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of replicas that are available and ready. |  | Optional: \{\} <br /> |
+
+
+#### v1beta1 DynamoGraphDeploymentRequest
+
+
+
+DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
+It provides a simplified, SLA-driven interface for deploying inference models on Dynamo.
+Users specify a model and optional performance targets; the controller handles profiling,
+configuration selection, and deployment.
+
+Lifecycle:
+ 1. Pending: Spec validated, preparing for profiling
+ 2. Profiling: Profiling job is running to discover optimal configurations
+ 3. Ready: Profiling complete, generated DGD spec available in status
+ 4. Deploying: DGD is being created and rolled out (when autoApply=true)
+ 5. Deployed: DGD is running and healthy
+ 6. Failed: An unrecoverable error occurred
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
+| `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  |  |
+| `status` _[DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)_ | Status reflects the current observed state of this deployment request. |  |  |
+
+
+#### v1beta1 DynamoGraphDeploymentRequestSpec
+
+
+
+DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+Only the Model field is required; all other fields are optional and have sensible defaults.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />Can be a HuggingFace ID or a private model name. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br />Optional: \{\} <br /> |
+| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/dynamo-runtime:latest"<br />backend type automatically; backend images can be overridden via overrides.dgd. |  | Optional: \{\} <br /> |
+| `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights.<br />When provided, weights are loaded from the PVC instead of downloading from HuggingFace. |  | Optional: \{\} <br /> |
+| `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment.<br />Typically auto-filled by the operator from cluster discovery. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the expected workload characteristics for SLA-based profiling. |  | Optional: \{\} <br /> |
+| `sla` _[SLASpec](#slaspec)_ | SLA defines service-level agreement targets that drive profiling optimization. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#overridesspec)_ | Overrides allows customizing the profiling job and the generated DynamoGraphDeployment. |  | Optional: \{\} <br /> |
+| `features` _[FeaturesSpec](#featuresspec)_ | Features controls optional Dynamo platform features in the generated deployment. |  | Optional: \{\} <br /> |
+| `searchStrategy` _[SearchStrategy](#searchstrategy)_ | SearchStrategy controls the profiling search depth.<br />"rapid" performs a fast sweep; "thorough" explores more configurations. | rapid | Enum: [rapid thorough] <br />Optional: \{\} <br /> |
+| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, the generated spec is stored in status<br />for manual review and application. | true | Optional: \{\} <br /> |
+
+
+#### v1beta1 DynamoGraphDeploymentRequestStatus
+
+
+
+DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[DGDRPhase](#dgdrphase)_ | Phase is the high-level lifecycle phase of the deployment request. |  | Enum: [Pending Profiling Ready Deploying Deployed Failed] <br />Optional: \{\} <br /> |
+| `profilingPhase` _[ProfilingPhase](#profilingphase)_ | ProfilingPhase indicates the current sub-phase of the profiling pipeline.<br />Only meaningful when Phase is "Profiling". Cleared when profiling completes or fails. |  | Enum: [Initializing SweepingPrefill SweepingDecode SelectingConfig BuildingCurves GeneratingDGD Done] <br />Optional: \{\} <br /> |
+| `dgdName` _string_ | DGDName is the name of the generated or created DynamoGraphDeployment. |  | Optional: \{\} <br /> |
+| `profilingJobName` _string_ | ProfilingJobName is the name of the Kubernetes Job running the profiler. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validated, ProfilingComplete, DeploymentReady. |  | Optional: \{\} <br /> |
+| `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the output of the profiling process including<br />Pareto-optimal configurations and the selected deployment configuration. |  | Optional: \{\} <br /> |
+| `deploymentInfo` _[DeploymentInfoStatus](#deploymentinfostatus)_ | DeploymentInfo tracks the state of the deployed DynamoGraphDeployment.<br />Populated when a DGD has been created (either via autoApply or manually). |  | Optional: \{\} <br /> |
+| `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
+
+
+#### FeaturesSpec
+
+
+
+FeaturesSpec controls optional Dynamo platform features in the generated deployment.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner is the raw SLA planner configuration passed to the planner service.<br />Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.<br />Go treats this as opaque bytes; the Planner service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
+| `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
+
+
+#### HardwareSpec
+
+
+
+HardwareSpec describes the hardware resources available for profiling and deployment.
+These fields are typically auto-filled by the operator from cluster discovery.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `gpuSku` _string_ | GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB"). |  | Optional: \{\} <br /> |
+| `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
+| `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
+| `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
+
+
+
+
+#### MockerSpec
+
+
+
+MockerSpec configures the simulated (mocker) backend.
+
+
+
+_Appears in:_
+- [FeaturesSpec](#featuresspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled indicates whether to deploy mocker workers instead of real inference workers.<br />Useful for large-scale testing without GPUs. |  | Optional: \{\} <br /> |
+
+
+#### ModelCacheSpec
+
+
+
+ModelCacheSpec references a PVC containing pre-downloaded model weights.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pvcName` _string_ | PVCName is the name of the PersistentVolumeClaim containing model weights.<br />The PVC must exist in the same namespace as the DGDR. |  | Optional: \{\} <br /> |
+| `pvcModelPath` _string_ | PVCModelPath is the path to the model checkpoint directory within the PVC<br />(e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8"). |  | Optional: \{\} <br /> |
+| `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache | Optional: \{\} <br /> |
+
+
+#### OptimizationType
+
+_Underlying type:_ _string_
+
+OptimizationType specifies the profiling optimization strategy.
+
+_Validation:_
+- Enum: [latency throughput]
+
+_Appears in:_
+- [SLASpec](#slaspec)
+
+| Field | Description |
+| --- | --- |
+| `latency` |  |
+| `throughput` |  |
+
+
+#### OverridesSpec
+
+
+
+OverridesSpec allows customizing the profiling job and the generated DynamoGraphDeployment.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob allows overriding the profiling Job specification.<br />Fields set here are merged into the controller-generated Job spec. |  | Optional: \{\} <br /> |
+| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment<br />to use as the base for the generated deployment. Fields from profiling results<br />are merged on top. Use this to override backend worker images.<br />The field is stored as a raw embedded resource rather than a typed<br />*v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already<br />imports v1beta1 as the conversion hub and Go does not allow import cycles.<br />The EmbeddedResource marker tells the API server to validate that the value is a<br />well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it<br />is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,<br />kind, and field schema) is performed by the controller during reconciliation. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+
+
+#### ParetoConfig
+
+
+
+ParetoConfig represents a single Pareto-optimal deployment configuration
+discovered during profiling.
+
+
+
+_Appears in:_
+- [ProfilingResultsStatus](#profilingresultsstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `config` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Config is the full deployment configuration for this Pareto point. |  | Type: object <br /> |
+
+
+#### ProfilingPhase
+
+_Underlying type:_ _string_
+
+ProfilingPhase represents a sub-phase within the profiling pipeline.
+When the DGDR Phase is "Profiling", this value indicates which step
+of the profiling pipeline is currently executing.
+
+_Validation:_
+- Enum: [Initializing SweepingPrefill SweepingDecode SelectingConfig BuildingCurves GeneratingDGD Done]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+
+| Field | Description |
+| --- | --- |
+| `Initializing` | Profiler is loading the DGD template, detecting GPU hardware,<br />and resolving the model architecture from HuggingFace.<br /> |
+| `SweepingPrefill` | Sweeping parallelization strategies (TP/TEP/DEP) across GPU counts<br />for prefill, measuring TTFT at each configuration.<br /> |
+| `SweepingDecode` | Sweeping parallelization strategies and concurrency levels<br />for decode, measuring ITL at each configuration.<br /> |
+| `SelectingConfig` | Filtering results against SLA targets and selecting the most<br />cost-efficient configuration that meets TTFT/ITL requirements.<br /> |
+| `BuildingCurves` | Building detailed interpolation curves (ISL→TTFT for prefill,<br />KV-usage×context-length→ITL for decode) using the selected configs.<br /> |
+| `GeneratingDGD` | Packaging profiling data into a ConfigMap and generating<br />the final DGD YAML with planner integration.<br /> |
+| `Done` | Profiling pipeline finished successfully.<br /> |
+
+
+#### ProfilingResultsStatus
+
+
+
+ProfilingResultsStatus contains the output of the profiling process.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pareto` _[ParetoConfig](#paretoconfig) array_ | Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.<br />Each entry represents a different cost/performance trade-off. |  | Optional: \{\} <br /> |
+| `selectedConfig` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | SelectedConfig is the recommended configuration chosen by the profiler<br />based on the SLA targets. This is the configuration used for deployment<br />when autoApply is true. |  | Type: object <br />Optional: \{\} <br /> |
+
+
+#### SLASpec
+
+
+
+SLASpec defines the service-level agreement targets for profiling optimization.
+Exactly one mode should be active: ttft+itl (default), e2eLatency, or optimizationType.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `optimizationType` _[OptimizationType](#optimizationtype)_ | OptimizationType controls the profiling optimization strategy.<br />Use when explicit SLA targets (ttft+itl or e2eLatency) are not known. |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
+| `ttft` _float_ | TTFT is the Time To First Token target in milliseconds. |  | Optional: \{\} <br /> |
+| `itl` _float_ | ITL is the Inter-Token Latency target in milliseconds. |  | Optional: \{\} <br /> |
+| `e2eLatency` _float_ | E2ELatency is the target end-to-end request latency in milliseconds.<br />Alternative to specifying TTFT + ITL. |  | Optional: \{\} <br /> |
+
+
+#### SearchStrategy
+
+_Underlying type:_ _string_
+
+SearchStrategy controls the profiling search depth.
+
+_Validation:_
+- Enum: [rapid thorough]
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description |
+| --- | --- |
+| `rapid` |  |
+| `thorough` |  |
+
+
+#### WorkloadSpec
+
+
+
+WorkloadSpec defines the workload characteristics for SLA-based profiling.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `isl` _integer_ | ISL is the Input Sequence Length (number of tokens). | 4000 | Optional: \{\} <br /> |
+| `osl` _integer_ | OSL is the Output Sequence Length (number of tokens). | 1000 | Optional: \{\} <br /> |
+| `concurrency` _float_ | Concurrency is the target concurrency level.<br />Required (or RequestRate) when the planner is disabled. |  | Optional: \{\} <br /> |
+| `requestRate` _float_ | RequestRate is the target request rate (req/s).<br />Required (or Concurrency) when the planner is disabled. |  | Optional: \{\} <br /> |
+
+
+
+## operator.config.dynamo.nvidia.com/v1alpha1
+
+
+### Resource Types
+- [OperatorConfiguration](#operatorconfiguration)
+
+
+
+#### CheckpointConfiguration
+
+
+
+CheckpointConfiguration holds checkpoint/restore settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
+| `readyForCheckpointFilePath` _string_ | ReadyForCheckpointFilePath signals model readiness for checkpoint jobs | /tmp/ready-for-checkpoint |  |
+| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage holds storage backend configuration |  |  |
+
+
+#### CheckpointOCIConfig
+
+
+
+CheckpointOCIConfig holds OCI registry storage configuration.
+
+
+
+_Appears in:_
+- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uri` _string_ | URI is the OCI URI (oci://registry/repository) |  |  |
+| `credentialsSecretRef` _string_ | CredentialsSecretRef is the name of the docker config secret |  |  |
+
+
+#### CheckpointPVCConfig
+
+
+
+CheckpointPVCConfig holds PVC storage configuration.
+
+
+
+_Appears in:_
+- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pvcName` _string_ | PVCName is the name of the PVC | chrek-pvc |  |
+| `basePath` _string_ | BasePath is the base directory within the PVC | /checkpoints |  |
+
+
+#### CheckpointS3Config
+
+
+
+CheckpointS3Config holds S3 storage configuration.
+
+
+
+_Appears in:_
+- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uri` _string_ | URI is the S3 URI (s3://[endpoint/]bucket/prefix) |  |  |
+| `credentialsSecretRef` _string_ | CredentialsSecretRef is the name of the credentials secret |  |  |
+
+
+#### CheckpointStorageConfiguration
+
+
+
+CheckpointStorageConfiguration holds storage backend configuration for checkpoints.
+
+
+
+_Appears in:_
+- [CheckpointConfiguration](#checkpointconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _string_ | Type is the storage backend type: pvc, s3, or oci | pvc |  |
+| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration (used when Type=pvc) |  |  |
+| `s3` _[CheckpointS3Config](#checkpoints3config)_ | S3 configuration (used when Type=s3) |  |  |
+| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration (used when Type=oci) |  |  |
+
+
+#### DiscoveryBackend
+
+_Underlying type:_ _string_
+
+DiscoveryBackend is the type for the discovery backend.
+
+
+
+_Appears in:_
+- [DiscoveryConfiguration](#discoveryconfiguration)
+
+| Field | Description |
+| --- | --- |
+| `kubernetes` | DiscoveryBackendKubernetes is the Kubernetes discovery backend<br /> |
+| `etcd` | DiscoveryBackendEtcd is the etcd discovery backend<br /> |
+
+
+#### DiscoveryConfiguration
+
+
+
+DiscoveryConfiguration holds discovery backend settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `backend` _[DiscoveryBackend](#discoverybackend)_ | Backend is the discovery backend: "kubernetes" or "etcd" | kubernetes |  |
+
+
+#### GPUConfiguration
+
+
+
+GPUConfiguration holds GPU discovery settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `discoveryEnabled` _boolean_ | DiscoveryEnabled indicates whether GPU discovery is enabled | true |  |
+
+
+#### GroveConfiguration
+
+
+
+GroveConfiguration holds Grove orchestrator settings.
+
+
+
+_Appears in:_
+- [OrchestratorConfiguration](#orchestratorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  |  |
+| `terminationDelay` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | TerminationDelay configures the termination delay for Grove PodCliqueSets | 15m |  |
+
+
+#### InfrastructureConfiguration
+
+
+
+InfrastructureConfiguration holds service mesh and backend addresses.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `natsAddress` _string_ | NATSAddress is the address of the NATS server |  |  |
+| `etcdAddress` _string_ | ETCDAddress is the address of the etcd server |  |  |
+| `modelExpressURL` _string_ | ModelExpressURL is the URL of the Model Express server to inject into all pods |  |  |
+| `prometheusEndpoint` _string_ | PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics |  |  |
+
+
+#### IngressConfiguration
+
+
+
+IngressConfiguration holds ingress settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `virtualServiceGateway` _string_ | VirtualServiceGateway is the name of the Istio virtual service gateway |  |  |
+| `controllerClassName` _string_ | ControllerClassName is the ingress controller class name |  |  |
+| `controllerTLSSecretName` _string_ | ControllerTLSSecretName is the TLS secret for the ingress controller |  |  |
+| `hostSuffix` _string_ | HostSuffix is the suffix for ingress hostnames |  |  |
+
+
+#### KaiSchedulerConfiguration
+
+
+
+KaiSchedulerConfiguration holds Kai-scheduler settings.
+
+
+
+_Appears in:_
+- [OrchestratorConfiguration](#orchestratorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  |  |
+
+
+#### LWSConfiguration
+
+
+
+LWSConfiguration holds LWS orchestrator settings.
+
+
+
+_Appears in:_
+- [OrchestratorConfiguration](#orchestratorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  |  |
+
+
+#### LeaderElectionConfiguration
+
+
+
+LeaderElectionConfiguration holds leader election settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled enables leader election for controller manager | false |  |
+| `id` _string_ | ID is the leader election resource identity |  |  |
+| `namespace` _string_ | Namespace is the namespace for the leader election resource |  |  |
+
+
+#### LoggingConfiguration
+
+
+
+LoggingConfiguration holds logging settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `level` _string_ | Level is the log level (e.g., "info", "debug") | info |  |
+| `format` _string_ | Format is the log format (e.g., "json", "text") | json |  |
+
+
+#### MPIConfiguration
+
+
+
+MPIConfiguration holds MPI SSH secret settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `sshSecretName` _string_ | SSHSecretName is the name of the secret containing the SSH key for MPI |  |  |
+| `sshSecretNamespace` _string_ | SSHSecretNamespace is the namespace where the MPI SSH secret is located |  |  |
+
+
+#### MetricsServer
+
+
+
+MetricsServer extends Server with secure serving option.
+
+
+
+_Appears in:_
+- [ServerConfiguration](#serverconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `bindAddress` _string_ | BindAddress is the address the server binds to |  |  |
+| `port` _integer_ | Port is the port the server listens on |  |  |
+| `secure` _boolean_ | Secure enables secure serving for the metrics endpoint |  |  |
+
+
+#### NamespaceConfiguration
+
+
+
+NamespaceConfiguration determines operator namespace mode.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `restricted` _string_ | Restricted is the namespace to restrict to. Empty = cluster-wide mode. |  |  |
+| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Scope holds namespace scope lease settings (namespace-restricted mode only) |  |  |
+
+
+#### NamespaceScopeConfiguration
+
+
+
+NamespaceScopeConfiguration holds lease settings for namespace-restricted mode.
+
+
+
+_Appears in:_
+- [NamespaceConfiguration](#namespaceconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `leaseDuration` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | LeaseDuration is the duration of namespace scope marker lease before expiration | 30s |  |
+| `leaseRenewInterval` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | LeaseRenewInterval is the interval for renewing namespace scope marker lease | 10s |  |
+
+
+#### OperatorConfiguration
+
+
+
+OperatorConfiguration is the Schema for the operator configuration.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `operator.config.dynamo.nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `OperatorConfiguration` | | |
+| `server` _[ServerConfiguration](#serverconfiguration)_ | Server configuration (metrics, health probes, webhooks) |  |  |
+| `leaderElection` _[LeaderElectionConfiguration](#leaderelectionconfiguration)_ | Leader election configuration |  |  |
+| `namespace` _[NamespaceConfiguration](#namespaceconfiguration)_ | Namespace configuration (restricted vs cluster-wide) |  |  |
+| `orchestrators` _[OrchestratorConfiguration](#orchestratorconfiguration)_ | Orchestrator configuration with optional overrides |  |  |
+| `infrastructure` _[InfrastructureConfiguration](#infrastructureconfiguration)_ | Service mesh and infrastructure addresses |  |  |
+| `ingress` _[IngressConfiguration](#ingressconfiguration)_ | Ingress configuration |  |  |
+| `rbac` _[RBACConfiguration](#rbacconfiguration)_ | RBAC configuration for cross-namespace resource management (cluster-wide mode) |  |  |
+| `mpi` _[MPIConfiguration](#mpiconfiguration)_ | MPI SSH secret configuration |  |  |
+| `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  |  |
+| `discovery` _[DiscoveryConfiguration](#discoveryconfiguration)_ | Discovery backend configuration |  |  |
+| `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  |  |
+| `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  |  |
+| `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  |  |
+
+
+#### OrchestratorConfiguration
+
+
+
+OrchestratorConfiguration holds orchestrator override settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `grove` _[GroveConfiguration](#groveconfiguration)_ | Grove orchestrator configuration |  |  |
+| `lws` _[LWSConfiguration](#lwsconfiguration)_ | LWS orchestrator configuration |  |  |
+| `kaiScheduler` _[KaiSchedulerConfiguration](#kaischedulerconfiguration)_ | KaiScheduler configuration |  |  |
+
+
+#### RBACConfiguration
+
+
+
+RBACConfiguration holds RBAC settings for cluster-wide mode.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `plannerClusterRoleName` _string_ | PlannerClusterRoleName is the ClusterRole for planner |  |  |
+| `dgdrProfilingClusterRoleName` _string_ | DGDRProfilingClusterRoleName is the ClusterRole for DGDR profiling jobs |  |  |
+| `eppClusterRoleName` _string_ | EPPClusterRoleName is the ClusterRole for EPP |  |  |
+
+
+#### SecurityConfiguration
+
+
+
+SecurityConfiguration holds HTTP/2 and TLS settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enableHTTP2` _boolean_ | EnableHTTP2 enables HTTP/2 for metrics and webhook servers | false |  |
+
+
+#### Server
+
+
+
+Server holds a bind address and port.
+
+
+
+_Appears in:_
+- [MetricsServer](#metricsserver)
+- [ServerConfiguration](#serverconfiguration)
+- [WebhookServer](#webhookserver)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `bindAddress` _string_ | BindAddress is the address the server binds to |  |  |
+| `port` _integer_ | Port is the port the server listens on |  |  |
+
+
+#### ServerConfiguration
+
+
+
+ServerConfiguration holds server bind addresses and ports.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `metrics` _[MetricsServer](#metricsserver)_ | Metrics server configuration | \{ bindAddress:127.0.0.1 port:8080 \} |  |
+| `healthProbe` _[Server](#server)_ | Health probe server configuration | \{ bindAddress:0.0.0.0 port:8081 \} |  |
+| `webhook` _[WebhookServer](#webhookserver)_ | Webhook server configuration | \{ certDir:/tmp/k8s-webhook-server/serving-certs host:0.0.0.0 port:9443 \} |  |
+
+
+#### WebhookServer
+
+
+
+WebhookServer extends Server with host and certificate directory.
+
+
+
+_Appears in:_
+- [ServerConfiguration](#serverconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `bindAddress` _string_ | BindAddress is the address the server binds to |  |  |
+| `port` _integer_ | Port is the port the server listens on |  |  |
+| `host` _string_ | Host is the address the webhook server binds to |  |  |
+| `certDir` _string_ | CertDir is the directory containing TLS certificates |  |  |
 
 
 # Operator Default Values Injection
