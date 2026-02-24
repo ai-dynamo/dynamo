@@ -32,10 +32,6 @@ logger = logging.getLogger(__name__)
 # Published container image naming conventions
 # ---------------------------------------------------------------------------
 
-# The image-name component of the published Dynamo frontend image.
-# e.g. nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0
-FRONTEND_IMAGE_NAME = "dynamo-frontend"
-
 # Mapping from backend name to the image-name component of the published
 # backend runtime image.
 # e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
@@ -46,24 +42,26 @@ BACKEND_IMAGE_NAMES: dict[str, str] = {
 }
 
 
-def derive_backend_image(frontend_image: str, backend: str) -> str:
-    """Derive the backend worker image from the frontend image.
+def derive_backend_image(profiler_image: str, backend: str) -> str:
+    """Derive the backend worker image from the profiler image.
 
-    The frontend image must contain ``dynamo-frontend`` in its name.  The
-    backend image is derived by replacing that component with the appropriate
-    backend runtime image name, preserving the registry path and tag.
+    Replaces the image name (the last ``/``-delimited component, before any
+    ``:tag``) with the backend-specific runtime image name, preserving the
+    registry path and tag unchanged.
 
-    Example::
+    Examples::
 
         derive_backend_image(
             "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0", "vllm"
         )
         # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
 
+        derive_backend_image("myregistry.io/sglang-runtime:1.0.0", "sglang")
+        # → "myregistry.io/sglang-runtime:1.0.0"
+
     Args:
-        frontend_image: The frontend container image.  Must contain
-            ``'dynamo-frontend'`` (e.g.
-            ``nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0``).
+        profiler_image: Any Docker image reference of the form
+            ``[REGISTRY/]NAME[:TAG]``.
         backend: The resolved backend type (``'vllm'``, ``'sglang'``, or
             ``'trtllm'``).
 
@@ -71,8 +69,7 @@ def derive_backend_image(frontend_image: str, backend: str) -> str:
         The backend container image string.
 
     Raises:
-        ValueError: If *backend* is not a recognised backend, or if
-            *frontend_image* does not follow the expected naming convention.
+        ValueError: If *backend* is not a recognised backend.
     """
     backend_image_name = BACKEND_IMAGE_NAMES.get(backend)
     if backend_image_name is None:
@@ -80,14 +77,17 @@ def derive_backend_image(frontend_image: str, backend: str) -> str:
             f"Cannot derive backend image for unknown backend '{backend}'. "
             f"Supported backends: {list(BACKEND_IMAGE_NAMES.keys())}"
         )
-    if FRONTEND_IMAGE_NAME not in frontend_image:
-        raise ValueError(
-            f"Image '{frontend_image}' does not contain '{FRONTEND_IMAGE_NAME}'. "
-            f"The profiler expects the 'image' field to reference the published "
-            f"Dynamo frontend image "
-            f"(e.g. nvcr.io/nvidia/ai-dynamo/{FRONTEND_IMAGE_NAME}:<tag>)."
-        )
-    return frontend_image.replace(FRONTEND_IMAGE_NAME, backend_image_name)
+
+    # Split off the last path component: "registry/path/name:tag" → "name:tag"
+    slash_idx = profiler_image.rfind("/")
+    prefix = profiler_image[: slash_idx + 1] if slash_idx >= 0 else ""
+    suffix = profiler_image[slash_idx + 1 :]
+
+    # Preserve the tag if present: "name:tag" → ":tag"
+    colon_idx = suffix.find(":")
+    tag = suffix[colon_idx:] if colon_idx >= 0 else ""
+
+    return f"{prefix}{backend_image_name}{tag}"
 
 
 # ---------------------------------------------------------------------------

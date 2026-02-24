@@ -33,7 +33,6 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     SLASpec,
     WorkloadSpec,
 )
-from dynamo.profiler.utils.profile_common import FRONTEND_IMAGE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +74,6 @@ def _validate_required_fields(dgdr: DynamoGraphDeploymentRequestSpec) -> None:
     """Check fields the profiler treats as required."""
     if not dgdr.image:
         raise ValueError("'image' is required in the DGDR spec.")
-
-    if FRONTEND_IMAGE_NAME not in dgdr.image:
-        raise ValueError(
-            f"'image' must reference the published Dynamo frontend image. "
-            f"Expected the image name to contain '{FRONTEND_IMAGE_NAME}' "
-            f"(e.g. nvcr.io/nvidia/ai-dynamo/{FRONTEND_IMAGE_NAME}:<tag>), "
-            f"got: '{dgdr.image}'."
-        )
 
     if not dgdr.hardware:
         raise ValueError("'hardware' is required in the DGDR spec.")
