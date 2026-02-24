@@ -135,13 +135,11 @@ impl SchedulerQueue {
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load → select worker → respond → book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest) {
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens(
-                request.token_seq.clone(),
-                request.isl_tokens,
-                request.overlaps.clone(),
-            );
+        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
+            request.token_seq.clone(),
+            request.isl_tokens,
+            request.overlaps.clone(),
+        );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
 

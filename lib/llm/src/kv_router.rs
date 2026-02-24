@@ -486,14 +486,13 @@ impl KvRouter {
         self.scheduler.worker_type()
     }
 
-    pub async fn add_output_block(
+    pub fn add_output_block(
         &self,
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
         self.scheduler
             .add_output_block(request_id, decay_fraction)
-            .await
     }
 
     pub fn block_size(&self) -> u32 {
@@ -530,8 +529,7 @@ impl KvRouter {
 
         Ok(self
             .scheduler
-            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores)
-            .await)
+            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores))
     }
 
     /// Dump all events from the indexer

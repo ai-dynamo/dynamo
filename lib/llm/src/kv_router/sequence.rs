@@ -373,7 +373,7 @@ pub struct ActiveSequencesMultiWorker {
     block_size: usize,
     router_id: u64,
     event_publisher: EventPublisher,
-    metrics_publisher: EventPublisher,
+    metrics_publisher: Arc<EventPublisher>,
     replica_sync: bool,
     worker_type: &'static str,
 }
@@ -404,8 +404,9 @@ impl ActiveSequencesMultiWorker {
 
         let event_publisher =
             EventPublisher::for_component(&component, ACTIVE_SEQUENCES_SUBJECT).await?;
-        let metrics_publisher =
-            EventPublisher::for_namespace(component.namespace(), KV_METRICS_SUBJECT).await?;
+        let metrics_publisher = Arc::new(
+            EventPublisher::for_namespace(component.namespace(), KV_METRICS_SUBJECT).await?,
+        );
 
         let multi_worker = Self {
             workers: workers.clone(),
@@ -642,7 +643,7 @@ impl ActiveSequencesMultiWorker {
             self.request_to_lora.remove(expired_id);
         }
 
-        self.publish_active_load_for_worker(worker).await;
+        self.publish_active_load_for_worker(worker);
 
         Ok(())
     }
@@ -693,7 +694,7 @@ impl ActiveSequencesMultiWorker {
             self.request_to_lora.remove(request_id);
         }
 
-        self.publish_active_load_for_worker(worker).await;
+        self.publish_active_load_for_worker(worker);
 
         Ok(())
     }
@@ -742,7 +743,7 @@ impl ActiveSequencesMultiWorker {
     ///
     /// This is used during generation to track output blocks as they are created.
     /// The decay_fraction represents how "temporary" the block is based on generation progress.
-    pub async fn add_output_block(
+    pub fn add_output_block(
         &self,
         request_id: &RequestId,
         decay_fraction: Option<f64>,
@@ -769,13 +770,14 @@ impl ActiveSequencesMultiWorker {
             });
         }
 
-        self.publish_active_load_for_worker(worker).await;
+        self.publish_active_load_for_worker(worker);
 
         Ok(())
     }
 
-    /// Read active blocks/tokens from a worker and publish ActiveLoad metrics
-    async fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank) {
+    /// Read active blocks/tokens from a worker and publish ActiveLoad metrics.
+    /// The NATS publish is spawned as a background task to avoid blocking the caller.
+    fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank) {
         let (active_blocks, active_tokens) = {
             let Some(entry) = self.workers.get(&worker) else {
                 tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
@@ -799,9 +801,12 @@ impl ActiveSequencesMultiWorker {
             active_prefill_tokens: Some(active_tokens as u64),
         };
 
-        if let Err(e) = self.metrics_publisher.publish(&active_load).await {
-            tracing::trace!("Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}");
-        }
+        let publisher = self.metrics_publisher.clone();
+        tokio::spawn(async move {
+            if let Err(e) = publisher.publish(&active_load).await {
+                tracing::trace!("Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}");
+            }
+        });
     }
 
     /// Get the number of workers

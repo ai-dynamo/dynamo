@@ -272,17 +272,16 @@ impl KvScheduler {
         self.slots.worker_type()
     }
 
-    pub async fn add_output_block(
+    pub fn add_output_block(
         &self,
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
         self.slots
             .add_output_block(&request_id.to_string(), decay_fraction)
-            .await
     }
 
-    pub async fn get_potential_loads(
+    pub fn get_potential_loads(
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
