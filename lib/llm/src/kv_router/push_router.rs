@@ -108,7 +108,6 @@ impl RequestGuard {
                 if let Err(e) = self
                     .chooser
                     .add_output_block(&self.context_id, decay_fraction)
-                    .await
                 {
                     tracing::warn!(
                         "Failed to add output block for request {}: {e}",
