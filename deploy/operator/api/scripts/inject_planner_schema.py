@@ -91,8 +91,33 @@ def _resolve_refs(schema: dict, defs: dict) -> dict:
     return result
 
 
+def _flatten_nullable_anyof(schema: dict) -> dict:
+    """Convert Pydantic nullable anyOf patterns to K8s-compatible schemas.
+
+    Pydantic emits ``anyOf: [{type: "X"}, {type: "null"}]`` for
+    ``Optional[X]`` fields.  Kubernetes structural schemas reject
+    ``type: "null"`` entirely.  This function collapses such patterns
+    into a plain ``type: "X"`` (the field is already optional via
+    ``omitempty`` in the Go struct tag).
+    """
+    if "anyOf" in schema:
+        any_of = schema["anyOf"]
+        non_null = [branch for branch in any_of if branch.get("type") != "null"]
+        if len(non_null) == 1 and len(any_of) == 2:
+            # Simple nullable: anyOf: [{type: X, ...}, {type: null}]
+            merged = {k: v for k, v in schema.items() if k != "anyOf"}
+            for k, v in non_null[0].items():
+                merged.setdefault(k, v)
+            # Remove default: null — K8s doesn't support null defaults
+            if merged.get("default") is None and "default" in merged:
+                del merged["default"]
+            return merged
+    return schema
+
+
 def _clean_for_k8s(schema: dict) -> dict:
     """Strip Pydantic-specific keys that Kubernetes does not understand."""
+    schema = _flatten_nullable_anyof(schema)
     result: dict = {}
     for key, value in schema.items():
         if key in _STRIP_KEYS:

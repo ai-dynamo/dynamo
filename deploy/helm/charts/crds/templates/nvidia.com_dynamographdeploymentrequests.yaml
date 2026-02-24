@@ -632,18 +632,16 @@ spec:
 
                       The presence of this field (non-null) enables the planner in the generated DGD.'
                     properties:
-                      plannerPreDeploymentSweeping:
-                        anyOf:
-                        - enum:
-                          - none
-                          - rapid
-                          - thorough
-                          type: string
-                        - type: 'null'
+                      pre_deployment_sweeping_mode:
                         default: rapid
                         description: Controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no
                           pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine
                           performance. "thorough" uses real GPUs to measure engine performance (takes several hours).
+                        enum:
+                        - none
+                        - rapid
+                        - thorough
+                        type: string
                       environment:
                         default: kubernetes
                         enum:
@@ -673,10 +671,7 @@ spec:
                         default: false
                         type: boolean
                       log_dir:
-                        anyOf:
-                        - type: string
-                        - type: 'null'
-                        default: null
+                        type: string
                       throughput_adjustment_interval:
                         default: 180
                         type: integer
@@ -687,15 +682,9 @@ spec:
                         default: 1
                         type: integer
                       decode_engine_num_gpu:
-                        anyOf:
-                        - type: integer
-                        - type: 'null'
-                        default: null
+                        type: integer
                       prefill_engine_num_gpu:
-                        anyOf:
-                        - type: integer
-                        - type: 'null'
-                        default: null
+                        type: integer
                       profile_results_dir:
                         default: profiling_results
                         type: string
@@ -715,10 +704,7 @@ spec:
                         default: 50
                         type: integer
                       load_predictor_warmup_trace:
-                        anyOf:
-                        - type: string
-                        - type: 'null'
-                        default: null
+                        type: string
                       kalman_q_level:
                         default: 1.0
                         type: number
@@ -739,15 +725,9 @@ spec:
                         default: false
                         type: boolean
                       model_name:
-                        anyOf:
-                        - type: string
-                        - type: 'null'
-                        default: null
+                        type: string
                       global_planner_namespace:
-                        anyOf:
-                        - type: string
-                        - type: 'null'
-                        default: null
+                        type: string
                       enable_throughput_scaling:
                         default: true
                         type: boolean
@@ -755,10 +735,7 @@ spec:
                         default: false
                         type: boolean
                       load_router_metrics_url:
-                        anyOf:
-                        - type: string
-                        - type: 'null'
-                        default: null
+                        type: string
                       load_adjustment_interval:
                         default: 5
                         type: integer
