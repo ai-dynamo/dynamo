@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from contextlib import nullcontext
 from typing import List, Optional
 
@@ -22,6 +23,7 @@ from gpu_memory_service import (
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
 )
+from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
 from gpu_memory_service.common.utils import get_socket_path, get_weight_lock_type
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
@@ -179,7 +181,25 @@ class GMSWorker(Worker):
             manager = get_gms_client_memory_manager()
             assert manager is not None, "GMS client is not initialized"
             assert manager.is_unmapped, "GMS weights are not unmapped"
-            manager.remap()
+
+            try:
+                manager.remap(timeout_ms=30_000)
+            except TimeoutError:
+                logger.error(
+                    "Fatal: timed out waiting for GMS RO lock during remap "
+                    "(GMS may be down or RW lock held indefinitely)"
+                )
+                sys.exit(1)
+            except StaleMemoryLayoutError as e:
+                logger.error(
+                    "Fatal: weight layout changed while unmapped, cannot remap: %s", e
+                )
+                sys.exit(1)
+            except ConnectionError as e:
+                logger.error(
+                    "Fatal: cannot connect to GMS during remap: %s", e
+                )
+                sys.exit(1)
 
         if "kv_cache" in tags:
             # Check if KV cache was skipped at startup (shadow engine mode)
