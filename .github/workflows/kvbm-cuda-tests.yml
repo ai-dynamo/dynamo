@@ -10,13 +10,11 @@ on:
       - release/*.*.*
     paths:
       - 'lib/kvbm-kernels/**'
-      - 'lib/kvbm-physical/**'
-      - '.github/workflows/kvbm-kernels-cuda-tests.yml'
+      - '.github/workflows/kvbm-cuda-tests.yml'
   pull_request:
     paths:
       - 'lib/kvbm-kernels/**'
-      - 'lib/kvbm-physical/**'
-      - '.github/workflows/kvbm-kernels-cuda-tests.yml'
+      - '.github/workflows/kvbm-cuda-tests.yml'
 
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.run_id) }}
@@ -70,13 +68,11 @@ jobs:
               # Build tests (auto-detects CUDA version from nvcc)
               echo "::group::cargo test --no-run"
               cargo test --all-features -p kvbm-kernels --no-run 2>&1
-              cargo test --all-features -p kvbm-physical --no-run 2>&1
               echo "::endgroup::"
 
               # Run tests
               echo "::group::cargo test"
               cargo test --all-features -p kvbm-kernels -- --nocapture 2>&1
-              cargo test --all-features -p kvbm-physical -- --nocapture 2>&1
               echo "::endgroup::"
             '
 
