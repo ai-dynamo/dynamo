@@ -376,6 +376,7 @@ class TestVllmRendererApi:
             "trace_headers",
             "resumable",
             "external_req_id",
+            "additional_information",
         )
         actual_request_fields = EngineCoreRequest.__struct_fields__
         assert actual_request_fields == expected_request_fields, (
