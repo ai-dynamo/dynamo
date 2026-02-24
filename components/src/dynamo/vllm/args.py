@@ -425,16 +425,22 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
         raise ValueError(
             "--connector is no longer supported for the vLLM backend. "
             "Use --kv-transfer-config instead.\n"
-            f"  Equivalent: --kv-transfer-config '{equiv}'\n"
-            "See: https://linear.app/nvidia-dynamo/issue/LLM-90"
+            f"  Equivalent: --kv-transfer-config '{equiv}'"
         )
 
     # DYN_CONNECTOR env var set but parsed to empty list
     if env_connector is not None:
+        env_values = [v.strip().lower() for v in env_connector.split() if v.strip()]
+        if env_values and not all(v in ("none", "null") for v in env_values):
+            equiv = _connector_to_kv_transfer_json(env_values)
+            raise ValueError(
+                "The DYN_CONNECTOR environment variable is no longer supported "
+                "for the vLLM backend. Use --kv-transfer-config instead.\n"
+                f"  Equivalent: --kv-transfer-config '{equiv}'"
+            )
         raise ValueError(
             "The DYN_CONNECTOR environment variable is no longer supported "
-            "for the vLLM backend. Use --kv-transfer-config instead.\n"
-            "See: https://linear.app/nvidia-dynamo/issue/LLM-90"
+            "for the vLLM backend. Use --kv-transfer-config instead."
         )
 
 
