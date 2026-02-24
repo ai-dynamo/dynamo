@@ -1007,11 +1007,78 @@ jobs:
           kubectl delete namespace $NAMESPACE || true
           echo "Namespace $NAMESPACE completed."
 
+  ############################## RUST TESTS ###################################
+  rust-tests:
+    name: rust-${{ matrix.dir == '.' && 'root' || matrix.dir }}-coverage
+    runs-on:
+      group: Fastchecker
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm']
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      with:
+        lfs: true
+    - name: Set up system dependencies
+      run: |
+        # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
+        PB_REL="https://github.com/protocolbuffers/protobuf/releases"
+        PROTOC_VER="30.2"
+        PROTOC_ZIP="protoc-${PROTOC_VER}-linux-x86_64.zip"
+        PROTOC_SHA256="327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f"
+        curl -fsSLO "$PB_REL/download/v${PROTOC_VER}/${PROTOC_ZIP}"
+        echo "${PROTOC_SHA256}  ${PROTOC_ZIP}" | sha256sum -c -
+        unzip "${PROTOC_ZIP}" -d $HOME/.local
+        rm "${PROTOC_ZIP}"
+        export PATH="$PATH:$HOME/.local/bin"
+        protoc --version
+    - name: Cache cargo artifacts
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+    - name: Set up Rust Toolchain Components
+      run: rustup component add llvm-tools-preview
+    - name: Install cargo-llvm-cov
+      run: cargo-llvm-cov --version 2>/dev/null || cargo install cargo-llvm-cov --locked
+    # Have an explicit step to build tests first to separate time spent on build vs execution.
+    - name: Compile Tests
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked --no-run
+    - name: Run Unit Tests with Coverage
+      working-directory: ${{ matrix.dir }}
+      # NOTE: --all-targets doesn't run doc tests.
+      # cargo llvm-cov is a drop-in for cargo test; --no-report defers output
+      # so we can generate multiple formats without re-running the tests.
+      run: |
+        cargo llvm-cov --locked --all-targets --no-report
+        cargo llvm-cov report --text --output-path coverage-rust.txt
+        cargo llvm-cov report --lcov --output-path coverage-rust.lcov
+        echo "Coverage summary:"
+        grep "^TOTAL" coverage-rust.txt || tail -3 coverage-rust.txt
+        SAFE_DIR=$(echo "${{ matrix.dir }}" | sed 's|^\.$|root|' | tr '/' '-')
+        echo "RUST_COV_ARTIFACT_NAME=coverage-rust-${SAFE_DIR}-${{ github.run_id }}" >> $GITHUB_ENV
+    - name: Upload Rust Coverage Data
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ${{ env.RUST_COV_ARTIFACT_NAME }}
+        path: |
+          ${{ matrix.dir }}/coverage-rust.txt
+          ${{ matrix.dir }}/coverage-rust.lcov
+        retention-days: 7
+
   ############################## COVERAGE REPORT ##############################
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests]
+    needs: [unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, rust-tests]
     if: inputs.enable_coverage && always()
     permissions:
       contents: write
@@ -1039,7 +1106,7 @@ jobs:
 
       - name: Download All Rust Coverage Artifacts
         uses: actions/download-artifact@v4
-        continue-on-error: true  # Rust tests not yet part of this pipeline; will succeed once added
+        continue-on-error: true
         with:
           pattern: coverage-rust-*
           path: coverage-rust-artifacts/
@@ -1139,7 +1206,7 @@ jobs:
             RUST_TOTAL_COVERAGE="${RUST_TOTAL_COVERAGE:-N/A}"
             echo "Rust line coverage: ${RUST_TOTAL_COVERAGE}"
           else
-            echo "ℹ️  No Rust coverage artifacts found (Rust tests not yet wired into this pipeline)"
+            echo "ℹ️  No Rust coverage artifacts found"
           fi
 
           echo "RUST_TOTAL_COVERAGE=${RUST_TOTAL_COVERAGE}" >> $GITHUB_ENV
