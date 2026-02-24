@@ -66,6 +66,10 @@ impl BlockHandle {
 
 impl Drop for BlockHandle {
     fn drop(&mut self) {
+        tracing::warn!(
+            sequence_hash = self.sequence_hash,
+            "BlockHandle dropped — block unregistered from pool"
+        );
         let _ = self.unregister_tx.send(self.sequence_hash);
     }
 }
@@ -124,11 +128,20 @@ impl BlockRegistry {
 
     pub fn is_registered(&self, sequence_hash: SequenceHash) -> bool {
         let blocks = self.blocks.lock().unwrap();
-        if let Some(handle) = blocks.get(&sequence_hash)
-            && let Some(_handle) = handle.upgrade()
-        {
-            return true;
+        if let Some(handle) = blocks.get(&sequence_hash) {
+            if let Some(_handle) = handle.upgrade() {
+                return true;
+            }
+            tracing::debug!(
+                sequence_hash,
+                "is_registered: hash in map but Weak<BlockHandle> upgrade failed"
+            );
+            return false;
         }
+        tracing::debug!(
+            sequence_hash,
+            "is_registered: hash NOT in blocks map at all"
+        );
         false
     }
 

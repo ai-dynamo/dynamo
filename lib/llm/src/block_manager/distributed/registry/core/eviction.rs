@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
-use super::storage::{PositionalStorageKey, RadixStorage, Storage};
+use super::storage::{FlatStorage, PositionalStorageKey, RadixStorage, Storage};
 
 /// Eviction policy wrapping a storage backend.
 pub trait Eviction<K, V>: Storage<K, V> {
@@ -272,30 +272,31 @@ where
     }
 }
 
-/// Position-aware eviction for RadixStorage.
+/// Position-aware eviction over a pluggable storage backend.
 ///
 /// Evicts entries from highest positions first (tail of sequence),
 /// with FIFO ordering within each position. This is ideal for KV cache
 /// where newer sequence positions are less valuable for prefix matching.
 ///
+/// The storage backend `S` must implement `Storage<K, V>`. Common choices:
+/// - `RadixStorage<K, V>` — position-sharded DashMap (legacy)
+/// - `FlatStorage<K, V>` — flat DashMap (avoids position-sharding bugs)
+///
 /// # Example
 /// ```text
-/// let storage = RadixStorage::new();
-/// let evictable = PositionalEviction::new(storage, 1000);
-///
-/// // Insert entries at various positions
+/// let evictable = PositionalEviction::<Key, Value, FlatStorage<Key, Value>>::with_flat_storage(1000);
 /// evictable.insert(key_at_pos_0, value);
 /// evictable.insert(key_at_pos_100, value);
-///
 /// // Eviction will remove from position 100 first
 /// evictable.evict(1);
 /// ```
-pub struct PositionalEviction<K, V>
+pub struct PositionalEviction<K, V, S = RadixStorage<K, V>>
 where
     K: PositionalStorageKey + Ord + Copy,
     V: Clone + Send + Sync,
+    S: Storage<K, V>,
 {
-    inner: RadixStorage<K, V>,
+    inner: S,
     capacity: usize,
     /// Track insertion order within each position: position -> ordered keys
     insertion_order: RwLock<HashMap<u64, Vec<K>>>,
@@ -305,14 +306,16 @@ where
     last_access: RwLock<HashMap<K, std::time::Instant>>,
     /// Track access count for each key (for LFU-style eviction)
     access_count: RwLock<HashMap<K, u64>>,
+    _phantom: PhantomData<V>,
 }
 
-impl<K, V> PositionalEviction<K, V>
+impl<K, V, S> PositionalEviction<K, V, S>
 where
     K: PositionalStorageKey + Ord + Copy + 'static,
     V: Clone + Send + Sync + 'static,
+    S: Storage<K, V>,
 {
-    pub fn new(storage: RadixStorage<K, V>, capacity: usize) -> Self {
+    pub fn new(storage: S, capacity: usize) -> Self {
         Self {
             inner: storage,
             capacity,
@@ -320,12 +323,39 @@ where
             positions: RwLock::new(BTreeSet::new()),
             last_access: RwLock::new(HashMap::new()),
             access_count: RwLock::new(HashMap::new()),
+            _phantom: PhantomData,
         }
     }
+}
 
+impl<K, V> PositionalEviction<K, V, RadixStorage<K, V>>
+where
+    K: PositionalStorageKey + Ord + Copy + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    /// Create with a `RadixStorage` backend (backward-compatible).
     pub fn with_capacity(capacity: usize) -> Self {
         Self::new(RadixStorage::new(), capacity)
     }
+}
+
+impl<K, V> PositionalEviction<K, V, FlatStorage<K, V>>
+where
+    K: PositionalStorageKey + Ord + Copy + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    /// Create with a `FlatStorage` backend (no position-sharding).
+    pub fn with_flat_storage(capacity: usize) -> Self {
+        Self::new(FlatStorage::with_capacity(capacity), capacity)
+    }
+}
+
+impl<K, V, S> PositionalEviction<K, V, S>
+where
+    K: PositionalStorageKey + Ord + Copy + 'static,
+    V: Clone + Send + Sync + 'static,
+    S: Storage<K, V>,
+{
 
     /// Record an access for a key (used for LRU/LFU tracking).
     ///
@@ -461,7 +491,7 @@ where
             }
         }
 
-        // Phase 3: Remove from RadixStorage (DashMap handles its own shard locking)
+        // Phase 3: Remove from storage backend
         for key in &victims {
             self.inner.remove(key);
         }
@@ -506,10 +536,11 @@ where
     }
 }
 
-impl<K, V> Storage<K, V> for PositionalEviction<K, V>
+impl<K, V, S> Storage<K, V> for PositionalEviction<K, V, S>
 where
     K: PositionalStorageKey + Ord + Copy + 'static,
     V: Clone + Send + Sync + 'static,
+    S: Storage<K, V>,
 {
     fn insert(&self, key: K, value: V) {
         let position = key.position();
@@ -582,7 +613,7 @@ where
         }
         // Locks dropped here
 
-        // Phase 2: Insert into RadixStorage (DashMap handles its own shard locking)
+        // Phase 2: Insert into storage backend
         for (key, value) in entries {
             self.inner.insert(key, value);
         }
@@ -592,10 +623,11 @@ where
     }
 }
 
-impl<K, V> Eviction<K, V> for PositionalEviction<K, V>
+impl<K, V, S> Eviction<K, V> for PositionalEviction<K, V, S>
 where
     K: PositionalStorageKey + Ord + Copy + 'static,
     V: Clone + Send + Sync + 'static,
+    S: Storage<K, V>,
 {
     fn evict(&self, count: usize) -> Vec<K> {
         let mut evicted = Vec::with_capacity(count);

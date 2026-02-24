@@ -40,6 +40,18 @@ impl<T> PrioritySender<T> {
             TransferPriority::Low => self.low.try_send(value),
         }
     }
+
+    /// Async send that waits for capacity instead of dropping.
+    pub async fn send(
+        &self,
+        priority: TransferPriority,
+        value: T,
+    ) -> Result<(), mpsc::error::SendError<T>> {
+        match priority {
+            TransferPriority::High => self.high.send(value).await,
+            TransferPriority::Low => self.low.send(value).await,
+        }
+    }
 }
 
 /// Receiver side of a priority queue (high + low).

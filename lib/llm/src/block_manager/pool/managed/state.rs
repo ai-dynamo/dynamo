@@ -276,6 +276,10 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         let mut immutable_blocks = Vec::new();
         for sequence_hash in &sequence_hashes {
             if !self.registry.is_registered(*sequence_hash) {
+                tracing::debug!(
+                    sequence_hash = ?sequence_hash,
+                    "match_sequence_hashes: registry says NOT registered — breaking"
+                );
                 break;
             }
 
@@ -338,7 +342,16 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
     /// Returns a block to the inactive pool
     pub fn return_block(&mut self, mut block: Block<S, L, M>) {
+        let was_registered = matches!(block.state(), BlockState::Registered(_, _));
+        let seq_hash = block.sequence_hash().ok();
         self.active.remove(&mut block);
+        let still_registered = matches!(block.state(), BlockState::Registered(_, _));
+        if was_registered && !still_registered {
+            tracing::warn!(
+                sequence_hash = ?seq_hash,
+                "host block was reset during active.remove() — lost from cache"
+            );
+        }
         self.inactive.return_block(block);
     }
 

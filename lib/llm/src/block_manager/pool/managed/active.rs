@@ -70,6 +70,10 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ActiveBlockPool<S, L, M>
             && let Some(weak) = self.map.get(&sequence_hash)
         {
             if let Some(_arc) = weak.upgrade() {
+                tracing::warn!(
+                    sequence_hash,
+                    "active.remove: resetting block (another ImmutableBlock ref exists)"
+                );
                 block.reset();
                 return;
             }

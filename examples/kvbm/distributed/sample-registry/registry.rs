@@ -43,20 +43,20 @@ use tracing_subscriber::EnvFilter;
 
 use dynamo_llm::block_manager::block::transfer::remote::RemoteKey;
 use dynamo_llm::block_manager::distributed::registry::{
-    BinaryCodec, NoMetadata, PositionalEviction, PositionalKey, RegistryHubConfig,
+    BinaryCodec, FlatStorage, NoMetadata, PositionalEviction, PositionalKey, RegistryHubConfig,
     RegistryMetricsSink, ZmqHub, ZmqHubServerConfig,
 };
 
 /// Type alias for the concrete hub type we use.
 ///
-/// Uses `PositionalKey` for position-aware storage and `PositionalEviction`
-/// which evicts from highest positions first (tail-first), optimizing for
-/// prefix reuse in KV cache scenarios.
+/// Uses `PositionalKey` for position-aware eviction (highest positions evicted
+/// first) and `FlatStorage` as the backend to avoid position-sharding bugs
+/// where batched offloads register blocks at wrong positions.
 type G4RegistryHub = ZmqHub<
     PositionalKey,
     RemoteKey,
     NoMetadata,
-    PositionalEviction<PositionalKey, RemoteKey>,
+    PositionalEviction<PositionalKey, RemoteKey, FlatStorage<PositionalKey, RemoteKey>>,
     BinaryCodec<PositionalKey, RemoteKey, NoMetadata>,
 >;
 
@@ -534,10 +534,11 @@ async fn main() -> Result<()> {
         lease_cleanup_interval: std::time::Duration::from_secs(5),
     };
 
-    // Create hub with positional eviction storage and codec
-    // PositionalEviction evicts from highest positions first (tail-first),
-    // which is optimal for KV cache prefix reuse.
-    let storage = PositionalEviction::with_capacity(config.capacity as usize);
+    // Create hub with FlatStorage backend + positional eviction policy.
+    // FlatStorage avoids position-sharding bugs in RadixStorage where batched
+    // offloads register blocks at incorrect positions, making them invisible
+    // on lookup. PositionalEviction still evicts from highest positions first.
+    let storage = PositionalEviction::with_flat_storage(config.capacity as usize);
     let codec = BinaryCodec::new();
     let plugin_metrics = plugin_metrics_enabled.then(|| Arc::new(RegistryPromMetrics::new(0)));
     let hub: G4RegistryHub = if let Some(metrics) = &plugin_metrics {

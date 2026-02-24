@@ -133,12 +133,14 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         // we need to move it to the uninitialized set
         match block.state() {
             BlockState::Reset | BlockState::Partial(_) | BlockState::Complete(_) => {
+                tracing::debug!(state = ?block.state(), "inactive: block arrived non-Registered → uninitialized_set");
                 let mut block = block;
                 block.reset();
                 self.uninitialized_set.push_back(block);
             }
             BlockState::Registered(state, _) => {
                 let sequence_hash = state.sequence_hash();
+                tracing::debug!(sequence_hash, "inactive: block arrived Registered → lookup_map");
                 self.insert_with_sequence_hash(block, sequence_hash);
             }
         }

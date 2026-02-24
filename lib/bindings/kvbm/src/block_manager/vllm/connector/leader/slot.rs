@@ -568,7 +568,12 @@ pub struct VllmConnectorSlot {
 
     /// Skip G4 (remote) lookup on retry after a failed onboard.
     /// This prevents infinite retry loops when remote storage has stale registry entries.
+    /// Only set to true after MAX_G4_RETRIES consecutive failures.
     skip_g4_on_retry: bool,
+
+    /// Count of consecutive G4 onboard failures for this slot.
+    /// After MAX_G4_RETRIES, skip_g4_on_retry is set to prevent infinite loops.
+    g4_retry_count: u32,
 
     /// Flag indicating the slot just recovered from a failed transfer.
     /// When true, `apply_scheduler_output` should ignore vLLM's `num_computed_tokens`
@@ -644,6 +649,7 @@ impl VllmConnectorSlot {
             performed_cache_lookup: false,
             total_blocks_queried: 0,
             skip_g4_on_retry: false,
+            g4_retry_count: 0,
             recovered_from_failed_transfer: false,
             attempted_g4_hashes: None,
             onboarding_started_at: None,
@@ -992,6 +998,7 @@ impl Slot for VllmConnectorSlot {
         self.total_blocks_queried = 0;
         self.offload_terminated_at_block = None;
         self.skip_g4_on_retry = false;
+        self.g4_retry_count = 0;
         self.attempted_g4_hashes = None;
         self.onboarding_started_at = None;
     }
@@ -1503,9 +1510,13 @@ impl Slot for VllmConnectorSlot {
             self.tokens_cached_from_g4 = 0;
             self.performed_cache_lookup = false;
             self.total_blocks_queried = 0;
-            // Skip G4 (remote) lookup on retry to prevent infinite loops
-            // when remote storage has stale registry entries (NoSuchKey errors)
-            self.skip_g4_on_retry = true;
+            // Track consecutive G4 failures; only permanently disable after
+            // MAX_G4_RETRIES to avoid giving up on a single slow transfer.
+            const MAX_G4_RETRIES: u32 = 3;
+            self.g4_retry_count += 1;
+            if self.g4_retry_count >= MAX_G4_RETRIES {
+                self.skip_g4_on_retry = true;
+            }
             // Mark that we've recovered - next apply_scheduler_output should ignore
             // vLLM's stale num_computed_tokens
             self.recovered_from_failed_transfer = true;
@@ -1726,6 +1737,17 @@ impl Slot for VllmConnectorSlot {
 
             debug_assert_eq!(dst_block_ids.len(), num_g4_blocks);
 
+            // Extract token blocks for the G4 range so bounce buffers can be
+            // registered in the host cache after the transfer completes.
+            let g4_token_blocks: Vec<TokenBlock> = self
+                .sequence
+                .blocks()
+                .iter()
+                .skip(self.evaluated_blocks)
+                .take(num_g4_blocks)
+                .cloned()
+                .collect();
+
             // Store hashes with positions for invalidation on failure
             // Positions are 0, 1, 2... relative to the offloaded sequence (matching registration)
             self.attempted_g4_hashes = Some(
@@ -1737,7 +1759,7 @@ impl Slot for VllmConnectorSlot {
             );
 
             // G4 onboard uses a different path - sends G4OnboardRequest to worker
-            self.onboard_from_g4(g4_hashes, dst_block_ids)?;
+            self.onboard_from_g4(g4_hashes, dst_block_ids, g4_token_blocks)?;
 
             // shift the evaluated blocks position to the end of the computed/cached blocks
             self.evaluated_blocks += num_g4_blocks;
@@ -1987,10 +2009,13 @@ impl VllmConnectorSlot {
     ///
     /// Unlike host/disk onboarding, G4 onboarding sends a G4OnboardRequest
     /// to the worker, which handles the G4->Host->Device transfer atomically.
+    /// Token blocks are threaded through so bounce buffers can be persisted
+    /// in the host cache after the transfer completes.
     fn onboard_from_g4(
         &mut self,
         sequence_hashes: Vec<u64>,
         device_block_ids: Vec<BlockId>,
+        token_blocks: Vec<TokenBlock>,
     ) -> Result<(), SlotError> {
         debug_assert_eq!(sequence_hashes.len(), device_block_ids.len());
 
@@ -1999,6 +2024,7 @@ impl VllmConnectorSlot {
             sequence_hashes,
             device_block_ids,
             self.block_size,
+            token_blocks,
         );
 
         let xfer_req = LocalTransferRequest::Remote(RemoteTransferRequest::from_g4_params(&params));
@@ -2099,6 +2125,9 @@ struct RemoteTransferRequest {
     /// after the transfer completes. This prevents host blocks from being
     /// evicted during transfers.
     pin_id: Option<uuid::Uuid>,
+    /// Token blocks for G4 onboard - used to persist bounce buffers in host cache.
+    /// Only set for G4 onboard transfers; None for H2O offloads.
+    token_blocks: Option<Vec<TokenBlock>>,
 }
 
 impl RemoteTransferRequest {
@@ -2112,6 +2141,7 @@ impl RemoteTransferRequest {
             block_size: params.block_size,
             is_onboard: true,
             pin_id: None,
+            token_blocks: Some(params.token_blocks.clone()),
         }
     }
 
@@ -2133,6 +2163,7 @@ impl RemoteTransferRequest {
             block_size,
             is_onboard: false,
             pin_id: Some(pin_id),
+            token_blocks: None,
         }
     }
 
@@ -2499,21 +2530,24 @@ impl LocalTransferEngine {
                                     }
                                 }
                                 LocalTransferRequest::Remote(remote_req) => {
-                                    // Read-path remote operations (onboard) are high priority.
-                                    // Background write-path operations (offload/H2R) are low priority.
-                                    let priority = if remote_req.is_onboard {
-                                        TransferPriority::High
-                                    } else {
-                                        TransferPriority::Low
-                                    };
-
-                                    match remote_tx.try_send(priority, remote_req) {
-                                        Ok(()) => {}
-                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                            tracing::warn!("LocalTransferEngine: dropping remote transfer request due to queue pressure");
+                                    if remote_req.is_onboard {
+                                        // Onboard requests must not be dropped — slot state
+                                        // (current_position, Onboarding state, pending_operations)
+                                        // depends on completion. Use blocking send.
+                                        if let Err(e) = remote_tx.send(TransferPriority::High, remote_req).await {
+                                            tracing::error!("LocalTransferEngine: remote queue closed for onboard request: {:?}", e);
                                         }
-                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                            tracing::error!("LocalTransferEngine: remote queue closed");
+                                    } else {
+                                        // Background write-path operations (offload/H2R) are
+                                        // low priority and can be dropped under queue pressure.
+                                        match remote_tx.try_send(TransferPriority::Low, remote_req) {
+                                            Ok(()) => {}
+                                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                                tracing::warn!("LocalTransferEngine: dropping remote transfer request due to queue pressure");
+                                            }
+                                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                                tracing::error!("LocalTransferEngine: remote queue closed");
+                                            }
                                         }
                                     }
                                 }
@@ -2846,6 +2880,7 @@ async fn process_remote_transfer_request(
     let operation_id = &req.operation_id;
     let pin_id = req.pin_id;
     let is_h2o = req.is_h2o();
+    let onboard_token_blocks = req.token_blocks.clone();
 
     // Helper to release pin guard and H2R semaphore permit (called on all exit paths)
     let release_pin = |pin_registry: &PinRegistry,
@@ -2864,6 +2899,90 @@ async fn process_remote_transfer_request(
                 semaphore.add_permits(1);
             }
         }
+    };
+
+    // --- G4 inflight dedup: wait for overlapping in-flight transfers ---
+    if req.is_onboard {
+        let inflight_receivers = leader.g4_inflight().check_inflight(&req.sequence_hashes);
+        if !inflight_receivers.is_empty() {
+            tracing::debug!(
+                target: "kvbm-g4",
+                request_id = %request_id,
+                num_inflight = inflight_receivers.len(),
+                "waiting for in-flight G4 transfers to complete"
+            );
+            // Wait for all in-flight transfers (bounded by G4_TRANSFER_TIMEOUT)
+            for mut rx in inflight_receivers {
+                let _ = tokio::time::timeout(*G4_TRANSFER_TIMEOUT, rx.changed()).await;
+            }
+            // Check if all blocks are now in host cache (from the other transfer's bounce buffer registration)
+            if let Some(host_pool) = block_manager.host() {
+                if let Ok(host_matches) =
+                    host_pool.match_sequence_hashes(&req.sequence_hashes).await
+                {
+                    if host_matches.len() == req.sequence_hashes.len() {
+                        // All blocks in host cache — do fast Host→Device transfer
+                        let block_pairs: Vec<(usize, usize)> = host_matches
+                            .iter()
+                            .zip(req.device_block_ids.iter())
+                            .map(|(src, dst)| (src.block_id(), *dst))
+                            .collect();
+                        let block_xfer_req = BlockTransferRequest {
+                            from_pool: BlockTransferPool::Host,
+                            to_pool: BlockTransferPool::Device,
+                            blocks: block_pairs,
+                            connector_req: Some(LeaderTransferRequest {
+                                request_id: request_id.clone(),
+                                uuid: *operation_id,
+                                requirement: None,
+                                request_type: RequestType::Immediate,
+                                chained: false,
+                            }),
+                            sequence_hashes: None,
+                        };
+                        match leader.transfer_blocks_request(block_xfer_req).await {
+                            Ok(notify_receiver) => match notify_receiver.await {
+                                Ok(_) => {
+                                    tracing::debug!(
+                                        target: "kvbm-g4",
+                                        request_id = %request_id,
+                                        num_blocks = req.sequence_hashes.len(),
+                                        "G4 dedup: used host cache fast path (Host→Device)"
+                                    );
+                                    kvbm_metrics
+                                        .onboard_blocks_h2d
+                                        .inc_by(req.sequence_hashes.len() as u64);
+                                    return Ok(());
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        target: "kvbm-g4",
+                                        request_id = %request_id,
+                                        "Host→Device transfer failed after G4 dedup wait, falling through to G4"
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "kvbm-g4",
+                                    request_id = %request_id,
+                                    error = %e,
+                                    "Failed to submit Host→Device transfer after G4 dedup wait, falling through to G4"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // Not all blocks found in host cache — fall through to normal G4 transfer
+        }
+    }
+
+    // Register our hashes as in-flight (guard cleans up on drop)
+    let _inflight_guard = if req.is_onboard {
+        Some(leader.g4_inflight().register(&req.sequence_hashes))
+    } else {
+        None
     };
 
     // Filter out blocks already in object storage
@@ -2945,11 +3064,11 @@ async fn process_remote_transfer_request(
 
     // Build transfer pipeline
     let hashes: Vec<u64> = hashes_with_positions.iter().map(|&(h, _)| h).collect();
-    let (bounce, device) = if req.is_h2o() {
+    let (bounce, device, onboard_host_blocks) = if req.is_h2o() {
         // H2R: use existing host blocks as bounce buffers
         let bounce = filtered_host_ids
             .ok_or_else(|| anyhow::anyhow!("H2R transfer requires host_block_ids"))?;
-        (bounce, vec![])
+        (bounce, vec![], None)
     } else {
         // Allocate bounce buffers from host pool
         let host_pool = block_manager
@@ -2958,7 +3077,7 @@ async fn process_remote_transfer_request(
         let host_blocks = host_pool.allocate_blocks(num_blocks).await?;
         let bounce = host_blocks.iter().map(|b| b.block_id()).collect();
         let device = req.device_block_ids.iter().copied().collect();
-        (bounce, device)
+        (bounce, device, Some(host_blocks))
     };
     let pipeline = vllm_int::create_transfer_pipeline(
         &hashes,
@@ -3039,6 +3158,49 @@ async fn process_remote_transfer_request(
                         leader.world_size(),
                     )
                     .await;
+                }
+            }
+
+            // Persist G4 bounce buffers in host cache so subsequent requests
+            // find the blocks in G2 instead of going back to G4.
+            if req.is_onboard {
+                if let (Some(host_blocks), Some(token_blocks)) =
+                    (onboard_host_blocks, onboard_token_blocks)
+                {
+                    let host_pool = block_manager.host();
+                    if let Some(host_pool) = host_pool {
+                        let mut blocks_to_register = Vec::new();
+                        for (mut block, token_block) in
+                            host_blocks.into_iter().zip(token_blocks)
+                        {
+                            if let Err(e) = block.apply_token_block(token_block) {
+                                tracing::warn!(
+                                    "failed to apply token block to bounce buffer: {e}"
+                                );
+                                continue;
+                            }
+                            blocks_to_register.push(block);
+                        }
+                        if !blocks_to_register.is_empty() {
+                            match host_pool.register_blocks(blocks_to_register).await {
+                                Ok(immutable_blocks) => {
+                                    tracing::debug!(
+                                        target: "kvbm-g4",
+                                        request_id = %request_id,
+                                        num_blocks = immutable_blocks.len(),
+                                        "registered G4 bounce buffers in host cache"
+                                    );
+                                    // ImmutableBlocks dropped here → blocks return to
+                                    // inactive pool as Registered (available for lookup)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "failed to register G4 bounce buffers (non-fatal): {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

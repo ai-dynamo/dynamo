@@ -39,7 +39,7 @@ pub use metrics::{NoopRegistryMetricsSink, RegistryMetricsSink};
 
 // Storage & Eviction
 pub use eviction::{Eviction, NoEviction, PositionalEviction, TailEviction};
-pub use storage::{HashMapStorage, PositionalStorageKey, RadixStorage, Storage};
+pub use storage::{FlatStorage, HashMapStorage, PositionalStorageKey, RadixStorage, Storage};
 
 // Key, Value, Metadata
 pub use key::{CompositeKey, Key128, PositionalKey, RegistryKey};

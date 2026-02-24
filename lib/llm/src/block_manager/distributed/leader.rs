@@ -10,6 +10,7 @@ use utils::*;
 use zmq::*;
 
 use derive_builder::Builder;
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::sync::OnceCell;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio::time::sleep;
 
 #[derive(Builder, Clone, Debug, Default)]
@@ -112,6 +114,74 @@ pub struct KvbmLeaderState {
     pub workers_ready_notify: Arc<Notify>,
 }
 
+/// Tracks in-flight G4 onboard transfers to prevent duplicate downloads.
+///
+/// When multiple requests need the same blocks from G4, only the first
+/// transfer proceeds; subsequent requests wait and then use the host cache.
+#[derive(Default, Clone)]
+pub struct G4InflightTracker {
+    inflight: Arc<DashMap<u64, watch::Receiver<bool>>>,
+}
+
+/// RAII guard that removes hashes from the tracker and notifies waiters on drop.
+pub struct InflightGuard {
+    hashes: Vec<u64>,
+    sender: Option<watch::Sender<bool>>,
+    tracker: Arc<DashMap<u64, watch::Receiver<bool>>>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        // Notify waiters FIRST, then remove entries
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(true);
+        }
+        for hash in &self.hashes {
+            self.tracker.remove(hash);
+        }
+    }
+}
+
+impl G4InflightTracker {
+    pub fn new() -> Self {
+        Self {
+            inflight: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Register hashes as in-flight. Returns an RAII guard.
+    /// Only registers hashes not already tracked by another transfer.
+    pub fn register(&self, hashes: &[u64]) -> InflightGuard {
+        let (tx, rx) = watch::channel(false);
+        let mut registered = Vec::new();
+        for &hash in hashes {
+            // Only register if not already in-flight
+            self.inflight.entry(hash).or_insert_with(|| {
+                registered.push(hash);
+                rx.clone()
+            });
+        }
+        InflightGuard {
+            hashes: registered,
+            sender: Some(tx),
+            tracker: Arc::clone(&self.inflight),
+        }
+    }
+
+    /// Check which hashes are in-flight. Returns receivers for in-flight hashes.
+    /// Multiple hashes from the same transfer share one watch channel; duplicate
+    /// receivers are harmless (second `changed().await` returns immediately).
+    pub fn check_inflight(&self, hashes: &[u64]) -> Vec<watch::Receiver<bool>> {
+        let mut receivers = Vec::new();
+        for &hash in hashes {
+            if let Some(entry) = self.inflight.get(&hash) {
+                receivers.push(entry.value().clone());
+            }
+        }
+        receivers
+    }
+}
+
 /// The leader of the KVBM.
 ///
 /// This is responsible for:
@@ -127,6 +197,8 @@ pub struct KvbmLeader {
     remote_handle: RwLock<Option<PositionalRemoteHandle>>,
     /// Tracks request IDs with failed G4 transfers for explicit failure detection.
     failed_g4_requests: RwLock<HashSet<String>>,
+    /// Tracks in-flight G4 onboard transfers to deduplicate concurrent requests.
+    g4_inflight: G4InflightTracker,
 }
 
 impl KvbmLeader {
@@ -139,6 +211,7 @@ impl KvbmLeader {
             config,
             remote_handle: RwLock::new(None),
             failed_g4_requests: RwLock::new(HashSet::new()),
+            g4_inflight: G4InflightTracker::new(),
         };
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -428,5 +501,10 @@ impl KvbmLeader {
     /// Clear the G4 failure flag for a request (called after recovery).
     pub fn clear_g4_failed(&self, request_id: &str) {
         self.failed_g4_requests.write().remove(request_id);
+    }
+
+    /// Get the G4 in-flight transfer tracker for deduplication.
+    pub fn g4_inflight(&self) -> &G4InflightTracker {
+        &self.g4_inflight
     }
 }

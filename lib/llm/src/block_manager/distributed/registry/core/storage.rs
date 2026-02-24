@@ -92,6 +92,86 @@ where
     }
 }
 
+/// Flat DashMap-based storage — no position sharding.
+///
+/// Unlike `RadixStorage`, which partitions entries by position into nested
+/// DashMaps, `FlatStorage` uses a single `DashMap` for all entries. This
+/// avoids the position-sharding bug where batched offloads register blocks
+/// at incorrect positions, making them invisible on lookup.
+///
+/// Use `FlatStorage` when position-based partitioning is not needed or when
+/// the keys' `position()` values may not be stable across insert/lookup.
+pub struct FlatStorage<K, V> {
+    map: DashMap<K, V>,
+    len_counter: AtomicUsize,
+}
+
+impl<K, V> FlatStorage<K, V>
+where
+    K: Eq + Hash + Clone + Send + Sync,
+{
+    pub fn new() -> Self {
+        Self {
+            map: DashMap::new(),
+            len_counter: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            map: DashMap::with_capacity(capacity),
+            len_counter: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl<K, V> Default for FlatStorage<K, V>
+where
+    K: Eq + Hash + Clone + Send + Sync,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, V> Storage<K, V> for FlatStorage<K, V>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    fn insert(&self, key: K, value: V) {
+        let old = self.map.insert(key, value);
+        if old.is_none() {
+            self.len_counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn get(&self, key: &K) -> Option<V> {
+        self.map.get(key).map(|v| v.clone())
+    }
+
+    fn contains(&self, key: &K) -> bool {
+        self.map.contains_key(key)
+    }
+
+    fn remove(&self, key: &K) -> Option<V> {
+        let removed = self.map.remove(key).map(|(_, v)| v);
+        if removed.is_some() {
+            self.len_counter.fetch_sub(1, Ordering::Relaxed);
+        }
+        removed
+    }
+
+    fn len(&self) -> usize {
+        self.len_counter.load(Ordering::Relaxed)
+    }
+
+    fn clear(&self) {
+        self.map.clear();
+        self.len_counter.store(0, Ordering::Relaxed);
+    }
+}
+
 /// Trait for keys that have an extractable position for radix organization.
 pub trait PositionalStorageKey: Eq + Hash + Clone + Send + Sync {
     /// Extract the position/prefix used for first-level partitioning.
@@ -393,5 +473,74 @@ mod tests {
         assert_eq!(storage.get(&1), Some(100));
         assert_eq!(storage.get(&2), Some(200));
         assert_eq!(storage.get(&3), Some(300));
+    }
+
+    // FlatStorage tests
+
+    #[test]
+    fn test_flat_storage_basic() {
+        let storage: FlatStorage<u64, u64> = FlatStorage::new();
+
+        storage.insert(1, 100);
+        storage.insert(2, 200);
+
+        assert_eq!(storage.get(&1), Some(100));
+        assert_eq!(storage.get(&3), None);
+        assert!(storage.contains(&1));
+        assert!(!storage.contains(&3));
+        assert_eq!(storage.len(), 2);
+
+        storage.remove(&1);
+        assert_eq!(storage.len(), 1);
+        assert!(!storage.contains(&1));
+
+        storage.clear();
+        assert!(storage.is_empty());
+    }
+
+    #[test]
+    fn test_flat_storage_overwrite_preserves_len() {
+        let storage: FlatStorage<u64, u64> = FlatStorage::new();
+
+        storage.insert(1, 100);
+        assert_eq!(storage.len(), 1);
+
+        storage.insert(1, 200);
+        assert_eq!(storage.len(), 1);
+        assert_eq!(storage.get(&1), Some(200));
+    }
+
+    #[test]
+    fn test_flat_storage_with_capacity() {
+        let storage: FlatStorage<u64, u64> = FlatStorage::with_capacity(100);
+
+        for i in 0..50 {
+            storage.insert(i, i * 10);
+        }
+        assert_eq!(storage.len(), 50);
+        assert_eq!(storage.get(&25), Some(250));
+    }
+
+    #[test]
+    fn test_flat_storage_with_positional_keys() {
+        // FlatStorage should work with PositionalStorageKey types
+        // but ignores position — all lookups are by full key equality
+        let storage: FlatStorage<TestPositionalKey, u64> = FlatStorage::new();
+
+        let key1 = TestPositionalKey {
+            position: 0,
+            hash: 100,
+        };
+        let key2 = TestPositionalKey {
+            position: 5,
+            hash: 100,
+        };
+        // Same hash, different position — should be distinct entries
+        storage.insert(key1, 1);
+        storage.insert(key2, 2);
+
+        assert_eq!(storage.len(), 2);
+        assert_eq!(storage.get(&key1), Some(1));
+        assert_eq!(storage.get(&key2), Some(2));
     }
 }

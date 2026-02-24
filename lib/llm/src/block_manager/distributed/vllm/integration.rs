@@ -15,7 +15,7 @@ use crate::block_manager::config::RemoteStorageConfig;
 use crate::block_manager::connector::protocol::{RequestType, TransferType, WorkerTransferRequest};
 use crate::block_manager::distributed::remote::PositionalRemoteHandle;
 use crate::block_manager::distributed::{RemoteHashOperations, RemoteHashOperationsSync};
-use crate::tokens::SequenceHash;
+use crate::tokens::{SequenceHash, TokenBlock};
 
 use std::sync::OnceLock;
 
@@ -402,6 +402,9 @@ pub struct G4OnboardParams {
     pub device_block_ids: Vec<usize>,
     pub operation_id: uuid::Uuid,
     pub block_size: usize,
+    /// Token blocks corresponding to the sequence hashes, used to persist
+    /// bounce buffers in the host cache after G4→Host→Device transfer.
+    pub token_blocks: Vec<TokenBlock>,
 }
 
 /// Prepare G4 onboard operation.
@@ -417,6 +420,7 @@ pub fn onboard_from_g4(
     sequence_hashes: Vec<u64>,
     device_block_ids: Vec<usize>,
     block_size: usize,
+    token_blocks: Vec<TokenBlock>,
 ) -> (G4OnboardParams, WorkerTransferRequest) {
     let num_blocks = sequence_hashes.len();
     let operation_id = uuid::Uuid::new_v4();
@@ -436,6 +440,7 @@ pub fn onboard_from_g4(
         device_block_ids: device_block_ids.clone(),
         operation_id,
         block_size,
+        token_blocks,
     };
 
     let worker_req = WorkerTransferRequest {
