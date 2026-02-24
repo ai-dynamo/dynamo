@@ -283,6 +283,8 @@ async def run_profile(
         # --- Apply DGD overrides (user-supplied partial DGD) ---
         if final_config and dgdr.overrides and dgdr.overrides.dgd:
             if isinstance(final_config, list):
+                # only apply to the last element (the actual DGD)
+                # previous elements are generated config maps
                 final_config[-1] = apply_dgd_overrides(
                     final_config[-1], dgdr.overrides.dgd
                 )
