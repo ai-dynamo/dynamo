@@ -276,13 +276,13 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "multimodal_disagg_qwen2vl_2b_e_pd": VLLMConfig(
-        name="multimodal_disagg_qwen2vl_2b_e_pd",
+    "multimodal_disagg_qwen3vl_2b_e_pd": VLLMConfig(
+        name="multimodal_disagg_qwen3vl_2b_e_pd",
         directory=vllm_dir,
         script_name="disagg_multimodal_e_pd.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         request_payloads=[
             chat_payload(
                 [

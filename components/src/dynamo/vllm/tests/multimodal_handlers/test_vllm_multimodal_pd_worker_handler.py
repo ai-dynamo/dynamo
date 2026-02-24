@@ -281,7 +281,10 @@ class TestGenerateDisagg:
                 "outputs": [
                     {
                         "index": 0,
+                        "text": "",
                         "token_ids": [42],
+                        "cumulative_logprob": None,
+                        "logprobs": None,
                         "finish_reason": "stop",
                         "stop_reason": None,
                     }
