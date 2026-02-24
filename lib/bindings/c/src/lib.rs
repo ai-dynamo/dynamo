@@ -335,7 +335,11 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     let lora_name = if lora_name.is_null() {
         None
     } else {
-        Some(unsafe { CStr::from_ptr(lora_name) }.to_string_lossy().into_owned())
+        Some(
+            unsafe { CStr::from_ptr(lora_name) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     };
     let kv_params = DynamoKvStoredEventParams {
         event_id,
@@ -799,7 +803,10 @@ pub unsafe extern "C" fn add_request(
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
 
             // Compute overlap_blocks using the public method
-            let overlap_blocks = match decode_router.get_overlap_blocks(&tokens, worker, None).await {
+            let overlap_blocks = match decode_router
+                .get_overlap_blocks(&tokens, worker, None)
+                .await
+            {
                 Ok(overlap) => overlap,
                 Err(e) => {
                     tracing::warn!(error = ?e, "Failed to compute overlap, using 0");

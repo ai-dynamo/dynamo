@@ -370,15 +370,14 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
-        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
-            .in_scope(|| {
-                compute_block_hash_for_seq(
-                    tokens,
-                    self.block_size,
-                    block_mm_infos,
-                    lora_name.as_deref(),
-                )
-            });
+        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes").in_scope(|| {
+            compute_block_hash_for_seq(
+                tokens,
+                self.block_size,
+                block_mm_infos,
+                lora_name.as_deref(),
+            )
+        });
         let hash_elapsed = start.elapsed();
 
         let overlap_scores = self

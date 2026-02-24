@@ -1176,7 +1176,8 @@ mod test_event_processing {
         let token_ids = vec![10, 20, 30, 40];
         let blk_hash = 0xdead_beef;
 
-        let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None);
+        let stored =
+            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None, None)[0];
@@ -1292,7 +1293,10 @@ mod test_event_processing {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
             _ => panic!("expected Stored"),
         };
-        assert_ne!(base_hash, lora_hash, "LoRA blocks must produce distinct tokens_hash");
+        assert_ne!(
+            base_hash, lora_hash,
+            "LoRA blocks must produce distinct tokens_hash"
+        );
     }
 
     #[test]
@@ -1333,7 +1337,10 @@ mod test_event_processing {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
             _ => panic!("expected Stored"),
         };
-        assert_eq!(hash1, hash2, "None and lora_id=0 should produce same base-model hash");
+        assert_eq!(
+            hash1, hash2,
+            "None and lora_id=0 should produce same base-model hash"
+        );
     }
 
     #[test]

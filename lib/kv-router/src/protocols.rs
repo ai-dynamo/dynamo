@@ -769,8 +769,8 @@ mod tests {
         let mut base = TokensWithHashes::new(tokens.clone(), 4);
         let base_hashes = base.get_or_compute_block_hashes().to_vec();
 
-        let mut with_lora = TokensWithHashes::new(tokens, 4)
-            .with_lora_name("my-adapter".to_string());
+        let mut with_lora =
+            TokensWithHashes::new(tokens, 4).with_lora_name("my-adapter".to_string());
         let lora_hashes = with_lora.get_or_compute_block_hashes().to_vec();
 
         assert_eq!(base_hashes.len(), lora_hashes.len());
