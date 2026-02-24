@@ -38,6 +38,7 @@ class SupportedModels:
     QWEN_2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
     QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
     QWEN_2_5_VL_32B = "Qwen/Qwen2.5-VL-32B-Instruct"
+    QWEN_3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
     QWEN_3_VL_30B_A3B = "Qwen/Qwen3-VL-30B-A3B-Instruct"
     QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
     QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
@@ -119,6 +120,7 @@ QWEN_VL_MODELS = [
     SupportedModels.QWEN_2_5_VL_3B,
     SupportedModels.QWEN_2_5_VL_7B,
     SupportedModels.QWEN_2_5_VL_32B,
+    SupportedModels.QWEN_3_VL_2B,
     SupportedModels.QWEN_3_VL_30B_A3B,
     SupportedModels.QWEN_3_VL_30B_A3B_FP8,
     SupportedModels.QWEN_3_VL_8B_FP8,

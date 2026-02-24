@@ -335,39 +335,13 @@ vllm_configs = {
             )
         ],
     ),
-    "multimodal_disagg_qwen2vl_2b_e_pd_2gpu": VLLMConfig(
-        name="multimodal_disagg_qwen2vl_2b_e_pd_2gpu",
-        directory=vllm_dir,
-        script_name="disagg_multimodal_e_pd.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct"],
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["green"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    "multimodal_disagg_qwen2vl_2b_epd": VLLMConfig(
-        name="multimodal_disagg_qwen2vl_2b_epd",
+    "multimodal_disagg_qwen3vl_2b_epd": VLLMConfig(
+        name="multimodal_disagg_qwen3vl_2b_epd",
         directory=vllm_dir,
         script_name="disagg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct"],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
         env={
             "DYN_ENCODE_WORKER_GPU": "0",
             "DYN_PREFILL_WORKER_GPU": "0",
