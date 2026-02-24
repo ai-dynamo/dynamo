@@ -29,34 +29,6 @@ from dynamo.common.protocols.video_protocol import (
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.constants import Modality
 
-
-def _make_mock_media_output(
-    video_shape=(4, 64, 64, 3),
-    image_shape=None,
-    audio_shape=None,
-):
-    """Create a mock MediaOutput object with torch tensors.
-
-    This avoids importing tensorrt_llm._torch.visual_gen.output.MediaOutput
-    (which may not be available in all test environments) by creating a
-    SimpleNamespace with the same interface.
-
-    Args:
-        video_shape: Shape for the video tensor (num_frames, H, W, 3), or None.
-        image_shape: Shape for the image tensor (H, W, 3), or None.
-        audio_shape: Shape for the audio tensor, or None.
-
-    Returns:
-        A SimpleNamespace with .video, .image, .audio attributes.
-    """
-    from types import SimpleNamespace
-
-    return SimpleNamespace(
-        video=torch.zeros(video_shape, dtype=torch.uint8) if video_shape else None,
-        image=torch.zeros(image_shape, dtype=torch.uint8) if image_shape else None,
-        audio=torch.zeros(audio_shape, dtype=torch.float32) if audio_shape else None,
-    )
-
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
@@ -566,7 +538,13 @@ class ConcurrencyTracker:
             self._active_count -= 1
 
         # Return a mock MediaOutput with a video tensor
-        return _make_mock_media_output(video_shape=(4, 64, 64, 3))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            video=torch.zeros((4, 64, 64, 3), dtype=torch.uint8),
+            image=None,
+            audio=None,
+        )
 
 
 class TestVideoHandlerConcurrency:
@@ -696,10 +674,15 @@ class TestVideoHandlerResponseFormats:
             VideoGenerationHandler,
         )
 
-        mock_engine = MagicMock()
-        mock_engine.generate = MagicMock(
-            return_value=_make_mock_media_output(video_shape=(4, 64, 64, 3))
+        from types import SimpleNamespace
+
+        mock_output = SimpleNamespace(
+            video=torch.zeros((4, 64, 64, 3), dtype=torch.uint8),
+            image=None,
+            audio=None,
         )
+        mock_engine = MagicMock()
+        mock_engine.generate = MagicMock(return_value=mock_output)
 
         config = DiffusionConfig(
             media_output_fs_url="file:///tmp/test_media",
