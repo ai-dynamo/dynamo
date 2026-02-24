@@ -335,13 +335,13 @@ vllm_configs = {
             )
         ],
     ),
-    "multimodal_agg_llava_epd": VLLMConfig(
-        name="multimodal_agg_llava_epd",
+    "multimodal_disagg_qwen2vl_2b_e_pd_2gpu": VLLMConfig(
+        name="multimodal_disagg_qwen2vl_2b_e_pd_2gpu",
         directory=vllm_dir,
-        script_name="agg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
-        model="llava-hf/llava-1.5-7b-hf",
-        script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        script_name="disagg_multimodal_e_pd.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct"],
         request_payloads=[
             chat_payload(
                 [
@@ -355,21 +355,27 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["purple"],
+                expected_response=["green"],
                 temperature=0.0,
                 max_tokens=100,
             )
         ],
     ),
-    "multimodal_agg_qwen_epd": VLLMConfig(
-        name="multimodal_agg_qwen_epd",
+    "multimodal_disagg_qwen2vl_2b_epd": VLLMConfig(
+        name="multimodal_disagg_qwen2vl_2b_epd",
         directory=vllm_dir,
-        script_name="agg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        delayed_start=0,
-        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
-        timeout=360,
+        script_name="disagg_multimodal_epd.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct"],
+        env={
+            "DYN_ENCODE_WORKER_GPU": "0",
+            "DYN_PREFILL_WORKER_GPU": "0",
+            "DYN_DECODE_WORKER_GPU": "1",
+            "DYN_ENCODE_GPU_MEM": "0.4",
+            "DYN_PREFILL_GPU_MEM": "0.4",
+            "DYN_DECODE_GPU_MEM": "0.85",
+        },
         request_payloads=[
             chat_payload(
                 [
@@ -383,7 +389,8 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["purple"],
+                expected_response=["green"],
+                temperature=0.0,
                 max_tokens=100,
             )
         ],
