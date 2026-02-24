@@ -415,7 +415,7 @@ def setup_vllm_engine(config, stat_logger=None):
     if engine_args.load_format == "gms":
         engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 
-    if engine_args.load_format in ("mx-source", "mx-target"):
+    if engine_args.load_format == "mx":
         try:
             from modelexpress import register_modelexpress_loaders
 
