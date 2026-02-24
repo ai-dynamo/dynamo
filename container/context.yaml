@@ -22,7 +22,7 @@ dynamo:
   nats_version: v2.10.28
   etcd_version: v3.5.21
 
-  nixl_ref: 6570177
+  nixl_ref: afdf3b8
   nixl_ucx_ref: v1.20.0
   nixl_gdrcopy_ref: v2.5.1
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
