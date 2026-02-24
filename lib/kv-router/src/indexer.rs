@@ -36,6 +36,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use dynamo_runtime::error::DynamoError;
 #[cfg(feature = "metrics")]
 pub use dynamo_runtime::protocols::maybe_error::MaybeError;
 #[cfg(feature = "metrics")]
@@ -51,9 +52,9 @@ use rustc_hash::FxBuildHasher;
 #[cfg(not(feature = "metrics"))]
 pub trait MaybeError {
     /// Construct an instance from an error.
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self;
+    fn from_err(err: impl std::error::Error + 'static) -> Self;
     /// Convert to an error instance if this represents an error.
-    fn err(&self) -> Option<anyhow::Error>;
+    fn err(&self) -> Option<DynamoError>;
 }
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "metrics")]
@@ -125,14 +126,15 @@ pub enum WorkerKvQueryResponse {
     Error(String),
 }
 
+#[cfg(feature = "metrics")]
 impl MaybeError for WorkerKvQueryResponse {
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
         WorkerKvQueryResponse::Error(err.to_string())
     }
 
-    fn err(&self) -> Option<anyhow::Error> {
+    fn err(&self) -> Option<DynamoError> {
         match self {
-            WorkerKvQueryResponse::Error(msg) => Some(anyhow::Error::msg(msg.clone())),
+            WorkerKvQueryResponse::Error(msg) => Some(DynamoError::msg(msg.clone())),
             _ => None,
         }
     }
@@ -300,6 +302,7 @@ pub trait KvIndexerInterface {
     /// ### Arguments
     ///
     /// * `tokens` - A vector of `u32` tokens.
+    /// * `lora_name` - Optional LoRA adapter name to include in block hash computation.
     ///
     /// ### Returns
     ///
@@ -307,6 +310,7 @@ pub trait KvIndexerInterface {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError>;
 
     /// Apply a `RouterEvent` to the KV store.
@@ -508,8 +512,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
         Ok(self.backend.find_matches(&sequence, false))
     }
 
@@ -970,13 +975,14 @@ impl KvIndexerInterface for KvIndexer {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
         tracing::debug!(
             "Finding matches for request tokens: {:?} / len: {}",
             tokens,
             tokens.len()
         );
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
         tracing::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }
@@ -1305,8 +1311,11 @@ impl KvIndexerInterface for LocalKvIndexer {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
-        self.indexer.find_matches_for_request(tokens).await
+        self.indexer
+            .find_matches_for_request(tokens, lora_name)
+            .await
     }
 
     async fn apply_event(&self, event: RouterEvent) {
@@ -1758,8 +1767,9 @@ impl KvIndexerInterface for KvIndexerSharded {
     async fn find_matches_for_request(
         &self,
         tokens: &[u32],
+        lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
         self.find_matches(sequence).await
     }
 
@@ -2348,7 +2358,7 @@ mod tests {
 
         // Empty index should return no matches
         let tokens = vec![1, 2, 3, 4];
-        let scores = index.find_matches_for_request(&tokens).await.unwrap();
+        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
         assert!(scores.scores.is_empty());
 
         // Store some data and verify we can find it via tokens
@@ -2360,7 +2370,7 @@ mod tests {
         // Note: find_matches_for_request computes block hashes from tokens,
         // so we need tokens that hash to the same LocalBlockHash values.
         // For this test, we just verify the method works without error.
-        let scores = index.find_matches_for_request(&tokens).await.unwrap();
+        let scores = index.find_matches_for_request(&tokens, None).await.unwrap();
         // The tokens [1,2,3,4] won't match our stored [1,2,3] local hashes
         // because find_matches_for_request computes different hashes from raw tokens
         assert!(scores.scores.is_empty() || !scores.scores.is_empty());

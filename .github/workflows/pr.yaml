@@ -135,7 +135,7 @@ jobs:
         working-directory: ./deploy/operator
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "pydantic>=2,<3" "black==23.1.0"
+          python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
       - name: Check for uncommitted changes
         shell: bash
         working-directory: ./deploy/operator
@@ -341,6 +341,7 @@ jobs:
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ steps.operator-tag.outputs.tag }} \
           --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.upgradeCRD=false \
           --debug
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch

@@ -47,12 +47,13 @@ pub fn start_kv_block_indexer_py<'p>(
 }
 
 #[pyfunction]
-#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None))]
+#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None))]
 pub fn compute_block_hash_for_seq_py(
     _py: Python,
     tokens: Vec<u32>,
     kv_block_size: usize,
     block_mm_infos: Option<Bound<PyAny>>,
+    lora_name: Option<String>,
 ) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -65,7 +66,12 @@ pub fn compute_block_hash_for_seq_py(
         .map(depythonize_block_mm_infos)
         .transpose()?;
 
-    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size as u32, mm_infos.as_deref());
+    let hashes = compute_block_hash_for_seq(
+        &tokens,
+        kv_block_size as u32,
+        mm_infos.as_deref(),
+        lora_name.as_deref(),
+    );
 
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }
@@ -169,23 +175,22 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None, block_mm_infos=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None))]
     fn publish_stored(
         &self,
         py: Python,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
         block_hashes: Vec<i64>,
-        lora_id: u64,
         parent_hash: Option<i64>,
         block_mm_infos: Option<Bound<PyAny>>,
+        lora_name: Option<String>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
         let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
 
-        // Use shared monotonic event_id counter from the inner publisher
         let event_id = inner.next_event_id();
 
         let mm_infos = block_mm_infos
@@ -204,7 +209,7 @@ impl KvEventPublisher {
                         &token_ids,
                         &num_block_tokens,
                         &block_hashes_u64,
-                        lora_id,
+                        lora_name.as_deref(),
                         &warning_count,
                         mm_infos.as_deref(),
                     ),
@@ -879,7 +884,7 @@ impl KvRouter {
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None, lora_name=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -887,6 +892,7 @@ impl KvRouter {
         router_config_override: Option<PyObject>,
         request_id: Option<String>,
         block_mm_infos: Option<PyObject>,
+        lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: llm_rs::kv_router::RouterConfigOverride =
@@ -911,7 +917,7 @@ impl KvRouter {
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
-                    None, // lora_name not exposed in Python API yet
+                    lora_name,
                     0.0,
                 )
                 .await
@@ -948,16 +954,18 @@ impl KvRouter {
         })
     }
 
+    #[pyo3(signature = (token_ids, lora_name=None))]
     fn get_potential_loads<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
+        lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
-                .get_potential_loads(&token_ids, None)
+                .get_potential_loads(&token_ids, None, lora_name.as_deref())
                 .await
                 .map_err(to_pyerr)?;
 
