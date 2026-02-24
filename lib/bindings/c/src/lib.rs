@@ -704,6 +704,7 @@ pub unsafe extern "C" fn create_routers(
                     Some(prefill_config),
                     enforce_disagg,
                     model_name.clone(),
+                    namespace_str.clone(),
                 )
             }
             None if enforce_disagg => {
