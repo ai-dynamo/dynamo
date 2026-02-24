@@ -26,8 +26,11 @@ import (
 
 // ValidateOperatorConfiguration validates an OperatorConfiguration object.
 func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration) field.ErrorList {
-	allErrs := field.ErrorList{}
+	if config == nil {
+		return field.ErrorList{field.Required(field.NewPath(""), "operator configuration is required")}
+	}
 
+	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validateServer(&config.Server, field.NewPath("server"))...)
 	allErrs = append(allErrs, validateLeaderElection(&config.LeaderElection, field.NewPath("leaderElection"))...)
 	allErrs = append(allErrs, validateNamespace(&config.Namespace, field.NewPath("namespace"))...)

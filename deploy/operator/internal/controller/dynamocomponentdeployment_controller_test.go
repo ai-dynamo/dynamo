@@ -976,7 +976,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		{
 			name: "nil instanceID", // This test should fail before r.List is called in generatePodTemplateSpec
 			fields: fields{
-				Recorder: record.NewFakeRecorder(100),
+				Recorder:      record.NewFakeRecorder(100),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+						return []string{}, nil
+					},
+				},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -1019,7 +1026,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		{
 			name: "error from generateLeaderPodTemplateSpec", // This case involves an error from generatePodTemplateSpec
 			fields: fields{
-				Recorder: record.NewFakeRecorder(100),
+				Recorder:      record.NewFakeRecorder(100),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+						return []string{}, nil
+					},
+				},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -1278,12 +1292,12 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 				WithScheme(s).
 				WithObjects(objs...).
 				Build(),
-			Config: controller_common.Config{
-				Checkpoint: controller_common.CheckpointConfig{
+			Config: &configv1alpha1.OperatorConfiguration{
+				Checkpoint: configv1alpha1.CheckpointConfiguration{
 					Enabled: true,
-					Storage: controller_common.CheckpointStorageConfig{
-						Type: controller_common.CheckpointStorageTypePVC,
-						PVC: controller_common.CheckpointPVCConfig{
+					Storage: configv1alpha1.CheckpointStorageConfiguration{
+						Type: configv1alpha1.CheckpointStorageTypePVC,
+						PVC: configv1alpha1.CheckpointPVCConfig{
 							PVCName:  "chrek-pvc",
 							BasePath: "/checkpoints",
 						},
@@ -1410,12 +1424,12 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 				WithScheme(s).
 				WithObjects(objs...).
 				Build(),
-			Config: controller_common.Config{
-				Checkpoint: controller_common.CheckpointConfig{
+			Config: &configv1alpha1.OperatorConfiguration{
+				Checkpoint: configv1alpha1.CheckpointConfiguration{
 					Enabled: true,
-					Storage: controller_common.CheckpointStorageConfig{
-						Type: controller_common.CheckpointStorageTypePVC,
-						PVC: controller_common.CheckpointPVCConfig{
+					Storage: configv1alpha1.CheckpointStorageConfiguration{
+						Type: configv1alpha1.CheckpointStorageTypePVC,
+						PVC: configv1alpha1.CheckpointPVCConfig{
 							PVCName:  "chrek-pvc",
 							BasePath: "/checkpoints",
 						},
