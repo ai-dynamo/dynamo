@@ -40,7 +40,8 @@ def test_no_bundled_shared_libraries():
         str(f) for f in installed_files if ".libs/" in str(f) and ".so" in str(f)
     ]
 
-    assert not bundled_libs, (
-        "Unexpected shared libraries bundled in ai-dynamo-runtime:\n"
-        + "\n".join(f"  {lib}" for lib in bundled_libs)
+    assert (
+        not bundled_libs
+    ), "Unexpected shared libraries bundled in ai-dynamo-runtime:\n" + "\n".join(
+        f"  {lib}" for lib in bundled_libs
     )
