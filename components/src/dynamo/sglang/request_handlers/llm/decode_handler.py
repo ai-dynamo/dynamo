@@ -8,7 +8,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -20,7 +20,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
@@ -30,7 +29,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """Initialize decode worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
@@ -38,7 +36,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
-            component,
             engine,
             config,
             publisher,

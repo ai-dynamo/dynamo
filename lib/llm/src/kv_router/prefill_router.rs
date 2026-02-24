@@ -103,6 +103,8 @@ pub struct PrefillRouter {
     enforce_disagg: bool,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
+    /// Namespace used to look up the correct WorkerSet's worker monitor
+    namespace: String,
 }
 
 impl PrefillRouter {
@@ -120,9 +122,11 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             model_name: String::new(), // Not used for disabled router
+            namespace: String::new(),  // Not used for disabled router
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
@@ -131,6 +135,7 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         enforce_disagg: bool,
         model_name: String,
+        namespace: String,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -143,6 +148,7 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             model_name,
+            namespace,
         });
 
         // Spawn background task to wait for activation
@@ -210,7 +216,9 @@ impl PrefillRouter {
             let client = kv_chooser.client().clone();
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 
@@ -230,7 +238,9 @@ impl PrefillRouter {
             let client = endpoint.client().await?;
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 

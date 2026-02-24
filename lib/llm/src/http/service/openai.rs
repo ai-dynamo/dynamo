@@ -372,12 +372,10 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     // todo - error handling should be more robust
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
+        .get_completions_engine_with_parsing(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -495,12 +493,10 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
+        .get_completions_engine_with_parsing(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -933,12 +929,10 @@ async fn chat_completions(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
+        .get_chat_completions_engine_with_parsing(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -1277,12 +1271,10 @@ async fn responses(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
+        .get_chat_completions_engine_with_parsing(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
