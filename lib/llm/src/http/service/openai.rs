@@ -405,16 +405,14 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     // todo - error handling should be more robust
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
+        .get_completions_engine_with_parsing(&model)
         .map_err(|_| {
             let err_response = ErrorMessage::model_not_found();
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -540,16 +538,14 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
+        .get_completions_engine_with_parsing(&model)
         .map_err(|_| {
             let err_response = ErrorMessage::model_not_found();
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -816,23 +812,40 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        let comment_str = event
-            .comment
-            .as_ref()
-            .map(|c| c.join(", "))
-            .unwrap_or_else(|| "Unknown error".to_string());
+        // Extract error string: prefer DynamoError field, fallback to legacy comment.
+        // Use message() instead of to_string() for DynamoError to avoid prefixing
+        // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
+        let error_str = if let Some(ref dynamo_err) = event.error {
+            let mut parts = Vec::new();
+            let mut current: Option<&dyn std::error::Error> = Some(dynamo_err);
+            while let Some(e) = current {
+                if let Some(de) = e.downcast_ref::<dynamo_runtime::error::DynamoError>() {
+                    parts.push(de.message().to_string());
+                } else {
+                    parts.push(e.to_string());
+                }
+                current = e.source();
+            }
+            parts.join(", ")
+        } else {
+            event
+                .comment
+                .as_ref()
+                .map(|c| c.join(", "))
+                .unwrap_or_else(|| "Unknown error".to_string())
+        };
 
-        // Try to parse comment as error JSON to extract status code
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str) {
+        // Try to parse as error JSON to extract status code
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
             let code = error_payload
                 .code
                 .and_then(|c| StatusCode::from_u16(c).ok())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(comment_str);
+            let message = error_payload.message.unwrap_or(error_str);
             return Some((message, code));
         }
 
-        return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
@@ -993,16 +1006,14 @@ async fn chat_completions(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
+        .get_chat_completions_engine_with_parsing(&model)
         .map_err(|_| {
             let err_response = ErrorMessage::model_not_found();
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -1350,16 +1361,14 @@ async fn responses(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
+        .get_chat_completions_engine_with_parsing(&model)
         .map_err(|_| {
             let err_response = ErrorMessage::model_not_found();
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -2563,6 +2572,7 @@ mod tests {
             id: None,
             event: Some("error".to_string()),
             comment: Some(vec!["Backend service unavailable".to_string()]),
+            error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);
@@ -2589,6 +2599,7 @@ mod tests {
             id: None,
             event: Some("error".to_string()),
             comment: Some(vec![error_json.to_string()]),
+            error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);
@@ -2625,6 +2636,7 @@ mod tests {
             id: Some("msg-1".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
 
         let test_stream = stream::iter(vec![normal_event.clone()]);
@@ -2671,6 +2683,7 @@ mod tests {
             id: None,
             event: None,
             comment: Some(vec!["Connection timeout".to_string()]),
+            error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);
