@@ -380,6 +380,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 overlap_amount as usize * block_size,
             );
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
+            if let Some(hit_rate) = tracker.kv_hit_rate() {
+                request_metrics.kv_hit_rate.observe(hit_rate);
+            }
         }
         request_metrics
             .input_sequence_tokens

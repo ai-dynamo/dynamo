@@ -54,6 +54,7 @@ from dynamo.vllm.worker_factory import WorkerFactory
 
 from .args import Config, parse_args
 from .checkpoint_restore import get_checkpoint_config
+from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import (
     VllmHealthCheckPayload,
@@ -190,7 +191,7 @@ async def worker():
     elif config.omni:
         await init_omni(runtime, config, shutdown_event)
         logger.debug("init_omni completed")
-    elif config.is_prefill_worker:
+    elif config.disaggregation_mode == DisaggregationMode.PREFILL:
         await init_prefill(
             runtime, config, shutdown_event, pre_created_engine=pre_created_engine
         )
@@ -318,7 +319,7 @@ def setup_kv_event_publisher(
         return None
 
     # Skip KV event publishing for decode workers
-    if config.is_decode_worker:
+    if config.disaggregation_mode == DisaggregationMode.DECODE:
         logger.info("Skipping KV event publisher setup for decode worker")
         return None
 
@@ -435,6 +436,32 @@ def setup_vllm_engine(config, stat_logger=None):
         engine_args.create_model_config().get_diff_sampling_param()
     )
 
+    # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
+    # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
+    if (
+        not config.route_to_encoder
+        and config.multimodal_embedding_cache_capacity_gb > 0
+    ):
+        from vllm.config import ECTransferConfig
+
+        logger.info(
+            "Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector "
+            "(capacity=%.2f GB)",
+            config.multimodal_embedding_cache_capacity_gb,
+        )
+        instance_id = 0
+        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
+        engine_args.ec_transfer_config = ECTransferConfig(
+            engine_id=engine_id,
+            ec_role="ec_both",
+            ec_connector="DynamoMultimodalEmbeddingCacheConnector",
+            ec_connector_module_path="dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
+            ec_connector_extra_config={
+                "multimodal_embedding_cache_capacity_gb": config.multimodal_embedding_cache_capacity_gb,
+            },
+        )
+        logger.info("Configured ec_both with engine_id=%s", engine_id)
+
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
@@ -516,7 +543,8 @@ async def register_vllm_model(
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     runtime_config.enable_local_indexer = (
-        config.enable_local_indexer and not config.is_decode_worker
+        config.enable_local_indexer
+        and config.disaggregation_mode != DisaggregationMode.DECODE
     )
 
     # Add tool/reasoning parsers for decode models
