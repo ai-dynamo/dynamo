@@ -284,7 +284,14 @@ def test_disaggregation_mode_default(mock_vllm_cli):
 
 def test_disaggregation_mode_prefill(mock_vllm_cli):
     """Test --disaggregation-mode prefill sets correct state."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill")
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disaggregation-mode",
+        "prefill",
+        "--kv-transfer-config",
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+    )
     config = parse_args()
     assert config.disaggregation_mode == DisaggregationMode.PREFILL
     assert config.is_prefill_worker is True
@@ -303,7 +310,13 @@ def test_disaggregation_mode_decode(mock_vllm_cli):
 
 def test_legacy_is_prefill_worker_emits_deprecation(mock_vllm_cli):
     """Test that --is-prefill-worker still works but emits DeprecationWarning."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--is-prefill-worker")
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--is-prefill-worker",
+        "--kv-transfer-config",
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+    )
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         config = parse_args()
