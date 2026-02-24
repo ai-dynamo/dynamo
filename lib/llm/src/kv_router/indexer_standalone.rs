@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use dynamo_runtime::{
     component::Component,
+    error::DynamoError,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
         network::Ingress,
@@ -42,13 +43,13 @@ pub enum IndexerQueryResponse {
 }
 
 impl MaybeError for IndexerQueryResponse {
-    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
         IndexerQueryResponse::Error(err.to_string())
     }
 
-    fn err(&self) -> Option<anyhow::Error> {
+    fn err(&self) -> Option<DynamoError> {
         match self {
-            IndexerQueryResponse::Error(msg) => Some(anyhow::Error::msg(msg.clone())),
+            IndexerQueryResponse::Error(msg) => Some(DynamoError::msg(msg.clone())),
             _ => None,
         }
     }

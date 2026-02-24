@@ -45,8 +45,8 @@ async def graceful_shutdown(runtime: DistributedRuntime):
 
 async def init(runtime: DistributedRuntime, ns: str):
     """
-    Instantiate a `backend` component and serve the `generate` endpoint
-    A `Component` can serve multiple endpoints
+    Create and serve the `generate` endpoint using the distributed runtime.
+    Multiple endpoints can be served from a single worker.
     """
     endpoint = runtime.endpoint(f"{ns}.backend.generate")
     print("Started server instance")

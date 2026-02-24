@@ -142,7 +142,8 @@ spec:
           args:
             - --model
             - /model-cache/deepseek-r1
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --all2all-backend

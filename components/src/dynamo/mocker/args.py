@@ -142,14 +142,48 @@ def create_temp_engine_args_file(args) -> Path:
 
 def validate_worker_type_args(args):
     """
-    Validate that is_prefill_worker and is_decode_worker are not both True.
+    Resolve disaggregation mode from --disaggregation-mode or legacy boolean flags.
     Raises ValueError if validation fails.
     """
-    if args.is_prefill_worker and args.is_decode_worker:
+    import warnings
+
+    explicit_mode = args.disaggregation_mode is not None
+    has_legacy = args.is_prefill_worker or args.is_decode_worker
+
+    if has_legacy and explicit_mode:
         raise ValueError(
-            "Cannot specify both --is-prefill-worker and --is-decode-worker. "
-            "A worker must be either prefill, decode, or aggregated (neither flag set)."
+            "Cannot combine --is-prefill-worker/--is-decode-worker with "
+            "--disaggregation-mode. Use only --disaggregation-mode."
         )
+
+    if has_legacy:
+        if args.is_prefill_worker and args.is_decode_worker:
+            raise ValueError(
+                "Cannot specify both --is-prefill-worker and --is-decode-worker. "
+                "A worker must be either prefill, decode, or aggregated (neither flag set)."
+            )
+        if args.is_prefill_worker:
+            warnings.warn(
+                "--is-prefill-worker is deprecated, use --disaggregation-mode=prefill",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            args.disaggregation_mode = "prefill"
+        elif args.is_decode_worker:
+            warnings.warn(
+                "--is-decode-worker is deprecated, use --disaggregation-mode=decode",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            args.disaggregation_mode = "decode"
+
+    # Apply default if neither new flag nor legacy flags were provided
+    if args.disaggregation_mode is None:
+        args.disaggregation_mode = "agg"
+
+    # Sync booleans from disaggregation_mode
+    args.is_prefill_worker = args.disaggregation_mode == "prefill"
+    args.is_decode_worker = args.disaggregation_mode == "decode"
 
 
 def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
@@ -306,16 +340,26 @@ def parse_args():
 
     # Worker type configuration
     parser.add_argument(
+        "--disaggregation-mode",
+        type=str,
+        default=None,
+        choices=["agg", "prefill", "decode"],
+        help="Worker disaggregation mode: 'agg' (default, aggregated), "
+        "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
+    )
+    parser.add_argument(
         "--is-prefill-worker",
         action="store_true",
         default=False,
-        help="Register as Prefill model type instead of Chat+Completions (default: False)",
+        help="DEPRECATED: use --disaggregation-mode=prefill. "
+        "Register as Prefill model type instead of Chat+Completions (default: False)",
     )
     parser.add_argument(
         "--is-decode-worker",
         action="store_true",
         default=False,
-        help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
+        help="DEPRECATED: use --disaggregation-mode=decode. "
+        "Mark this as a decode worker which does not publish KV events (default: False)",
     )
     parser.add_argument(
         "--durable-kv-events",
