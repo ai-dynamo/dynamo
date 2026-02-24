@@ -19,24 +19,22 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -53,23 +51,6 @@ func (m *MockRBACManager) EnsureServiceAccountWithRBAC(ctx context.Context, targ
 		return m.EnsureServiceAccountWithRBACFunc(ctx, targetNamespace, serviceAccountName, clusterRoleName)
 	}
 	return nil
-}
-
-// Helper function to create JSON config for tests
-func createTestConfig(config map[string]interface{}) *apiextensionsv1.JSON {
-	// Add default hardware config if not present to satisfy validation
-	if _, hasHardware := config["hardware"]; !hasHardware {
-		config["hardware"] = map[string]interface{}{
-			"numGpusPerNode": 8,
-			"gpuModel":       "H100-SXM5-80GB",
-			"gpuVramMib":     81920,
-		}
-	}
-	jsonBytes, err := json.Marshal(config)
-	if err != nil {
-		panic(err)
-	}
-	return &apiextensionsv1.JSON{Raw: jsonBytes}
 }
 
 var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
@@ -115,19 +96,15 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config": "/tmp/test-config.yaml",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-								"isl":  3000,
-								"osl":  5,
-							},
-						}),
+					Image: "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -170,14 +147,15 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-							},
-						}),
+					Image: "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -236,27 +214,22 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdrName,
 					Namespace: namespace,
+					Annotations: map[string]string{
+						"nvidia.com/dgdr-config-map-ref": `{"name":"test-config","key":"disagg.yaml"}`,
+					},
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"profiler_image": "test-profiler:latest",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-								"isl":  3000,
-								"osl":  5,
-							},
-						}),
-						ConfigMapRef: &nvidiacomv1beta1.ConfigMapKeySelector{
-							Name: "test-config",
-							Key:  "disagg.yaml",
-						},
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -333,26 +306,16 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "trtllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config":         "/tmp/test-config.yaml",
-								"profiler_image": "test-profiler:latest",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-								"isl":  3000,
-								"osl":  5,
-							},
-							"sweep": map[string]interface{}{
-								"use_ai_configurator": true,
-								"aic_system":          "h200_sxm",
-								"aic_hf_id":           "Qwen/Qwen3-32B",
-								"aic_backend_version": "0.20.0",
-							},
-						}),
+					Image:          "test-profiler:latest",
+					SearchStrategy: "rapid",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -379,7 +342,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					return ""
 				}
 				return job.Labels[nvidiacomv1beta1.LabelApp]
-			}, timeout, interval).Should(Equal(nvidiacomv1beta1.LabelValueAICProfiler))
+			}, timeout, interval).Should(Equal(nvidiacomv1beta1.LabelValueDynamoProfiler))
 
 			// Clean up
 			jobName := getProfilingJobName(dgdr)
@@ -404,19 +367,15 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config": "/tmp/test-config.yaml",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-								"isl":  3000,
-								"osl":  5,
-							},
-						}),
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -518,19 +477,15 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config": "/tmp/test-config.yaml",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-								"isl":  3000,
-								"osl":  5,
-							},
-						}),
+					Image: "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 					AutoApply: true,
 				},
@@ -619,7 +574,7 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify DGD was created
-			dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+			dgd := &dgdv1alpha1.DynamoGraphDeployment{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "test-dgd-auto", Namespace: namespace}, dgd)).Should(Succeed())
 
 			// Get final DGDR status
@@ -646,19 +601,15 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config": "/tmp/test-config.yaml",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-								"isl":  3000,
-								"osl":  5,
-							},
-						}),
+					Image: "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -684,11 +635,7 @@ spec:
 
 			// Try to modify spec
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
-			// Unmarshal config, modify it, and marshal back
-			var config map[string]interface{}
-			Expect(yaml.Unmarshal(current.Spec.ProfilingConfig.Config.Raw, &config)).Should(Succeed())
-			config["sla"].(map[string]interface{})["ttft"] = 200.0
-			current.Spec.ProfilingConfig.Config = createTestConfig(config)
+			current.Spec.Model = "modified-model"
 			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
 
 			// Reconcile
@@ -729,19 +676,15 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config": "/tmp/test-config.yaml",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-								"isl":  3000,
-								"osl":  5,
-							},
-						}),
+					Image: "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 					AutoApply: true,
 				},
@@ -793,91 +736,42 @@ var _ = Describe("DGDR Helper Functions", func() {
 	})
 
 	Context("isOnlineProfiling", func() {
-		It("Should return true for online profiling (use_ai_configurator=false)", func() {
+		It("Should always return true regardless of spec", func() {
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{
-							"sweep": map[string]interface{}{
-								"use_ai_configurator": false,
-							},
-						}),
-					},
+					Model:   "test-model",
+					Backend: "vllm",
 				},
 			}
 			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
 		})
 
-		It("Should return false for AI Configurator profiling (use_ai_configurator=true)", func() {
+		It("Should return true with search strategy rapid", func() {
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{
-							"sweep": map[string]interface{}{
-								"use_ai_configurator": true,
-							},
-						}),
-					},
-				},
-			}
-			Expect(isOnlineProfiling(dgdr)).Should(BeFalse())
-		})
-
-		It("Should return true by default when sweep section is missing", func() {
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"backend": "vllm",
-							},
-						}),
-					},
+					Model:          "test-model",
+					Backend:        "trtllm",
+					SearchStrategy: "rapid",
 				},
 			}
 			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
 		})
 
-		It("Should return true by default when use_ai_configurator is not specified", func() {
+		It("Should return true with search strategy thorough", func() {
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{
-							"sweep": map[string]interface{}{
-								"prefill_interpolation_granularity": 16,
-							},
-						}),
-					},
+					Model:          "test-model",
+					Backend:        "vllm",
+					SearchStrategy: "thorough",
 				},
 			}
 			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
 		})
 
-		It("Should return false for AI Configurator profiling (useAiConfigurator=true camelCase)", func() {
+		It("Should return true with nil spec fields", func() {
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{
-							"sweep": map[string]interface{}{
-								"useAiConfigurator": true,
-							},
-						}),
-					},
-				},
-			}
-			Expect(isOnlineProfiling(dgdr)).Should(BeFalse())
-		})
-
-		It("Should return true for online profiling (useAiConfigurator=false camelCase)", func() {
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{
-							"sweep": map[string]interface{}{
-								"useAiConfigurator": false,
-							},
-						}),
-					},
+					Model: "test-model",
 				},
 			}
 			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
@@ -901,19 +795,15 @@ var _ = Describe("DGDR Validation", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config": "/tmp/test-config.yaml",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-								"isl":  3000,
-								"osl":  5,
-							},
-						}),
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -928,14 +818,15 @@ var _ = Describe("DGDR Validation", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-							},
-						}),
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -988,28 +879,15 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "trtllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config":         "/tmp/test-config.yaml",
-								"profiler_image": "test-profiler:latest",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 50.0,
-								"itl":  10.0,
-								"isl":  3000,
-								"osl":  500,
-							},
-							"hardware": map[string]interface{}{
-								"gpu_type":                "h200_sxm",
-								"min_num_gpus_per_engine": 2,
-								"max_num_gpus_per_engine": 4,
-							},
-							"sweep": map[string]interface{}{
-								"use_ai_configurator": false,
-							},
-						}),
+					Image: "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						GPUSKU:         "H200-SXM",
+						NumGPUsPerNode: ptr.To[int32](8),
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(50.0),
+						ITL:  ptr.To(10.0),
 					},
 				},
 			}
@@ -1064,31 +942,16 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "trtllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config":         "/tmp/test-config.yaml",
-								"profiler_image": "test-profiler:latest",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 50.0,
-								"itl":  10.0,
-								"isl":  3000,
-								"osl":  500,
-							},
-							"hardware": map[string]interface{}{
-								"gpu_type":                "h200_sxm",
-								"min_num_gpus_per_engine": 1,
-								"max_num_gpus_per_engine": 8,
-							},
-							"sweep": map[string]interface{}{
-								"use_ai_configurator": true,
-								"aic_system":          "h200_sxm",
-								"aic_hf_id":           "Qwen/Qwen3-32B",
-								"aic_backend_version": "0.20.0",
-							},
-						}),
+					Image:          "test-profiler:latest",
+					SearchStrategy: "rapid",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						GPUSKU:         "H200-SXM",
+						NumGPUsPerNode: ptr.To[int32](8),
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(50.0),
+						ITL:  ptr.To(10.0),
 					},
 				},
 			}
@@ -1143,16 +1006,15 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "trtllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"sla": map[string]interface{}{
-								"ttft": 50.0,
-								"itl":  10.0,
-								"isl":  3000,
-								"osl":  500,
-							},
-						}),
+					Image: "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(50.0),
+						ITL:  ptr.To(10.0),
 					},
 				},
 			}
@@ -1224,19 +1086,15 @@ var _ = Describe("DGDR Error Handling", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"config": "/tmp/test-config.yaml",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-								"isl":  3000,
-								"osl":  5,
-							},
-						}),
+					Image: "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -1537,14 +1395,10 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: &apiextensionsv1.JSON{
-							Raw: []byte(`{
-								"sla": {"ttft": 100.0, "itl": 1500.0},
-								"engine": {"minNumGpusPerEngine": 1, "maxNumGpusPerEngine": 8}
-							}`),
-						},
+					Image:   "test-profiler:latest",
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -1595,19 +1449,15 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: &apiextensionsv1.JSON{
-							Raw: []byte(`{
-								"sla": {"ttft": 100.0, "itl": 1500.0},
-								"hardware": {
-									"numGpusPerNode": 4,
-									"gpuModel": "A100-SXM4-40GB",
-									"gpuVramMib": 40960,
-									"system": "a100_sxm"
-								}
-							}`),
-						},
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](4),
+						GPUSKU:         "A100-SXM4-40GB",
+						VRAMMB:         ptr.To(40960.0),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -1658,13 +1508,10 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: &apiextensionsv1.JSON{
-							Raw: []byte(`{
-								"sla": {"ttft": 100.0, "itl": 1500.0}
-							}`),
-						},
+					Image:   "test-profiler:latest",
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -1702,20 +1549,13 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: &apiextensionsv1.JSON{
-							Raw: []byte(`{
-								"sla": {"ttft": 100.0, "itl": 1500.0},
-								"engine": {
-									"minNumGpusPerEngine": 2,
-									"maxNumGpusPerEngine": 4
-								},
-								"hardware": {
-									"numGpusPerNode": 8
-								}
-							}`),
-						},
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
@@ -1780,14 +1620,10 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					ProfilingConfig: nvidiacomv1beta1.ProfilingConfigSpec{
-						ProfilerImage: "test-profiler:latest",
-						Config: &apiextensionsv1.JSON{
-							Raw: []byte(`{
-								"sla": {"ttft": 100.0, "itl": 1500.0},
-								"engine": {"minNumGpusPerEngine": 1, "maxNumGpusPerEngine": 8}
-							}`),
-						},
+					Image:   "test-profiler:latest",
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
 					},
 				},
 			}
