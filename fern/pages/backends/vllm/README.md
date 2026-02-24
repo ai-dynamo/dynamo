@@ -162,7 +162,7 @@ For complete Kubernetes deployment instructions, configurations, and troubleshoo
 vLLM workers are configured through command-line arguments. Key parameters include:
 
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
-- `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
+- `--disaggregation-mode <mode>`: Worker role for disaggregated serving. Accepted values: `prefill`, `decode`, `agg` (default)
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
 - `--connector`: Specify which kv_transfer_config you want vllm to use `[nixl, lmcache, kvbm, none]`. This is a helper flag which overwrites the engines KVTransferConfig.
 - `--enable-prompt-embeds`: **Enable prompt embeddings feature** (opt-in, default: disabled)

@@ -105,7 +105,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
     --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" \
-    --is-prefill-worker \
+    --disaggregation-mode prefill \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 ```
 
