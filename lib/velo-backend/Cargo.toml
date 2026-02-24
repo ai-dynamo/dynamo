@@ -25,23 +25,23 @@ velo-common = { workspace = true }
 anyhow = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
-derive_builder = { workspace = true }
+# derive_builder = { workspace = true }
 parking_lot.workspace = true
-serde = { workspace = true, features = ["derive"] }
+# serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true, features = ["serde", "v4"] }
-xxhash-rust = { workspace = true }
+# uuid = { workspace = true, features = ["serde", "v4"] }
+# xxhash-rust = { workspace = true }
 
-base64 = "0.22"
+# base64 = "0.22"
 flume = "0.11.1"
 futures = "0.3"
-hashbrown = "0.16"
-lru = { version = "0.16", features = ["hashbrown"]}
+# hashbrown = "0.16"
+# lru = { version = "0.16", features = ["hashbrown"]}
 rmp-serde = "1.1"
-serde_bytes = "0.11"
+# serde_bytes = "0.11"
 socket2 = "0.6"
 tokio-util = { version = "0.7", features = ["codec"] }
 

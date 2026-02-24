@@ -21,7 +21,7 @@ This crate provides the foundational types used across Nova for identity and add
 - Peer management
 
 ```rust
-use dynamo_nova_common::InstanceId;
+use velo_common::InstanceId;
 
 let instance_id = InstanceId::new_v4();
 let uuid = instance_id.as_uuid();
@@ -38,7 +38,7 @@ let uuid = instance_id.as_uuid();
 This value-semantics approach simplifies passing identity through systems that work with fixed-size integers.
 
 ```rust
-use dynamo_nova_common::InstanceId;
+use velo_common::InstanceId;
 
 let instance_id = InstanceId::new_v4();
 let worker_id = instance_id.worker_id();  // Deterministic derivation
@@ -65,7 +65,7 @@ The derivation is always consistent—calling `worker_id()` multiple times retur
 3. **KV-store friendly**: The entire address serializes to a `Bytes` blob, suitable for storage in etcd, Redis, or any key-value store without schema changes.
 
 ```rust
-use dynamo_nova_common::WorkerAddress;
+use velo_common::WorkerAddress;
 use std::collections::HashMap;
 
 // Addresses are typically constructed by nova-backend transport builders,
@@ -86,7 +86,7 @@ let tcp_endpoint = address.get_entry("tcp").unwrap();      // Some(Bytes)
 A type-safe wrapper around transport identifiers. Provides zero-cost abstraction over `Arc<str>` with efficient cloning and HashMap compatibility.
 
 ```rust
-use dynamo_nova_common::TransportKey;
+use velo_common::TransportKey;
 use std::collections::HashMap;
 
 let key = TransportKey::from("tcp");
@@ -103,7 +103,7 @@ assert!(map.get("tcp").is_some());  // &str lookup works
 Combines `InstanceId` and `WorkerAddress` into a single structure representing a discoverable peer. This is the primary type exchanged during peer discovery and registration.
 
 ```rust
-use dynamo_nova_common::{InstanceId, PeerInfo, WorkerAddress};
+use velo_common::{InstanceId, PeerInfo, WorkerAddress};
 use std::collections::HashMap;
 
 let instance_id = InstanceId::new_v4();
