@@ -234,9 +234,6 @@ type CheckpointStorageConfiguration struct {
 	// Type is the storage backend type: pvc, s3, or oci
 	// +kubebuilder:default="pvc"
 	Type string `json:"type"`
-	// SignalHostPath is the host path for signal files
-	// +kubebuilder:default="/var/lib/chrek/signals"
-	SignalHostPath string `json:"signalHostPath"`
 	// PVC configuration (used when Type=pvc)
 	PVC CheckpointPVCConfig `json:"pvc"`
 	// S3 configuration (used when Type=s3)

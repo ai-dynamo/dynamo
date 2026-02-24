@@ -75,9 +75,6 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 	if obj.Checkpoint.Storage.Type == "" {
 		obj.Checkpoint.Storage.Type = CheckpointStorageTypePVC
 	}
-	if obj.Checkpoint.Storage.SignalHostPath == "" {
-		obj.Checkpoint.Storage.SignalHostPath = "/var/lib/chrek/signals"
-	}
 	if obj.Checkpoint.Storage.PVC.PVCName == "" {
 		obj.Checkpoint.Storage.PVC.PVCName = "chrek-pvc"
 	}

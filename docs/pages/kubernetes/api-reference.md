@@ -1714,7 +1714,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `type` _string_ | Type is the storage backend type: pvc, s3, or oci | pvc |  |
-| `signalHostPath` _string_ | SignalHostPath is the host path for signal files | /var/lib/chrek/signals |  |
 | `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration (used when Type=pvc) |  |  |
 | `s3` _[CheckpointS3Config](#checkpoints3config)_ | S3 configuration (used when Type=s3) |  |  |
 | `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration (used when Type=oci) |  |  |

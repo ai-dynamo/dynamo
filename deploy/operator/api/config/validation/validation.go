@@ -164,8 +164,14 @@ func validateRBAC(config *configv1alpha1.OperatorConfiguration) field.ErrorList 
 	}
 
 	fldPath := field.NewPath("rbac")
-	if config.RBAC.PlannerClusterRoleName == "" {
+	if config.Namespace.Restricted == "" && config.RBAC.PlannerClusterRoleName == "" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("plannerClusterRoleName"), "planner ClusterRole name is required in cluster-wide mode"))
+	}
+	if config.Namespace.Restricted == "" && config.RBAC.DGDRProfilingClusterRoleName == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("dgdrProfilingClusterRoleName"), "DGDR profiling ClusterRole name is required in cluster-wide mode"))
+	}
+	if config.Namespace.Restricted == "" && config.RBAC.EPPClusterRoleName == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("eppClusterRoleName"), "EPP ClusterRole name is required in cluster-wide mode"))
 	}
 
 	return allErrs
