@@ -3,9 +3,11 @@
 
 """Unit tests for vLLM backend components."""
 
+import json
 import re
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -239,16 +241,12 @@ def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
 
 def test_connector_to_kv_transfer_json_single():
     """Test _connector_to_kv_transfer_json returns valid JSON for a single connector."""
-    import json
-
     result = json.loads(_connector_to_kv_transfer_json(["nixl"]))
     assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
 
 
 def test_connector_to_kv_transfer_json_multi():
     """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
-    import json
-
     result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"]))
     assert result["kv_connector"] == "PdConnector"
     nested = result["kv_connector_extra_config"]["connectors"]
@@ -262,8 +260,6 @@ def test_connector_to_kv_transfer_json_multi():
 
 def _make_engine_cfg(kv_connector=None, extra_config=None):
     """Build a minimal fake engine config for connector detection tests."""
-    from types import SimpleNamespace
-
     if kv_connector is None:
         return SimpleNamespace(kv_transfer_config=None)
     return SimpleNamespace(
