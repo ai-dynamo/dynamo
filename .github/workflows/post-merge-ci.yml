@@ -127,7 +127,7 @@ jobs:
                 text:
                   type: mrkdwn
                   text: "${{ env.FAILED_JOBS }}"
-              - type: "context"
+              - type: "section"
                 text:
                   type: mrkdwn
                   text: "<!@ops-support> Please investigate the failures above."
