@@ -406,7 +406,12 @@ async def parse_args(args: list[str]) -> Config:
     # but the field stays None until the normal scheduler init sets it from
     # tp_worker.get_worker_info(). Set a safe default so the DLLM mixin
     # doesn't crash on `None - int`.
-    if diffusion_worker and server_args.max_running_requests is None:
+    # Only applies to real DLLM workers (truthy algorithm string), not
+    # video/image diffusion stubs where dllm_algorithm=False.
+    if (
+        server_args.dllm_algorithm
+        and getattr(server_args, "max_running_requests", None) is None
+    ):
         server_args.max_running_requests = 8
         logging.info(
             "Defaulting max_running_requests to 8 for diffusion worker"
