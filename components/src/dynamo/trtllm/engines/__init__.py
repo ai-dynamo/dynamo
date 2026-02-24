@@ -4,7 +4,7 @@
 """Engine modules for TensorRT-LLM backend.
 
 This module provides engine wrappers for various generative models:
-- DiffusionEngine: Generic wrapper for visual_gen diffusion pipelines
+- DiffusionEngine: Generic wrapper for TensorRT-LLM visual_gen diffusion pipelines
 """
 
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
