@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_heavy_jobs:
+        description: 'Skip image builds and Python test jobs (only runs rust-tests + coverage-report). For coverage feature iteration only.'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -79,6 +84,7 @@ env:
 jobs:
   build-amd64:
     name: Build ${{ matrix.framework }} (amd64)
+    if: inputs.skip_heavy_jobs != true
     runs-on: prod-builder-amd-v1
     timeout-minutes: 120
     strategy:
@@ -128,6 +134,7 @@ jobs:
 
   build-arm64:
     name: Build ${{ matrix.framework }} (arm64)
+    if: inputs.skip_heavy_jobs != true
     runs-on: prod-builder-arm-v1
     timeout-minutes: 120
     strategy:
@@ -182,6 +189,7 @@ jobs:
   # CUDA 13 builds (vllm and sglang only, both architectures)
   build-cuda13-amd64:
     name: Build ${{ matrix.framework }} CUDA13 (amd64)
+    if: inputs.skip_heavy_jobs != true
     runs-on: prod-builder-amd-v1
     timeout-minutes: 120
     strategy:
@@ -232,6 +240,7 @@ jobs:
 
   build-cuda13-arm64:
     name: Build ${{ matrix.framework }} CUDA13 (arm64)
+    if: inputs.skip_heavy_jobs != true
     runs-on: prod-builder-arm-v1
     timeout-minutes: 120
     strategy:
@@ -285,7 +294,7 @@ jobs:
   unit-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always() && inputs.skip_tests != true
+    if: always() && inputs.skip_tests != true && inputs.skip_heavy_jobs != true
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
     strategy:
@@ -419,7 +428,7 @@ jobs:
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always()
+    if: always() && inputs.skip_heavy_jobs != true
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -554,7 +563,7 @@ jobs:
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always()
+    if: always() && inputs.skip_heavy_jobs != true
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -691,7 +700,7 @@ jobs:
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
     needs: [build-amd64, build-arm64, build-cuda13-arm64, build-cuda13-amd64]
-    if: always()
+    if: always() && inputs.skip_heavy_jobs != true
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -829,7 +838,7 @@ jobs:
   fault-tolerance-tests:
     name: ${{ matrix.framework.name }}-ft-k8s
     needs: [build-amd64]
-    if: always() && inputs.pipeline_type == 'nightly'
+    if: always() && inputs.pipeline_type == 'nightly' && inputs.skip_heavy_jobs != true
     runs-on: prod-builder-amd-v1
     timeout-minutes: 60
     strategy:
