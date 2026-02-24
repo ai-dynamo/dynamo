@@ -39,6 +39,7 @@ from dynamo.profiler.utils.aiperf import (
 )
 from dynamo.profiler.utils.config import Config, get_service_name_by_type
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 from dynamo.profiler.utils.profile_decode import get_num_request_range
@@ -85,6 +86,22 @@ async def run_thorough(
         len(prefill_candidates),
         len(decode_candidates),
     )
+
+    # --- Apply DGD overrides to each candidate ---
+    if dgdr.overrides and dgdr.overrides.dgd:
+        for candidate in prefill_candidates:
+            candidate.dgd_config = apply_dgd_overrides(
+                candidate.dgd_config, dgdr.overrides.dgd
+            )
+        for candidate in decode_candidates:
+            candidate.dgd_config = apply_dgd_overrides(
+                candidate.dgd_config, dgdr.overrides.dgd
+            )
+        logger.info(
+            "Applied DGD overrides to %d prefill + %d decode candidates.",
+            len(prefill_candidates),
+            len(decode_candidates),
+        )
 
     config_modifier = CONFIG_MODIFIERS[backend]
 

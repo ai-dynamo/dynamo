@@ -30,6 +30,7 @@ from dynamo.profiler.thorough import run_thorough
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
+from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import generate_dgd_config_with_planner
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
@@ -278,6 +279,16 @@ async def run_profile(
                 final_config = real_config
         else:
             final_config = dgd_config
+
+        # --- Apply DGD overrides (user-supplied partial DGD) ---
+        if final_config and dgdr.overrides and dgdr.overrides.dgd:
+            if isinstance(final_config, list):
+                final_config[-1] = apply_dgd_overrides(
+                    final_config[-1], dgdr.overrides.dgd
+                )
+            elif isinstance(final_config, dict):
+                final_config = apply_dgd_overrides(final_config, dgdr.overrides.dgd)
+            logger.info("Applied DGD overrides to the final config.")
 
         output_file = f"{ops.output_dir}/final_config.yaml"
         if not final_config:

@@ -311,28 +311,43 @@ def _save_dummy_npz(output_dir: str):
     )
 
 
-_THOROUGH_PATCHES = [
-    patch(
-        "dynamo.profiler.thorough.DynamoDeploymentClient",
-        side_effect=lambda **kw: _mock_deployment_client(),
-    ),
-    patch("dynamo.profiler.thorough.get_prefill_ttft", return_value=50.0),
-    patch(
-        "dynamo.profiler.thorough.get_decode_itl_and_thpt_per_gpu",
-        return_value=(8.0, 125.0),
-    ),
-    patch("dynamo.profiler.thorough.get_num_request_range", return_value=[1, 4, 8]),
-    patch(
-        "dynamo.profiler.thorough.get_service_name_by_type", return_value="TRTLLMWorker"
-    ),
-]
+_DECODE_SVC_NAMES = {
+    "sglang": "decode",
+    "vllm": "VllmDecodeWorker",
+    "trtllm": "TRTLLMDecodeWorker",
+}
 
 
-def _patch_kv_cache_log(modifier_module: str):
+def _make_thorough_patches(backend: str = "trtllm"):
+    """Build mock-patches for thorough mode, parameterised by backend."""
+    svc_name = _DECODE_SVC_NAMES.get(backend, "TRTLLMDecodeWorker")
+    return [
+        patch(
+            "dynamo.profiler.thorough.DynamoDeploymentClient",
+            side_effect=lambda **kw: _mock_deployment_client(),
+        ),
+        patch("dynamo.profiler.thorough.get_prefill_ttft", return_value=50.0),
+        patch(
+            "dynamo.profiler.thorough.get_decode_itl_and_thpt_per_gpu",
+            return_value=(8.0, 125.0),
+        ),
+        patch("dynamo.profiler.thorough.get_num_request_range", return_value=[1, 4, 8]),
+        patch(
+            "dynamo.profiler.thorough.get_service_name_by_type",
+            return_value=svc_name,
+        ),
+    ]
+
+
+# Backward compat: existing tests use the trtllm-flavored list
+_THOROUGH_PATCHES = _make_thorough_patches("trtllm")
+
+
+def _patch_kv_cache_log(backend: str = "trtllm"):
     """Patch get_kv_cache_size_from_dynamo_log on the real config modifier."""
     from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 
-    real_modifier = CONFIG_MODIFIERS["trtllm"]
+    real_modifier = CONFIG_MODIFIERS[backend]
     return patch.object(
         real_modifier, "get_kv_cache_size_from_dynamo_log", return_value=100000
     )
@@ -429,3 +444,75 @@ class TestThoroughMocked:
         )
         assert prefill_npz.exists(), "Prefill interpolation data should be saved"
         assert decode_npz.exists(), "Decode interpolation data should be saved"
+
+
+# ---------------------------------------------------------------------------
+# Shared helper for mocked-thorough + override tests
+# ---------------------------------------------------------------------------
+
+
+def _run_mocked_thorough(dgdr, ops, backend: str):
+    """Run the full mocked-thorough pipeline for an arbitrary backend."""
+    thorough_patches = _make_thorough_patches(backend)
+    kv_patch = _patch_kv_cache_log(backend)
+
+    with kv_patch:
+        for p in thorough_patches:
+            p.start()
+        try:
+            asyncio.run(run_profile(dgdr, ops))
+        finally:
+            for p in thorough_patches:
+                p.stop()
+
+
+def _assert_overrides_applied(final_config_path: Path, dgdr):
+    """Assert the final DGD exists and that overrides are reflected."""
+    assert final_config_path.exists(), "final_config.yaml should exist"
+    raw = final_config_path.read_text()
+    docs = list(yaml.safe_load_all(raw))
+    dgd = docs[-1] if docs else {}
+    assert dgd and "spec" in dgd, "DGD should have a spec"
+
+    override_spec = dgdr.overrides.dgd.get("spec", {})
+
+    for ovr_key in ("envs", "backendFramework"):
+        if ovr_key in override_spec:
+            assert ovr_key in dgd["spec"], f"Override field spec.{ovr_key} should exist"
+
+    svc_overrides = override_spec.get("services", {})
+    dgd_services = dgd.get("spec", {}).get("services", {})
+    for svc_name, svc_ovr in svc_overrides.items():
+        if svc_name in dgd_services:
+            dgd_svc = dgd_services[svc_name]
+            if "sharedMemory" in svc_ovr:
+                assert (
+                    "sharedMemory" in dgd_svc
+                ), f"Override sharedMemory on {svc_name} should be applied"
+            mc = svc_ovr.get("extraPodSpec", {}).get("mainContainer", {})
+            if "args" in mc:
+                dgd_args = (
+                    dgd_svc.get("extraPodSpec", {})
+                    .get("mainContainer", {})
+                    .get("args", [])
+                )
+                for arg in mc["args"]:
+                    assert (
+                        arg in dgd_args
+                    ), f"Override arg '{arg}' should be in {svc_name} args"
+
+
+class TestThoroughMockedOverrides:
+    """Cases 9a/9b/9c: thorough + DGD overrides for DeepSeek-R1 per backend."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_9a_sglang_overrides(self, tmp_path):
+        """Case 9a: SGLang thorough sweep with DSR1 overrides."""
+        dgdr = _load_dgdr(CONFIGS_DIR / "9a_thorough_dsr1_sglang_overrides.yaml")
+        ops = _make_ops(tmp_path)
+        _run_mocked_thorough(dgdr, ops, "sglang")
+        _assert_overrides_applied(
+            tmp_path / "profiling_results" / "final_config.yaml",
+            dgdr,
+        )
