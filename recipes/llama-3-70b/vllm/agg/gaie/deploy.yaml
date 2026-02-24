@@ -49,27 +49,6 @@ spec:
                 - pluginRef: dyn-decode
                   weight: 1
                 - pluginRef: picker
-    Frontend:
-      envFromSecret: hf-token-secret
-      componentType: frontend
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
-      extraPodSpec:
-        mainContainer:
-          image: docker.io/lambda108/dynamo:align-interface
-          workingDir: /workspace/examples/backends/vllm
-          command:
-            - python3
-          args:
-            - -m
-            - dynamo.frontend
-            - --router-mode
-            - direct
-      envs:
-        - name: HF_HOME
-          value: /opt/models
-      replicas: 1
     VllmDecodeWorker:
       componentType: worker
       envFromSecret: hf-token-secret
@@ -96,6 +75,64 @@ spec:
           - -c
           image: docker.io/lambda108/dynamo:align-interface
           workingDir: /workspace/examples/backends/vllm
+              # Frontend sidecar: receives requests from kGateway on port 8000
+        # and routes them to the vLLM worker in the same pod
+        containers:
+          - name: frontend
+            image: docker.io/lambda108/dynamo:align-interface-1
+            command:
+              - python3
+            args:
+              - -m
+              - dynamo.frontend
+              - --router-mode
+              - direct
+            ports:
+              - containerPort: 8000
+                name: http
+                protocol: TCP
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
+            env:
+              - name: DYNAMO_PORT
+                value: "8000"
+              - name: DYN_HTTP_PORT
+                value: "8000"
+              - name: DYN_NAMESPACE
+                value: my-model-vllm-agg
+              - name: DYN_COMPONENT
+                value: frontend
+              - name: DYN_DISCOVERY_BACKEND
+                value: kubernetes
+              - name: DYN_PARENT_DGD_K8S_NAME
+                value: llama3-70b-agg
+              - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                value: my-model
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: POD_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_UID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.uid
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
       replicas: 1
       resources:
         limits:
