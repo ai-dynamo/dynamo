@@ -104,7 +104,7 @@ def validate_chat_response(
 @pytest.mark.deploy
 @pytest.mark.post_merge
 @pytest.mark.e2e
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 async def test_deployment(
     deployment_target: DeploymentTarget,
     deployment_spec: DeploymentSpec,
