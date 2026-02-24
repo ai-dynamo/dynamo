@@ -24,6 +24,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.constants import DisaggregationMode
 
 from . import envs
 
@@ -35,8 +36,6 @@ VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     component: str
-    is_prefill_worker: bool
-    is_decode_worker: bool
     custom_jinja_template: Optional[str] = None
     discovery_backend: str
     request_plane: str
@@ -157,7 +156,6 @@ def update_dynamo_config_with_engine(
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint
 
-    # TODO: move to "disaggregation_mode" as the other engines.
     if dynamo_config.route_to_encoder:
         dynamo_config.component = "processor"
         dynamo_config.endpoint = "generate"
@@ -167,13 +165,16 @@ def update_dynamo_config_with_engine(
     elif dynamo_config.multimodal_decode_worker:
         dynamo_config.component = "decoder"
         dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_worker and dynamo_config.is_prefill_worker:
+    elif (
+        dynamo_config.multimodal_worker
+        and dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
+    ):
         dynamo_config.component = "backend"
         dynamo_config.endpoint = "generate"
     elif dynamo_config.omni:
         dynamo_config.component = "backend"
         dynamo_config.endpoint = "generate"
-    elif dynamo_config.is_prefill_worker:
+    elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
         dynamo_config.component = "prefill"
         dynamo_config.endpoint = "generate"
     else:
@@ -320,10 +321,10 @@ def create_kv_events_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
-    if dynamo_config.is_decode_worker:
+    if dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
         logger.info(
-            f"Decode worker detected (is_decode_worker={dynamo_config.is_decode_worker}): "
-            f"kv_events_config disabled (decode workers don't publish KV events)"
+            "Decode worker detected (disaggregation_mode=decode): "
+            "kv_events_config disabled (decode workers don't publish KV events)"
         )
         return None
 

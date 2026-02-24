@@ -34,6 +34,7 @@ ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
 COPY --from=dynamo_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=dynamo_base /usr/local/cuda/bin/nvlink /usr/local/cuda/bin/nvlink
 COPY --from=dynamo_base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
 COPY --from=dynamo_base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
 COPY --from=dynamo_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary

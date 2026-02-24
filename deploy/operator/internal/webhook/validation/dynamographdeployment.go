@@ -441,6 +441,17 @@ func (v *DynamoGraphDeploymentValidator) validateAnnotations() error {
 		}
 	}
 
+	// Validate vLLM distributed executor backend override
+	if value, exists := annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]; exists {
+		switch strings.ToLower(value) {
+		case "mp", "ray":
+			// valid
+		default:
+			errs = append(errs, fmt.Errorf("annotation %s has invalid value %q: must be \"mp\" or \"ray\"",
+				consts.KubeAnnotationVLLMDistributedExecutorBackend, value))
+		}
+	}
+
 	return errors.Join(errs...)
 }
 
