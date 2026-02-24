@@ -147,7 +147,7 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Always built so FFmpeg libs are available for Rust checks in dev containers.
+# Always built so FFmpeg libs are available for Rust checks in CI
 # Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -278,12 +278,11 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 ##################################
 ##### runtime_wheel_builder ######
 ##################################
-# Builds ai-dynamo, ai-dynamo-runtime, and gpu_memory_service wheels.
-# nixl is NOT installed in this stage, so _core.so will not link against libnixl.
+# Builds ai-dynamo, ai-dynamo-runtime, and gpu_memory_service wheels, sans nixl.
 
 FROM wheel_builder_base AS runtime_wheel_builder
 
-# Copy source code first so ARG changes don't invalidate the COPY layer
+# Copy source code
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
@@ -382,7 +381,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /workspace/nixl && \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
-# Copy source code (after nixl build so nixl layers are cached across source changes)
+# Copy source code
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
