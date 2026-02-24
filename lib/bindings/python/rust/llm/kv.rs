@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
 use super::*;
-use crate::Component;
+use crate::Endpoint;
 use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
@@ -24,6 +24,26 @@ use serde_json::json;
 
 fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BlockExtraInfo>>> {
     depythonize(obj).map_err(to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "start_kv_block_indexer", signature = (endpoint, block_size, kv_router_config))]
+pub fn start_kv_block_indexer_py<'p>(
+    py: Python<'p>,
+    endpoint: &Endpoint,
+    block_size: u32,
+    kv_router_config: &super::entrypoint::KvRouterConfig,
+) -> PyResult<Bound<'p, PyAny>> {
+    let component = endpoint.inner.component().clone();
+    let config = kv_router_config.inner();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        llm_rs::kv_router::indexer_standalone::start_kv_block_indexer(
+            &component, &config, block_size,
+        )
+        .await
+        .map_err(to_pyerr)?;
+        Ok(())
+    })
 }
 
 #[pyfunction]
@@ -66,14 +86,14 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (component))]
+    #[pyo3(signature = (endpoint))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
-        component: Component,
+        endpoint: Endpoint,
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
-        let rs_component = component.inner.clone();
+        let rs_component = endpoint.inner.component().clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             rs_publisher
                 .create_endpoint(rs_component)
@@ -107,9 +127,9 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None))]
+    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None))]
     fn new(
-        component: Component,
+        endpoint: Endpoint,
         worker_id: WorkerId,
         kv_block_size: usize,
         dp_rank: DpRank,
@@ -119,8 +139,8 @@ impl KvEventPublisher {
     ) -> PyResult<Self> {
         let _ = worker_id;
 
-        let source_config = zmq_endpoint.map(|endpoint| KvEventSourceConfig::Zmq {
-            endpoint,
+        let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
+            endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
         });
 
@@ -128,8 +148,11 @@ impl KvEventPublisher {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
+        // Extract component from endpoint
+        let component = endpoint.inner.component().clone();
+
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component.inner,
+            component,
             kv_block_size as u32,
             source_config,
             enable_local_indexer,

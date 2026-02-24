@@ -1766,6 +1766,7 @@ mod tests {
             data: None,
             event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
             comment: None,
+            error: None,
         };
 
         // Add metrics annotation with cached_tokens
@@ -1870,6 +1871,7 @@ mod tests {
             data: None,
             event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
             comment: None,
+            error: None,
         };
 
         let llm_metrics = LLMMetricAnnotation {

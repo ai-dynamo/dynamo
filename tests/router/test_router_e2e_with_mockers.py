@@ -125,9 +125,9 @@ def _build_mocker_command(
 
     # Add worker type flag for disaggregated mode
     if worker_type == "prefill":
-        command.append("--is-prefill-worker")
+        command.extend(["--disaggregation-mode", "prefill"])
     elif worker_type == "decode":
-        command.append("--is-decode-worker")
+        command.extend(["--disaggregation-mode", "decode"])
 
     # Add individual CLI arguments from mocker_args
     if "speedup_ratio" in mocker_args:
@@ -537,7 +537,7 @@ def test_kv_router_bindings(
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
-@pytest.mark.timeout(180)  # bumped for xdist contention (was 90s; up to 33s under load)
+@pytest.mark.timeout(180)
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
