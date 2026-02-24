@@ -67,7 +67,7 @@ python -m dynamo.router \
 python -m dynamo.vllm --model MODEL_NAME --block-size 64 &
 
 # Start prefill workers
-python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
+python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode prefill &
 ```
 
 >[!Note]

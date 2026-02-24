@@ -194,7 +194,7 @@ The DCGM ServiceMonitor must be manually created (see `dcgm-servicemonitor.yaml`
 - Check deployment mode and request routing configuration
 
 ### KV Cache metrics only showing decode workers:
-**Important Limitation**: In disaggregated mode, prefill workers (`--is-prefill-worker`) do NOT expose `dynamo_component_kvstats_*` metrics. Only decode workers expose these.
+**Important Limitation**: In disaggregated mode, prefill workers (`--disaggregation-mode prefill`) do NOT expose `dynamo_component_kvstats_*` metrics. Only decode workers expose these.
 
 **Why this happens:**
 - Prefill workers transfer KV cache to decode workers via NIXL

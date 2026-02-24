@@ -33,6 +33,7 @@ ENV OMPI_MCA_coll_ucc_enable=0
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from PyTorch base image
 COPY --from=pytorch_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=pytorch_base /usr/local/cuda/bin/nvlink /usr/local/cuda/bin/nvlink
 COPY --from=pytorch_base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
 COPY --from=pytorch_base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
 COPY --from=pytorch_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
