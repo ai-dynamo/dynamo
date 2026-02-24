@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: true
+      run_multi_gpu_tests:
+        description: 'Whether to run multi-gpu tests'
+        required: false
+        type: boolean
+        default: false
       copy_to_acr:
         description: 'Whether to copy images to ACR'
         required: false
@@ -75,7 +80,7 @@ on:
         description: 'Timeout in minutes for the copy to ACR step'
         required: false
         type: number
-        default: 5
+        default: 10
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -117,6 +122,7 @@ jobs:
       builder_name: ${{ inputs.builder_name }}
       build_image: ${{ inputs.build_image }}
       run_tests: ${{ inputs.run_tests }}
+      run_multi_gpu_tests: ${{ inputs.run_multi_gpu_tests }}
       copy_to_acr: ${{ inputs.copy_to_acr && matrix.platform == 'amd64' }} # no reason to copy ARM images to ACR
       push_image: ${{ inputs.push_image }}
       build_timeout_minutes: ${{ inputs.build_timeout_minutes }}

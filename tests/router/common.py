@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiohttp
 import nats
 
-from dynamo._core import DistributedRuntime, KvRouter, KvRouterConfig
+from dynamo._internal import start_kv_block_indexer
+from dynamo.llm import KvRouter, KvRouterConfig
+from dynamo.runtime import DistributedRuntime
 from tests.utils.managed_process import ManagedProcess
 
 if TYPE_CHECKING:
@@ -83,7 +85,7 @@ class KVRouterProcess(ManagedProcess):
             )
 
         if durable_kv_events:
-            command.append("--durable-kv-events")
+            command.append("--router-durable-kv-events")
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
@@ -113,6 +115,46 @@ class KVRouterProcess(ManagedProcess):
 def generate_random_suffix() -> str:
     """Generate a 10-character random alphabetic suffix for namespace isolation."""
     return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311
+
+
+def assert_event_dumps_equal(
+    expected: list[dict],
+    actual: list[dict],
+    expected_label: str,
+    actual_label: str,
+) -> None:
+    """Assert two sorted event dump lists are equal, ignoring event_id fields."""
+    assert len(expected) == len(actual), (
+        f"{expected_label} has {len(expected)} events, "
+        f"{actual_label} has {len(actual)} events"
+    )
+
+    differences = []
+    for i, (exp_item, act_item) in enumerate(zip(expected, actual)):
+        exp_compare = exp_item.copy()
+        act_compare = act_item.copy()
+        if "event" in exp_compare and "event_id" in exp_compare["event"]:
+            del exp_compare["event"]["event_id"]
+        if "event" in act_compare and "event_id" in act_compare["event"]:
+            del act_compare["event"]["event_id"]
+        if exp_compare != act_compare:
+            differences.append(
+                {"index": i, expected_label: exp_item, actual_label: act_item}
+            )
+
+    if differences:
+        error_msg = (
+            f"{expected_label} and {actual_label} differ. "
+            f"Found {len(differences)} differences:\n"
+        )
+        for diff in differences:
+            error_msg += f"\nDifference at index {diff['index']}:\n"
+            error_msg += (
+                f"{expected_label}: {json.dumps(diff[expected_label], indent=2)}\n"
+            )
+            error_msg += f"{actual_label}: {json.dumps(diff[actual_label], indent=2)}\n"
+            error_msg += "-" * 80 + "\n"
+        assert False, error_msg
 
 
 def verify_response_worker_ids(
@@ -1389,9 +1431,9 @@ def _test_router_indexers_sync(
         # Create first runtime and endpoint for router 1
         logger.info("Creating first KV router with its own runtime")
         runtime1 = get_runtime(store_backend, request_plane)
-        namespace1 = runtime1.namespace(engine_workers.namespace)
-        component1 = namespace1.component(engine_workers.component_name)
-        endpoint1 = component1.endpoint("generate")
+        endpoint1 = runtime1.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+        )
 
         kv_router1 = KvRouter(
             endpoint=endpoint1,
@@ -1442,9 +1484,9 @@ def _test_router_indexers_sync(
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
         runtime2 = get_runtime(store_backend, request_plane)
-        namespace2 = runtime2.namespace(engine_workers.namespace)
-        component2 = namespace2.component(engine_workers.component_name)
-        endpoint2 = component2.endpoint("generate")
+        endpoint2 = runtime2.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+        )
 
         kv_router2 = KvRouter(
             endpoint=endpoint2,
@@ -1568,57 +1610,49 @@ def _test_router_indexers_sync(
         sorted_state1 = sorted(state1, key=sort_key)
         sorted_state2 = sorted(state2, key=sort_key)
 
-        # Verify they are equal
         logger.info(f"Router 1 has {len(sorted_state1)} events")
         logger.info(f"Router 2 has {len(sorted_state2)} events")
 
-        # Compare states one by one and only show differences
-        if len(sorted_state1) != len(sorted_state2):
-            logger.error(
-                f"Router 1 has {len(sorted_state1)} events, Router 2 has {len(sorted_state2)} events"
-            )
-            assert False, "Router states have different numbers of events"
-
-        differences = []
-        for i, (state1_item, state2_item) in enumerate(
-            zip(sorted_state1, sorted_state2)
-        ):
-            # Create copies without event_id for comparison
-            item1_compare = state1_item.copy()
-            item2_compare = state2_item.copy()
-
-            # Remove event_id from the nested event structure
-            if "event" in item1_compare and "event_id" in item1_compare["event"]:
-                del item1_compare["event"]["event_id"]
-            if "event" in item2_compare and "event_id" in item2_compare["event"]:
-                del item2_compare["event"]["event_id"]
-
-            if item1_compare != item2_compare:
-                differences.append(
-                    {
-                        "index": i,
-                        "router1_state": state1_item,
-                        "router2_state": state2_item,
-                    }
-                )
-        # If there are differences, format them for easier debugging
-        if differences:
-            error_msg = (
-                f"Router states are not equal. Found {len(differences)} differences:\n"
-            )
-            for diff in differences:
-                error_msg += f"\nDifference at index {diff['index']}:\n"
-                error_msg += (
-                    f"Router 1: {json.dumps(diff['router1_state'], indent=2)}\n"
-                )
-                error_msg += (
-                    f"Router 2: {json.dumps(diff['router2_state'], indent=2)}\n"
-                )
-                error_msg += "-" * 80 + "\n"
-
-            assert False, error_msg
-
+        assert_event_dumps_equal(sorted_state1, sorted_state2, "Router 1", "Router 2")
         logger.info("Successfully verified that both router states are equal")
+
+        # Verify standalone indexer builds the same tree (only for non-durable/NATS Core)
+        if not durable_kv_events:
+            logger.info("Starting standalone indexer and verifying tree state")
+            runtime3 = get_runtime(store_backend, request_plane)
+            endpoint3 = runtime3.endpoint(
+                f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+            )
+            await start_kv_block_indexer(endpoint3, block_size, kv_router_config)
+
+            # Wait for the standalone indexer to sync events from workers
+            await asyncio.sleep(3)
+
+            # Query the standalone indexer's tree via kv_indexer_query endpoint
+            # Note: reuse runtime3 to keep the standalone indexer's component alive
+            query_endpoint = runtime3.endpoint(
+                f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
+            )
+            query_client = await query_endpoint.client()
+            await query_client.wait_for_instances()
+            stream = await query_client.generate("DumpTree", annotated=False)
+            response = await stream.__anext__()
+            standalone_state = response["TreeDump"]
+
+            sorted_standalone = sorted(standalone_state, key=sort_key)
+
+            logger.info(f"Standalone indexer has {len(sorted_standalone)} events")
+
+            assert_event_dumps_equal(
+                sorted_state1, sorted_standalone, "Router 1", "Standalone"
+            )
+            logger.info(
+                "Successfully verified standalone indexer state matches router states"
+            )
+        else:
+            logger.info(
+                "Skipping standalone indexer verification (not supported with durable_kv_events)"
+            )
 
         # Verify NATS consumers are created (while routers are still alive)
         # Skip this for NATS interruption test since it uses local indexer (NATS Core, not JetStream)

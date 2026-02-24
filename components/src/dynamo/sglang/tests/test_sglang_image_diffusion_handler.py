@@ -24,12 +24,6 @@ pytestmark = [
 
 
 @pytest.fixture
-def mock_component():
-    """Mock Dynamo Component."""
-    return MagicMock()
-
-
-@pytest.fixture
 def mock_generator():
     """Mock SGLang DiffGenerator."""
     generator = MagicMock()
@@ -42,8 +36,8 @@ def mock_config():
     """Mock Config object."""
     config = MagicMock()
     config.dynamo_args = MagicMock()
-    config.dynamo_args.image_diffusion_fs_url = "file:///tmp/images"
-    config.dynamo_args.image_diffusion_base_url = "file:///tmp/images"
+    config.dynamo_args.media_output_fs_url = "file:///tmp/images"
+    config.dynamo_args.media_output_http_url = "file:///tmp/images"
     return config
 
 
@@ -67,12 +61,9 @@ def mock_context():
 
 
 @pytest.fixture
-def handler(
-    mock_component, mock_generator, mock_config, mock_fs
-) -> ImageDiffusionWorkerHandler:
+def handler(mock_generator, mock_config, mock_fs) -> ImageDiffusionWorkerHandler:
     """Create ImageDiffusionWorkerHandler instance."""
     return ImageDiffusionWorkerHandler(
-        component=mock_component,
         generator=mock_generator,
         config=mock_config,
         publisher=None,
@@ -90,17 +81,14 @@ class TestImageDiffusionWorkerHandler:
         assert handler.fs_url == "file:///tmp/images"
         assert handler.base_url == "file:///tmp/images"
 
-    def test_initialization_with_url_base(
-        self, mock_component, mock_generator, mock_fs
-    ):
+    def test_initialization_with_url_base(self, mock_generator, mock_fs):
         """Test handler initialization with URL base."""
         config = MagicMock()
         config.dynamo_args = MagicMock()
-        config.dynamo_args.image_diffusion_fs_url = "s3://my-bucket/images"
-        config.dynamo_args.image_diffusion_base_url = "http://localhost:8008/images"
+        config.dynamo_args.media_output_fs_url = "s3://my-bucket/images"
+        config.dynamo_args.media_output_http_url = "http://localhost:8008/images"
 
         handler = ImageDiffusionWorkerHandler(
-            component=mock_component,
             generator=mock_generator,
             config=config,
             publisher=None,

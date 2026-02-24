@@ -100,22 +100,11 @@ pub struct PrefillRouter {
     enforce_disagg: bool,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
+    /// Namespace used to look up the correct WorkerSet's worker monitor
+    namespace: String,
 }
 
 impl PrefillRouter {
-    fn routing_inputs(req: &PreprocessedRequest) -> (&[u32], Option<&[Option<BlockExtraInfo>]>) {
-        if let Some(mm_routing_info) = req.mm_routing_info.as_ref() {
-            let routing_tokens = mm_routing_info.routing_token_ids.as_slice();
-            if !routing_tokens.is_empty() {
-                return (
-                    routing_tokens,
-                    Some(mm_routing_info.block_mm_infos.as_slice()),
-                );
-            }
-        }
-        (&req.token_ids, None)
-    }
-
     /// Create a disabled prefill router that will never activate (passthrough only)
     pub fn disabled(
         model_manager: Arc<ModelManager>,
@@ -130,9 +119,11 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             model_name: String::new(), // Not used for disabled router
+            namespace: String::new(),  // Not used for disabled router
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
@@ -141,6 +132,7 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         enforce_disagg: bool,
         model_name: String,
+        namespace: String,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -153,6 +145,7 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             model_name,
+            namespace,
         });
 
         // Spawn background task to wait for activation
@@ -220,7 +213,9 @@ impl PrefillRouter {
             let client = kv_chooser.client().clone();
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 
@@ -240,7 +235,9 @@ impl PrefillRouter {
             let client = endpoint.client().await?;
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 
@@ -298,7 +295,7 @@ impl PrefillRouter {
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
-            let (routing_token_ids, block_mm_infos) = Self::routing_inputs(req);
+            let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
             match self
                 .query_prefill_worker(
                     routing_token_ids,

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+from typing import Optional
 
 from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
@@ -45,7 +46,8 @@ from dynamo.llm import (
     register_model,
 )
 from dynamo.runtime import DistributedRuntime
-from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.args import Config
+from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -54,7 +56,7 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import Config, deep_update
+from dynamo.trtllm.utils.trtllm_utils import deep_update
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
@@ -92,23 +94,26 @@ async def get_engine_runtime_config(
 
 
 def build_kv_connector_config(config: Config):
-    if config.connector is not None:
-        if config.connector == "kvbm":
+    if config.connector:
+        if config.connector[0] == "kvbm":
             return KvCacheConnectorConfig(
                 connector_module="kvbm.trtllm_integration.connector",
                 connector_scheduler_class="DynamoKVBMConnectorLeader",
                 connector_worker_class="DynamoKVBMConnectorWorker",
             )
-        elif config.connector == "none":
+        elif config.connector[0] == "none":
             return None
         else:
-            logging.error(f"Invalid connector: {config.connector}")
+            logging.error(f"Invalid connector: {config.connector[0]}")
             sys.exit(1)
     return None
 
 
 async def init_llm_worker(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    shutdown_endpoints: Optional[list] = None,
 ) -> None:
     """Initialize and run the LLM worker.
 
@@ -118,6 +123,7 @@ async def init_llm_worker(
         runtime: The Dynamo distributed runtime.
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
+        shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
 
     encode_client = None
@@ -128,17 +134,12 @@ async def init_llm_worker(
         parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
             config.encode_endpoint
         )
-        encode_client = (
-            await runtime.namespace(parsed_namespace)
-            .component(parsed_component_name)
-            .endpoint(parsed_endpoint_name)
-            .client()
-        )
-
-    component = runtime.namespace(config.namespace).component(config.component)
+        encode_client = await runtime.endpoint(
+            f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
+        ).client()
 
     # Convert model path to Path object if it's a local path, otherwise keep as string
-    model_path = str(config.model_path)
+    model_path = str(config.model)
 
     if config.gpus_per_node is None:
         gpus_per_node = device_count()
@@ -151,7 +152,7 @@ async def init_llm_worker(
         free_gpu_memory_fraction=config.free_gpu_memory_fraction
     )
 
-    if config.connector is not None and "kvbm" in config.connector:
+    if config.has_connector("kvbm"):
         kv_cache_config.enable_partial_reuse = False
 
     dynamic_batch_config = DynamicBatchConfig(
@@ -165,7 +166,6 @@ async def init_llm_worker(
     )
     kv_connector_config = build_kv_connector_config(config)
 
-    modality = getattr(config, "modality", None) or "text"
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,
@@ -275,15 +275,13 @@ async def init_llm_worker(
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
         model_type = ModelType.Prefill
     else:
-        model_type = parse_endpoint_types(config.dyn_endpoint_types)
-        logging.info(
-            f"Registering model with endpoint types: {config.dyn_endpoint_types}"
-        )
+        model_type = parse_endpoint_types(config.endpoint_types)
+        logging.info(f"Registering model with endpoint types: {config.endpoint_types}")
 
         # Warn if custom template provided but chat endpoint not enabled
-        if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+        if config.custom_jinja_template and "chat" not in config.endpoint_types:
             logging.warning(
-                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --endpoint-types. "
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
@@ -296,14 +294,12 @@ async def init_llm_worker(
         # This overrides the skip_tokenizer_init=True set earlier
         engine_args["skip_tokenizer_init"] = False
 
-    if modality == "multimodal":
+    if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
-        model_config = AutoConfig.from_pretrained(
-            config.model_path, trust_remote_code=True
-        )
+        model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
-            model_dir=config.model_path,
+            model_dir=config.model,
             max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
             allowed_local_media_path=config.allowed_local_media_path,
@@ -322,7 +318,7 @@ async def init_llm_worker(
     )
 
     # Prepare model name for metrics
-    model_name_for_metrics = config.served_model_name or config.model_path
+    model_name_for_metrics = config.served_model_name or config.model
 
     # Construct Prometheus gauges directly; passed through to the engine and publisher
     # via explicit parameters (no module-level global).
@@ -337,7 +333,12 @@ async def init_llm_worker(
         config.disaggregation_mode,
         component_gauges=component_gauges,
     ) as engine:
-        endpoint = component.endpoint(config.endpoint)
+        endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+
+        if shutdown_endpoints is not None:
+            shutdown_endpoints[:] = [endpoint]
 
         # should ideally call get_engine_runtime_config
         # this is because we don't have a good way to
@@ -357,8 +358,8 @@ async def init_llm_worker(
         # Both parameters control the same thing: how many requests can be processed simultaneously
         runtime_config.max_num_seqs = config.max_batch_size
         runtime_config.max_num_batched_tokens = config.max_num_tokens
-        runtime_config.reasoning_parser = config.reasoning_parser
-        runtime_config.tool_call_parser = config.tool_call_parser
+        runtime_config.reasoning_parser = config.dyn_reasoning_parser
+        runtime_config.tool_call_parser = config.dyn_tool_call_parser
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer
@@ -386,7 +387,7 @@ async def init_llm_worker(
         metrics_collector = None
         if config.publish_events_and_metrics:
             try:
-                model_name_for_metrics = config.served_model_name or config.model_path
+                model_name_for_metrics = config.served_model_name or config.model
                 metrics_collector = MetricsCollector(
                     {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
                 )
@@ -418,7 +419,6 @@ async def init_llm_worker(
 
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
-            component=component,
             engine=engine,
             default_sampling_params=default_sampling_params,
             publisher=None,
@@ -430,7 +430,8 @@ async def init_llm_worker(
             metrics_collector=metrics_collector,
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
-            encoder_cache_capacity_gb=config.encoder_cache_capacity_gb,
+            encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+            disable_request_abort=config.disable_request_abort,
         )
 
         # Register the model with runtime config
@@ -441,7 +442,7 @@ async def init_llm_worker(
                 model_input,
                 model_type,
                 endpoint,
-                config.model_path,
+                config.model,
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
                 runtime_config=runtime_config,
@@ -454,11 +455,8 @@ async def init_llm_worker(
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
-            kv_listener = runtime.namespace(config.namespace).component(
-                config.component
-            )
-            # Use model_path as fallback if served_model_name is not provided
-            model_name_for_metrics = config.served_model_name or config.model_path
+            # Use model as fallback if served_model_name is not provided
+            model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [
                 (
                     prometheus_names.labels.MODEL,
@@ -476,7 +474,7 @@ async def init_llm_worker(
             if consolidator_output_endpoint:
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_publisher = KvEventPublisher(
-                    component,
+                    endpoint=endpoint,
                     kv_block_size=config.kv_block_size,
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",
@@ -487,9 +485,8 @@ async def init_llm_worker(
                 )
 
             async with get_publisher(
-                component,
+                endpoint,
                 engine,
-                kv_listener,
                 int(endpoint.connection_id()),
                 config.kv_block_size,
                 metrics_labels,

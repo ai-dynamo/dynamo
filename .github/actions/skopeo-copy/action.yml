@@ -109,7 +109,7 @@ runs:
         RETRY_DELAY=10
         for attempt in $(seq 1 $MAX_RETRIES); do
           echo "Attempt ${attempt}/${MAX_RETRIES}..."
-          if skopeo copy --all "${SOURCE_REF}" "${TARGET_REF}"; then
+          if skopeo copy --all --retry-times 4 "${SOURCE_REF}" "${TARGET_REF}"; then
             echo "target_image_ref=${{ inputs.target_registry }}/${TARGET_IMAGE}:${TARGET_TAG}" >> $GITHUB_OUTPUT
             echo "✅ Image copied successfully"
             exit 0

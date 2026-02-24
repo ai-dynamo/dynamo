@@ -118,6 +118,7 @@ class ZmqKvEventPublisher:
         block_hashes: list[int],
         lora_id: int = 0,
         parent_hash: Optional[int] = None,
+        block_mm_infos: Optional[list[dict | None]] = None,
         attention_dp_rank: int = 0,
     ):
         """Publish a BlockStored event.
@@ -140,6 +141,10 @@ class ZmqKvEventPublisher:
             "block_size": self.kv_block_size,
             "lora_id": lora_id if lora_id != 0 else None,
         }
+
+        # Add multimodal info if present
+        if block_mm_infos is not None:
+            event["block_mm_infos"] = block_mm_infos
 
         self._publish_event(event, attention_dp_rank)
 
@@ -291,9 +296,8 @@ class Publisher:
 
     def __init__(
         self,
-        component,
+        endpoint,
         engine,
-        kv_listener,
         worker_id,
         kv_block_size,
         metrics_labels,
@@ -301,9 +305,8 @@ class Publisher:
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
     ):
-        self.component = component
+        self.endpoint = endpoint
         self.engine = engine
-        self.kv_listener = kv_listener
         self.worker_id = worker_id
         self.kv_block_size = kv_block_size
         self.max_window_size = None
@@ -351,7 +354,7 @@ class Publisher:
         if self.metrics_publisher is None:
             logging.error("KV metrics publisher not initialized!")
             return
-        await self.metrics_publisher.create_endpoint(self.component)
+        await self.metrics_publisher.create_endpoint(self.endpoint)
 
     def initialize(self):
         # Setup the metrics publisher
@@ -380,9 +383,9 @@ class Publisher:
             self.kv_event_publishers = {}
             for rank in range(self.attention_dp_size):
                 self.kv_event_publishers[rank] = KvEventPublisher(
-                    self.kv_listener,
-                    self.worker_id,
-                    self.kv_block_size,
+                    endpoint=self.endpoint,
+                    worker_id=self.worker_id,
+                    kv_block_size=self.kv_block_size,
                     dp_rank=rank,
                     enable_local_indexer=self.enable_local_indexer,
                 )
@@ -537,6 +540,7 @@ class Publisher:
             token_ids: list[int] = []
             num_block_tokens: list[int] = []
             block_hashes: list[int] = []
+            block_mm_infos: list[dict | None] = []
             for block in data["blocks"]:
                 token_num_in_block = len(block["tokens"])
                 block_hash = _to_signed_i64(block["block_hash"])
@@ -561,6 +565,26 @@ class Publisher:
                 for token in block["tokens"]:
                     token_ids.append(int(token["token_id"]))
 
+                # Extract multimodal hash info for this block
+                # {"mm_keys": [{"type":"mm_key","hash":"<hex>","start_offset":N}]}
+                mm_keys = block.get("mm_keys", [])
+                mm_hashes = [
+                    int(mm_key["hash"][:16], 16)
+                    for mm_key in mm_keys
+                    if mm_key.get("type") == "mm_key" and mm_key.get("hash")
+                ]
+                if mm_hashes:
+                    block_mm_infos.append(
+                        {
+                            "mm_objects": [
+                                {"mm_hash": mm_hash, "offsets": []}
+                                for mm_hash in mm_hashes
+                            ]
+                        }
+                    )
+                else:
+                    block_mm_infos.append(None)
+
             # Note: Currently data does not have lora_id.
             # Using 0 as default value. If later data has
             # lora_id, we need to verify if this is correct.
@@ -583,6 +607,7 @@ class Publisher:
                     block_hashes,
                     lora_id,
                     parent_hash,
+                    block_mm_infos,
                     attention_dp_rank,
                 )
             elif self.kv_event_publishers:
@@ -596,6 +621,7 @@ class Publisher:
                         block_hashes,
                         lora_id,
                         parent_hash,
+                        block_mm_infos,
                     )
                 else:
                     logging.warning(
@@ -732,9 +758,8 @@ class Publisher:
 
 @asynccontextmanager
 async def get_publisher(
-    component,
+    endpoint,
     engine,
-    kv_listener,
     worker_id,
     kv_block_size,
     metrics_labels,
@@ -743,9 +768,8 @@ async def get_publisher(
     enable_local_indexer: bool = False,
 ):
     publisher = Publisher(
-        component,
+        endpoint,
         engine,
-        kv_listener,
         worker_id,
         kv_block_size,
         metrics_labels,

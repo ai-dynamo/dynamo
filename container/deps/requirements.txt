@@ -41,6 +41,7 @@ prometheus_client==0.23.1
 prophet==1.2.1
 protobuf>=5.29.5,<7.0.0
 pydantic>=2.11.4,<2.13  # vllm==0.12.0 depends on pydantic>=2.12.0
+pydantic-settings<2.13.0  # tensorrt_llm DynamicYamlWithDeepMergeSettingsSource incompatible with 2.13.0+ deep_merge param
 pyright==1.1.407
 PyYAML==6.0.3
 scikit-learn==1.7.2
@@ -53,7 +54,7 @@ tensorboard>=2.19.0,<2.21.0
 tensorboardX==2.6.2.2
 # Transformers version constraint for container builds
 # - vLLM 0.11.0: >=4.55.2, vLLM 0.11.2: >=4.56.0,<5
-# - TensorRT-LLM 1.3.0rc1: ==4.57.1
+# - TensorRT-LLM 1.3.0rc3: ==4.57.1
 # - SGLang 0.5.8: ==4.57.1
 # Using >=4.56.0 to satisfy all frameworks
 transformers>=4.56.0

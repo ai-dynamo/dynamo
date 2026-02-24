@@ -67,8 +67,8 @@ const VALIDATION_PREFIX: &str = "Validation: ";
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
-/// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
-fn get_body_limit() -> usize {
+/// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
+pub(super) fn get_body_limit() -> usize {
     std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -248,7 +248,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 // TODO: Similar function exists in lib/llm/src/grpc/service/openai.rs but with different signature and simpler logic
-fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
+pub(super) fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
     // Try to get request id from trace context
     if let Some(trace_context) = get_distributed_tracing_context()
         && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
@@ -372,12 +372,10 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     // todo - error handling should be more robust
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
+        .get_completions_engine_with_parsing(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -495,12 +493,10 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
+        .get_completions_engine_with_parsing(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -821,7 +817,7 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
 
 /// Checks if the first event in the stream is a backend error.
 /// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise.
-async fn check_for_backend_error(
+pub(super) async fn check_for_backend_error(
     mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
     + Send
     + Unpin
@@ -916,12 +912,10 @@ async fn chat_completions(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
+        .get_chat_completions_engine_with_parsing(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -1260,12 +1254,10 @@ async fn responses(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
+        .get_chat_completions_engine_with_parsing(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 

@@ -17,6 +17,8 @@ from tests.serve.common import (
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
+    anthropic_messages_payload_default,
+    anthropic_messages_stream_payload_default,
     chat_payload,
     chat_payload_default,
     completion_payload_default,
@@ -286,6 +288,23 @@ sglang_configs = {
         ],
         request_payloads=[
             completion_payload_default(),
+        ],
+    ),
+    "anthropic_messages": SGLangConfig(
+        name="anthropic_messages",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(240),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={"DYN_ENABLE_ANTHROPIC_API": "1"},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            anthropic_messages_payload_default(),
+            anthropic_messages_stream_payload_default(),
         ],
     ),
 }

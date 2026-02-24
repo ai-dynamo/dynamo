@@ -58,21 +58,30 @@ class DistributedRuntime:
         """
         ...
 
-    def namespace(self, name: str) -> Namespace:
+    def endpoint(self, path: str) -> Endpoint:
         """
-        Create a `Namespace` object
+        Get an endpoint directly by path.
+
+        Args:
+            path: Endpoint path in format 'namespace.component.endpoint'
+                  or 'dyn://namespace.component.endpoint'
+
+        Returns:
+            Endpoint: The requested endpoint
+
+        Raises:
+            ValueError: If path format is invalid (not 3 parts separated by dots)
+            Exception: If namespace or component creation fails
+
+        Example:
+            endpoint = runtime.endpoint("demo.backend.generate")
+            endpoint = runtime.endpoint("dyn://demo.backend.generate")
         """
         ...
 
     def shutdown(self) -> None:
         """
         Shutdown the runtime by triggering the cancellation token
-        """
-        ...
-
-    def child_token(self) -> CancellationToken:
-        """
-        Get a child cancellation token that can be passed to async tasks
         """
         ...
 
@@ -99,46 +108,6 @@ class DistributedRuntime:
         a dict that will be serialized as the JSON response.
 
         For GET requests or empty bodies, an empty dict {} is passed.
-        """
-        ...
-
-class CancellationToken:
-    def cancel(self) -> None:
-        """
-        Cancel the token and all its children
-        """
-        ...
-
-    async def cancelled(self) -> None:
-        """
-        Await until the token is cancelled
-        """
-        ...
-
-
-class Namespace:
-    """
-    A namespace is a collection of components
-    """
-
-    ...
-
-    def component(self, name: str) -> Component:
-        """
-        Create a `Component` object
-        """
-        ...
-
-class Component:
-    """
-    A component is a collection of endpoints
-    """
-
-    ...
-
-    def endpoint(self, name: str) -> Endpoint:
-        """
-        Create an endpoint
         """
         ...
 
@@ -207,7 +176,6 @@ class Endpoint:
         and should start receiving requests.
         """
         ...
-
 
 class Client:
     """
@@ -404,14 +372,15 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    async def create_endpoint(self, component: Component) -> None:
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Create the NATS endpoint for metrics publishing. Must be awaited.
+        Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
 
-        Only service created through this method will interact with KV router of the same component.
+        Extracts component information from the endpoint to set up metrics publishing
+        on the correct NATS subject for routing decisions.
 
         Args:
-            component: The component to create the endpoint for
+            endpoint: The endpoint to extract component information from for metrics publishing
         """
 
     def publish(
@@ -575,7 +544,7 @@ class KvIndexer:
 
     ...
 
-    def __init__(self, component: Component, block_size: int) -> None:
+    def __init__(self, endpoint: Endpoint, block_size: int) -> None:
         """
         Create a `KvIndexer` object
         """
@@ -622,7 +591,7 @@ class ApproxKvIndexer:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: int,
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
@@ -689,7 +658,7 @@ class KvEventPublisher:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         worker_id: int = 0,
         kv_block_size: int = 0,
         dp_rank: int = 0,
@@ -706,8 +675,8 @@ class KvEventPublisher:
         When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
-            component: The component to publish events for
-            worker_id: The worker ID (unused, inferred from component)
+            endpoint: The endpoint to extract component information from for event publishing
+            worker_id: The worker ID (unused, inferred from endpoint)
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
             enable_local_indexer: Enable worker-local KV indexer
@@ -722,6 +691,7 @@ class KvEventPublisher:
         block_hashes: List[int],
         lora_id: int,
         parent_hash: Optional[int] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -734,6 +704,9 @@ class KvEventPublisher:
             block_hashes: List of block hashes (signed 64-bit integers)
             lora_id: The LoRA ID
             parent_hash: Optional parent hash (signed 64-bit integer)
+            block_mm_infos: Optional list of multimodal info for each block.
+                Each item is either None or a dict with "mm_objects" key containing
+                a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
         """
         ...
 
@@ -760,7 +733,29 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    ...
+    def __init__(self, port: Optional[int] = None) -> None:
+        """
+        Create a new HTTP service.
+
+        Args:
+            port: Optional port number to bind the service to (default: 8080)
+        """
+        ...
+
+    async def run(self, runtime: DistributedRuntime) -> None:
+        """
+        Run the HTTP service.
+
+        Args:
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the HTTP service by cancelling its internal token.
+        """
+        ...
 
 class PythonAsyncEngine:
     """
@@ -901,12 +896,18 @@ class KserveGrpcService:
         """
         ...
 
-    async def run(self, token: CancellationToken) -> None:
+    async def run(self, runtime: DistributedRuntime) -> None:
         """
         Run the KServe gRPC service.
 
         Args:
-            token: Cancellation token to stop the service
+            runtime: DistributedRuntime instance for token management
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the KServe gRPC service by cancelling its internal token.
         """
         ...
 
@@ -922,6 +923,7 @@ class ModelType:
     TensorBased: ModelType
     Prefill: ModelType
     Images: ModelType
+    Audios: ModelType
     Videos: ModelType
     ...
 
@@ -1010,6 +1012,12 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool.
         """
         ...
+
+async def start_kv_block_indexer(
+    endpoint: Endpoint,
+    block_size: int,
+    kv_router_config: KvRouterConfig,
+) -> None: ...
 
 async def register_model(
     model_input: ModelInput,
@@ -1298,37 +1306,6 @@ class KvbmRequest:
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
-class ZmqKvEventListener:
-    """
-    A ZMQ-based key-value cache event listener that operates independently
-    of the dynamo runtime or event plane infrastructure.
-    """
-
-    def __init__(
-        self, zmq_endpoint: str, zmq_topic: str, kv_block_size: int
-    ) -> None:
-        """
-        Create a new ZmqKvEventListener instance.
-
-        Args:
-            zmq_endpoint: ZeroMQ endpoint to connect to (e.g., "tcp://127.0.0.1:5557")
-            zmq_topic: ZeroMQ topic to subscribe to
-            kv_block_size: Size of KV cache blocks
-        """
-        ...
-
-    async def get_events(self) -> List[str]:
-        """
-        Get all available KV cache events from the ZMQ listener.
-
-        Returns:
-            List of JSON-serialized KV cache events as strings
-
-        Raises:
-            ValueError: If events cannot be serialized to JSON
-        """
-        ...
-
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.
@@ -1604,7 +1581,6 @@ class VirtualConnectorClient:
 
 __all__ = [
     "Client",
-    "Component",
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",

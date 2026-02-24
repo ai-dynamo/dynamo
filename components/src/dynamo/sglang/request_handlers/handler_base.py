@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import logging
 import random
 import socket
@@ -12,7 +13,7 @@ from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 import sglang as sgl
 from sglang.srt.utils import get_local_ip_auto
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -29,18 +30,15 @@ class BaseGenerativeHandler(ABC):
 
     def __init__(
         self,
-        component: Component,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
     ) -> None:
         """Initialize base generative handler.
 
         Args:
-            component: The Dynamo runtime component.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
         """
-        self.component = component
         self.config = config
 
         # Set up metrics and KV publishers
@@ -97,7 +95,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
@@ -107,7 +104,6 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         """Initialize base worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
@@ -115,7 +111,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             shutdown_event: Optional event to signal shutdown.
         """
         # Call parent constructor
-        super().__init__(component, config, publisher)
+        super().__init__(config, publisher)
 
         # LLM-specific initialization
         self.engine = engine
@@ -138,6 +134,15 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             if not self.skip_tokenizer_init
             else None
         )
+
+        self._engine_supports_priority = (
+            "priority" in inspect.signature(engine.async_generate).parameters
+        )
+
+    def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
+        if priority is not None and self._engine_supports_priority:
+            return {"priority": priority}
+        return {}
 
     async def release_memory_occupation(self, body: dict) -> dict:
         """Release GPU memory occupation and unregister from discovery.
