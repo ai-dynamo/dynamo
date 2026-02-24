@@ -1,0 +1,1151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Unified CI pipeline: builds, tests, and distributes all framework images.
+# Called directly on push (main / PR), or via workflow_call by nightly-ci.yml / release.yml.
+# Note: release/* branches are handled by release.yml which calls this workflow.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+  workflow_dispatch:
+    inputs:
+      run_deploy_operator:
+        description: 'Run deploy operator and deployment tests'
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      pipeline_type:
+        description: 'pr, post_merge, nightly, or release'
+        required: false
+        type: string
+        default: ''
+      image_prefix:
+        description: 'Tag prefix for images (e.g. nightly, release-0.9.0)'
+        required: false
+        type: string
+        default: ''
+      include_nightly_marks:
+        description: 'Include nightly pytest marks in test selection'
+        required: false
+        type: boolean
+        default: false
+      enable_slack_notification:
+        description: 'Enable Slack notifications on completion'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
+    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+  REGISTRY_IMAGE: ai-dynamo/dynamo
+
+jobs:
+
+  # ============================================================================
+  # SETUP & DETECTION JOBS
+  # ============================================================================
+
+
+  changed-files:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
+    outputs:
+      core: ${{ steps.set-output.outputs.core }}
+      operator: ${{ steps.set-output.outputs.operator }}
+      deploy: ${{ steps.set-output.outputs.deploy }}
+      vllm: ${{ steps.set-output.outputs.vllm }}
+      sglang: ${{ steps.set-output.outputs.sglang }}
+      trtllm: ${{ steps.set-output.outputs.trtllm }}
+      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+      pipeline_type: ${{ steps.set-output.outputs.pipeline_type }}
+      image_prefix: ${{ steps.set-output.outputs.image_prefix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+      - name: Check for changes
+        id: changes
+        if: ${{ inputs.pipeline_type == '' }}
+        uses: ./.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
+      - name: Set output
+        id: set-output
+        env:
+          INPUT_PIPELINE_TYPE: ${{ inputs.pipeline_type }}
+          INPUT_IMAGE_PREFIX: ${{ inputs.image_prefix }}
+        run: |
+          if [[ -n "$INPUT_PIPELINE_TYPE" ]]; then
+            # Called via workflow_call (nightly / release) -- build everything
+            echo "All builds forced (workflow_call: ${INPUT_PIPELINE_TYPE})"
+            for key in core operator deploy vllm sglang trtllm; do
+              echo "${key}=true" >> $GITHUB_OUTPUT
+            done
+            echo "pipeline_type=${INPUT_PIPELINE_TYPE}" >> $GITHUB_OUTPUT
+            echo "image_prefix=${INPUT_IMAGE_PREFIX}" >> $GITHUB_OUTPUT
+
+          elif [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "core=${{ steps.changes.outputs.core }}" >> $GITHUB_OUTPUT
+            echo "operator=${{ steps.changes.outputs.operator }}" >> $GITHUB_OUTPUT
+            echo "deploy=${{ steps.changes.outputs.deploy }}" >> $GITHUB_OUTPUT
+            echo "vllm=${{ steps.changes.outputs.vllm }}" >> $GITHUB_OUTPUT
+            echo "sglang=${{ steps.changes.outputs.sglang }}" >> $GITHUB_OUTPUT
+            echo "trtllm=${{ steps.changes.outputs.trtllm }}" >> $GITHUB_OUTPUT
+            echo "pipeline_type=post_merge" >> $GITHUB_OUTPUT
+            echo "image_prefix=main" >> $GITHUB_OUTPUT
+
+          else
+            echo "core=${{ steps.changes.outputs.core }}" >> $GITHUB_OUTPUT
+            echo "operator=${{ steps.changes.outputs.operator }}" >> $GITHUB_OUTPUT
+            echo "deploy=${{ steps.changes.outputs.deploy }}" >> $GITHUB_OUTPUT
+            echo "vllm=${{ steps.changes.outputs.vllm }}" >> $GITHUB_OUTPUT
+            echo "sglang=${{ steps.changes.outputs.sglang }}" >> $GITHUB_OUTPUT
+            echo "trtllm=${{ steps.changes.outputs.trtllm }}" >> $GITHUB_OUTPUT
+            echo "pipeline_type=pr" >> $GITHUB_OUTPUT
+            echo "image_prefix=" >> $GITHUB_OUTPUT
+          fi
+      - name: Export builder name
+        id: export-builder-name
+        run: |
+          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
+
+  backend-status-check:
+    runs-on: ubuntu-latest
+    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
+    if: always()
+    steps:
+      - name: "Check all dependent jobs"
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+
+
+  # ============================================================================
+  # Operator
+  # ============================================================================
+
+  operator:
+    needs: changed-files
+    if: needs.changed-files.outputs.operator == 'true'
+    name: Operator
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    outputs:
+      operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          flavor: general
+          all_arch: 'true'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Linter
+        shell: bash
+        working-directory: ./deploy/operator
+        run: |
+          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Tester
+        shell: bash
+        working-directory: ./deploy/operator
+        run: |
+          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.25'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python dependencies for operator codegen
+        shell: bash
+        working-directory: ./deploy/operator
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pydantic>=2,<3" "black==23.1.0"
+      - name: Check for uncommitted changes
+        shell: bash
+        working-directory: ./deploy/operator
+        run: |
+          make check
+      - name: Build and push Container
+        id: build-and-push-image
+        shell: bash
+        working-directory: ./deploy/operator
+        env:
+          NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
+        run: |
+          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          DEFAULT_TAG="${{ github.sha }}-operator"
+          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          IMAGE_URIS=(
+            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
+          )
+
+          IMAGE_PREFIX="${{ needs.changed-files.outputs.image_prefix }}"
+          if [[ -n "$IMAGE_PREFIX" ]]; then
+            IMAGE_URIS+=(
+              "${ECR_DEFAULT_IMAGE_BASE}:${IMAGE_PREFIX}-operator"
+              "${ACR_IMAGE_BASE}:${IMAGE_PREFIX}-operator"
+            )
+          fi
+
+          echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          echo "flags for docker buildx: ${TAGGING_FLAGS}"
+
+          if [[ "$NO_CACHE_FLAG" == "true" ]]; then
+            NO_CACHE_FLAG="--no-cache"
+          fi
+          docker buildx build --push ${NO_CACHE_FLAG} \
+              --platform linux/amd64,linux/arm64 \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              ${TAGGING_FLAGS} -f Dockerfile .
+
+          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          for image_uri in "${IMAGE_URIS[@]}"; do
+            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+          done
+
+
+# ============================================================================
+# FRAMEWORK PIPELINES (Build → Test → Copy)
+# ============================================================================
+  # ============================================================================
+  # VLLM PIPELINE
+  # ============================================================================
+  vllm-pipeline:
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ needs.changed-files.outputs.image_prefix != '' && format('{0}-vllm', needs.changed-files.outputs.image_prefix) || '' }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: false
+      test_gpu_timeout_minutes: 35
+      build_timeout_minutes: ${{ needs.changed-files.outputs.image_prefix != '' && 120 || 60 }}
+      copy_timeout_minutes: ${{ needs.changed-files.outputs.image_prefix != '' && 20 || 10 }}
+    secrets: inherit
+
+  # ============================================================================
+  # SGLANG PIPELINE
+  # ============================================================================
+  sglang-pipeline:
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: sglang
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ needs.changed-files.outputs.image_prefix != '' && format('{0}-sglang', needs.changed-files.outputs.image_prefix) || '' }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: false
+      build_timeout_minutes: ${{ needs.changed-files.outputs.image_prefix != '' && 120 || 60 }}
+      copy_timeout_minutes: ${{ needs.changed-files.outputs.image_prefix != '' && 20 || 10 }}
+    secrets: inherit
+
+  # ============================================================================
+  # TRTLLM PIPELINE
+  # ============================================================================
+  trtllm-pipeline:
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["13.1"]'
+      extra_tags: |
+        ${{ needs.changed-files.outputs.image_prefix != '' && format('{0}-trtllm', needs.changed-files.outputs.image_prefix) || '' }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: false
+      build_timeout_minutes: ${{ needs.changed-files.outputs.image_prefix != '' && 120 || 60 }}
+      copy_timeout_minutes: ${{ needs.changed-files.outputs.image_prefix != '' && 20 || 10 }}
+    secrets: inherit
+
+
+   # ============================================================================
+   # DEPLOYMENT JOBS
+   # ============================================================================
+
+  deploy-operator:
+    runs-on: prod-default-small-v2
+    if: |
+      always() &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+    needs: [changed-files, operator]
+    outputs:
+      NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Determine operator image tag
+      id: operator-tag
+      run: |
+        if [ "${{ needs.operator.result }}" == "success" ]; then
+          echo "tag=${{ needs.operator.outputs.operator_default_tag }}" >> $GITHUB_OUTPUT
+          echo "Using newly built operator image: ${{ needs.operator.outputs.operator_default_tag }}"
+        else
+          echo "tag=main-operator" >> $GITHUB_OUTPUT
+          echo "Using stable operator image: main-operator"
+        fi
+    - name: Deploy Operator
+      id: deploy-operator-step
+      env:
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        set -x
+
+        # https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
+        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+
+        set +x
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        set -x
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        kubectl config current-context
+
+        # Create a namespace for this job
+        kubectl create namespace $NAMESPACE
+        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+
+        # Set the namespace as default
+        kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Check if Istio is installed
+        kubectl get pods -n istio-system
+        # Check if default storage class exists
+        kubectl get storageclass
+
+        # Install Helm chart
+        export VIRTUAL_ENV=/opt/dynamo/venv
+        export KUBE_NS=$NAMESPACE
+        export ISTIO_ENABLED=true
+        export ISTIO_GATEWAY=istio-system/ingress-alb
+        export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+
+        # Install dynamo env secrets
+        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/helm/charts/platform/
+        helm dep build .
+        # Install platform with namespace restriction for single profile testing
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+          --set dynamo-operator.namespaceRestriction.enabled=true \
+          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ steps.operator-tag.outputs.tag }} \
+          --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.upgradeCRD=false \
+          --debug
+        # Wait for all deployments to be ready
+        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+    - name: 🔍 Report Unhealthy Pods
+      if: failure()
+      run: |
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        kubectl config current-context
+
+        echo "### ⚠️ OPERATOR DEPLOYMENT FAILED: Unhealthy Pods Report" >> $GITHUB_STEP_SUMMARY
+        echo "Unhealthy pods:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        # If all pods are healthy, grep/awk won't output anything -- handled gracefully by || true
+        kubectl get pods -n ${{ steps.deploy-operator-step.outputs.namespace }} --no-headers \
+          | grep -v -E '(Running|Completed)' \
+          | awk '{print "- 🔴 **" $1 "** | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY || true
+
+   # ============================================================================
+   # END-TO-END DEPLOYMENT TESTS
+   # ============================================================================
+  deploy-test-vllm:
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    runs-on: prod-default-small-v2
+    needs: [changed-files, deploy-operator, vllm-pipeline]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile:
+          - agg
+          - agg_router
+          - disagg
+          - disagg_router
+    name: deploy-test-vllm (${{ matrix.profile }})
+    env:
+      FRAMEWORK: vllm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Run Dynamo Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          deployment_file: "deploy/${{ matrix.profile }}.yaml"
+          framework: ${{ env.FRAMEWORK }}
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
+          platform_arch: amd64
+
+  deploy-test-sglang:
+    runs-on: prod-default-small-v2
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    needs: [changed-files, deploy-operator, sglang-pipeline]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile:
+          - agg
+          - agg_router
+    name: deploy-test-sglang (${{ matrix.profile }})
+    env:
+      FRAMEWORK: sglang
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Run Dynamo Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          deployment_file: "deploy/${{ matrix.profile }}.yaml"
+          framework: ${{ env.FRAMEWORK }}
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
+          platform_arch: amd64
+
+  deploy-test-trtllm:
+    runs-on: prod-default-small-v2
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    needs: [changed-files, deploy-operator, trtllm-pipeline]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile:
+          - agg
+          - agg_router
+          - disagg
+          - disagg_router
+    name: deploy-test-trtllm (${{ matrix.profile }})
+    env:
+      FRAMEWORK: trtllm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Run Dynamo Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          deployment_file: "deploy/${{ matrix.profile }}.yaml"
+          framework: ${{ env.FRAMEWORK }}
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
+          platform_arch: amd64
+
+  # ============================================================================
+  # CLEANUP JOBS
+  # ============================================================================
+
+  clean-k8s-builder:
+    name: Clean K8s builder if exists
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - name: Create K8s builders (skip bootstrap)
+      uses: ./.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: ${{ needs.changed-files.outputs.builder_name }}
+        buildkit_worker_addresses: '' # k8s builder
+        skip_bootstrap: true
+    - name: Builder Cleanup in case of k8s builder
+      shell: bash
+      run: |
+        docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true
+
+
+  cleanup:
+    name: Cleanup AKS resources
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [deploy-operator, deploy-test-sglang, deploy-test-trtllm, deploy-test-vllm]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - name: Setup Kubeconfig
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      run: |
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        set -x
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        kubectl config current-context
+    - name: Cleanup
+      timeout-minutes: 5
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      run: |
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        set -x
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+
+        # List resources before teardown for debugging
+        kubectl get dynamographdeployments
+        kubectl get all
+
+        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+        helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m || true
+        kubectl delete namespace $NAMESPACE || true
+
+
+  # ============================================================================
+  # POST-MERGE / NIGHTLY / RELEASE TEST JOBS
+  # ============================================================================
+
+  unit-tests:
+    name: ${{ matrix.framework.name }}-${{ matrix.arch.arch }}-unit
+    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    if: |
+      always() &&
+      contains(fromJson('["post_merge", "nightly", "release"]'), needs.changed-files.outputs.pipeline_type)
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        framework:
+          - name: vllm
+            cuda_major: 12
+          - name: sglang
+            cuda_major: 12
+          - name: trtllm
+            cuda_major: 13
+        arch:
+          - arch: amd64
+            runner: prod-builder-amd-gpu-v1
+          - arch: arm64
+            runner: prod-builder-arm-v1
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check if build succeeded
+        run: |
+          FRAMEWORK="${{ matrix.framework.name }}"
+          case "$FRAMEWORK" in
+            vllm)   RESULT="${{ needs.vllm-pipeline.result }}" ;;
+            sglang) RESULT="${{ needs.sglang-pipeline.result }}" ;;
+            trtllm) RESULT="${{ needs.trtllm-pipeline.result }}" ;;
+          esac
+          if [ "$RESULT" != "success" ]; then
+            echo "ERROR: ${FRAMEWORK} pipeline did not succeed (result: $RESULT)"
+            exit 1
+          fi
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ github.sha }}-${{ matrix.framework.name }}-cuda${{ matrix.framework.cuda_major }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run Unit Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ github.sha }}-${{ matrix.framework.name }}-cuda${{ matrix.framework.cuda_major }}-${{ matrix.arch.arch }}
+          pytest_marks: ${{ inputs.include_nightly_marks && 'unit and (nightly or post_merge or pre_merge)' || 'unit and (post_merge or pre_merge)' }}
+          framework: ${{ matrix.framework.name }}
+          test_type: unit
+          platform_arch: ${{ matrix.arch.arch }}
+          cpu_limit: '8'
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  integration-tests:
+    name: ${{ matrix.framework.name }}-${{ matrix.arch.arch }}-integ
+    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    if: |
+      always() &&
+      contains(fromJson('["post_merge", "nightly", "release"]'), needs.changed-files.outputs.pipeline_type)
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework:
+          - name: vllm
+            cuda_major: 12
+          - name: sglang
+            cuda_major: 12
+          - name: trtllm
+            cuda_major: 13
+        arch:
+          - arch: amd64
+            runner: prod-builder-amd-gpu-v1
+            timeout: 90
+          - arch: arm64
+            runner: prod-builder-arm-v1
+            timeout: 90
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check if build succeeded
+        run: |
+          FRAMEWORK="${{ matrix.framework.name }}"
+          case "$FRAMEWORK" in
+            vllm)   RESULT="${{ needs.vllm-pipeline.result }}" ;;
+            sglang) RESULT="${{ needs.sglang-pipeline.result }}" ;;
+            trtllm) RESULT="${{ needs.trtllm-pipeline.result }}" ;;
+          esac
+          if [ "$RESULT" != "success" ]; then
+            echo "ERROR: ${FRAMEWORK} pipeline did not succeed (result: $RESULT)"
+            exit 1
+          fi
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ github.sha }}-${{ matrix.framework.name }}-cuda${{ matrix.framework.cuda_major }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run Integration Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ github.sha }}-${{ matrix.framework.name }}-cuda${{ matrix.framework.cuda_major }}-${{ matrix.arch.arch }}
+          pytest_marks: ${{ inputs.include_nightly_marks && 'integration and (nightly or post_merge or pre_merge)' || 'integration and (post_merge or pre_merge)' }}
+          framework: ${{ matrix.framework.name }}
+          test_type: integration
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  e2e-single-gpu-tests:
+    name: ${{ matrix.framework.name }}-${{ matrix.arch.arch }}-1gpu-e2e
+    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    if: |
+      always() &&
+      contains(fromJson('["post_merge", "nightly", "release"]'), needs.changed-files.outputs.pipeline_type)
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework:
+          - name: vllm
+            cuda_major: 12
+          - name: sglang
+            cuda_major: 12
+          - name: trtllm
+            cuda_major: 13
+        arch:
+          - arch: amd64
+            runner: prod-builder-amd-gpu-v1
+            timeout: 180
+          - arch: arm64
+            runner: prod-builder-arm-v1
+            timeout: 180
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+      - name: Check if build succeeded
+        run: |
+          FRAMEWORK="${{ matrix.framework.name }}"
+          case "$FRAMEWORK" in
+            vllm)   RESULT="${{ needs.vllm-pipeline.result }}" ;;
+            sglang) RESULT="${{ needs.sglang-pipeline.result }}" ;;
+            trtllm) RESULT="${{ needs.trtllm-pipeline.result }}" ;;
+          esac
+          if [ "$RESULT" != "success" ]; then
+            echo "ERROR: ${FRAMEWORK} pipeline did not succeed (result: $RESULT)"
+            exit 1
+          fi
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ github.sha }}-${{ matrix.framework.name }}-cuda${{ matrix.framework.cuda_major }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run E2E Tests (gpu_1)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ github.sha }}-${{ matrix.framework.name }}-cuda${{ matrix.framework.cuda_major }}-${{ matrix.arch.arch }}
+          pytest_marks: "${{ matrix.framework.name }} and e2e and gpu_1"
+          framework: ${{ matrix.framework.name }}
+          test_type: e2e-single-gpu
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  e2e-multi-gpu-tests:
+    name: ${{ matrix.framework.name }}-${{ matrix.arch.arch }}-2gpu-e2e
+    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    if: |
+      always() &&
+      contains(fromJson('["post_merge", "nightly", "release"]'), needs.changed-files.outputs.pipeline_type)
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework:
+          - name: vllm
+            cuda_major: 12
+          - name: sglang
+            cuda_major: 12
+          - name: trtllm
+            cuda_major: 13
+        arch:
+          - arch: amd64
+            runner: prod-builder-amd-gpu-v1
+            timeout: 150
+          - arch: arm64
+            runner: prod-builder-arm-v1
+            timeout: 150
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+      - name: Check if build succeeded
+        run: |
+          FRAMEWORK="${{ matrix.framework.name }}"
+          case "$FRAMEWORK" in
+            vllm)   RESULT="${{ needs.vllm-pipeline.result }}" ;;
+            sglang) RESULT="${{ needs.sglang-pipeline.result }}" ;;
+            trtllm) RESULT="${{ needs.trtllm-pipeline.result }}" ;;
+          esac
+          if [ "$RESULT" != "success" ]; then
+            echo "ERROR: ${FRAMEWORK} pipeline did not succeed (result: $RESULT)"
+            exit 1
+          fi
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ github.sha }}-${{ matrix.framework.name }}-cuda${{ matrix.framework.cuda_major }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run E2E Tests (gpu_2)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ github.sha }}-${{ matrix.framework.name }}-cuda${{ matrix.framework.cuda_major }}-${{ matrix.arch.arch }}
+          pytest_marks: ${{ inputs.include_nightly_marks && '(nightly or post_merge or pre_merge) and e2e and gpu_2' || '(post_merge or pre_merge) and e2e and gpu_2' }}
+          framework: ${{ matrix.framework.name }}
+          test_type: e2e-multi-gpu
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: 'true'
+
+  # ============================================================================
+  # FAULT TOLERANCE TESTS (nightly only)
+  # ============================================================================
+  fault-tolerance-tests:
+    name: ${{ matrix.framework.name }}-ft-k8s
+    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    if: always() && needs.changed-files.outputs.pipeline_type == 'nightly'
+    runs-on: prod-builder-amd-v1
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        framework:
+          - name: vllm
+            test_scenario: "vllm-agg"
+          - name: trtllm
+            test_scenario: "trtllm-agg"
+          - name: sglang
+            test_scenario: "sglang-agg"
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      NIGHTLY_IMAGE_PREFIX: ${{ needs.changed-files.outputs.image_prefix }}
+      NAMESPACE: ft-${{ matrix.framework.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+      DYNAMO_INGRESS_SUFFIX: ${{ secrets.DYNAMO_INGRESS_SUFFIX }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check if build succeeded
+        run: |
+          FRAMEWORK="${{ matrix.framework.name }}"
+          case "$FRAMEWORK" in
+            vllm)   RESULT="${{ needs.vllm-pipeline.result }}" ;;
+            sglang) RESULT="${{ needs.sglang-pipeline.result }}" ;;
+            trtllm) RESULT="${{ needs.trtllm-pipeline.result }}" ;;
+          esac
+          if [ "$RESULT" != "success" ]; then
+            echo "ERROR: ${FRAMEWORK} pipeline did not succeed (result: $RESULT)"
+            exit 1
+          fi
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Setup Kubernetes
+        run: |
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl cluster-info
+      - name: Deploy Operator
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl delete namespace $NAMESPACE || true
+          kubectl create namespace $NAMESPACE || true
+          kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+          kubectl config set-context --current --namespace=$NAMESPACE
+          kubectl get pods -n istio-system
+          kubectl get storageclass
+          export VIRTUAL_ENV=/opt/dynamo/venv
+          export KUBE_NS=$NAMESPACE
+          export ISTIO_ENABLED=true
+          export ISTIO_GATEWAY=istio-system/ingress-alb
+          export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+          set +x
+          kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
+          kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+          export ECR_HOSTNAME=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          echo "::add-mask::${ECR_HOSTNAME}"
+          set -x
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64 || echo "Operator image not found, will use SHA-based tag"
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          cd deploy/helm/charts/platform/
+          helm dep build .
+          helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+            --set dynamo-operator.namespaceRestriction.enabled=true \
+            --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+            --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+            --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
+            --timeout 10m --wait
+          timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+          cd -
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE
+      - name: Run Fault Tolerance Tests
+        id: run-ft-tests
+        run: |
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          export NAMESPACE=$NAMESPACE
+          export FRAMEWORK=${{ matrix.framework.name }}
+          export ECR_HOSTNAME=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          echo "::add-mask::${ECR_HOSTNAME}"
+          export IMAGE="${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${FRAMEWORK}-amd64"
+          set -x
+          echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
+          echo "Using namespace: $NAMESPACE"
+          echo "Using image tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${FRAMEWORK}-amd64"
+          sudo apt-get update && sudo apt-get install -y python3-venv
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r container/deps/requirements.test.txt
+          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
+          mkdir -p test-results
+          set +e
+          pytest tests/fault_tolerance/deploy/test_deployment.py \
+            -m 'k8s and fault_tolerance' \
+            -k '${{ matrix.framework.test_scenario }}' \
+            -s -v \
+            --namespace ${NAMESPACE} \
+            --image ${IMAGE} \
+            --client-type legacy \
+            --junitxml=test-results/pytest_ft_report.xml \
+            --tb=short
+          TEST_EXIT_CODE=$?
+          echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+          exit ${TEST_EXIT_CODE}
+        continue-on-error: true
+      - name: Process Fault Tolerance Test Results
+        if: always()
+        run: |
+          if [ -f "test-results/pytest_ft_report.xml" ]; then
+            mv "test-results/pytest_ft_report.xml" "test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+          fi
+      - name: Upload Fault Tolerance Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.framework.name }}-fault_tolerance-amd64-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml
+          retention-days: 7
+      - name: Cleanup
+        if: always()
+        timeout-minutes: 5
+        run: |
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+          kubectl get all
+          kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+          helm uninstall dynamo-platform || true
+          kubectl delete namespace $NAMESPACE || true
+
+  # ============================================================================
+  # RESULTS SUMMARY
+  # ============================================================================
+  results-summary:
+    name: Results Summary
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      contains(fromJson('["post_merge", "nightly", "release"]'), needs.changed-files.outputs.pipeline_type)
+    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Gather job metadata
+        id: gather
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIPELINE_TYPE: ${{ needs.changed-files.outputs.pipeline_type }}
+        run: |
+          set +x -e
+          echo "# ${PIPELINE_TYPE^} CI Results Summary" > results.md
+          echo "" >> results.md
+          echo "| Stage | Status | Runner | Duration (min) | Artifacts |" >> results.md
+          echo "|-------|--------|--------|----------------|-----------|" >> results.md
+
+          curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            2>/dev/null | jq -c '.jobs[] | {id, name, runner_name, conclusion, started_at, completed_at}' > jobs.jsonl
+
+          while read job_entry; do
+            job_id=$(echo "$job_entry" | jq -r '.id')
+            name=$(echo "$job_entry" | jq -r '.name')
+            runner=$(echo "$job_entry" | jq -r '.runner_name')
+            status=$(echo "$job_entry" | jq -r '.conclusion')
+            started=$(echo "$job_entry" | jq -r '.started_at')
+            completed=$(echo "$job_entry" | jq -r '.completed_at')
+            minutes="N/A"
+            if [[ "$started" != "null" && "$completed" != "null" ]]; then
+              start_epoch=$(date -d "$started" +%s)
+              end_epoch=$(date -d "$completed" +%s)
+              minutes=$(( (end_epoch - start_epoch)/60 ))
+            fi
+            artifact_link="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#job-$job_id"
+            printf "| %s | %s | %s | %s | [Log & Artifacts](%s) |\n" "$name" "$status" "$runner" "$minutes" "$artifact_link" >> results.md
+          done < jobs.jsonl
+
+          echo "" >> results.md
+          echo "---" >> results.md
+      - name: Display workflow summary
+        run: cat results.md
+      - name: Upload results summary as job summary
+        run: cat results.md >> $GITHUB_STEP_SUMMARY
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ needs.changed-files.outputs.pipeline_type }}-results-summary
+          path: results.md
+          retention-days: 7
+
+  # ============================================================================
+  # SLACK NOTIFICATION
+  # ============================================================================
+  notify-slack:
+    name: Notify Slack
+    runs-on: prod-builder-amd-v1
+    if: always() && inputs.enable_slack_notification && !github.event.repository.fork
+    needs: [changed-files, results-summary]
+    permissions:
+      contents: read
+    env:
+      HAS_SLACK_WEBHOOK: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL != '' }}
+    steps:
+      - name: Send Slack notification
+        if: env.HAS_SLACK_WEBHOOK == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          SLACK_OPS_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PIPELINE_TYPE: ${{ needs.changed-files.outputs.pipeline_type }}
+        run: |
+          set -euo pipefail
+
+          JOBS_JSON=$(mktemp)
+          trap 'rm -f "$JOBS_JSON"' EXIT
+
+          if ! curl -sSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            > "$JOBS_JSON"; then
+            echo "Error: Failed to fetch job data from GitHub API"
+            exit 1
+          fi
+
+          if [ ! -s "$JOBS_JSON" ]; then
+            echo "Error: No job data received"
+            exit 1
+          fi
+
+          TOTAL_JOBS=$(jq '[.jobs[]] | length' "$JOBS_JSON")
+          SUCCESS_COUNT=$(jq '[.jobs[] | select(.conclusion == "success")] | length' "$JOBS_JSON")
+          FAILED_COUNT=$(jq '[.jobs[] | select(.conclusion == "failure")] | length' "$JOBS_JSON")
+
+          if [ "$FAILED_COUNT" -eq 0 ]; then
+            STATUS="Success"
+            STATUS_EMOJI=":white_check_mark:"
+          else
+            STATUS="Failed"
+            STATUS_EMOJI=":x:"
+          fi
+
+          DISPLAY_TYPE="${PIPELINE_TYPE^}"
+          SUMMARY_TEXT="*${DISPLAY_TYPE} CI Pipeline - ${STATUS}*"$'\n'"Summary: ${SUCCESS_COUNT}/${TOTAL_JOBS} jobs passed"$'\n'"<${RUN_URL}|View Workflow Summary>"
+
+          if [ "$FAILED_COUNT" -eq 0 ]; then
+            PAYLOAD=$(jq -n \
+              --arg text "$SUMMARY_TEXT" \
+              '{text: $text}')
+          else
+            FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "• " + .name' "$JOBS_JSON")
+            FAILED_JOBS_TEXT="*Failed Jobs (${FAILED_COUNT}):*"$'\n'"${FAILED_JOBS}"
+
+            if [ -n "${SLACK_OPS_GROUP_ID:-}" ]; then
+              OPS_MENTION="<!subteam^${SLACK_OPS_GROUP_ID}|@ops-support>"
+            else
+              OPS_MENTION="@ops-support"
+            fi
+            ACTION_TEXT=":rotating_light: cc ${OPS_MENTION} - Please investigate the failures above."
+
+            PAYLOAD=$(jq -n \
+              --arg summary "$SUMMARY_TEXT" \
+              --arg failed "$FAILED_JOBS_TEXT" \
+              --arg action "$ACTION_TEXT" \
+              '{
+                text: $summary,
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: $summary
+                    }
+                  },
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: $failed
+                    }
+                  },
+                  {
+                    type: "divider"
+                  },
+                  {
+                    type: "context",
+                    elements: [
+                      {
+                        type: "mrkdwn",
+                        text: $action
+                      }
+                    ]
+                  }
+                ]
+              }')
+          fi
+
+          if curl -sSf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$SLACK_WEBHOOK_URL"; then
+            echo "Slack notification sent successfully"
+          else
+            echo "Warning: Failed to send Slack notification"
+            exit 1
+          fi

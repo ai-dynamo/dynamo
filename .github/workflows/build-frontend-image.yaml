@@ -10,6 +10,12 @@ on:
     - "pull-request/[0-9]+"
     # Note: release/* branches are handled by release.yml which calls this workflow
   workflow_call:
+    inputs:
+      frontend_build:
+        description: 'Force frontend build (skip change detection)'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -31,14 +37,15 @@ on:
         required: true
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ (github.ref_name == 'main' || startsWith(github.ref, 'refs/heads/release/')) && github.run_id || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}
 
 jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      frontend: ${{ steps.changes.outputs.frontend }}
+      frontend: ${{ steps.set-output.outputs.frontend }}
+      image_prefix: ${{ steps.set-output.outputs.image_prefix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -46,9 +53,33 @@ jobs:
           fetch-depth: 0
       - name: Check for changes
         id: changes
+        if: ${{ inputs.frontend_build != true && !startsWith(github.ref, 'refs/heads/release/') }}
         uses: ./.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
+      - name: Set output
+        id: set-output
+        run: |
+          if [[ "${{ inputs.frontend_build }}" == "true" ]]; then
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "Frontend build forced (workflow_call with frontend_build=true)"
+          elif [[ "${{ github.ref }}" == refs/heads/release/* ]]; then
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "Frontend build forced (release branch)"
+          else
+            echo "frontend=${{ steps.changes.outputs.frontend }}" >> $GITHUB_OUTPUT
+            echo "Frontend build based on changed files: ${{ steps.changes.outputs.frontend }}"
+          fi
+
+          # Derive image_prefix from branch
+          if [[ "${{ github.ref }}" == refs/heads/release/* ]]; then
+            VERSION="${GITHUB_REF#refs/heads/release/}"
+            echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "image_prefix=main" >> $GITHUB_OUTPUT
+          else
+            echo "image_prefix=" >> $GITHUB_OUTPUT
+          fi
 
   build-frontend-image:
     name: Build Frontend Image (${{ matrix.platform.arch }})
@@ -63,7 +94,7 @@ jobs:
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -97,7 +128,9 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-frontend-${{ matrix.platform.arch }}
+          push_tags: |
+            ai-dynamo/dynamo:${{ github.sha }}-frontend-${{ matrix.platform.arch }}
+            ${{ needs.changed-files.outputs.image_prefix != '' && format('ai-dynamo/dynamo:{0}-frontend-{1}', needs.changed-files.outputs.image_prefix, matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
