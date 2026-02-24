@@ -96,10 +96,12 @@ runs:
         echo "Deleting DynamoGraphDeployment: ${GRAPH_NAME}"
         kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s || true
 
-    - name: Upload Test Results
+    - name: Upload Test Results and Pod Logs
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
-        name: test-results-${{ inputs.framework }}-${{ inputs.profile }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        name: pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}
+        path: |
+          test-results/pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+          test_deployment[[[]${{ inputs.framework }}-${{ inputs.profile }}[]]/
         retention-days: 7

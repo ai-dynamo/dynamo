@@ -846,25 +846,31 @@ class ManagedDeployment:
         directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
 
+        # Pod manifest (YAML)
         try:
             with open(os.path.join(directory, f"{pod.name}{suffix}.yaml"), "w") as f:
                 f.write(pod.to_yaml())
         except Exception as e:
-            self._logger.error(e)
+            self._logger.error(f"Failed to collect manifest for {pod.name}: {e}")
+
+        # Pod status (conditions, container states) — also logged to pytest output
+        self._collect_pod_status(pod, directory, suffix)
+
+        # Container logs
         try:
             with open(os.path.join(directory, f"{pod.name}{suffix}.log"), "w") as f:
                 f.write("\n".join(pod.logs()))
         except Exception as e:
-            self._logger.error(e)
+            self._logger.error(f"Failed to collect logs for {pod.name}: {e}")
         try:
-            previous_logs = pod.logs(previous=True)
             with open(
                 os.path.join(directory, f"{pod.name}{suffix}.previous.log"), "w"
             ) as f:
-                f.write("\n".join(previous_logs))
+                f.write("\n".join(pod.logs(previous=True)))
         except Exception as e:
-            self._logger.debug(e)
+            self._logger.debug(f"No previous logs for {pod.name}: {e}")
 
+        # Metrics
         self._get_pod_metrics(pod, service_name, suffix)
 
     def _get_service_logs(self, service_name=None, suffix=""):
@@ -913,6 +919,109 @@ class ManagedDeployment:
                 os.path.join(directory, f"{pod.name}.metrics{suffix}.log"), "w"
             ) as f:
                 f.write(content)
+
+    async def _collect_pod_events(
+        self, pod_name: str, directory: str, suffix: str = ""
+    ):
+        """Collect and log Kubernetes events related to a specific pod."""
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            events = await self._core_api.list_namespaced_event(
+                self.namespace, field_selector=f"involvedObject.name={pod_name}"
+            )
+            if not events.items:
+                return
+
+            event_file = os.path.join(directory, f"{pod_name}{suffix}.events.log")
+            with open(event_file, "w") as f:
+                for event in sorted(
+                    events.items,
+                    key=lambda e: e.last_timestamp or e.event_time or "",
+                ):
+                    ts = event.last_timestamp or event.event_time or "unknown"
+                    line = f"[{ts}] [{event.type}] {event.reason}: {event.message}"
+                    f.write(line + "\n")
+                    if event.type != "Normal":
+                        self._logger.warning(f"K8s event for {pod_name}: {line}")
+        except Exception as e:
+            self._logger.warning(f"Failed to collect events for {pod_name}: {e}")
+
+    def _collect_pod_status(self, pod: Pod, directory: str, suffix: str = ""):
+        """Collect detailed pod status (conditions, container states)."""
+        try:
+            pod.refresh()
+            status = pod.status
+            lines = []
+            lines.append(f"Pod: {pod.name}")
+            lines.append(f"Phase: {status.get('phase', 'Unknown')}")
+            lines.append(
+                f"Node: {pod.raw.get('spec', {}).get('nodeName', 'Unscheduled')}"
+            )
+            lines.append("")
+
+            lines.append("=== Conditions ===")
+            for cond in status.get("conditions", []):
+                line = f"  {cond['type']}: {cond['status']}"
+                if cond.get("reason"):
+                    line += f" ({cond['reason']})"
+                if cond.get("message"):
+                    line += f" - {cond['message']}"
+                lines.append(line)
+
+            for section, label in [
+                ("initContainerStatuses", "Init Containers"),
+                ("containerStatuses", "Containers"),
+            ]:
+                containers = status.get(section, [])
+                if containers:
+                    lines.append(f"\n=== {label} ===")
+                    for cs in containers:
+                        lines.append(
+                            f"  {cs['name']}: ready={cs.get('ready')},"
+                            f" restarts={cs.get('restartCount', 0)}"
+                        )
+                        state = cs.get("state", {})
+                        for state_type, state_info in state.items():
+                            detail = f"    state: {state_type}"
+                            if isinstance(state_info, dict):
+                                detail += " " + ", ".join(
+                                    f"{k}={v}" for k, v in state_info.items()
+                                )
+                            lines.append(detail)
+
+            content = "\n".join(lines)
+
+            status_file = os.path.join(directory, f"{pod.name}{suffix}.status.log")
+            with open(status_file, "w") as f:
+                f.write(content)
+
+            self._logger.info(f"Pod status for {pod.name}:\n{content}")
+
+        except Exception as e:
+            self._logger.warning(f"Failed to collect status for {pod.name}: {e}")
+
+    async def _collect_all_events(self):
+        """Collect Kubernetes events for all pods in the deployment."""
+        service_pods = self.get_pods()
+        for service_name, pods in service_pods.items():
+            directory = os.path.join(self.log_dir, service_name)
+            os.makedirs(directory, exist_ok=True)
+            for pod in pods:
+                await self._collect_pod_events(pod.name, directory)
+
+    def _log_collection_summary(self):
+        """Log a summary of all collected diagnostic files."""
+        total_files = 0
+        for root, _, files in os.walk(self.log_dir):
+            for f in files:
+                total_files += 1
+                filepath = os.path.join(root, f)
+                size = os.path.getsize(filepath)
+                self._logger.info(
+                    f"  Collected: {os.path.relpath(filepath, self.log_dir)}"
+                    f" ({size} bytes)"
+                )
+        self._logger.info(f"Total diagnostic files collected: {total_files}")
 
     async def _delete_deployment(self):
         """
@@ -1010,6 +1119,8 @@ class ManagedDeployment:
         try:
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs()
+            await self._collect_all_events()
+            self._log_collection_summary()
             self._logger.info(
                 f"Cleaning up {len(self._active_port_forwards)} active port forwards"
             )
