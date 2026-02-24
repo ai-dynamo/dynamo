@@ -87,9 +87,7 @@ impl RequestGuard {
         if !self.first_token_recorded && new_tokens > 0 {
             if let Some(ref tracker) = self.tracker {
                 tracker.record_first_token();
-                if let (Some(m), Some(ttft)) =
-                    (&self.request_metrics, tracker.ttft_ms())
-                {
+                if let (Some(m), Some(ttft)) = (&self.request_metrics, tracker.ttft_ms()) {
                     m.time_to_first_token_seconds.observe(ttft / 1000.0);
                 }
             }
@@ -119,8 +117,7 @@ impl RequestGuard {
                 if let Some(ref tracker) = self.tracker {
                     tracker.record_osl(self.cumulative_osl);
                     tracker.record_finish();
-                    if let (Some(m), Some(avg_itl)) =
-                        (&self.request_metrics, tracker.avg_itl_ms())
+                    if let (Some(m), Some(avg_itl)) = (&self.request_metrics, tracker.avg_itl_ms())
                     {
                         m.inter_token_latency_seconds.observe(avg_itl / 1000.0);
                     }
@@ -149,8 +146,7 @@ impl RequestGuard {
             tracker.record_osl(self.cumulative_osl);
         }
         if let Some(ref m) = self.request_metrics {
-            m.output_sequence_tokens
-                .observe(self.cumulative_osl as f64);
+            m.output_sequence_tokens.observe(self.cumulative_osl as f64);
             m.requests_total.inc();
         }
     }

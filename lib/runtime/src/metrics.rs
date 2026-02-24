@@ -1535,7 +1535,9 @@ dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",ser
         let mut uptime_value: Option<f64> = None;
         for line in drt_output_raw.trim_end_matches('\n').lines() {
             if line.starts_with("dynamo_component_uptime_seconds ") {
-                let val_str = line.strip_prefix("dynamo_component_uptime_seconds ").unwrap();
+                let val_str = line
+                    .strip_prefix("dynamo_component_uptime_seconds ")
+                    .unwrap();
                 uptime_value = Some(val_str.parse::<f64>().expect("uptime should be a float"));
             } else if line.starts_with("# HELP dynamo_component_uptime_seconds")
                 || line.starts_with("# TYPE dynamo_component_uptime_seconds")

@@ -296,11 +296,7 @@ impl RouterRequestMetrics {
             .expect("dynamo_router_output_sequence_tokens");
             let kv_hit_rate = prometheus::Histogram::with_opts(
                 HistogramOpts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::ROUTER,
-                        frontend_service::KV_HIT_RATE
-                    ),
+                    format!("{}_{}", name_prefix::ROUTER, frontend_service::KV_HIT_RATE),
                     "Predicted KV cache hit rate at routing time (0.0-1.0)",
                 )
                 .const_label(labels::ROUTER_ID, &router_id)
