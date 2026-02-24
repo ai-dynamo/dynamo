@@ -57,7 +57,7 @@ sglang:
   runtime_image: lmsysorg/sglang
   cuda12.9:
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image_tag: v0.5.7-runtime
+    runtime_image_tag: v0.5.9-runtime
   cuda13.0:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: v0.5.9-cu130-runtime
