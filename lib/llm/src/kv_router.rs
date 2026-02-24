@@ -30,6 +30,7 @@ pub use dynamo_kv_router::protocols;
 
 pub mod config;
 pub mod indexer_standalone;
+mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
@@ -370,8 +371,14 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
-        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
-            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos));
+        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes").in_scope(|| {
+            compute_block_hash_for_seq(
+                tokens,
+                self.block_size,
+                block_mm_infos,
+                lora_name.as_deref(),
+            )
+        });
         let hash_elapsed = start.elapsed();
 
         let overlap_scores = self
@@ -381,12 +388,12 @@ impl KvRouter {
             .await?;
         let find_matches_elapsed = start.elapsed();
 
-        // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
             self.kv_router_config.compute_seq_hashes_for_tracking(
                 tokens,
                 self.block_size,
                 router_config_override,
+                lora_name.as_deref(),
             )
         });
         let seq_hash_elapsed = start.elapsed();
@@ -453,6 +460,7 @@ impl KvRouter {
             tokens,
             self.block_size,
             router_config_override,
+            lora_name.as_deref(),
         );
 
         if let Err(e) = self
@@ -486,14 +494,12 @@ impl KvRouter {
         self.scheduler.worker_type()
     }
 
-    pub async fn add_output_block(
+    pub fn add_output_block(
         &self,
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
-        self.scheduler
-            .add_output_block(request_id, decay_fraction)
-            .await
+        self.scheduler.add_output_block(request_id, decay_fraction)
     }
 
     pub fn block_size(&self) -> u32 {
@@ -506,8 +512,9 @@ impl KvRouter {
         &self,
         tokens: &[u32],
         worker: WorkerWithDpRank,
+        lora_name: Option<&str>,
     ) -> Result<u32, KvRouterError> {
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
         Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
     }
@@ -517,21 +524,22 @@ impl KvRouter {
         &self,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
+        lora_name: Option<&str>,
     ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
             tokens,
             self.block_size,
             router_config_override,
+            lora_name,
         );
 
         Ok(self
             .scheduler
-            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores)
-            .await)
+            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores))
     }
 
     /// Dump all events from the indexer

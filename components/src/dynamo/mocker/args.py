@@ -366,7 +366,7 @@ def parse_args():
         "--durable-kv-events",
         action="store_true",
         default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
-        help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
+        help="[Deprecated] Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
     )
     parser.add_argument(
         "--zmq-kv-events-ports",

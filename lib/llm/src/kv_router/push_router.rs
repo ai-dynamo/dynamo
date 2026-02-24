@@ -108,7 +108,6 @@ impl RequestGuard {
                 if let Err(e) = self
                     .chooser
                     .add_output_block(&self.context_id, decay_fraction)
-                    .await
                 {
                     tracing::warn!(
                         "Failed to add output block for request {}: {e}",
@@ -262,7 +261,7 @@ impl KvPushRouter {
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
-            .get_overlap_blocks(routing_token_ids, worker)
+            .get_overlap_blocks(routing_token_ids, worker, lora_name.as_deref())
             .await?;
 
         if !is_query_only {

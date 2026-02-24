@@ -264,7 +264,7 @@ DYN_KVBM_CPU_CACHE_GB=20 \
 python -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
-    --connector kvbm
+    --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}'
 ```
 
 ### Enable Metrics for TensorRT-LLM
@@ -420,7 +420,7 @@ python -m dynamo.frontend &
 
 DYN_KVBM_CPU_CACHE_GB=10 \
 nsys profile -o /tmp/kvbm-nsys --trace-fork-before-exec=true --cuda-graph-trace=node --delay 30 --duration 60 \
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector kvbm
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}'
 ```
 
 ## See Also

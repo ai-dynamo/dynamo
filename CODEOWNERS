@@ -8,6 +8,9 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 # Python Libraries
 *.py @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
+# Docs utility scripts (diagram generators, conversion tools — not production code)
+/docs/**/*.py
+
 # Container/Environments
 /container/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners @ai-dynamo/dynamo-deploy-codeowners
 
