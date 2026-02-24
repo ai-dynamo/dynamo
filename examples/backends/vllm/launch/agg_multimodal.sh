@@ -65,11 +65,10 @@ fi
 # Start vLLM worker with vision model
 # Multimodal data (images) are decoded in the backend worker using ImageLoader
 # --enforce-eager: Quick deployment (remove for production)
-# --connector none: No KV transfer needed for aggregated serving
 # Extra args from command line come last to allow overrides
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
+    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
 
 # Wait for all background processes to complete
 wait

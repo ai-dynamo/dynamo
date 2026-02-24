@@ -141,6 +141,7 @@ impl KvRouterConfig {
         tokens: &[u32],
         block_size: u32,
         config_override: Option<&RouterConfigOverride>,
+        lora_name: Option<&str>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -151,17 +152,14 @@ impl KvRouterConfig {
             return Some(Vec::new());
         }
 
-        // Use override if provided, otherwise use default config
         let assume_kv_reuse = config_override
             .and_then(|cfg| cfg.assume_kv_reuse)
             .unwrap_or(self.router_assume_kv_reuse);
 
         if assume_kv_reuse {
-            // Compute actual block hashes and sequence hashes
-            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None);
+            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None, lora_name);
             Some(compute_seq_hash_for_block(&block_hashes))
         } else {
-            // Generate random hashes (no KV reuse assumed)
             let mut rng = rand::rng();
             Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
         }
