@@ -767,7 +767,10 @@ mod tests {
         let tokens: Vec<u32> = (0..4).collect();
         let base = compute_block_hash_for_seq(&tokens, 4, None, None);
         let empty = compute_block_hash_for_seq(&tokens, 4, None, Some(""));
-        assert_eq!(base, empty, "empty lora_name should be treated as base model");
+        assert_eq!(
+            base, empty,
+            "empty lora_name should be treated as base model"
+        );
     }
 
     #[test]
