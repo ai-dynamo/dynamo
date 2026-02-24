@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any, Protocol, Tuple
 
@@ -624,3 +625,96 @@ class BaseConfigModifier:
         cls._apply_worker_config(
             cfg.spec.services[svc_name], agg_cli_args, agg_replicas, agg_gpus
         )
+
+
+# ---------------------------------------------------------------------------
+# DGD override merging (module-level, backend-agnostic)
+# ---------------------------------------------------------------------------
+
+# Services whose CLI args are fully replaced by overrides.
+# For engine-worker services (everything else), the main container args
+# are *appended* because they contain profiler-generated sweep results.
+_OVERRIDE_NON_WORKER_SERVICES = frozenset({"Frontend", "Planner"})
+
+# The exact path suffix where profiler-generated CLI args live inside a
+# service dict.  Only this specific location gets append semantics.
+_WORKER_ARGS_SUFFIX = ("extraPodSpec", "mainContainer", "args")
+
+
+def _is_worker_main_container_args(path: list[str]) -> bool:
+    """True when *path* is ``spec.services.<worker>.extraPodSpec.mainContainer.args``."""
+    if len(path) != 6:
+        return False
+    return (
+        path[0] == "spec"
+        and path[1] == "services"
+        and path[2] not in _OVERRIDE_NON_WORKER_SERVICES
+        and tuple(path[3:]) == _WORKER_ARGS_SUFFIX
+    )
+
+
+def _deep_merge_overrides(
+    target: dict,
+    overrides: dict,
+    path: list[str],
+) -> None:
+    """Recursively merge *overrides* into *target* (mutates *target* in-place).
+
+    Rules:
+    - Dicts are merged recursively; missing intermediate keys are created.
+    - ``spec.services.<name>`` that does not exist in *target* is skipped
+      with a warning (all nested overrides under that service are dropped).
+    - Only ``spec.services.<worker>.extraPodSpec.mainContainer.args`` is
+      *appended* to the existing list (preserving profiler-generated CLI
+      args).  ``args`` at any other path is replaced normally.
+    - All other leaf values replace the target value.
+    """
+    for key, value in overrides.items():
+        current_path = path + [key]
+
+        # Guard: skip overrides for services that don't exist in the DGD
+        if (
+            len(current_path) == 3
+            and current_path[0] == "spec"
+            and current_path[1] == "services"
+        ):
+            services = target.get("services", target) if path == ["spec"] else target
+            if key not in services:
+                logger.warning(
+                    "Service '%s' does not exist in the generated DGD config; "
+                    "overrides for this service will not be applied.",
+                    key,
+                )
+                continue
+
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge_overrides(target[key], value, current_path)
+        elif isinstance(value, dict) and key not in target:
+            target[key] = copy.deepcopy(value)
+        elif (
+            key == "args"
+            and isinstance(value, list)
+            and _is_worker_main_container_args(current_path)
+        ):
+            existing = target.get(key) or []
+            target[key] = list(existing) + list(value)
+        else:
+            target[key] = (
+                copy.deepcopy(value) if isinstance(value, (dict, list)) else value
+            )
+
+
+def apply_dgd_overrides(dgd_config: dict, overrides: dict) -> dict:
+    """Deep-merge an ``overrides.dgd`` dict onto a generated DGD config.
+
+    Args:
+        dgd_config: The generated DynamoGraphDeployment config dict.
+        overrides: A partial DGD dict with the same structure.  Leaf values
+            overwrite the corresponding keys in *dgd_config*.
+
+    Returns:
+        A new dict with the overrides applied (the original is not mutated).
+    """
+    result = copy.deepcopy(dgd_config)
+    _deep_merge_overrides(result, overrides, path=[])
+    return result
