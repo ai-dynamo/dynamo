@@ -146,8 +146,7 @@ jobs:
             -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
             -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
             ${{ env.IMAGE_TAG }} \
-            bash -ec 'ARCH_ALT=x86_64 /workspace/container/use-sccache.sh install && \
-                      eval $(/workspace/container/use-sccache.sh setup-env) && \
+            bash -ec 'eval $(/workspace/container/use-sccache.sh setup-env) && \
                       rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
                       cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings && \

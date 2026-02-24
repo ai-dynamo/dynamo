@@ -22,7 +22,11 @@ RUN wget --tries=3 --waitretry=5 \
         "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz" && \
     tar -xzf "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz" && \
     mv "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl/sccache" /usr/local/bin/ && \
-    rm -rf sccache*
+    rm -rf sccache* && \
+    printf '#!/bin/sh\ncase " $* " in\n    *" -c "*) exec sccache "${SCCACHE_CC_REAL:-gcc}" "$@" ;;\n    *)        exec "${SCCACHE_CC_REAL:-gcc}" "$@" ;;\nesac\n' > /usr/local/bin/sccache-cc && \
+    chmod +x /usr/local/bin/sccache-cc && \
+    printf '#!/bin/sh\ncase " $* " in\n    *" -c "*) exec sccache "${SCCACHE_CXX_REAL:-g++}" "$@" ;;\n    *)        exec "${SCCACHE_CXX_REAL:-g++}" "$@" ;;\nesac\n' > /usr/local/bin/sccache-cxx && \
+    chmod +x /usr/local/bin/sccache-cxx
 
 # Install uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
