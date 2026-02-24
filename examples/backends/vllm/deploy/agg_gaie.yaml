@@ -80,7 +80,7 @@ spec:
               - name: DYN_HTTP_PORT
                 value: "8000"
               - name: DYN_NAMESPACE
-                value: my-model-vllm-agg
+                value: my-model-qwen-agg
               - name: DYN_COMPONENT
                 value: frontend
               - name: DYN_DISCOVERY_BACKEND

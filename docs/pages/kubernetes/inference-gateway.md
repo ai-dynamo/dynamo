@@ -131,14 +131,10 @@ you could deploy it as a standalone pod
 #### 5.a. Deploy as a DGD component (recommended)
 
 We provide an example for the Qwen vLLM below.
-Follow the steps in [model deployment](../../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg_gaie.yaml](../../../examples/backends/vllm/deploy/agg_gaie.yaml) in `my-model` kubernetes namespace.
-
-Sample commands to deploy model:
-
 ```bash
 cd <dynamo-source-root>
-cd examples/backends/vllm/deploy
-kubectl apply -f agg_gaie.yaml -n my-model
+kubectl apply -f examples/backends/vllm/deploy/agg_gaie.yaml -n my-model
+kubectl apply -f examples/backends/vllm/deploy/http-route.yaml -n my-model
 ```
 
 Examples for other models can be found in the recipes folder.
