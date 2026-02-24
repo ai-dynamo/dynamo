@@ -198,8 +198,6 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
-# Override nixl-sys stub symbols with real nixl C API at runtime
-ENV LD_PRELOAD=${NIXL_LIB_DIR}/libnixl.so
 
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597

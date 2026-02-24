@@ -29,8 +29,6 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins \
     CARGO_TARGET_DIR=/opt/dynamo/target
-# Override nixl-sys stub symbols with real nixl C API at runtime
-ENV LD_PRELOAD=${NIXL_LIB_DIR}/libnixl.so
 
 ENV LD_LIBRARY_PATH=\
 ${NIXL_LIB_DIR}:\
