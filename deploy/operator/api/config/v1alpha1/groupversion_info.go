@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+// +kubebuilder:object:generate=true
+// +groupName=operator.config.dynamo.nvidia.com
 package v1alpha1
 
 import (
