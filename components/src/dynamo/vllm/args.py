@@ -219,26 +219,6 @@ def update_engine_config_with_dynamo(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
     """Update engine config based on Dynamo config."""
-    # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
-    # With TP=1, vLLM defaults to UniProcExecutor which runs scheduler and worker in the same
-    # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,
-    # blocking NIXL's add_remote_agent from completing. Using "mp" backend forces separate
-    # processes, avoiding the GIL contention.
-    # Note: Only apply for NIXL - other connectors (kvbm, lmcache) work fine with UniProcExecutor
-    # and forcing mp can expose race conditions in vLLM's scheduler.
-    # See: https://github.com/vllm-project/vllm/issues/29369
-    if _uses_nixl_connector(engine_config):
-        tp_size = getattr(engine_config, "tensor_parallel_size", None) or 1
-        if (
-            tp_size == 1
-            and getattr(engine_config, "distributed_executor_backend", None) is None
-        ):
-            logger.info(
-                "Setting --distributed-executor-backend=mp for TP=1 to avoid "
-                "UniProcExecutor GIL contention with NIXL connector"
-            )
-            engine_config.distributed_executor_backend = "mp"
-
     if engine_config.enable_prefix_caching is None:
         logger.debug(
             "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
@@ -338,15 +318,42 @@ def create_kv_events_config(
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
-    """Check if the user-provided --kv-transfer-config uses NixlConnector."""
+    """Check if the user-provided --kv-transfer-config uses NixlConnector.
+
+    Handles both direct usage (kv_connector="NixlConnector") and nested usage
+    inside PdConnector (kv_connector_extra_config.connectors contains
+    "NixlConnector").
+    """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
-    return kv_cfg is not None and kv_cfg.kv_connector == "NixlConnector"
+    if kv_cfg is None:
+        return False
+    if kv_cfg.kv_connector == "NixlConnector":
+        return True
+    # PdConnector wraps multiple connectors in kv_connector_extra_config
+    if kv_cfg.kv_connector == "PdConnector":
+        extra = kv_cfg.kv_connector_extra_config or {}
+        connectors = extra.get("connectors", [])
+        if "NixlConnector" in connectors:
+            return True
+    return False
 
 
 def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
-    """Check if the user-provided --kv-transfer-config uses DynamoConnector (KVBM)."""
+    """Check if the user-provided --kv-transfer-config uses DynamoConnector (KVBM).
+
+    Handles both direct usage and nested usage inside PdConnector.
+    """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
-    return kv_cfg is not None and kv_cfg.kv_connector == "DynamoConnector"
+    if kv_cfg is None:
+        return False
+    if kv_cfg.kv_connector == "DynamoConnector":
+        return True
+    if kv_cfg.kv_connector == "PdConnector":
+        extra = kv_cfg.kv_connector_extra_config or {}
+        connectors = extra.get("connectors", [])
+        if "DynamoConnector" in connectors:
+            return True
+    return False
 
 
 def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
