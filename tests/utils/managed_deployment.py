@@ -856,8 +856,12 @@ class ManagedDeployment:
         # Pod status (conditions, container states) — also logged to pytest output
         self._collect_pod_status(pod, directory, suffix)
 
-        # All container logs (init + main + sidecar)
-        self._get_all_container_logs(pod, directory, suffix)
+        # Container logs
+        try:
+            with open(os.path.join(directory, f"{pod.name}{suffix}.log"), "w") as f:
+                f.write("\n".join(pod.logs()))
+        except Exception as e:
+            self._logger.error(f"Failed to collect logs for {pod.name}: {e}")
 
         # Metrics
         self._get_pod_metrics(pod, service_name, suffix)
@@ -908,42 +912,6 @@ class ManagedDeployment:
                 os.path.join(directory, f"{pod.name}.metrics{suffix}.log"), "w"
             ) as f:
                 f.write(content)
-
-    def _get_all_container_logs(self, pod: Pod, directory: str, suffix: str = ""):
-        """Collect logs from all containers in a pod (init, main, sidecar)."""
-        pod.refresh()
-
-        init_containers = pod.raw.get("spec", {}).get("initContainers", [])
-        for container in init_containers:
-            self._collect_container_logs(
-                pod, container["name"], directory, suffix, prefix="init"
-            )
-
-        containers = pod.raw.get("spec", {}).get("containers", [])
-        for container in containers:
-            self._collect_container_logs(pod, container["name"], directory, suffix)
-
-    def _collect_container_logs(
-        self, pod: Pod, container_name: str, directory: str, suffix: str = "", prefix: str = ""
-    ):
-        """Collect current and previous logs for a single container."""
-        label = f"{prefix}-{container_name}" if prefix else container_name
-
-        try:
-            log_file = os.path.join(directory, f"{pod.name}.{label}{suffix}.log")
-            with open(log_file, "w") as f:
-                f.write("\n".join(pod.logs(container=container_name)))
-        except Exception as e:
-            self._logger.warning(f"Failed to collect logs for {pod.name}/{label}: {e}")
-
-        try:
-            log_file = os.path.join(
-                directory, f"{pod.name}.{label}{suffix}.previous.log"
-            )
-            with open(log_file, "w") as f:
-                f.write("\n".join(pod.logs(container=container_name, previous=True)))
-        except Exception as e:
-            self._logger.debug(f"No previous logs for {pod.name}/{label}: {e}")
 
     async def _collect_pod_events(
         self, pod_name: str, directory: str, suffix: str = ""
