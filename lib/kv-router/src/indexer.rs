@@ -511,7 +511,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         &self,
         tokens: &[u32],
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, None);
         Ok(self.backend.find_matches(&sequence, false))
     }
 
@@ -978,7 +978,7 @@ impl KvIndexerInterface for KvIndexer {
             tokens,
             tokens.len()
         );
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, None);
         tracing::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }
@@ -1761,7 +1761,7 @@ impl KvIndexerInterface for KvIndexerSharded {
         &self,
         tokens: &[u32],
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, None);
         self.find_matches(sequence).await
     }
 

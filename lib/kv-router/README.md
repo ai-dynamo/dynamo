@@ -10,13 +10,14 @@ Every cached KV block in a distributed LLM system needs four pieces of informati
 
 ### 1. Local Block Hash (`LocalBlockHash`, u64)
 
-**What**: Hash of the tokens *within* a single block (e.g., 64 tokens).
+**What**: Hash of the tokens *within* a single block (e.g., 64 tokens), optionally including LoRA adapter name and multimodal metadata.
 
-**Why**: Identifies the content of this specific block, independent of context. Two blocks with the same tokens have the same local hash.
+**Why**: Identifies the content of this specific block, independent of context. Two blocks with the same tokens (and same LoRA adapter) have the same local hash. When a LoRA adapter name is provided, it is length-prefixed and appended to the byte buffer before hashing, ensuring that blocks under different adapters (or the base model) always produce distinct hashes.
 
 ```
 Block at position 5: tokens [101, 102, 103, ...]
-LocalBlockHash = hash(tokens) = 0xABCD1234
+LocalBlockHash = hash(tokens)                          = 0xABCD1234  (base model)
+LocalBlockHash = hash(tokens || len("my-lora") || "my-lora") = 0xDEAD5678  (LoRA adapter)
 ```
 
 ### 2. External Sequence Block Hash (`ExternalSequenceBlockHash`, u64)

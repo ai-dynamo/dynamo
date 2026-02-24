@@ -574,9 +574,10 @@ fn convert_event(
             parent_block_hash,
             token_ids,
             block_size,
-            lora_id,
+            lora_id: _,
+            lora_name,
             block_mm_infos,
-            ..
+            medium: _,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -614,7 +615,7 @@ fn convert_event(
                         &token_ids,
                         &num_block_tokens,
                         &block_hashes_u64,
-                        lora_id.unwrap_or(0),
+                        lora_name.as_deref(),
                         warning_count,
                         block_mm_infos.as_deref(),
                     ),
@@ -648,13 +649,16 @@ pub fn create_stored_block_from_parts(
     kv_block_size: u32,
     block_hash: u64,
     token_ids: &[u32],
-    _lora_id: u64,
+    lora_name: Option<&str>,
     mm_extra_info: Option<BlockExtraInfo>,
 ) -> KvCacheStoredBlockData {
-    // Compute tokens_hash including MM info if present
     let block_mm_infos = mm_extra_info.as_ref().map(|info| vec![Some(info.clone())]);
-    let tokens_hash =
-        compute_block_hash_for_seq(token_ids, kv_block_size, block_mm_infos.as_deref())[0];
+    let tokens_hash = compute_block_hash_for_seq(
+        token_ids,
+        kv_block_size,
+        block_mm_infos.as_deref(),
+        lora_name,
+    )[0];
 
     tracing::trace!(
         "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}, mm_extra_info={:?}",
@@ -676,7 +680,7 @@ pub fn create_stored_blocks(
     token_ids: &[u32],
     num_block_tokens: &[u64],
     block_hashes: &[u64],
-    lora_id: u64,
+    lora_name: Option<&str>,
     warning_count: &Arc<AtomicU32>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
 ) -> Vec<KvCacheStoredBlockData> {
@@ -706,7 +710,7 @@ pub fn create_stored_blocks(
             kv_block_size,
             *block_hash_it,
             tokens,
-            lora_id,
+            lora_name,
             mm_extra_info,
         ));
         token_offset += *num_tokens_it as usize;
@@ -1172,10 +1176,10 @@ mod test_event_processing {
         let token_ids = vec![10, 20, 30, 40];
         let blk_hash = 0xdead_beef;
 
-        let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, 0, None);
+        let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
-        let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None)[0];
+        let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None, None)[0];
         assert_eq!(stored.tokens_hash, expected_hash);
         assert!(stored.mm_extra_info.is_none());
     }
@@ -1196,7 +1200,7 @@ mod test_event_processing {
             &token_ids,
             &num_block_tokens,
             &block_hashes,
-            /*lora_id=*/ 0,
+            None,
             &Arc::new(AtomicU32::new(0)),
             None,
         );
@@ -1209,7 +1213,6 @@ mod test_event_processing {
     #[test]
     fn test_create_stored_blocks_wrong_size_triggers_warning() {
         let kv_block_size = 4;
-        // second block is the wrong size
         let token_ids = vec![1, 2, 3, 4, 5, 6, 7];
         let num_block_tokens = vec![4_u64, 3_u64];
         let block_hashes = vec![111_u64, 222_u64];
@@ -1220,7 +1223,7 @@ mod test_event_processing {
             &token_ids,
             &num_block_tokens,
             &block_hashes,
-            /*lora_id=*/ 0,
+            None,
             &warning_count,
             None,
         );
@@ -1249,6 +1252,88 @@ mod test_event_processing {
 
         let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Stored(_)));
+    }
+
+    #[test]
+    fn test_convert_event_with_lora_name() {
+        let kv_block_size = 4;
+        let token_ids = vec![1, 2, 3, 4];
+
+        let base_evt = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: token_ids.clone(),
+            block_size: 4,
+            lora_id: None,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+        };
+        let lora_evt = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: token_ids.clone(),
+            block_size: 4,
+            lora_id: None,
+            medium: None,
+            lora_name: Some("my-lora".to_string()),
+            block_mm_infos: None,
+        };
+
+        let wc = Arc::new(AtomicU32::new(0));
+        let base_out = convert_event(base_evt, 1, kv_block_size, 0, &wc);
+        let lora_out = convert_event(lora_evt, 2, kv_block_size, 0, &wc);
+
+        let base_hash = match &base_out.data {
+            KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
+            _ => panic!("expected Stored"),
+        };
+        let lora_hash = match &lora_out.data {
+            KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
+            _ => panic!("expected Stored"),
+        };
+        assert_ne!(base_hash, lora_hash, "LoRA blocks must produce distinct tokens_hash");
+    }
+
+    #[test]
+    fn test_convert_event_lora_name_none_matches_base() {
+        let kv_block_size = 4;
+        let token_ids = vec![1, 2, 3, 4];
+        let wc = Arc::new(AtomicU32::new(0));
+
+        let evt1 = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: token_ids.clone(),
+            block_size: 4,
+            lora_id: None,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+        };
+        let evt2 = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: token_ids.clone(),
+            block_size: 4,
+            lora_id: Some(0),
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+        };
+
+        let out1 = convert_event(evt1, 1, kv_block_size, 0, &wc);
+        let out2 = convert_event(evt2, 2, kv_block_size, 0, &wc);
+
+        let hash1 = match &out1.data {
+            KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
+            _ => panic!("expected Stored"),
+        };
+        let hash2 = match &out2.data {
+            KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
+            _ => panic!("expected Stored"),
+        };
+        assert_eq!(hash1, hash2, "None and lora_id=0 should produce same base-model hash");
     }
 
     #[test]

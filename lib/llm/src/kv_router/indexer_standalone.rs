@@ -90,7 +90,7 @@ impl
             IndexerQueryRequest::FindMatchesTokens {
                 tokens,
                 block_mm_infos,
-            } => compute_block_hash_for_seq(&tokens, self.block_size, block_mm_infos.as_deref()),
+            } => compute_block_hash_for_seq(&tokens, self.block_size, block_mm_infos.as_deref(), None),
             IndexerQueryRequest::DumpTree => unreachable!(),
         };
 

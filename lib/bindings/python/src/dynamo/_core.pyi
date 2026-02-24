@@ -236,7 +236,8 @@ class ModelCardInstanceId:
 def compute_block_hash_for_seq(
     tokens: List[int],
     kv_block_size: int,
-    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
+    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+    lora_name: Optional[str] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -689,9 +690,10 @@ class KvEventPublisher:
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
-        lora_id: int,
+        lora_id: int = 0,
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -1388,6 +1390,7 @@ class KvRouter:
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -1413,6 +1416,7 @@ class KvRouter:
     async def get_potential_loads(
         self,
         token_ids: List[int],
+        lora_name: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
         Get potential prefill and decode loads for all workers.

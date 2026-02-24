@@ -213,11 +213,13 @@ fn kv_event_create_stored_block_from_parts(
     num_tokens: usize,
     kv_block_size: u32,
     _lora_id: u64,
+    lora_name: Option<&str>,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(
         unsafe { std::slice::from_raw_parts(token_ids, num_tokens) },
         kv_block_size,
         None,
+        lora_name,
     )[0];
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash(block_hash),
@@ -265,6 +267,7 @@ fn kv_event_create_stored_from_parts(
             num_toks,
             kv_block_size,
             kv_params.lora_id,
+            kv_params.lora_name.as_deref(),
         ));
     }
 
@@ -304,11 +307,13 @@ pub struct DynamoKvStoredEventParams {
     pub num_blocks: usize,
     pub parent_hash: Option<u64>,
     pub lora_id: u64,
+    pub lora_name: Option<String>,
 }
 
 /// # Safety
 /// parent_hash is passed as pointer to indicate whether the blocks
-/// has a parent hash or not. nullptr is used to represent no parent hash
+/// has a parent hash or not. nullptr is used to represent no parent hash.
+/// lora_name is an optional null-terminated C string; pass nullptr for base model.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     event_id: u64,
@@ -318,6 +323,7 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     num_blocks: usize,
     parent_hash: *const u64,
     lora_id: u64,
+    lora_name: *const c_char,
 ) -> DynamoLlmResult {
     let parent_hash = {
         if parent_hash.is_null() {
@@ -325,6 +331,11 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
         } else {
             Some(unsafe { *parent_hash })
         }
+    };
+    let lora_name = if lora_name.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(lora_name) }.to_string_lossy().into_owned())
     };
     let kv_params = DynamoKvStoredEventParams {
         event_id,
@@ -334,6 +345,7 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
         num_blocks,
         parent_hash,
         lora_id,
+        lora_name,
     };
     let publisher = KV_PUB.get().unwrap();
     let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
@@ -787,7 +799,7 @@ pub unsafe extern "C" fn add_request(
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
 
             // Compute overlap_blocks using the public method
-            let overlap_blocks = match decode_router.get_overlap_blocks(&tokens, worker).await {
+            let overlap_blocks = match decode_router.get_overlap_blocks(&tokens, worker, None).await {
                 Ok(overlap) => overlap,
                 Err(e) => {
                     tracing::warn!(error = ?e, "Failed to compute overlap, using 0");

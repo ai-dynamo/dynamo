@@ -41,7 +41,8 @@ For `BlockStored` events:
 - **`block_hashes`**: List of **sequence block hashes** from the engine's block manager. These are cumulative hashes that incorporate all tokens from the start of the sequence up to and including the current block (not just the tokens within that block). This enables prefix matching across requests.
 - **`num_block_tokens`**: Number of tokens per block (should all equal `kv_block_size`)
 - **`parent_hash`**: Hash of the parent block. Required for all blocks except the first block in a sequence (which has no parent).
-- **`lora_id`**: LoRA adapter ID (0 if not using LoRA)
+- **`lora_name`**: LoRA adapter name string (omit or `None` for base model). When set, the adapter name is incorporated into block hash computation so that blocks for different LoRA adapters (or the base model) are never conflated.
+- **`lora_id`**: *(Deprecated)* Numeric LoRA adapter ID. Use `lora_name` instead.
 
 For `BlockRemoved` events:
 - **`block_hashes`**: List of sequence block hashes being evicted
@@ -93,15 +94,16 @@ class CustomEnginePublisher:
         )
 
     def on_blocks_stored(self, token_ids: list[int], block_hashes: list[int],
-                         lora_id: int = 0, parent_hash: int | None = None):
+                         parent_hash: int | None = None,
+                         lora_name: str | None = None):
         """Call after KV cache blocks are allocated."""
         num_block_tokens = [self.block_size] * len(block_hashes)
         self.kv_publisher.publish_stored(
             token_ids=token_ids,
             num_block_tokens=num_block_tokens,
             block_hashes=block_hashes,
-            lora_id=lora_id,
             parent_hash=parent_hash,
+            lora_name=lora_name,
         )
 
     def on_blocks_removed(self, block_hashes: list[int]):
@@ -209,7 +211,8 @@ For `BlockStored`:
     "parent_block_hash": signed_i64 | None,  # Parent hash
     "token_ids": [int, ...],                 # Token IDs
     "block_size": int,                       # Tokens per block
-    "lora_id": int | None,                   # LoRA adapter ID
+    "lora_id": int | None,                   # LoRA adapter ID (deprecated, use lora_name)
+    "lora_name": str | None,                 # LoRA adapter name
 }
 ```
 
@@ -257,12 +260,14 @@ publish_stored(
     token_ids: list[int],
     num_block_tokens: list[int],
     block_hashes: list[int],
-    lora_id: int,
+    lora_id: int = 0,
     parent_hash: int | None = None,
+    block_mm_infos: list[dict | None] | None = None,
+    lora_name: str | None = None,
 )
 ```
 
-Publish a block-stored event. Event IDs are managed internally.
+Publish a block-stored event. Event IDs are managed internally. When `lora_name` is provided, the adapter name is mixed into block hash computation so blocks cached under different adapters produce distinct hashes. The `lora_id` parameter is deprecated; use `lora_name` instead.
 
 #### `publish_removed()`
 

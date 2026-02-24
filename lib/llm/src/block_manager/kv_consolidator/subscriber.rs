@@ -145,12 +145,11 @@ enum VllmRawEvent {
         parent_block_hash: Option<BlockHash>,
         token_ids: Vec<i32>,
         block_size: i32,
+        #[allow(dead_code)]
         lora_id: Option<i32>,
         #[serde(default)]
         medium: Option<String>,
         #[serde(default)]
-        #[allow(dead_code)]
-        // Reserved for future use, needed for vLLM 0.14.0 deserialization
         lora_name: Option<String>,
     },
     #[serde(rename = "BlockRemoved")]
@@ -279,9 +278,9 @@ fn process_event(
             parent_block_hash,
             token_ids,
             block_size,
-            lora_id,
+            lora_id: _,
             medium,
-            lora_name: _, // Not used yet, lora_id is still used for backwards compat
+            lora_name,
         } => {
             let storage_tier = medium
                 .as_ref()
@@ -370,7 +369,7 @@ fn process_event(
                     block_tokens,
                     current_parent.clone(),
                     block_size_usize,
-                    lora_id,
+                    lora_name.clone(),
                     Some(storage_tier),
                     data_parallel_rank,
                 );
