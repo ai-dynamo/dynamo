@@ -179,6 +179,11 @@ fn extract_visible_text(content: &JsonValue) -> String {
                         .map(|text| text.to_string());
                 }
 
+                tracing::warn!(
+                    chunk_type = item_type.unwrap_or("unknown"),
+                    "DeepSeek V3.2 formatter dropped non-text content chunk while normalizing message content",
+                );
+
                 None
             })
             .collect::<String>(),
