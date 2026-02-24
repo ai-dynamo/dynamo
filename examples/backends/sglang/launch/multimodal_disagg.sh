@@ -62,6 +62,29 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
     SERVED_MODEL_ARG="--served-model-name $SERVED_MODEL_NAME"
 fi
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Multimodal E/P/D Workers"
+echo "=========================================="
+echo "Model:       $MODEL_NAME"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL_NAME}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": ["
+echo "        {\"type\": \"text\", \"text\": \"Describe the image.\"},"
+echo "        {\"type\": \"image_url\", \"image_url\": {\"url\": \"http://images.cocodataset.org/test2017/000000155781.jpg\"}}"
+echo "      ]}],"
+echo "      \"max_tokens\": 50"
+echo "    }'"
+echo ""
+echo "=========================================="
+
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
