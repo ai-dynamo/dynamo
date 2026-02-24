@@ -743,6 +743,8 @@ impl ActiveSequencesMultiWorker {
     ///
     /// This is used during generation to track output blocks as they are created.
     /// The decay_fraction represents how "temporary" the block is based on generation progress.
+    // TODO: output blocks are not replicated via replica_sync — add an
+    // ActiveSequenceEventData variant if cross-instance accuracy matters.
     pub fn add_output_block(
         &self,
         request_id: &RequestId,
@@ -827,7 +829,7 @@ impl ActiveSequencesMultiWorker {
         &self,
         token_sequence: Vec<SequenceHash>,
     ) -> HashMap<WorkerWithDpRank, usize> {
-        let mut results = HashMap::new();
+        let mut results = HashMap::with_capacity(self.workers.len());
         for entry in self.workers.iter() {
             results.insert(*entry.key(), entry.value().new_blocks(&token_sequence));
         }
@@ -839,7 +841,7 @@ impl ActiveSequencesMultiWorker {
         &self,
         token_sequence: Vec<SequenceHash>,
     ) -> HashMap<WorkerWithDpRank, usize> {
-        let mut results = HashMap::new();
+        let mut results = HashMap::with_capacity(self.workers.len());
         for entry in self.workers.iter() {
             results.insert(
                 *entry.key(),
@@ -864,8 +866,8 @@ impl ActiveSequencesMultiWorker {
         #[cfg(feature = "bench")]
         let num_workers = self.workers.len();
 
-        let mut potential_blocks = HashMap::new();
-        let mut potential_tokens = HashMap::new();
+        let mut potential_blocks = HashMap::with_capacity(self.workers.len());
+        let mut potential_tokens = HashMap::with_capacity(self.workers.len());
 
         for entry in self.workers.iter() {
             let worker = *entry.key();
@@ -894,7 +896,7 @@ impl ActiveSequencesMultiWorker {
 
     /// Query all workers for their current number of active blocks
     pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
-        let mut results = HashMap::new();
+        let mut results = HashMap::with_capacity(self.workers.len());
         for entry in self.workers.iter() {
             results.insert(*entry.key(), entry.value().active_blocks());
         }
@@ -903,7 +905,7 @@ impl ActiveSequencesMultiWorker {
 
     /// Query all workers for their current number of active tokens
     pub fn active_tokens(&self) -> HashMap<WorkerWithDpRank, usize> {
-        let mut results = HashMap::new();
+        let mut results = HashMap::with_capacity(self.workers.len());
         for entry in self.workers.iter() {
             results.insert(*entry.key(), entry.value().active_tokens());
         }
