@@ -1030,11 +1030,19 @@ jobs:
           pip install coverage[toml] pytest-cov
           echo "✅ Coverage tools installed"
 
-      - name: Download All Coverage Artifacts
+      - name: Download All Python Coverage Artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: coverage-python-*
           path: coverage-artifacts/
+          merge-multiple: false
+
+      - name: Download All Rust Coverage Artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true  # Rust tests not yet part of this pipeline; will succeed once added
+        with:
+          pattern: coverage-rust-*
+          path: coverage-rust-artifacts/
           merge-multiple: false
 
       - name: List Downloaded Artifacts
@@ -1111,6 +1119,31 @@ jobs:
           fi
 
 
+      - name: Process Rust Coverage
+        run: |
+          RUST_TOTAL_COVERAGE="N/A"
+          echo "No Rust coverage data available yet." > coverage-rust-report.txt
+
+          if find coverage-rust-artifacts/ -name "coverage-rust.txt" -type f 2>/dev/null | grep -q .; then
+            echo "📊 Processing Rust coverage reports..."
+            # Concatenate TOTAL lines from every workspace dir into one summary
+            find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | while read -r f; do
+              echo "=== $(basename $(dirname "$f")) ==="
+              grep "^TOTAL" "$f" || echo "(no TOTAL line)"
+              echo ""
+            done > coverage-rust-report.txt
+
+            # Extract line coverage % (3rd percentage on TOTAL line: Region%, Func%, Line%, Branch%)
+            FIRST=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | head -1)
+            RUST_TOTAL_COVERAGE=$(grep "^TOTAL" "$FIRST" | grep -oE '[0-9]+\.[0-9]+%' | sed -n '3p')
+            RUST_TOTAL_COVERAGE="${RUST_TOTAL_COVERAGE:-N/A}"
+            echo "Rust line coverage: ${RUST_TOTAL_COVERAGE}"
+          else
+            echo "ℹ️  No Rust coverage artifacts found (Rust tests not yet wired into this pipeline)"
+          fi
+
+          echo "RUST_TOTAL_COVERAGE=${RUST_TOTAL_COVERAGE}" >> $GITHUB_ENV
+
       - name: Create Coverage Summary
         run: |
           DATE=$(date +"%Y-%m-%d %H:%M:%S UTC")
@@ -1120,21 +1153,34 @@ jobs:
           **Date:** ${DATE}
           **Run ID:** ${{ github.run_id }}
           **Workflow:** ${{ github.workflow }}
-          **Total Coverage:** ${TOTAL_COVERAGE}
+
+          | Language | Total Coverage |
+          |----------|---------------|
+          | Python   | ${TOTAL_COVERAGE} |
+          | Rust     | ${RUST_TOTAL_COVERAGE} |
 
           ---
 
-          ## Coverage Details
+          ## Python Coverage Details
 
           \`\`\`
-          $(cat coverage-report.txt 2>/dev/null || echo "No coverage data available")
+          $(cat coverage-report.txt 2>/dev/null || echo "No Python coverage data available")
+          \`\`\`
+
+          ---
+
+          ## Rust Coverage Details
+
+          \`\`\`
+          $(cat coverage-rust-report.txt 2>/dev/null || echo "No Rust coverage data available")
           \`\`\`
 
           ---
 
           ## 📁 Artifacts
           - Full HTML Report: Download \`coverage-reports-${{ github.run_id }}\` artifact
-          - Coverage XML: \`coverage-merged.xml\`
+          - Python Coverage XML: \`coverage-merged.xml\`
+          - Rust Coverage LCov: \`coverage-rust.lcov\` (per workspace dir)
 
           EOF
 
@@ -1153,6 +1199,8 @@ jobs:
             coverage-html/
             coverage-merged.xml
             coverage-report.txt
+            coverage-rust-report.txt
+            coverage-rust-artifacts/
             coverage-summary.md
             .coverage
           retention-days: 30
