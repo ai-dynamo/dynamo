@@ -43,6 +43,4 @@ def test_no_bundled_shared_libraries():
     assert not bundled_libs, (
         "Unexpected shared libraries bundled in ai-dynamo-runtime:\n"
         + "\n".join(f"  {lib}" for lib in bundled_libs)
-        + "\nAdd --exclude flags to auditwheel repair in "
-        "container/templates/wheel_builder.Dockerfile"
     )
