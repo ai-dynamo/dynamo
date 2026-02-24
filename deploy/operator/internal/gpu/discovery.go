@@ -31,6 +31,7 @@ import (
 	"github.com/prometheus/common/model"
 
 	corev1 "k8s.io/api/core/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -49,13 +50,14 @@ const (
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
-	NodeName    string         // Name of the node with this GPU configuration
-	GPUsPerNode int            // Maximum GPUs per node found in the cluster
-	Model       string         // GPU product name (e.g., "H100-SXM5-80GB")
-	VRAMPerGPU  int            // VRAM in MiB per GPU
-	System      string         // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
-	MIGEnabled  bool           // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
-	MIGProfiles map[string]int // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
+	NodeName      string         // Name of the node with this GPU configuration
+	GPUsPerNode   int            // Maximum GPUs per node found in the cluster
+	Model         string         // GPU product name (e.g., "H100-SXM5-80GB")
+	VRAMPerGPU    int            // VRAM in MiB per GPU
+	System        string         // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	MIGEnabled    bool           // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
+	MIGProfiles   map[string]int // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
+	CloudProvider string         // NEW: aws | gcp | aks | other | unknown
 }
 
 type GPUDiscoveryCache struct {
@@ -63,6 +65,9 @@ type GPUDiscoveryCache struct {
 	value     *GPUInfo
 	expiresAt time.Time
 }
+
+var scrapeMetricsFunc = scrapeMetricsEndpoint
+var ensureDCGMFunc = EnsureDCGMEnabled
 
 // NewGPUDiscoveryCache creates a new GPUDiscoveryCache instance.
 //
@@ -137,100 +142,67 @@ func (c *GPUDiscoveryCache) Set(info *GPUInfo, ttl time.Duration) {
 // does not represent full cluster GPU inventory. Future improvements should
 // aggregate and return GPU information for all nodes instead of selecting
 // only one.
-func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *GPUDiscoveryCache) (*GPUInfo, error) {
+func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *GPUDiscoveryCache) (*GPUInfo, ctrl.Result, error) {
+
+	const maxRetryAttempts = 3
+	const requeueDelay = 5 * time.Second
 
 	// Return cached result if still valid
 	if cached, ok := cache.Get(); ok {
-		return cached, nil
+		return cached, ctrl.Result{}, nil
 	}
 
-	// List ALL pods (we'll filter manually to support OR label logic)
-	podList := &corev1.PodList{}
-	if err := k8sClient.List(ctx, podList); err != nil {
-		return nil, fmt.Errorf("list pods: %w", err)
-	}
-
-	var dcgmPods []corev1.Pod
-
-	// Filter pods matching ANY of the supported DCGM label combinations
-	for _, pod := range podList.Items {
-
-		labels := pod.GetLabels()
-
-		if labels == nil {
-			continue
-		}
-
-		// Supported label combinations:
-		if labels[LabelApp] == LabelValueNvidiaDCGMExporter ||
-			labels[LabelApp] == LabelValueDCGMExporter ||
-			labels[LabelAppKubernetesName] == LabelValueDCGMExporter {
-
-			dcgmPods = append(dcgmPods, pod)
+	// Track retry attempts in context
+	var retryAttempts int
+	if val := ctx.Value("retryAttempts"); val != nil {
+		if attempts, ok := val.(int); ok {
+			retryAttempts = attempts
 		}
 	}
+	// Increment for this invocation
+	retryAttempts++
+	ctx = context.WithValue(ctx, "retryAttempts", retryAttempts)
 
-	// If no pods found → attempt enablement
+	// List DCGM exporter pods
+	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
+	if err != nil && !strings.Contains(err.Error(), "no DCGM exporter pods found") {
+		return nil, ctrl.Result{}, fmt.Errorf("listing DCGM exporter pods failed: %w", err)
+	}
+
+	// If no pods found
 	if len(dcgmPods) == 0 {
-
-		if err := EnsureDCGMEnabled(ctx); err != nil {
-			return nil, fmt.Errorf("install dcgm via helm: %w", err)
-		}
-
-		if err := WaitForDCGMPods(ctx, k8sClient, 3*time.Minute); err != nil {
-			return nil, err
-		}
-
-		// Re-list and re-filter
-		if err := k8sClient.List(ctx, podList); err != nil {
-			return nil, err
-		}
-
-		dcgmPods = nil
-
-		for _, pod := range podList.Items {
-			labels := pod.GetLabels()
-			if labels == nil {
-				continue
-			}
-
-			if labels[LabelApp] == LabelValueNvidiaDCGMExporter ||
-				labels[LabelApp] == LabelValueDCGMExporter ||
-				labels[LabelAppKubernetesName] == LabelValueDCGMExporter {
-
-				dcgmPods = append(dcgmPods, pod)
+		// Only attempt to enable DCGM on the first attempt
+		if retryAttempts == 1 {
+			if err := ensureDCGMFunc(ctx); err != nil {
+				return nil, ctrl.Result{}, fmt.Errorf("failed to enable DCGM and DCGM Exporter: %w", err)
 			}
 		}
+
+		// If max retries exceeded, stop retrying
+		if retryAttempts >= maxRetryAttempts {
+			return nil, ctrl.Result{}, fmt.Errorf("DCGM exporter pods not found after %d attempts", retryAttempts)
+		}
+
+		// Requeue for non-blocking retry
+		return nil, ctrl.Result{RequeueAfter: requeueDelay}, nil
 	}
 
-	if len(dcgmPods) == 0 {
-		return nil, fmt.Errorf("no dcgm exporter pods found")
-	}
-
+	// Scrape each running pod individually
 	var bestNode *GPUInfo
 	var scrapeErrors []error
-	// Scrape each running pod individually
 	for _, pod := range dcgmPods {
-
-		if pod.Status.Phase != corev1.PodRunning {
-			continue
-		}
-
-		if pod.Status.PodIP == "" {
+		if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
 			continue
 		}
 
 		endpoint := fmt.Sprintf("http://%s:9400/metrics", pod.Status.PodIP)
-
-		info, err := scrapeMetricsEndpoint(ctx, endpoint)
+		info, err := scrapeMetricsFunc(ctx, endpoint)
 		if err != nil {
 			scrapeErrors = append(scrapeErrors, fmt.Errorf("pod %s (%s): %w", pod.Name, pod.Status.PodIP, err))
 			continue
 		}
 
-		// Select best node:
-		// 1. Highest GPU count
-		// 2. Highest VRAM per GPU (tie-breaker)
+		// Select best node: highest GPU count, tie-breaker by VRAM
 		if bestNode == nil ||
 			info.GPUsPerNode > bestNode.GPUsPerNode ||
 			(info.GPUsPerNode == bestNode.GPUsPerNode &&
@@ -242,15 +214,63 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *G
 
 	if bestNode == nil {
 		if len(scrapeErrors) > 0 {
-			return nil, fmt.Errorf("failed to scrape any dcgm exporter pod: %v", scrapeErrors)
+			return nil, ctrl.Result{}, fmt.Errorf("failed to scrape any DCGM exporter pod: %v", scrapeErrors)
 		}
-		return nil, fmt.Errorf("no GPU metrics could be parsed from any dcgm pod")
+		return nil, ctrl.Result{}, fmt.Errorf("no GPU metrics could be parsed from any DCGM pod")
 	}
 
+	// Infer cloud provider for the best node
+	cloudProvider, err := GetCloudProviderInfo(ctx, k8sClient)
+	if err != nil {
+		cloudProvider = "unknown"
+	}
+	bestNode.CloudProvider = cloudProvider
 	// Cache result for 60 seconds
 	cache.Set(bestNode, 60*time.Second)
 
-	return bestNode, nil
+	return bestNode, ctrl.Result{}, nil
+}
+
+func listDCGMExporterPods(ctx context.Context, k8sClient client.Client) ([]corev1.Pod, error) {
+	var result []corev1.Pod
+	seen := make(map[string]struct{})
+
+	selectors := []client.MatchingLabels{
+		{LabelApp: LabelValueNvidiaDCGMExporter},
+		{LabelApp: LabelValueDCGMExporter},
+		{LabelAppKubernetesName: LabelValueDCGMExporter},
+	}
+
+	var lastErr error
+
+	for _, selector := range selectors {
+		podList := &corev1.PodList{}
+
+		err := k8sClient.List(ctx, podList, selector)
+		if err != nil {
+			lastErr = fmt.Errorf("list pods: %w", err)
+			continue
+		}
+
+		for _, pod := range podList.Items {
+			key := pod.Namespace + "/" + pod.Name
+
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				result = append(result, pod)
+			}
+		}
+	}
+
+	if len(result) > 0 {
+		return result, nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	return nil, fmt.Errorf("no DCGM exporter pods found")
 }
 
 // scrapeMetricsEndpoint retrieves and parses Prometheus metrics from a
@@ -271,6 +291,10 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *G
 // This function does not implement retries or fallback logic.
 // Error handling and multi-pod aggregation are managed by the caller.
 func scrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
+	// Set a timeout for the request
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request for %s: %w", endpoint, err)
@@ -416,10 +440,12 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 		}
 	}
 
-	// --- Calculate VRAM from first GPU ---
+	// --- Calculate Max VRAM in case of heterogenous GPUs
 	for gpuID := range gpuSet {
-		vram = int(fbFree[gpuID] + fbUsed[gpuID] + fbReserved[gpuID])
-		break
+		total := int(fbFree[gpuID] + fbUsed[gpuID] + fbReserved[gpuID])
+		if total > vram {
+			vram = total
+		}
 	}
 
 	gpuCount := len(gpuSet)
@@ -605,4 +631,50 @@ func InferHardwareSystem(gpuProduct string) string {
 	// Unknown GPU type, return empty string
 	// User must specify system manually in profiling config (hardware.system)
 	return ""
+}
+
+func GetCloudProviderInfo(ctx context.Context, k8sClient client.Client) (string, error) {
+	var nodeList corev1.NodeList
+	if err := k8sClient.List(ctx, &nodeList); err != nil {
+		return "unknown", fmt.Errorf("failed to list nodes: %w", err)
+	}
+	if len(nodeList.Items) == 0 {
+		return "unknown", fmt.Errorf("no nodes found in cluster")
+	}
+	// Use first node as representative (assumes homogeneous control plane)
+	node := nodeList.Items[0]
+	providerID := strings.ToLower(node.Spec.ProviderID)
+	labels := node.Labels
+	// ---- Primary Detection: providerID ----
+	switch {
+	case strings.Contains(providerID, "azure"):
+		return "aks", nil
+	case strings.Contains(providerID, "aws"):
+		return "aws", nil
+	case strings.Contains(providerID, "gce"):
+		return "gcp", nil
+	}
+	// ---- Secondary Detection: Node Labels ----
+	// AKS labels
+	if _, ok := labels["kubernetes.azure.com/cluster"]; ok {
+		return "aks", nil
+	}
+	if strings.Contains(labels["node.kubernetes.io/instance-type"], "standard_") {
+		return "aks", nil
+	}
+	// EKS labels
+	if _, ok := labels["eks.amazonaws.com/nodegroup"]; ok {
+		return "aws", nil
+	}
+	if strings.HasPrefix(labels["node.kubernetes.io/instance-type"], "p") {
+		return "aws", nil
+	}
+	// GKE labels
+	if _, ok := labels["cloud.google.com/gke-nodepool"]; ok {
+		return "gcp", nil
+	}
+	if strings.HasPrefix(labels["node.kubernetes.io/instance-type"], "a2-") {
+		return "gcp", nil
+	}
+	return "other", nil
 }

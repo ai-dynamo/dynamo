@@ -21,12 +21,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
+	"path/filepath"
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
-	corev1 "k8s.io/api/core/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -55,12 +53,25 @@ const (
 //   - Uses /tmp as a temporary HOME directory for Helm caching and config.
 func EnsureDCGMEnabled(ctx context.Context) error {
 	// Configure Helm environment
-	// Set temporary HOME for Helm to write cache/config in controller environments.
-	os.Setenv("HOME", "/tmp")
-
 	settings := cli.New()
-	settings.RepositoryCache = "/tmp/.cache/helm/repository"
-	settings.RepositoryConfig = "/tmp/.config/helm/repositories.yaml"
+
+	// Explicitly configure paths
+	settings.RepositoryCache = "/tmp/helm/.cache/repository"
+	settings.RepositoryConfig = "/tmp/helm/.config/repositories.yaml"
+	settings.RegistryConfig = "/tmp/helm/.config/registry.json"
+	settings.PluginsDirectory = "/tmp/helm/plugins"
+
+	paths := []string{
+		settings.RepositoryCache,
+		filepath.Dir(settings.RepositoryConfig),
+		filepath.Dir(settings.RegistryConfig),
+		filepath.Dir(settings.PluginsDirectory),
+	}
+	for _, p := range paths {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			return fmt.Errorf("failed to create helm path %s: %w", p, err)
+		}
+	}
 
 	// Initialize Helm action configuration for the target namespace
 	actionConfig := new(action.Configuration)
@@ -117,56 +128,4 @@ func EnsureDCGMEnabled(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// WaitForDCGMPods waits until at least one DCGM exporter pod is running
-// and has a valid Pod IP, or until the provided timeout is reached.
-//
-// The function polls the Kubernetes API at regular intervals,
-// checking for pods matching DCGM exporter labels.
-//
-// A pod is considered ready when:
-//   - Status.Phase == Running
-//   - PodIP is non-empty
-//
-// Returns:
-//   - nil once a ready DCGM exporter pod is detected
-//   - error if the timeout expires or if a Kubernetes API call fails
-//
-// This function is typically used after enabling DCGM via Helm
-// to ensure pods are ready before metrics scraping begins.
-// WaitForDCGMPods waits until at least one DCGM exporter pod is running
-// and has a valid Pod IP, or until the provided timeout is reached.
-//
-// It checks pods matching the supported DCGM exporter labels and
-// polls the Kubernetes API at regular intervals.
-//
-// Returns nil when a ready pod is found, or an error if timeout expires.
-func WaitForDCGMPods(ctx context.Context, k8sClient client.Client, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-
-	// List of label selectors to support multiple DCGM exporter labels
-	labelSelectors := []client.MatchingLabels{
-		{LabelAppKubernetesName: LabelValueNvidiaDCGMExporter},
-		{LabelApp: LabelValueDCGMExporter},
-	}
-
-	for time.Now().Before(deadline) {
-		for _, labels := range labelSelectors {
-			podList := &corev1.PodList{}
-			if err := k8sClient.List(ctx, podList, labels); err != nil {
-				return fmt.Errorf("listing pods with labels %v: %w", labels, err)
-			}
-
-			for _, pod := range podList.Items {
-				if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" {
-					return nil
-				}
-			}
-		}
-
-		time.Sleep(5 * time.Second)
-	}
-
-	return fmt.Errorf("timeout waiting for DCGM exporter pods")
 }
