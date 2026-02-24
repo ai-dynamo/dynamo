@@ -86,8 +86,6 @@ jobs:
     needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
     permissions:
       contents: read
-    env:
-      SLACK_OPS_SUPPORT_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
     steps:
       - name: Get Failed jobs
         shell: bash
@@ -101,7 +99,7 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             >$JOBS_JSON
 
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | ":failed: " + .name + "\\n"' "$JOBS_JSON")
+          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | ":failed: " + (.name | split(" / ") | .[-1]) + "\\n"' "$JOBS_JSON")
           echo $FAILED_JOBS
           {
             echo "FAILED_JOBS<<EOF"
@@ -118,7 +116,7 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "THIS IS A TEST :alert: *Github Post-merge Build Failure*"
+                  text: ":alert: *Github Post-merge Build Failure*"
               - type: "section"
                 text:
                   type: mrkdwn
@@ -130,4 +128,4 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "<!@ops-support> Please investigate the failures above."
+                  text: "@ops-support Please investigate the failures above."
