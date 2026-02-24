@@ -26,16 +26,21 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 /// to ensure that blocks with identical tokens but different multimodal objects produce
 /// different hashes.
 ///
-/// When `lora_name` is provided, a length-prefixed representation of the adapter name is
-/// appended to each block's byte buffer before hashing, so blocks cached under different
-/// LoRA adapters (or the base model) produce distinct tree keys.
+/// When `lora_name` is provided, the adapter name is mixed into the XXH3 seed so that
+/// blocks cached under different LoRA adapters (or the base model) produce distinct hashes.
+/// Because LoRA identity applies uniformly to every block in a sequence, encoding it in the
+/// seed is more efficient than appending per-block bytes and matches the approach used by
+/// KVBM's `SaltHash`.
 pub fn compute_block_hash_for_seq(
     tokens: &[u32],
     kv_block_size: u32,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     lora_name: Option<&str>,
 ) -> Vec<LocalBlockHash> {
-    let lora_name = lora_name.filter(|n| !n.is_empty());
+    let seed = match lora_name.filter(|n| !n.is_empty()) {
+        Some(name) => XXH3_SEED.wrapping_add(xxh3::xxh3_64(name.as_bytes())),
+        None => XXH3_SEED,
+    };
     tokens
         .chunks_exact(kv_block_size as usize)
         .enumerate()
@@ -57,13 +62,7 @@ pub fn compute_block_hash_for_seq(
                 }
             }
 
-            if let Some(name) = lora_name {
-                let name_bytes = name.as_bytes();
-                bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-                bytes.extend_from_slice(name_bytes);
-            }
-
-            compute_block_hash(&bytes)
+            LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed))
         })
         .collect()
 }
