@@ -1789,7 +1789,7 @@ async fn videos(
     Ok(Json(response).into_response())
 }
 
-/// MJPEG streaming handler for `/v1/videos/stream`.
+/// [EXPERIMENTAL] MJPEG streaming handler for `/v1/videos/stream`.
 ///
 /// The backend is expected to yield one [`NvVideosResponse`] per frame, carrying a
 /// JPEG-encoded frame as `data[0].b64_json`. This handler decodes each frame and
