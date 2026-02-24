@@ -862,6 +862,13 @@ class ManagedDeployment:
                 f.write("\n".join(pod.logs()))
         except Exception as e:
             self._logger.error(f"Failed to collect logs for {pod.name}: {e}")
+        try:
+            with open(
+                os.path.join(directory, f"{pod.name}{suffix}.previous.log"), "w"
+            ) as f:
+                f.write("\n".join(pod.logs(previous=True)))
+        except Exception as e:
+            self._logger.debug(f"No previous logs for {pod.name}: {e}")
 
         # Metrics
         self._get_pod_metrics(pod, service_name, suffix)
