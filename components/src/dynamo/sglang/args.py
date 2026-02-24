@@ -32,7 +32,7 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
     """Combined configuration container for SGLang server and Dynamo args."""
 
     component: str
-    llm_diffusion_worker: bool = False
+    diffusion_worker: bool = False
     use_kv_events: bool = False
 
     def validate(self) -> None:
@@ -254,7 +254,7 @@ async def parse_args(args: list[str]) -> Config:
             endpoint = f"dyn://{namespace}.backend.generate"
         elif dynamo_config.image_diffusion_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
-        elif dynamo_config.video_diffusion_worker:
+        elif dynamo_config.video_generation_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
         elif (
             hasattr(parsed_args, "disaggregation_mode")
@@ -334,11 +334,11 @@ async def parse_args(args: list[str]) -> Config:
     # For diffusion/video workers, create a minimal dummy ServerArgs since diffusion
     # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
     image_diffusion_worker = dynamo_config.image_diffusion_worker
-    video_diffusion_worker = dynamo_config.video_diffusion_worker
+    video_generation_worker = dynamo_config.video_generation_worker
 
-    if image_diffusion_worker or video_diffusion_worker:
+    if image_diffusion_worker or video_generation_worker:
         worker_type = (
-            "image diffusion" if image_diffusion_worker else "video diffusion"
+            "image diffusion" if image_diffusion_worker else "video generation"
         )
         logging.info(
             f"{worker_type.title()} worker detected with model: {model_path}, creating minimal ServerArgs stub"
@@ -399,14 +399,14 @@ async def parse_args(args: list[str]) -> Config:
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
 
-    # Auto-detect LLM diffusion worker mode if dllm_algorithm
-    llm_diffusion_worker = server_args.dllm_algorithm is not None
+    # Auto-detect diffusion worker mode if dllm_algorithm
+    diffusion_worker = server_args.dllm_algorithm is not None
 
     dynamo_config.namespace = parsed_namespace
     dynamo_config.component = parsed_component_name
     dynamo_config.endpoint = parsed_endpoint_name
     dynamo_config.custom_jinja_template = expanded_template_path
-    dynamo_config.llm_diffusion_worker = llm_diffusion_worker
+    dynamo_config.diffusion_worker = diffusion_worker
     dynamo_config.use_kv_events = use_kv_events
 
     logging.debug(f"Dynamo configs: {dynamo_config}")

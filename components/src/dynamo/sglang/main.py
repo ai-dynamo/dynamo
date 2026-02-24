@@ -61,7 +61,7 @@ async def worker():
         await init_image_diffusion(
             runtime, config, shutdown_endpoints, run_deferred_handlers
         )
-    elif config.dynamo_args.video_diffusion_worker:
+    elif config.dynamo_args.video_generation_worker:
         await init_video_diffusion(
             runtime, config, shutdown_endpoints, run_deferred_handlers
         )
@@ -106,7 +106,7 @@ async def worker():
                 shutdown_endpoints,
                 run_deferred_handlers,
             )
-    elif config.dynamo_args.llm_diffusion_worker:
+    elif config.dynamo_args.diffusion_worker:
         await init_llm_diffusion(
             runtime,
             config,

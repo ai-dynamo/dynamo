@@ -89,10 +89,10 @@ class DynamoSGLangArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--video-diffusion-worker",
-            env_var="DYN_SGL_VIDEO_DIFFUSION_WORKER",
+            flag_name="--video-generation-worker",
+            env_var="DYN_SGL_VIDEO_GENERATION_WORKER",
             default=False,
-            help="Run as video diffusion worker for video generation (T2V/I2V).",
+            help="Run as video generation worker for video generation (T2V/I2V).",
         )
 
 
@@ -109,7 +109,7 @@ class DynamoSGLangConfig(ConfigBase):
     disagg_config: Optional[str] = None
     disagg_config_key: Optional[str] = None
 
-    video_diffusion_worker: bool
+    video_generation_worker: bool
 
     def validate(self) -> None:
         if (self.disagg_config is not None) ^ (self.disagg_config_key is not None):

@@ -17,7 +17,7 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     CreateVideoRequest,
     VideoData,
-    VideoDiffusionResponse,
+    VideoGenerationResponse,
     VideoNvExt,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -40,7 +40,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         publisher: Optional[DynamoSglangPublisher] = None,
         fs: Any = None,  # fsspec.AbstractFileSystem for primary storage
     ):
-        """Initialize video diffusion worker handler.
+        """Initialize video generation worker handler.
 
         Args:
             generator: The SGLang DiffGenerator instance.
@@ -51,7 +51,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         # Call parent constructor for common setup
         super().__init__(config, publisher)
 
-        # Video diffusion-specific initialization
+        # Video generation-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
         self._generate_lock = asyncio.Lock()  # Serialize generator access
         self.fs = fs
@@ -59,7 +59,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         self.base_url = config.dynamo_args.media_output_http_url
 
         logger.info(
-            f"Video diffusion worker handler initialized with fs_url={self.fs_url}"
+            f"Video generation worker handler initialized with fs_url={self.fs_url}"
         )
 
     def cleanup(self) -> None:
@@ -67,7 +67,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         if self.generator is not None:
             del self.generator
         torch.cuda.empty_cache()
-        logger.info("Video diffusion generator cleanup complete")
+        logger.info("Video generation generator cleanup complete")
         # Call parent cleanup for any base class cleanup
         super().cleanup()
 
@@ -135,7 +135,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
 
             inference_time = time.time() - start_time
 
-            response = VideoDiffusionResponse(
+            response = VideoGenerationResponse(
                 id=f"video-{context.id()}",
                 model=req.model,
                 created=int(time.time()),
@@ -148,7 +148,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         except Exception as e:
             logger.error(f"Error in video generation: {e}", exc_info=True)
             # Return error response
-            error_response = VideoDiffusionResponse(
+            error_response = VideoGenerationResponse(
                 id=f"video-{context.id()}",
                 model=request.get("model", "unknown"),
                 created=int(time.time()),

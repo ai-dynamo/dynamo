@@ -335,23 +335,24 @@ async def register_image_diffusion_model(
     logging.info(f"Image diffusion model ready: {model_name}")
 
 
-async def register_video_diffusion_model(
+async def register_video_generation_model(
     generator: Any,  # DiffGenerator
     endpoint: Endpoint,
     server_args: ServerArgs,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
-    """Register video diffusion model with Dynamo runtime.
+    """Register video generation model with Dynamo runtime.
 
     Args:
-        generator: The SGLang DiffGenerator instance (used for video diffusion).
+        generator: The SGLang DiffGenerator instance (used for video generation).
         endpoint: The Dynamo endpoint for generation requests.
         server_args: SGLang server configuration.
         readiness_gate: Optional event to signal when registration completes.
 
     Note:
-        Video diffusion models use ModelInput.Text (text prompts) and ModelType.Videos.
+        Video generation models use ModelInput.Text (text prompts) and ModelType.Videos.
     """
+    # Use model_path as the model name (video workers don't have served_model_name)
     model_name = server_args.model_path
 
     try:
@@ -362,12 +363,13 @@ async def register_video_diffusion_model(
             model_name,
             model_name,
         )
-        logging.info(f"Successfully registered video diffusion model: {model_name}")
+        logging.info(f"Successfully registered video generation model: {model_name}")
     except Exception as e:
-        logging.error(f"Failed to register video diffusion model: {e}")
-        raise RuntimeError("Video diffusion model registration failed")
+        logging.error(f"Failed to register video generation model: {e}")
+        raise RuntimeError("Video generation model registration failed")
 
+    # Signal readiness
     if readiness_gate:
         readiness_gate.set()
 
-    logging.info(f"Video diffusion model ready: {model_name}")
+    logging.info(f"Video generation model ready: {model_name}")
