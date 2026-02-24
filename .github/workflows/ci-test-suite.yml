@@ -1203,12 +1203,14 @@ jobs:
 
           if find coverage-rust-artifacts/ -name "coverage-rust.txt" -type f 2>/dev/null | grep -q .; then
             echo "📊 Processing Rust coverage reports..."
-            # Concatenate TOTAL lines from every workspace dir into one summary
+            # Concatenate full per-file coverage from every workspace dir
+            > coverage-rust-report.txt
             find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | while read -r f; do
-              echo "=== $(basename $(dirname "$f")) ==="
-              grep "^TOTAL" "$f" || echo "(no TOTAL line)"
-              echo ""
-            done > coverage-rust-report.txt
+              DIR_NAME=$(basename $(dirname "$f"))
+              echo "=== ${DIR_NAME} ===" >> coverage-rust-report.txt
+              cat "$f" >> coverage-rust-report.txt
+              echo "" >> coverage-rust-report.txt
+            done
 
             # Extract line coverage % (3rd percentage on TOTAL line: Region%, Func%, Line%, Branch%)
             FIRST=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | head -1)
