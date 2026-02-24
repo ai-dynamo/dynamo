@@ -80,10 +80,12 @@ type Config struct {
 	// DiscoveryBackend is the discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery.
 	DiscoveryBackend string
 
-	// WebhooksEnabled indicates whether admission webhooks are enabled
-	// When true, controllers skip validation (webhooks handle it)
-	// When false, controllers perform validation (defense in depth)
-	WebhooksEnabled bool
+	// GPUDiscoveryEnabled indicates whether Helm provisioned node read access for the namespace-scoped operator.
+	// Only relevant for namespace-scoped operators (RestrictedNamespace != "").
+	GPUDiscoveryEnabled bool
+
+	// Checkpoint configuration for checkpoint/restore functionality
+	Checkpoint CheckpointConfig
 }
 
 // RBACConfig holds configuration for RBAC management
@@ -92,6 +94,62 @@ type RBACConfig struct {
 	PlannerClusterRoleName string
 	// DGDRProfilingClusterRoleName is the name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)
 	DGDRProfilingClusterRoleName string
+	// EPPClusterRoleName is the name of the ClusterRole for EPP (cluster-wide mode only)
+	EPPClusterRoleName string
+}
+
+// CheckpointConfig holds configuration for checkpoint/restore functionality
+type CheckpointConfig struct {
+	// Enabled indicates if checkpoint functionality is enabled
+	Enabled bool
+	// Storage holds storage backend configuration
+	Storage CheckpointStorageConfig
+	// ReadyForCheckpointFilePath is the file path used to signal model readiness for checkpoint jobs
+	ReadyForCheckpointFilePath string
+}
+
+// Checkpoint storage type constants
+const (
+	CheckpointStorageTypePVC = "pvc"
+	CheckpointStorageTypeS3  = "s3"
+	CheckpointStorageTypeOCI = "oci"
+)
+
+// CheckpointStorageConfig holds storage backend configuration for checkpoints
+type CheckpointStorageConfig struct {
+	// Type is the storage backend type: pvc, s3, or oci
+	Type string
+	// PVC configuration (used when Type=pvc)
+	PVC CheckpointPVCConfig
+	// S3 configuration (used when Type=s3)
+	S3 CheckpointS3Config
+	// OCI configuration (used when Type=oci)
+	OCI CheckpointOCIConfig
+}
+
+// CheckpointPVCConfig holds PVC storage configuration
+type CheckpointPVCConfig struct {
+	// PVCName is the name of the PVC
+	PVCName string
+	// BasePath is the base directory within the PVC
+	BasePath string
+}
+
+// CheckpointS3Config holds S3 storage configuration
+type CheckpointS3Config struct {
+	// URI is the S3 URI (s3://[endpoint/]bucket/prefix)
+	URI string
+	// CredentialsSecretRef is the name of the credentials secret
+	// (should contain AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION)
+	CredentialsSecretRef string
+}
+
+// CheckpointOCIConfig holds OCI registry storage configuration
+type CheckpointOCIConfig struct {
+	// URI is the OCI URI (oci://registry/repository)
+	URI string
+	// CredentialsSecretRef is the name of the docker config secret
+	CredentialsSecretRef string
 }
 
 type IngressConfig struct {
@@ -127,6 +185,12 @@ func DetectVolcanoAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 // This approach uses the discovery client which is simpler and more reliable
 func DetectKaiSchedulerAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "scheduling.run.ai")
+}
+
+// DetectInferencePoolAvailability checks if the Gateway API Inference Extension is available
+// by checking if the inference.networking.k8s.io API group is registered
+func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "inference.networking.k8s.io")
 }
 
 // detectAPIGroupAvailability checks if a specific API group is registered in the cluster

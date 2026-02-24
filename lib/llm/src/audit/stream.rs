@@ -238,6 +238,7 @@ pub fn final_response_to_one_chunk_stream(
         id: None,
         event: None,
         comment: None,
+        error: None,
     };
     Box::pin(futures::stream::once(async move { annotated }))
 }
@@ -246,7 +247,8 @@ pub fn final_response_to_one_chunk_stream(
 mod tests {
     use super::*;
     use dynamo_async_openai::types::{
-        ChatChoiceStream, ChatCompletionStreamResponseDelta, FinishReason, Role,
+        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+        FinishReason, Role,
     };
     use futures::StreamExt;
     use futures::stream;
@@ -261,7 +263,7 @@ mod tests {
             index,
             delta: ChatCompletionStreamResponseDelta {
                 role: Some(Role::Assistant),
-                content: Some(content),
+                content: Some(ChatCompletionMessageContent::Text(content)),
                 tool_calls: None,
                 function_call: None,
                 refusal: None,
@@ -289,6 +291,7 @@ mod tests {
             id: None,
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -327,6 +330,7 @@ mod tests {
             id: None,
             event: None,
             comment: None,
+            error: None,
         }
     }
 
@@ -337,7 +341,10 @@ mod tests {
             .as_ref()
             .and_then(|d| d.choices.first())
             .and_then(|c| c.delta.content.as_ref())
-            .cloned()
+            .and_then(|content| match content {
+                ChatCompletionMessageContent::Text(text) => Some(text.clone()),
+                ChatCompletionMessageContent::Parts(_) => None,
+            })
             .unwrap_or_default()
     }
 
@@ -423,7 +430,9 @@ mod tests {
                         index: 0,
                         delta: ChatCompletionStreamResponseDelta {
                             role: Some(Role::Assistant),
-                            content: Some("Content".to_string()),
+                            content: Some(ChatCompletionMessageContent::Text(
+                                "Content".to_string(),
+                            )),
                             tool_calls: None,
                             function_call: None,
                             refusal: None,
@@ -445,6 +454,7 @@ mod tests {
             id: Some("correlation-123".to_string()),
             event: Some("test-event".to_string()),
             comment: Some(vec!["test-comment".to_string()]),
+            error: None,
         };
 
         let input_stream = stream::iter(vec![chunk_with_metadata.clone()]);

@@ -148,6 +148,10 @@ enum VllmRawEvent {
         lora_id: Option<i32>,
         #[serde(default)]
         medium: Option<String>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        // Reserved for future use, needed for vLLM 0.14.0 deserialization
+        lora_name: Option<String>,
     },
     #[serde(rename = "BlockRemoved")]
     BlockRemoved {
@@ -277,6 +281,7 @@ fn process_event(
             block_size,
             lora_id,
             medium,
+            lora_name: _, // Not used yet, lora_id is still used for backwards compat
         } => {
             let storage_tier = medium
                 .as_ref()

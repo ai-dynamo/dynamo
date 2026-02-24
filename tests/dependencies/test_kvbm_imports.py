@@ -3,9 +3,21 @@
 
 """Unit tests to verify KVBM package and wheels are properly installed."""
 
+import importlib.util
 import subprocess
 
 import pytest
+
+
+def _is_sglang_installed() -> bool:
+    """Check if sglang is installed (KVBM is not available in sglang images)."""
+    return importlib.util.find_spec("sglang") is not None
+
+
+# Skip all KVBM tests if running in sglang environment (sglang doesn't have KVBM)
+pytestmark = pytest.mark.skipif(
+    _is_sglang_installed(), reason="KVBM is not available in sglang images"
+)
 
 
 # Helper functions for KVBM verification

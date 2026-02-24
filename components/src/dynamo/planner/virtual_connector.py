@@ -130,6 +130,8 @@ class VirtualConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
     ):
         """Validate the deployment"""
         pass
@@ -138,6 +140,9 @@ class VirtualConnector(PlannerConnector):
         """Wait for the deployment to be ready"""
         await self._wait_for_scaling_completion()
 
-    async def get_model_name(self) -> str:
+    async def get_model_name(
+        self, require_prefill: bool = True, require_decode: bool = True
+    ) -> str:
         """Get the model name from the deployment"""
+        del require_prefill, require_decode
         return self.model_name

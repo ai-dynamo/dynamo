@@ -1,0 +1,14 @@
+{% for message in messages %}
+{%- if message['role'] == 'system' -%}
+<<SYS>>
+{{ message['content'] }}
+<</SYS>>
+
+{% elif message['role'] == 'user' -%}
+[INST] {% if message['content'] is string %}{{ message['content'] }}{% else %}{% for item in message['content'] %}{% if item['type'] == 'image_url' %}<image>
+{% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}{% endfor %}{% endif %} [/INST]
+{% elif message['role'] == 'assistant' -%}
+{{ message['content'] }}</s>
+{% endif %}
+{%- endfor -%}
+

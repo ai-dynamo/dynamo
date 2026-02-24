@@ -93,8 +93,6 @@ class VllmWorkerProcess(ManagedProcess):
             "harmony",
             "--dyn-reasoning-parser",
             "gpt_oss",
-            "--connector",
-            "none",
         ]
 
         env = os.environ.copy()
@@ -118,7 +116,7 @@ class VllmWorkerProcess(ManagedProcess):
             ],
             timeout=500,
             display_output=True,
-            terminate_existing=False,
+            terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
@@ -180,7 +178,7 @@ def start_services(
         # If the frontend hits a Rust panic, enabling backtraces makes failures diagnosable
         # from CI logs without needing to repro locally.
         # extra_env={"RUST_BACKTRACE": "1", "TOKIO_BACKTRACE": "1"},
-        terminate_existing=False,
+        terminate_all_matching_process_names=False,
     ):
         logger.info("Frontend started for tests")
         with VllmWorkerProcess(

@@ -3,7 +3,7 @@
 
 //! Helper binary to generate the Dynamo HTTP frontend OpenAPI specification.
 //!
-//! This allows CI, documentation tooling, and NIM to obtain the exact same
+//! This allows CI and documentation tooling to obtain the exact same
 //! OpenAPI document that is served at `/openapi.json` by the frontend
 //! without having to start the HTTP service and scrape the endpoint.
 //!
@@ -51,6 +51,7 @@ fn generate_openapi() -> anyhow::Result<()> {
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
         .enable_responses_endpoints(true)
+        .enable_anthropic_endpoints(true)
         .build()
         .context("failed to build HttpService for OpenAPI generation")?;
 

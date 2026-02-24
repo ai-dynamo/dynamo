@@ -11,15 +11,17 @@ SPDX-License-Identifier: Apache-2.0
 
 ### Docker Version Compatibility
 
-**Docker 29.x has compatibility issues with Dev Containers (by Anysphere):**
-- It is known that Docker Engine version **29.0.1** (released November 14, 2025) may cause Dev Containers to hang all the time, rendering it unusable
-- The Dev Containers extension (v1.0.26) and devcontainer CLI (v0.75.0) were not tested against Docker 29.x
-- Symptoms: Container builds successfully but connection hangs, requiring a manual reload to connect
-- This may be fixed in a later version of the Anysphere Dev Containers extension and/or Docker Engine patch
+**Docker 29.x had a known incompatibility with Dev Containers extension at and before v1.0.26 (CLI v0.75.0):**
 
-**Recommended Docker Version:**
-- Use Docker Engine **28.5.2** or earlier for stable Dev Container operation
-- Docker 27.x and 28.x series are confirmed working with current Dev Containers tooling
+- **Symptom:** Container builds and starts successfully (prints "Container started"), but the IDE hangs indefinitely and never connects. The `postCreateCommand` never runs.
+- **Root cause:** The bundled devcontainers CLI spawns `docker events --format {{json .}} --filter event=start` to detect when a container starts. It checks `i.status || i.Status` in the parsed JSON. However, Docker 29.x emits the event type under the field name `"Action"` (e.g., `{"Action":"start",...}`), not `"status"`. The start event is received but silently discarded because the field name doesn't match, so the CLI waits forever.
+- **Affected:** Docker Engine 29.0.0+ with Dev Containers extension v1.0.26 (CLI v0.75.0)
+- **Fixed in:** Dev Containers extension **v1.0.32+**
+- **Confirmed working combinations:**
+  - Docker 27.x / 28.x with any extension version
+  - Docker 29.x with Dev Containers extension v1.0.32+
+
+**Recommended fix:** If you are using Docker 29.x, update the Dev Containers extension to **v1.0.32 or later**. Docker Engine 28.5.2 or earlier have been stable with all extension versions.
 
 ## Framework-Specific Devcontainers
 
@@ -142,22 +144,11 @@ Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) fro
 
 ```bash
 # Single command approach (recommended)
-export FRAMEWORK=VLLM         # Note: any of VLLM, SGLANG, TRTLLM can be used
-./container/build.sh --framework $FRAMEWORK --target local-dev
+export FRAMEWORK=vllm         # Note: any of vllm, sglang, trtllm can be used
+python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
+docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
 
 # Now you've created both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
-```
-
-Alternatively, you can build a development container, then build local-dev:
-
-```bash
-export FRAMEWORK=VLLM
-
-./container/build.sh --framework $FRAMEWORK
-# Now you have a development image dynamo:latest-vllm
-
-./container/build.sh --dev-image dynamo:latest-${FRAMEWORK,,}
-# Now you have a local-dev image dynamo:latest-vllm-local-dev
 ```
 
 The local-dev image will give you local user permissions matching your host user and includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
@@ -222,7 +213,7 @@ If `post-create.sh` fails, you can try to debug or [submit](https://github.com/a
 
 ### Building Rust Code
 
-If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries such as dynamo-run.
+If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries.
 
 ```bash
 cd /workspace && cargo build --locked --profile dev
@@ -427,10 +418,8 @@ If you see errors like "container is not running" or "An error occurred setting 
 
    # If missing, build the dev image first, then build local-dev
    export FRAMEWORK=VLLM  # Replace with VLLM, SGLANG, or TRTLLM
-   ./container/build.sh --framework $FRAMEWORK
-   # change to lower case portable way across shells
-   ./container/build.sh --dev-image dynamo:latest-$(echo "$FRAMEWORK" | tr '[:upper:]' '[:lower:]') --framework "$FRAMEWORK"
-   # Now you have dynamo:latest-vllm-local-dev
+   python container/render.py --framework=${FRAMEWORK} --target=local-dev --output-short-filename
+   docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f container/rendered.Dockerfile .
    ```
 
 2. **Container startup failure:**

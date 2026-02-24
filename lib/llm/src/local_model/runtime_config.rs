@@ -32,8 +32,8 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_data_parallel_size")]
     pub data_parallel_size: u32,
 
-    /// Enable worker-local KV indexer for tracking this worker's own KV cache state
-    #[serde(default)]
+    /// Enable worker-local KV indexer for tracking this worker's own KV cache state (default: true)
+    #[serde(default = "default_local_indexer")]
     pub enable_local_indexer: bool,
 
     /// Mapping of engine-specific runtime configs
@@ -59,6 +59,10 @@ const fn default_data_parallel_size() -> u32 {
     1
 }
 
+const fn default_local_indexer() -> bool {
+    true
+}
+
 impl Default for ModelRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -68,7 +72,7 @@ impl Default for ModelRuntimeConfig {
             tool_call_parser: None,
             reasoning_parser: None,
             data_parallel_size: default_data_parallel_size(),
-            enable_local_indexer: false,
+            enable_local_indexer: true,
             runtime_data: HashMap::new(),
             tensor_model_config: None,
             disaggregated_endpoint: None,

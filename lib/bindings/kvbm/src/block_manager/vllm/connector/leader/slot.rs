@@ -108,18 +108,7 @@ pub trait Slot: std::fmt::Debug {
         block_ids: &[usize],
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
-    ) -> Result<(), SlotError>;
-
-    // TRT-LLM does not include scheduled tokens in the scheduler output.
-    // Ideally, we should have a dedicated implementation for the TRT-LLM slot.
-    // However, since only this single function needs to be rewritten for now,
-    // we keep it as a separate function in Slot.
-    fn apply_scheduler_output_with_computed_position(
-        &mut self,
-        tokens: &[u32],
-        block_ids: &[usize],
-        computed_position: usize,
-        is_new_request: bool,
+        priorities: Option<&[u32]>,
     ) -> Result<(), SlotError>;
 
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -185,7 +174,10 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     /// Cache statistics tracker
     cache_stats: Arc<CacheStatsTracker>,
     /// KVBM metrics for exposing cache hit rates
+    #[allow(dead_code)]
     kvbm_metrics: KvbmMetrics,
+    /// Minimum priority threshold for host offload filtering (read once at init)
+    offload_min_priority: u32,
 }
 
 impl std::fmt::Debug for ConnectorSlotManager<String> {
@@ -202,6 +194,10 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         identifier: Option<String>,
     ) -> Self {
         let cache_stats = Arc::new(CacheStatsTracker::new(identifier));
+        let offload_min_priority = std::env::var("DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let kvbm_metrics_clone = kvbm_metrics.clone();
         let cache_stats_clone = cache_stats.clone();
 
@@ -257,6 +253,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             _transfer_engine_handle: Some(xfer_engine_task),
             cache_stats,
             kvbm_metrics: kvbm_metrics.clone(),
+            offload_min_priority,
         }
     }
 }
@@ -286,6 +283,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             self.block_manager.clone(),
             self.xfer_tx.clone(),
             self.cache_stats.clone(),
+            self.offload_min_priority,
         );
         self.slots
             .lock()
@@ -378,6 +376,14 @@ pub struct VllmConnectorSlot {
 
     /// Cache statistics tracker for this KVBM instance
     cache_stats: Arc<CacheStatsTracker>,
+
+    /// Minimum priority threshold for offload filtering.
+    /// All blocks after the first occurance of block priority < threshold are not offloaded.
+    offload_min_priority: u32,
+
+    /// Block index where offload was terminated due to priority filtering.
+    /// When Some, no further blocks will be offloaded to ensure global contiguity.
+    offload_terminated_at_block: Option<usize>,
 }
 
 impl VllmConnectorSlot {
@@ -388,6 +394,7 @@ impl VllmConnectorSlot {
         block_manager: VllmBlockManager,
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
         cache_stats: Arc<CacheStatsTracker>,
+        offload_min_priority: u32,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
@@ -415,6 +422,8 @@ impl VllmConnectorSlot {
             performed_cache_lookup: false,
             total_blocks_queried: 0,
             cache_stats,
+            offload_min_priority,
+            offload_terminated_at_block: None,
         }
     }
 
@@ -492,6 +501,7 @@ impl Slot for VllmConnectorSlot {
         self.tokens_cached_from_disk = 0;
         self.performed_cache_lookup = false;
         self.total_blocks_queried = 0;
+        self.offload_terminated_at_block = None;
     }
 
     fn reset(&mut self) {
@@ -531,7 +541,19 @@ impl Slot for VllmConnectorSlot {
         block_ids: &[BlockId],
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
+        priorities: Option<&[u32]>,
     ) -> Result<(), SlotError> {
+        // Validate contract: priorities must match block_ids length when provided
+        if let Some(prios) = priorities {
+            assert_eq!(
+                prios.len(),
+                block_ids.len(),
+                "priorities length ({}) must match block_ids length ({})",
+                prios.len(),
+                block_ids.len()
+            );
+        }
+
         if !tokens.is_empty() {
             tracing::debug!(
                 "appending {} newly decoded tokens to sequence",
@@ -552,6 +574,18 @@ impl Slot for VllmConnectorSlot {
         if !block_ids.is_empty() {
             tracing::debug!("assigning {} new device blocks slot", block_ids.len());
             self.device_blocks.extend(block_ids);
+        }
+
+        // Early exit if offload has been permanently terminated.
+        // This ensures global contiguity: once a gap is created by priority filtering,
+        // no subsequent blocks will be offloaded for this request.
+        if let Some(terminated_at) = self.offload_terminated_at_block {
+            tracing::debug!(
+                "offload terminated at block {}; skipping offload evaluation",
+                terminated_at
+            );
+            self.current_position += num_scheduled_tokens;
+            return Ok(());
         }
 
         // we should have enough device blocks to cover the newly scheduled tokens
@@ -597,34 +631,125 @@ impl Slot for VllmConnectorSlot {
         );
 
         if num_candidate_blocks != 0 {
-            // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
-            // for now, offload all the blocks to the host
-            let offload_block_ids: Vec<usize> = self
+            // Get candidate block IDs
+            let candidate_block_ids: Vec<usize> = self
                 .device_blocks
                 .iter()
                 .skip(self.evaluated_blocks)
                 .take(num_candidate_blocks)
                 .copied()
-                .collect::<Vec<_>>();
+                .collect();
+
+            // Get candidate priorities from the priorities parameter.
+            // When priorities are provided, extract priorities for candidate blocks.
+            let candidate_priorities: Vec<u32> = if let Some(prios) = priorities {
+                let new_blocks_start = self.device_blocks.len() - block_ids.len();
+                let candidate_start = self.evaluated_blocks;
+
+                if candidate_start >= new_blocks_start {
+                    let prio_offset = candidate_start - new_blocks_start;
+                    debug_assert!(
+                        prio_offset + num_candidate_blocks <= prios.len(),
+                        "prio_offset ({}) + num_candidate_blocks ({}) > prios.len() ({}); \
+                         candidate_start={}, new_blocks_start={}, device_blocks.len()={}, block_ids.len()={}",
+                        prio_offset,
+                        num_candidate_blocks,
+                        prios.len(),
+                        candidate_start,
+                        new_blocks_start,
+                        self.device_blocks.len(),
+                        block_ids.len()
+                    );
+                    prios
+                        .iter()
+                        .skip(prio_offset)
+                        .take(num_candidate_blocks)
+                        .copied()
+                        .collect()
+                } else {
+                    vec![0; num_candidate_blocks]
+                }
+            } else {
+                vec![0; num_candidate_blocks]
+            };
 
             assert_eq!(
-                offload_block_ids.len(),
+                candidate_block_ids.len(),
                 num_candidate_blocks,
                 "device block overflow - candidate blocks exceed block count at offset {}",
                 self.evaluated_blocks
             );
 
-            let offload_token_blocks: Vec<TokenBlock> = self
-                .sequence
-                .blocks()
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .cloned()
-                .collect::<Vec<_>>();
+            // Apply contiguous priority filtering: find how many blocks from the start
+            // meet the minimum priority threshold. Stop at first block below threshold.
+            let num_blocks_to_offload = if self.offload_min_priority > 0 {
+                candidate_priorities
+                    .iter()
+                    .take_while(|&&priority| priority >= self.offload_min_priority)
+                    .count()
+            } else {
+                num_candidate_blocks
+            };
 
-            self.offload_blocks(&offload_block_ids, &offload_token_blocks)
+            if num_blocks_to_offload > 0 {
+                if self.offload_min_priority > 0 {
+                    tracing::debug!(
+                        "priority filtering: offloading {}/{} blocks (threshold={})",
+                        num_blocks_to_offload,
+                        num_candidate_blocks,
+                        self.offload_min_priority
+                    );
+                }
+
+                let offload_block_ids: Vec<usize> = candidate_block_ids
+                    .into_iter()
+                    .take(num_blocks_to_offload)
+                    .collect();
+
+                let offload_token_blocks: Vec<TokenBlock> = self
+                    .sequence
+                    .blocks()
+                    .iter()
+                    .skip(self.evaluated_blocks)
+                    .take(num_blocks_to_offload)
+                    .cloned()
+                    .collect();
+
+                let offload_priorities: Vec<u32> = candidate_priorities
+                    .iter()
+                    .take(num_blocks_to_offload)
+                    .copied()
+                    .collect();
+
+                self.offload_blocks(
+                    &offload_block_ids,
+                    &offload_token_blocks,
+                    &offload_priorities,
+                )
                 .expect("failed to offload blocks");
+            } else if self.offload_min_priority > 0 {
+                tracing::debug!(
+                    "priority filtering: skipping all {} candidate blocks (threshold={})",
+                    num_candidate_blocks,
+                    self.offload_min_priority
+                );
+            }
+
+            // Check if we skipped any blocks due to priority filtering.
+            // If so, terminate offloading for this request to ensure global contiguity.
+            if num_blocks_to_offload < num_candidate_blocks {
+                let termination_index = self.evaluated_blocks + num_blocks_to_offload;
+                self.offload_terminated_at_block = Some(termination_index);
+
+                tracing::info!(
+                    request_id = %self.request_id,
+                    "offload terminated at block {}: priority {} < threshold {}; \
+                     no further blocks will be offloaded",
+                    termination_index,
+                    candidate_priorities.get(num_blocks_to_offload).copied().unwrap_or(0),
+                    self.offload_min_priority
+                );
+            }
 
             self.evaluated_blocks += num_candidate_blocks;
         }
@@ -642,111 +767,6 @@ impl Slot for VllmConnectorSlot {
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id.as_str()))]
-    fn apply_scheduler_output_with_computed_position(
-        &mut self,
-        tokens: &[u32],
-        block_ids: &[usize],
-        computed_position: usize,
-        is_new_request: bool,
-    ) -> Result<(), SlotError> {
-        // TRTLLM's KV Connector Manager will have (computed_position - external matches)
-        // in onborading case
-        if computed_position < self.current_position {
-            tracing::debug!(
-                "computed_position={} < current_position={}, so we are onboarding during prefilling phase",
-                computed_position,
-                self.current_position
-            );
-            return Ok(());
-        }
-
-        // now we decide what we should do for the new computed tokens
-        tracing::debug!(
-            "applying scheduler output, computed_position={}, sequence_total_tokens={}",
-            computed_position,
-            self.sequence.total_tokens()
-        );
-
-        if computed_position < self.sequence.total_tokens() {
-            // no need to apply new tokens, since it's applied when created the slot during prefilling
-            self.state = SlotState::Prefilling;
-        } else {
-            tracing::debug!(
-                "appending {} newly decoded tokens to sequence",
-                tokens.len()
-            );
-            self.sequence.extend(tokens.into()).unwrap();
-            self.state = SlotState::Decoding;
-        }
-
-        // apply new block_ids, this should be applied for both prefilling and decoding
-        // because this is unknown when creating the slot
-        if !block_ids.is_empty() {
-            tracing::debug!("assigning {} new device blocks slot", block_ids.len());
-            self.device_blocks.extend(block_ids);
-        }
-
-        // This approach is fragile, but it’s the only way currently to skip evaluating
-        // the device matched blocks and to avoid offloading them again.
-        // TODO: Consider adding an indicator in the scheduler output to distinguish between
-        // matched and unmatched device blocks/tokens from the scheduler.
-        let maybe_have_device_matched_blocks =
-            is_new_request && computed_position > 0 && self.evaluated_blocks == 0;
-
-        if maybe_have_device_matched_blocks {
-            self.evaluated_blocks = (computed_position + 1) / self.block_size;
-        }
-
-        let num_candidate_blocks =
-            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
-
-        if num_candidate_blocks > 0 {
-            // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
-            // for now, offload all the blocks to the host
-            let offload_block_ids: Vec<usize> = self
-                .device_blocks
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .copied()
-                .collect::<Vec<_>>();
-
-            assert_eq!(
-                offload_block_ids.len(),
-                num_candidate_blocks,
-                "device block overflow - candidate blocks exceed block count at offset {}",
-                self.evaluated_blocks
-            );
-
-            let offload_token_blocks: Vec<TokenBlock> = self
-                .sequence
-                .blocks()
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .cloned()
-                .collect::<Vec<_>>();
-
-            self.offload_blocks(&offload_block_ids, &offload_token_blocks)
-                .expect("failed to offload blocks");
-
-            self.evaluated_blocks += num_candidate_blocks;
-        }
-
-        // done applying policy
-        tracing::debug!(
-            "done applying kv cache policy at current_position: {}; computed_position: {}",
-            self.current_position,
-            computed_position,
-        );
-
-        // advance current position to computed position
-        self.current_position = computed_position;
-
-        Ok(())
-    }
-
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError> {
         if self.iteration_first_scheduled.is_none() {
             self.iteration_first_scheduled = Some(iteration);
@@ -760,8 +780,8 @@ impl Slot for VllmConnectorSlot {
             let block_size = self.block_size;
 
             // Convert cached tokens to blocks (rounding up)
-            let host_blocks = (self.tokens_cached_from_host + block_size - 1) / block_size;
-            let disk_blocks = (self.tokens_cached_from_disk + block_size - 1) / block_size;
+            let host_blocks = self.tokens_cached_from_host.div_ceil(block_size);
+            let disk_blocks = self.tokens_cached_from_disk.div_ceil(block_size);
 
             tracing::debug!(
                 request_id = %self.request_id,
@@ -845,7 +865,7 @@ impl Slot for VllmConnectorSlot {
 
         let block_size = self.block_manager.block_size();
         let num_computed_blocks = num_computed_tokens / block_size;
-        debug_assert!(num_computed_tokens % block_size == 0);
+        debug_assert!(num_computed_tokens.is_multiple_of(block_size));
 
         let sequence_hashes = self
             .sequence()
@@ -1097,6 +1117,7 @@ impl VllmConnectorSlot {
         &mut self,
         block_ids: &[BlockId],
         token_blocks: &[TokenBlock],
+        priorities: &[u32],
     ) -> Result<(), SlotError> {
         // Check if slot is in Finishing state before creating operations
         // If we're finishing, don't create new operations
@@ -1105,12 +1126,14 @@ impl VllmConnectorSlot {
         }
 
         assert!(block_ids.len() == token_blocks.len());
+        assert!(block_ids.len() == priorities.len());
         let operation_id = uuid::Uuid::new_v4();
 
         let xfer_req = LocalTransferRequest::Offload(LocalOffloadRequest::new(
             self.request_id.clone(),
             block_ids.to_vec(),
             token_blocks.to_vec(),
+            priorities.to_vec(),
             operation_id,
         ));
 
@@ -1205,6 +1228,8 @@ struct LocalOffloadRequest {
     request_id: String,
     block_ids: Vec<BlockId>,
     token_blocks: Vec<TokenBlock>,
+    /// Priorities for each block, used to set BasicMetadata.priority during offload.
+    priorities: Vec<u32>,
     operation_id: uuid::Uuid,
 }
 
@@ -1213,13 +1238,16 @@ impl LocalOffloadRequest {
         request_id: String,
         block_ids: Vec<BlockId>,
         token_blocks: Vec<TokenBlock>,
+        priorities: Vec<u32>,
         operation_id: uuid::Uuid,
     ) -> Self {
         debug_assert!(block_ids.len() == token_blocks.len());
+        debug_assert!(block_ids.len() == priorities.len());
         Self {
             request_id,
             block_ids,
             token_blocks,
+            priorities,
             operation_id,
         }
     }
@@ -1520,14 +1548,22 @@ where
         storage_name
     );
 
-    // 2. Apply token blocks
+    // 2. Apply token blocks and set priorities
     let mut blocks_to_register = Vec::new();
-    let zipped_blocks = blocks.into_iter().zip(token_blocks.into_iter());
+    let priorities = offload_req.priorities;
 
-    for (mut mutable_block, token_block) in zipped_blocks {
+    for ((mut mutable_block, token_block), priority) in blocks
+        .into_iter()
+        .zip(token_blocks.into_iter())
+        .zip(priorities.into_iter())
+    {
         mutable_block
             .apply_token_block(token_block.clone())
             .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
+
+        // Set the priority on the block's metadata so it flows through to downstream processing
+        let updated_metadata = mutable_block.metadata().with_priority(priority);
+        mutable_block.update_metadata(updated_metadata);
 
         blocks_to_register.push(mutable_block);
     }

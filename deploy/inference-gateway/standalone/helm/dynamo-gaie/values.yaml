@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default values for dynamo-gaie.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Name of the DynamoGraphDeployment (DGD) that backs this gateway integration
+dynamoGraphDeploymentName: "vllm-agg"
+
+# This is the port on which the model is exposed
+model:
+  # This is the model name that will be used to route traffic to the dynamo model
+  # for example, if the model name is Qwen/Qwen3-0.6B, then the modelShortName should be qwen
+  identifier: "Qwen/Qwen3-0.6B"
+  # This is the short name of the model that will be used to generate the resource names
+  shortName: "qwen"
+
+# InferencePool configuration
+inferencePool:
+  # Target port number for the inference pool
+  port: 8000
+
+# HTTPRoute configuration
+httpRoute:
+  # Enable the HTTPRoute
+  enabled: true
+  # Gateway parent reference configuration
+  gatewayName: "inference-gateway"
+  # Namespace where the Gateway resource is deployed
+  # Leave empty ("") to use the release namespace, or set explicitly (e.g., "default")
+  gatewayNamespace: ""
+  # Path matching configuration
+  path:
+    prefix: "/"
+  # Timeout configuration
+  timeout:
+    request: "300s"
+
+extension:
+  # EPP image for the GAIE extension (required - no default)
+  # Set via --set-string extension.image=$EPP_IMAGE or in your values file
+  image: ""
+
+# generic knobs you may want in both modes
+imagePullSecrets:
+  - docker-imagepullsecret
+
+epp:
+  imagePullPolicy: IfNotPresent
+  # Add env in name/value pairs
+  extraEnv: []
+  # If you ever want to completely override args, supply a list here.
+  # When empty, chart will render sane defaults
+  argsOverride: []
+
+  # Dynamo routing mode - set to true to enable KV-aware routing via Dynamo EPP image
+  useDynamo: true
+
+  # Dynamo-specific settings (only used when useDynamo: true)
+  configFile: "/etc/epp/epp-config-dynamo.yaml"
+  dynamo:
+    # Use ETCD for discovery instead of Kubernetes (default: false)
+    # Set to true via --set epp.dynamo.useEtcd=true to enable ETCD discovery
+    useEtcd: false
+
+# Platform configuration (for Dynamo mode)
+platformReleaseName: dynamo-platform
+platformNamespace: "my-model"

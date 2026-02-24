@@ -31,14 +31,14 @@ Before running this example, ensure you have the following services running:
 You can start these services using Docker Compose:
 
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ## Components
 
 - [Frontend](/components/src/dynamo/frontend/README.md) - HTTP API endpoint that receives requests and forwards them to the decode worker
-- [vLLM Prefill Worker](/docs/backends/vllm/README.md) - Specialized worker for prefill phase execution
-- [vLLM Decode Worker](/docs/backends/vllm/README.md) - Specialized worker that handles requests and decides between local/remote prefill
+- [vLLM Prefill Worker](/docs/pages/backends/vllm/README.md) - Specialized worker for prefill phase execution
+- [vLLM Decode Worker](/docs/pages/backends/vllm/README.md) - Specialized worker that handles requests and decides between local/remote prefill
 
 ```mermaid
 ---
@@ -81,9 +81,9 @@ Leave this terminal running - it will show Decode Worker logs.
 
 ```bash
 export DYN_LOG=debug # Increase log verbosity to see disaggregation
-DYN_VLLM_KV_EVENT_PORT=20081 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker
+CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 ```
 
 This starts a specialized prefill worker that:
@@ -137,7 +137,7 @@ In each terminal, press `Ctrl+C` to stop:
 Stop the etcd and NATS services:
 
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml down
+docker compose -f deploy/docker-compose.yml down
 ```
 
 ## Understand

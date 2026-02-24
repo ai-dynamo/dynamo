@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if and .Values.webhook.enabled (not .Values.webhook.certManager.enabled) (not .Values.webhook.certificateSecret.external) }}
+{{- if and (not .Values.webhook.certManager.enabled) (not .Values.webhook.certificateSecret.external) }}
 ---
 # ServiceAccount for certificate generation job
 apiVersion: v1
@@ -102,6 +102,14 @@ spec:
     spec:
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen
       restartPolicy: OnFailure
+      {{- with .Values.controllerManager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controllerManager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: cert-generator
         image: {{ .Values.webhook.certGenerator.image.repository }}:{{ .Values.webhook.certGenerator.image.tag }}

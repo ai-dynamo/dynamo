@@ -8,6 +8,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from dynamo.common.utils.namespace import get_worker_namespace
+
 from . import __version__
 from .utils.planner_profiler_perf_data_converter import (
     convert_profile_results_to_npz,
@@ -15,7 +17,7 @@ from .utils.planner_profiler_perf_data_converter import (
     is_profile_results_dir,
 )
 
-DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DYN_NAMESPACE = get_worker_namespace()
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
@@ -115,9 +117,14 @@ def create_temp_engine_args_file(args) -> Path:
         ),
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
-        "enable_local_indexer": getattr(args, "enable_local_indexer", None),
+        "enable_local_indexer": not getattr(args, "durable_kv_events", False),
         # Note: bootstrap_port is NOT included here - it's set per-worker in launch_workers()
     }
+
+    # Parse --reasoning JSON string into a nested object
+    reasoning_str = getattr(args, "reasoning", None)
+    if reasoning_str:
+        engine_args["reasoning"] = json.loads(reasoning_str)
 
     # Remove None values to only include explicitly set arguments
     engine_args = {k: v for k, v in engine_args.items() if v is not None}
@@ -135,14 +142,48 @@ def create_temp_engine_args_file(args) -> Path:
 
 def validate_worker_type_args(args):
     """
-    Validate that is_prefill_worker and is_decode_worker are not both True.
+    Resolve disaggregation mode from --disaggregation-mode or legacy boolean flags.
     Raises ValueError if validation fails.
     """
-    if args.is_prefill_worker and args.is_decode_worker:
+    import warnings
+
+    explicit_mode = args.disaggregation_mode is not None
+    has_legacy = args.is_prefill_worker or args.is_decode_worker
+
+    if has_legacy and explicit_mode:
         raise ValueError(
-            "Cannot specify both --is-prefill-worker and --is-decode-worker. "
-            "A worker must be either prefill, decode, or aggregated (neither flag set)."
+            "Cannot combine --is-prefill-worker/--is-decode-worker with "
+            "--disaggregation-mode. Use only --disaggregation-mode."
         )
+
+    if has_legacy:
+        if args.is_prefill_worker and args.is_decode_worker:
+            raise ValueError(
+                "Cannot specify both --is-prefill-worker and --is-decode-worker. "
+                "A worker must be either prefill, decode, or aggregated (neither flag set)."
+            )
+        if args.is_prefill_worker:
+            warnings.warn(
+                "--is-prefill-worker is deprecated, use --disaggregation-mode=prefill",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            args.disaggregation_mode = "prefill"
+        elif args.is_decode_worker:
+            warnings.warn(
+                "--is-decode-worker is deprecated, use --disaggregation-mode=decode",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            args.disaggregation_mode = "decode"
+
+    # Apply default if neither new flag nor legacy flags were provided
+    if args.disaggregation_mode is None:
+        args.disaggregation_mode = "agg"
+
+    # Sync booleans from disaggregation_mode
+    args.is_prefill_worker = args.disaggregation_mode == "prefill"
+    args.is_decode_worker = args.disaggregation_mode == "decode"
 
 
 def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
@@ -153,6 +194,11 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
 
 
 def parse_args():
+    """Parse command-line arguments for the Dynamo mocker engine.
+
+    Returns:
+        argparse.Namespace: Parsed command-line arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Mocker engine for testing Dynamo LLM infrastructure with vLLM-style CLI.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -244,7 +290,7 @@ def parse_args():
         "--speedup-ratio",
         type=float,
         default=None,
-        help="Speedup ratio for mock execution (default: 1.0)",
+        help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
     )
     parser.add_argument(
         "--data-parallel-size",
@@ -274,6 +320,16 @@ def parse_args():
         "All workers share the same tokio runtime and thread pool.",
     )
 
+    # Reasoning token output
+    parser.add_argument(
+        "--reasoning",
+        type=str,
+        default=None,
+        help="Enable reasoning token output. JSON object with fields: "
+        "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
+        'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
+    )
+
     # Legacy support - allow direct JSON file specification
     parser.add_argument(
         "--extra-engine-args",
@@ -284,22 +340,32 @@ def parse_args():
 
     # Worker type configuration
     parser.add_argument(
+        "--disaggregation-mode",
+        type=str,
+        default=None,
+        choices=["agg", "prefill", "decode"],
+        help="Worker disaggregation mode: 'agg' (default, aggregated), "
+        "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
+    )
+    parser.add_argument(
         "--is-prefill-worker",
         action="store_true",
         default=False,
-        help="Register as Prefill model type instead of Chat+Completions (default: False)",
+        help="DEPRECATED: use --disaggregation-mode=prefill. "
+        "Register as Prefill model type instead of Chat+Completions (default: False)",
     )
     parser.add_argument(
         "--is-decode-worker",
         action="store_true",
         default=False,
-        help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
+        help="DEPRECATED: use --disaggregation-mode=decode. "
+        "Mark this as a decode worker which does not publish KV events (default: False)",
     )
     parser.add_argument(
-        "--enable-local-indexer",
+        "--durable-kv-events",
         action="store_true",
-        default=False,
-        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (default: False)",
+        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
+        help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
     )
     parser.add_argument(
         "--bootstrap-ports",
@@ -311,11 +377,22 @@ def parse_args():
         "If not specified, bootstrap rendezvous is disabled.",
     )
     parser.add_argument(
-        "--store-kv",
+        "--stagger-delay",
+        type=float,
+        default=-1.0,
+        help=(
+            "Delay in seconds between launching each worker to avoid overwhelming "
+            "etcd/NATS/frontend with many workers. Set to 0 to disable staggering. "
+            "Use -1 for auto mode (0.1s for 32-128 workers, 0.2s for >128 workers, 0 otherwise). "
+            "Default: -1 (auto)"
+        ),
+    )
+    parser.add_argument(
+        "--discovery-backend",
         type=str,
-        choices=["etcd", "file", "mem"],
-        default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        choices=["kubernetes", "etcd", "file", "mem"],
+        default=os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        help="Discovery backend: kubernetes (K8s API), etcd (distributed KV), file (local filesystem), mem (in-memory). Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",

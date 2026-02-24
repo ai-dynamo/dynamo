@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from dynamo.llm import compute_block_hash_for_seq_py
+from dynamo.llm import compute_block_hash_for_seq
 
 # Sample test images from COCO dataset
 TEST_IMAGE_1 = "http://images.cocodataset.org/test2017/000000155781.jpg"
@@ -340,7 +340,7 @@ class KvRouterTests:
 
     def _test_mm_hash_computation(self):
         """
-        Test: Verify that compute_block_hash_for_seq_py produces different hashes
+        Test: Verify that compute_block_hash_for_seq produces different hashes
         for same tokens with different mm_hash values.
         """
         print("\n[MM-1] MM Hash Computation Test")
@@ -351,15 +351,15 @@ class KvRouterTests:
         block_size = 32
 
         # Hash without MM info
-        hash_no_mm = compute_block_hash_for_seq_py(tokens, block_size)
+        hash_no_mm = compute_block_hash_for_seq(tokens, block_size)
 
         # Hash with MM info (simulated mm_hash)
         mm_info_1 = {"mm_objects": [{"mm_hash": 0xDEADBEEF, "offsets": [[0, 32]]}]}
-        hash_with_mm1 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_1])
+        hash_with_mm1 = compute_block_hash_for_seq(tokens, block_size, [mm_info_1])
 
         # Hash with different MM info
         mm_info_2 = {"mm_objects": [{"mm_hash": 0xCAFEBABE, "offsets": [[0, 32]]}]}
-        hash_with_mm2 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info_2])
+        hash_with_mm2 = compute_block_hash_for_seq(tokens, block_size, [mm_info_2])
 
         self.log(f"Hash without MM: {hash_no_mm}")
         self.log(f"Hash with MM 1:  {hash_with_mm1}")
@@ -410,7 +410,7 @@ class KvRouterTests:
         mm_info_a = {
             "mm_objects": [{"mm_hash": 0x1111111111111111, "offsets": [[0, 64]]}]
         }
-        hashes_a = compute_block_hash_for_seq_py(
+        hashes_a = compute_block_hash_for_seq(
             tokens, block_size, [mm_info_a, mm_info_a]
         )
 
@@ -418,7 +418,7 @@ class KvRouterTests:
         mm_info_b = {
             "mm_objects": [{"mm_hash": 0x2222222222222222, "offsets": [[0, 64]]}]
         }
-        hashes_b = compute_block_hash_for_seq_py(
+        hashes_b = compute_block_hash_for_seq(
             tokens, block_size, [mm_info_b, mm_info_b]
         )
 
@@ -459,9 +459,9 @@ class KvRouterTests:
         mm_info = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[0, 32]]}]}
 
         # Compute hash multiple times
-        hash1 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info])
-        hash2 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info])
-        hash3 = compute_block_hash_for_seq_py(tokens, block_size, [mm_info])
+        hash1 = compute_block_hash_for_seq(tokens, block_size, [mm_info])
+        hash2 = compute_block_hash_for_seq(tokens, block_size, [mm_info])
+        hash3 = compute_block_hash_for_seq(tokens, block_size, [mm_info])
 
         self.log(f"Hash 1: {hash1}")
         self.log(f"Hash 2: {hash2}")
@@ -499,19 +499,19 @@ class KvRouterTests:
 
         # Image covers first block only
         mm_info_first = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[0, 32]]}]}
-        hash_first = compute_block_hash_for_seq_py(
+        hash_first = compute_block_hash_for_seq(
             tokens, block_size, [mm_info_first, None]
         )
 
         # Image covers second block only
         mm_info_second = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[32, 64]]}]}
-        hash_second = compute_block_hash_for_seq_py(
+        hash_second = compute_block_hash_for_seq(
             tokens, block_size, [None, mm_info_second]
         )
 
         # Image covers both blocks
         mm_info_both = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[0, 64]]}]}
-        hash_both = compute_block_hash_for_seq_py(
+        hash_both = compute_block_hash_for_seq(
             tokens, block_size, [mm_info_both, mm_info_both]
         )
 
@@ -555,12 +555,12 @@ class KvRouterTests:
 
         # MM info only applies to middle block
         mm_info = {"mm_objects": [{"mm_hash": mm_hash, "offsets": [[32, 64]]}]}
-        hashes_with_mm = compute_block_hash_for_seq_py(
+        hashes_with_mm = compute_block_hash_for_seq(
             tokens, block_size, [None, mm_info, None]
         )
 
         # No MM info
-        hashes_without_mm = compute_block_hash_for_seq_py(tokens, block_size, None)
+        hashes_without_mm = compute_block_hash_for_seq(tokens, block_size, None)
 
         self.log(f"Hashes with MM:    {hashes_with_mm}")
         self.log(f"Hashes without MM: {hashes_without_mm}")

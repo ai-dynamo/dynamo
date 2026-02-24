@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.seccomp.deploy }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chrek.fullname" . }}-seccomp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "chrek.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seccomp
+data:
+  block-iouring.json: |
+    {
+      "defaultAction": "SCMP_ACT_ALLOW",
+      "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"],
+      "syscalls": [
+        {
+          "names": ["io_uring_setup", "io_uring_enter", "io_uring_register"],
+          "action": "SCMP_ACT_ERRNO",
+          "comment": "Block io_uring syscalls - CRIU doesn't support io_uring memory mappings"
+        }
+      ]
+    }
+{{- end }}
+

@@ -1,0 +1,144 @@
+name: 'Initialize Dynamo Builder'
+description: 'Route buildkit workers and bootstrap buildx builder for dynamo builds'
+
+# This action combines buildkit worker discovery and builder bootstrapping into a single step.
+# It wraps route_buildkit.sh and bootstrap-buildkit action to simplify workflow configuration.
+#
+# How it works:
+#   1. Discovers available BuildKit pods via Kubernetes DNS using route_buildkit.sh
+#   2. Routes pods to the specified flavor based on modulo-3 strategy (see route_buildkit.sh)
+#   3. Bootstraps a docker buildx builder using the discovered workers
+#   4. Falls back to Kubernetes driver if no remote workers are available
+#
+# Architecture modes:
+#   - Single arch: Set arch to 'amd64' or 'arm64' to initialize for one architecture
+#   - Multi arch: Set all_arch to 'true' to initialize for both amd64 and arm64
+#
+# Flavor routing:
+#   BuildKit pods are assigned to flavors based on pod index modulo 3:
+#   - Pool 0 (mod 0): vllm-cuda12, trtllm-cuda12
+#   - Pool 1 (mod 1): vllm-cuda13, trtllm-cuda13, sglang-cuda13
+#   - Pool 2 (mod 2): sglang-cuda12, general (any/no CUDA)
+#
+# Usage examples:
+#   # Initialize for both architectures with general flavor:
+#   - uses: ./.github/actions/init-dynamo-builder
+#     with:
+#       builder_name: my-builder
+#       flavor: general
+#       all_arch: 'true'
+#
+#   # Initialize for single architecture with specific flavor and CUDA version:
+#   - uses: ./.github/actions/init-dynamo-builder
+#     with:
+#       builder_name: my-builder
+#       flavor: vllm
+#       arch: amd64
+#       cuda_version: '12.9'
+
+inputs:
+  builder_name:
+    description: 'Name for the buildx builder'
+    required: true
+  flavor:
+    description: 'Buildkit flavor (vllm, trtllm, sglang, general)'
+    required: false
+    default: 'general'
+  arch:
+    description: 'Target architecture (amd64, arm64). Ignored if all_arch is true.'
+    required: false
+    default: 'amd64'
+  all_arch:
+    description: 'If true, initialize builder for both amd64 and arm64 architectures'
+    required: false
+    default: 'false'
+  cuda_version:
+    description: 'CUDA version (12.9, 13.0). Optional for general flavor.'
+    required: false
+    default: ''
+
+  # Passthrough inputs for bootstrap-buildkit (kubernetes fallback)
+  ephemeral_storage:
+    description: 'Ephemeral storage request for Kubernetes driver'
+    required: false
+    default: '400Gi'
+  namespace:
+    description: 'Kubernetes namespace for buildkit pods'
+    required: false
+    default: 'buildkit'
+  replicas:
+    description: 'Number of buildkit replicas'
+    required: false
+    default: '1'
+  requests_cpu:
+    description: 'CPU requests for buildkit pods'
+    required: false
+    default: '12'
+  requests_memory:
+    description: 'Memory requests for buildkit pods'
+    required: false
+    default: '26Gi'
+  limits_memory:
+    description: 'Memory limits for buildkit pods'
+    required: false
+    default: '29Gi'
+  tolerations:
+    description: 'Tolerations for buildkit pods'
+    required: false
+    default: "key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Route buildkit workers
+      id: route-buildkit
+      continue-on-error: true
+      shell: bash
+      run: |
+        CUDA_ARG=""
+        if [[ -n "${{ inputs.cuda_version }}" ]]; then
+          CUDA_ARG="--cuda ${{ inputs.cuda_version }}"
+        fi
+        if [[ "${{ inputs.all_arch }}" == "true" ]]; then
+           echo "running with --arch all --flavor ${{ inputs.flavor }} $CUDA_ARG"
+          .github/scripts/route_buildkit.sh --arch all --flavor ${{ inputs.flavor }} $CUDA_ARG
+        else
+          echo "running with --arch ${{ inputs.arch }} --flavor ${{ inputs.flavor }} $CUDA_ARG"
+          .github/scripts/route_buildkit.sh --arch ${{ inputs.arch }} --flavor ${{ inputs.flavor }} $CUDA_ARG
+        fi
+
+    - name: Prepare worker addresses and platform
+      id: prepare
+      shell: bash
+      run: |
+        if [[ "${{ inputs.all_arch }}" == "true" ]]; then
+          # Combine both architecture outputs for multi-arch builds
+          AMD64_ADDRS="${{ steps.route-buildkit.outputs[format('{0}_amd64', inputs.flavor)] }}"
+          ARM64_ADDRS="${{ steps.route-buildkit.outputs[format('{0}_arm64', inputs.flavor)] }}"
+          if [[ -n "$AMD64_ADDRS" && -n "$ARM64_ADDRS" ]]; then
+            echo "worker_addresses=${AMD64_ADDRS},${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$AMD64_ADDRS" ]]; then
+            echo "worker_addresses=${AMD64_ADDRS}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$ARM64_ADDRS" ]]; then
+            echo "worker_addresses=${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
+          else
+            echo "worker_addresses=" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          # Single architecture build
+          echo "worker_addresses=${{ steps.route-buildkit.outputs[format('{0}_{1}', inputs.flavor, inputs.arch)] }}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Bootstrap buildkit
+      uses: ./.github/actions/bootstrap-buildkit
+      with:
+        builder_name: ${{ inputs.builder_name }}
+        buildkit_worker_addresses: ${{ steps.prepare.outputs.worker_addresses }}
+        ephemeral_storage: ${{ inputs.ephemeral_storage }}
+        namespace: ${{ inputs.namespace }}
+        replicas: ${{ inputs.replicas }}
+        requests_cpu: ${{ inputs.requests_cpu }}
+        requests_memory: ${{ inputs.requests_memory }}
+        limits_memory: ${{ inputs.limits_memory }}
+        tolerations: ${{ inputs.tolerations }}
+

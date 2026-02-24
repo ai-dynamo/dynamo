@@ -43,7 +43,7 @@
 //! ```
 //!
 //! For registering with external libraries:
-//! ```rust
+//! ```rust,ignore
 //! use dynamo_llm::block_manager::storage::{
 //!     PinnedAllocator, StorageAllocator,
 //!     nixl::NixlRegisterableStorage

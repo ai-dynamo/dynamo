@@ -39,7 +39,7 @@ use crate::block_manager::v2::physical::{
 /// # Example
 ///
 /// ```
-/// # use dynamo_kvbm::v2::physical::transfer::TransferCapabilities;
+/// # use dynamo_llm::block_manager::v2::physical::transfer::TransferCapabilities;
 /// // Default conservative policy
 /// let caps = TransferCapabilities::default();
 /// assert!(!caps.allow_gds);

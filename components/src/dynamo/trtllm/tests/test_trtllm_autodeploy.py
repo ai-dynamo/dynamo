@@ -8,6 +8,14 @@ from unittest import mock
 
 import pydantic
 import pytest
+import torch
+
+if not torch.cuda.is_available():
+    pytest.skip(
+        "Skipping to avoid errors during collection with '-m gpu_0'. "
+        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
+        allow_module_level=True,
+    )
 from tensorrt_llm._torch.auto_deploy import LlmArgs as ADLlmArgs
 
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
@@ -56,7 +64,10 @@ class TestTensorRTLLMEngine:
             ({"moe_cluster_parallel_size": 3}, True),
             ({"moe_tensor_parallel_size": 3}, True),
             ({"moe_expert_parallel_size": 3}, True),
-            ({"enable_attention_dp": True}, True),
+            (
+                {"enable_attention_dp": True},
+                True,
+            ),  # AutoDeploy doesn't support attention DP
             # Default value is an empty dict.
             ({"cp_config": {"foo", "bar"}}, True),
             ({"scheduler_config": {}}, False),
@@ -89,4 +100,4 @@ async def test_get_llm_engine_forwards_backend(backend):
         async with get_llm_engine(engine_args=engine_args):
             pass
 
-    mocked_engine.assert_called_once_with(engine_args)
+    mocked_engine.assert_called_once_with(engine_args, None)

@@ -17,12 +17,16 @@ from tests.serve.common import (
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
+    anthropic_messages_payload_default,
+    anthropic_messages_stream_payload_default,
     chat_payload,
     chat_payload_default,
     completion_payload_default,
     embedding_payload,
     embedding_payload_default,
     metric_payload_default,
+    responses_payload_default,
+    responses_stream_payload_default,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +64,8 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            responses_payload_default(),
+            responses_stream_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),
@@ -155,10 +161,11 @@ sglang_configs = {
             )
         ],
     ),
-    "multimodal_agg_qwen": SGLangConfig(
-        name="multimodal_agg_qwen",
+    "multimodal_epd_qwen": SGLangConfig(
+        # E/PD architecture: Encode worker (GPU 0) + Prefill/Decode worker (GPU 1)
+        name="multimodal_epd_qwen",
         directory=sglang_dir,
-        script_name="multimodal_agg.sh",
+        script_name="multimodal_epd.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
@@ -181,6 +188,46 @@ sglang_configs = {
                 # approach to validation for this test to be stable.
                 expected_response=["image"],
                 temperature=0.0,
+            )
+        ],
+    ),
+    "multimodal_agg_qwen": SGLangConfig(
+        # Tests single-process aggregated multimodal inference using DecodeWorkerHandler
+        # with in-process vision encoding (no separate encode worker)
+        name="multimodal_agg_qwen",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.nightly,
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            "--chat-template",
+            "qwen2-vl",
+        ],
+        delayed_start=0,
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image"],
+                temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),
@@ -241,6 +288,23 @@ sglang_configs = {
         ],
         request_payloads=[
             completion_payload_default(),
+        ],
+    ),
+    "anthropic_messages": SGLangConfig(
+        name="anthropic_messages",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(240),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={"DYN_ENABLE_ANTHROPIC_API": "1"},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            anthropic_messages_payload_default(),
+            anthropic_messages_stream_payload_default(),
         ],
     ),
 }

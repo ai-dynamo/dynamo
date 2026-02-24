@@ -1,0 +1,29 @@
+# Binaries
+bin/
+*.exe
+
+# Build artifacts
+*.o
+*.a
+*.so
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+coverage.out
+*.prof
+
+# Temporary files
+*.tmp
+*.tar
+/tmp/

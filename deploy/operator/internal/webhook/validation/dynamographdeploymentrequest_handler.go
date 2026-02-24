@@ -22,6 +22,8 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,13 +41,16 @@ const (
 // It is a thin wrapper around DynamoGraphDeploymentRequestValidator.
 type DynamoGraphDeploymentRequestHandler struct {
 	isClusterWideOperator bool
+	gpuDiscoveryEnabled   bool
 }
 
 // NewDynamoGraphDeploymentRequestHandler creates a new handler for DynamoGraphDeploymentRequest Webhook.
-// The isClusterWide parameter indicates whether the operator is running in cluster-wide or namespace-restricted mode.
-func NewDynamoGraphDeploymentRequestHandler(isClusterWide bool) *DynamoGraphDeploymentRequestHandler {
+// isClusterWide indicates whether the operator has cluster-wide permissions.
+// gpuDiscoveryEnabled indicates whether a ClusterRole for node read access was provisioned by Helm.
+func NewDynamoGraphDeploymentRequestHandler(isClusterWide bool, gpuDiscoveryEnabled bool) *DynamoGraphDeploymentRequestHandler {
 	return &DynamoGraphDeploymentRequestHandler{
 		isClusterWideOperator: isClusterWide,
+		gpuDiscoveryEnabled:   gpuDiscoveryEnabled,
 	}
 }
 
@@ -61,7 +66,7 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateCreate(ctx context.Context
 	logger.Info("validate create", "name", request.Name, "namespace", request.Namespace)
 
 	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentRequestValidator(request, h.isClusterWideOperator)
+	validator := NewDynamoGraphDeploymentRequestValidator(request, h.isClusterWideOperator, h.gpuDiscoveryEnabled)
 	return validator.Validate()
 }
 
@@ -88,7 +93,7 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context
 	}
 
 	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentRequestValidator(newRequest, h.isClusterWideOperator)
+	validator := NewDynamoGraphDeploymentRequestValidator(newRequest, h.isClusterWideOperator, h.gpuDiscoveryEnabled)
 
 	// Validate stateless rules
 	warnings, err := validator.Validate()
@@ -126,10 +131,13 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateDelete(ctx context.Context
 // The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic.
 func (h *DynamoGraphDeploymentRequestHandler) RegisterWithManager(mgr manager.Manager) error {
 	// Wrap the handler with lease-aware logic for cluster-wide coordination
-	validator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
+	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
+
+	// Wrap with metrics collection
+	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeploymentRequest)
 
 	webhook := admission.
-		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}, validator).
+		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}, observedValidator).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dynamoGraphDeploymentRequestWebhookPath, webhook)
 	return nil
