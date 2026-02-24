@@ -137,4 +137,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8  --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
+            - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8  --disaggregation-mode prefill 2>&1 | tee /tmp/vllm.log"

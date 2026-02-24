@@ -191,11 +191,8 @@ docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG .
 docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
 cd -
 
-# Install CRDs
+# Install platform with custom operator image (CRDs are automatically installed by the chart)
 cd deploy/helm/charts
-helm install dynamo-crds ./crds/ --namespace default
-
-# Install platform with custom operator image
 helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --create-namespace \

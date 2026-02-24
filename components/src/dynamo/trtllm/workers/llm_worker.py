@@ -181,6 +181,10 @@ async def init_llm_worker(
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
         "return_perf_metrics": config.publish_events_and_metrics,
+        # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
+        # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
+        # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
+        "enable_iter_perf_stats": config.publish_events_and_metrics,
         "kv_connector_config": kv_connector_config,
     }
 
@@ -493,6 +497,7 @@ async def init_llm_worker(
                 component_gauges=component_gauges,
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
+                metrics_collector=metrics_collector,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
