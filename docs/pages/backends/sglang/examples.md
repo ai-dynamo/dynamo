@@ -56,7 +56,7 @@ cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/agg_router.sh
 ```
 
-This launches the frontend with `--router-mode kv` and two workers with ZMQ-based KV event publishing. 
+This launches the frontend with `--router-mode kv` and two workers with ZMQ-based KV event publishing.
 
 ### Disaggregated Serving
 

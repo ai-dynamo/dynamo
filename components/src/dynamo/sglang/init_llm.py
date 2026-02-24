@@ -19,10 +19,7 @@ from dynamo.sglang.health_check import (
 )
 from dynamo.sglang.publisher import handle_non_leader_node, setup_sgl_metrics
 from dynamo.sglang.register import register_model_with_readiness_gate
-from dynamo.sglang.request_handlers import (
-    DecodeWorkerHandler,
-    PrefillWorkerHandler,
-)
+from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
@@ -213,5 +210,3 @@ async def init_prefill(
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")
             await run_deferred_handlers()
-
-
