@@ -990,9 +990,9 @@ class KvRouterConfig:
             overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
             router_temperature: Temperature for worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
-            durable_kv_events: Enable durable KV events using NATS JetStream (default: False).
-                When False, uses NATS Core / generic event plane with local_indexer mode.
-                When True, uses JetStream for durability and multi-replica consistency.
+            durable_kv_events: **Deprecated.** Enable durable KV events using NATS JetStream (default: False).
+                This option will be removed in a future release. The event-plane subscriber
+                (local_indexer mode) is now the recommended path.
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
