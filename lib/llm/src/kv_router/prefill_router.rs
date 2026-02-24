@@ -323,7 +323,7 @@ impl PrefillRouter {
 
         let bootstrap_room: u64 = rand::rng().random();
 
-        tracing::info!(
+        tracing::debug!(
             worker_id = worker_id,
             dp_rank = dp_rank,
             bootstrap_host = %host,
