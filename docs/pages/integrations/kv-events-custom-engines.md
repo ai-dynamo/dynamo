@@ -42,7 +42,6 @@ For `BlockStored` events:
 - **`num_block_tokens`**: Number of tokens per block (should all equal `kv_block_size`)
 - **`parent_hash`**: Hash of the parent block. Required for all blocks except the first block in a sequence (which has no parent).
 - **`lora_name`**: LoRA adapter name string (omit or `None` for base model). When set, the adapter name is incorporated into block hash computation so that blocks for different LoRA adapters (or the base model) are never conflated.
-- **`lora_id`**: *(Deprecated)* Numeric LoRA adapter ID. Use `lora_name` instead.
 
 For `BlockRemoved` events:
 - **`block_hashes`**: List of sequence block hashes being evicted
@@ -211,7 +210,6 @@ For `BlockStored`:
     "parent_block_hash": signed_i64 | None,  # Parent hash
     "token_ids": [int, ...],                 # Token IDs
     "block_size": int,                       # Tokens per block
-    "lora_id": int | None,                   # LoRA adapter ID (deprecated, use lora_name)
     "lora_name": str | None,                 # LoRA adapter name
 }
 ```
@@ -260,14 +258,13 @@ publish_stored(
     token_ids: list[int],
     num_block_tokens: list[int],
     block_hashes: list[int],
-    lora_id: int = 0,
     parent_hash: int | None = None,
     block_mm_infos: list[dict | None] | None = None,
     lora_name: str | None = None,
 )
 ```
 
-Publish a block-stored event. Event IDs are managed internally. When `lora_name` is provided, the adapter name is mixed into block hash computation so blocks cached under different adapters produce distinct hashes. The `lora_id` parameter is deprecated; use `lora_name` instead.
+Publish a block-stored event. Event IDs are managed internally. When `lora_name` is provided, the adapter name is mixed into block hash computation so blocks cached under different adapters produce distinct hashes.
 
 #### `publish_removed()`
 

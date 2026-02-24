@@ -175,14 +175,13 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, lora_id=0, parent_hash=None, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None))]
     fn publish_stored(
         &self,
         py: Python,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
         block_hashes: Vec<i64>,
-        #[allow(unused_variables)] lora_id: u64,
         parent_hash: Option<i64>,
         block_mm_infos: Option<Bound<PyAny>>,
         lora_name: Option<String>,

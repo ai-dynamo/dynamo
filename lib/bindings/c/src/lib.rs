@@ -212,7 +212,6 @@ fn kv_event_create_stored_block_from_parts(
     token_ids: *const u32,
     num_tokens: usize,
     kv_block_size: u32,
-    _lora_id: u64,
     lora_name: Option<&str>,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(
@@ -266,7 +265,6 @@ fn kv_event_create_stored_from_parts(
             tokens,
             num_toks,
             kv_block_size,
-            kv_params.lora_id,
             kv_params.lora_name.as_deref(),
         ));
     }
@@ -306,7 +304,6 @@ pub struct DynamoKvStoredEventParams {
     pub block_ids: *const u64,
     pub num_blocks: usize,
     pub parent_hash: Option<u64>,
-    pub lora_id: u64,
     pub lora_name: Option<String>,
 }
 
@@ -322,7 +319,6 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     block_ids: *const u64,
     num_blocks: usize,
     parent_hash: *const u64,
-    lora_id: u64,
     lora_name: *const c_char,
 ) -> DynamoLlmResult {
     let parent_hash = {
@@ -350,7 +346,6 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
         block_ids,
         num_blocks,
         parent_hash,
-        lora_id,
         lora_name,
     };
     let publisher = KV_PUB.get().unwrap();

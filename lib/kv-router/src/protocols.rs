@@ -35,6 +35,7 @@ pub fn compute_block_hash_for_seq(
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     lora_name: Option<&str>,
 ) -> Vec<LocalBlockHash> {
+    let lora_name = lora_name.filter(|n| !n.is_empty());
     tokens
         .chunks_exact(kv_block_size as usize)
         .enumerate()
@@ -192,8 +193,8 @@ pub struct ActiveLoad {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct LocalBlockHash(pub u64);
 
-/// A sequence aware hash of a block where the hash is computed from the tokens_ids, extra_token_ids
-/// and the optional lora_id of a block, PLUS the hash of the parent block.
+/// A sequence-aware hash of a block computed by the engine from token IDs, optional metadata,
+/// and the hash of the parent block.
 ///
 /// In this case, the hashing function is external and unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -757,9 +758,16 @@ mod tests {
     fn test_lora_name_none_matches_legacy() {
         let tokens: Vec<u32> = (0..8).collect();
         let hashes_none = compute_block_hash_for_seq(&tokens, 4, None, None);
-        // Calling with None should produce the same result every time
         let hashes_none2 = compute_block_hash_for_seq(&tokens, 4, None, None);
         assert_eq!(hashes_none, hashes_none2);
+    }
+
+    #[test]
+    fn test_lora_name_empty_string_normalized_to_none() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
+        let empty = compute_block_hash_for_seq(&tokens, 4, None, Some(""));
+        assert_eq!(base, empty, "empty lora_name should be treated as base model");
     }
 
     #[test]

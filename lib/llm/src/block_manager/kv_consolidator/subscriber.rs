@@ -145,8 +145,6 @@ enum VllmRawEvent {
         parent_block_hash: Option<BlockHash>,
         token_ids: Vec<i32>,
         block_size: i32,
-        #[allow(dead_code)]
-        lora_id: Option<i32>,
         #[serde(default)]
         medium: Option<String>,
         #[serde(default)]
@@ -278,7 +276,6 @@ fn process_event(
             parent_block_hash,
             token_ids,
             block_size,
-            lora_id: _,
             medium,
             lora_name,
         } => {

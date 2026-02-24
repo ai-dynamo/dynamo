@@ -1122,7 +1122,7 @@ mod tests {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let scores = indexer.find_matches_for_request(&[100, 200, 300]).await;
+            let scores = indexer.find_matches_for_request(&[100, 200, 300], None).await;
             assert!(scores.is_ok());
 
             indexer.shutdown();

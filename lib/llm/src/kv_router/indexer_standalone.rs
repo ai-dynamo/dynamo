@@ -31,6 +31,7 @@ pub enum IndexerQueryRequest {
     FindMatchesTokens {
         tokens: Vec<u32>,
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        lora_name: Option<String>,
     },
     DumpTree,
 }
@@ -90,11 +91,12 @@ impl
             IndexerQueryRequest::FindMatchesTokens {
                 tokens,
                 block_mm_infos,
+                lora_name,
             } => compute_block_hash_for_seq(
                 &tokens,
                 self.block_size,
                 block_mm_infos.as_deref(),
-                None,
+                lora_name.as_deref(),
             ),
             IndexerQueryRequest::DumpTree => unreachable!(),
         };

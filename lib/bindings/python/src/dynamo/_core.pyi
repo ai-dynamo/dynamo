@@ -563,7 +563,7 @@ class KvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_id: int
+        self, token_ids: List[int], lora_name: Optional[str] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -611,13 +611,14 @@ class ApproxKvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int]
+        self, token_ids: List[int], lora_name: Optional[str] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
 
         Args:
             token_ids: List of token IDs to find matches for
+            lora_name: Optional LoRA adapter name for adapter-aware matching
 
         Returns:
             OverlapScores containing worker matching scores and frequencies
@@ -690,7 +691,6 @@ class KvEventPublisher:
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
-        lora_id: int = 0,
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
@@ -704,11 +704,11 @@ class KvEventPublisher:
             token_ids: List of token IDs
             num_block_tokens: Number of tokens per block
             block_hashes: List of block hashes (signed 64-bit integers)
-            lora_id: The LoRA ID
             parent_hash: Optional parent hash (signed 64-bit integer)
             block_mm_infos: Optional list of multimodal info for each block.
                 Each item is either None or a dict with "mm_objects" key containing
                 a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
+            lora_name: Optional LoRA adapter name for adapter-aware block hashing.
         """
         ...
 
