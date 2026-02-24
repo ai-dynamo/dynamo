@@ -26,8 +26,8 @@ from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 logger = logging.getLogger(__name__)
 
 
-class VideoGenerationWorkerHandler(BaseGenerativeHandler):
-    """Handler for video generation (T2V/I2V).
+class VideoDiffusionWorkerHandler(BaseGenerativeHandler):
+    """Handler for video diffusion (T2V/I2V).
 
     Inherits from BaseGenerativeHandler for common infrastructure like
     tracing, metrics publishing, and cancellation support.

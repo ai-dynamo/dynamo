@@ -15,18 +15,18 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
-    VideoGenerationHealthCheckPayload,
+    VideoDiffusionHealthCheckPayload,
 )
 from dynamo.sglang.publisher import handle_non_leader_node, setup_sgl_metrics
 from dynamo.sglang.register import (
     register_image_diffusion_model,
     register_model_with_readiness_gate,
-    register_video_generation_model,
+    register_video_diffusion_model,
 )
 from dynamo.sglang.request_handlers import (
     DiffusionWorkerHandler,
     ImageDiffusionWorkerHandler,
-    VideoGenerationWorkerHandler,
+    VideoDiffusionWorkerHandler,
 )
 
 
@@ -196,13 +196,13 @@ async def init_video_diffusion(
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
 ):
-    """Initialize video generation worker component"""
+    """Initialize video diffusion worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     from sglang.multimodal_gen import DiffGenerator
 
     if not server_args.model_path:
-        raise ValueError("--model is required for video generation workers")
+        raise ValueError("--model is required for video diffusion workers")
 
     tp_size = getattr(server_args, "tp_size", 1)
     dp_size = getattr(server_args, "dp_size", 1)
@@ -226,14 +226,14 @@ async def init_video_diffusion(
 
     shutdown_endpoints[:] = [generate_endpoint]
 
-    handler = VideoGenerationWorkerHandler(
+    handler = VideoDiffusionWorkerHandler(
         generator,
         config,
         publisher=None,
         fs=get_fs(fs_url),
     )
 
-    health_check_payload = VideoGenerationHealthCheckPayload(
+    health_check_payload = VideoDiffusionHealthCheckPayload(
         model_path=server_args.model_path
     ).to_dict()
 
@@ -247,7 +247,7 @@ async def init_video_diffusion(
                 metrics_labels=[],
                 health_check_payload=health_check_payload,
             ),
-            register_video_generation_model(
+            register_video_diffusion_model(
                 generator,
                 generate_endpoint,
                 server_args,
@@ -255,7 +255,7 @@ async def init_video_diffusion(
             ),
         )
     except Exception as e:
-        logging.error(f"Failed to serve video generation endpoints: {e}")
+        logging.error(f"Failed to serve video diffusion endpoints: {e}")
         raise
     finally:
         handler.cleanup()

@@ -213,8 +213,8 @@ class VideoData(BaseModel):
     b64_json: Optional[str] = None
 
 
-class VideoGenerationResponse(BaseModel):
-    """Response for video generation"""
+class VideoDiffusionResponse(BaseModel):
+    """Response for video diffusion"""
 
     id: str
     object: str = "video"

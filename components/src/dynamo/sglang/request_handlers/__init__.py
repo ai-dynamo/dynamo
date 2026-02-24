@@ -21,8 +21,8 @@ from .multimodal import (
     MultimodalWorkerHandler,
 )
 
-# Video generation handlers
-from .video_generation import VideoGenerationWorkerHandler
+# Video diffusion handlers
+from .video_diffusion import VideoDiffusionWorkerHandler
 
 __all__ = [
     # Base handlers
@@ -36,8 +36,8 @@ __all__ = [
     "EmbeddingWorkerHandler",
     # Image diffusion handlers
     "ImageDiffusionWorkerHandler",
-    # Video generation handlers
-    "VideoGenerationWorkerHandler",
+    # Video diffusion handlers
+    "VideoDiffusionWorkerHandler",
     # Multimodal handlers
     "MultimodalEncodeWorkerHandler",
     "MultimodalPrefillWorkerHandler",

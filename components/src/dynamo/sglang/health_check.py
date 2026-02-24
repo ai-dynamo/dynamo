@@ -146,8 +146,8 @@ class ImageDiffusionHealthCheckPayload(HealthCheckPayload):
         super().__init__()
 
 
-class VideoGenerationHealthCheckPayload(HealthCheckPayload):
-    """Video generation-specific health check payload for video generation workers.
+class VideoDiffusionHealthCheckPayload(HealthCheckPayload):
+    """Video diffusion-specific health check payload for video diffusion workers.
 
     Sends a minimal video generation request to verify the video worker
     is responding and the model is loaded. Uses minimal resources for fast checks.
@@ -157,7 +157,7 @@ class VideoGenerationHealthCheckPayload(HealthCheckPayload):
         """Initialize video health check payload with minimal generation request.
 
         Args:
-            model_path: The video generation model being served.
+            model_path: The video diffusion model being served.
         """
         self.default_payload = {
             "prompt": "test",  # Minimal prompt
