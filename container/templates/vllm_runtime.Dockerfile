@@ -125,6 +125,8 @@ SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+# Override nixl-sys stub symbols with real nixl C API at runtime
+ENV LD_PRELOAD=${NIXL_LIB_DIR}/libnixl.so
 
 # Site-packages path derived from PYTHON_VERSION ARG
 ARG SITE_PACKAGES=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages
