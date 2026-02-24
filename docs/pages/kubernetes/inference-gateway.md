@@ -133,8 +133,8 @@ you could deploy it as a standalone pod
 We provide an example for the Qwen vLLM below.
 ```bash
 cd <dynamo-source-root>
-kubectl apply -f examples/backends/vllm/deploy/agg_gaie.yaml -n my-model
-kubectl apply -f examples/backends/vllm/deploy/http-route.yaml -n my-model
+kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
+kubectl apply -f examples/backends/vllm/deploy/gaie/http-route.yaml -n my-model
 ```
 
 Examples for other models can be found in the recipes folder.
