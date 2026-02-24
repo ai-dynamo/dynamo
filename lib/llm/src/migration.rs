@@ -1,25 +1,37 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::error::Error as StdError;
 use std::sync::Arc;
 
 use anyhow::{Error, Result};
 use futures::{stream, stream::StreamExt};
-
-use async_nats::client::{
-    RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
-};
 
 use crate::{
     http::service::metrics::Metrics, model_card::ModelDeploymentCard, preprocessor::BackendOutput,
     protocols::common::llm_backend::PreprocessedRequest,
 };
 
+use dynamo_runtime::error::{self, BackendError, DynamoError, ErrorType};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream,
-    ServerStreamingEngine, SingleIn, async_trait, network::STREAM_ERR_MSG,
+    ServerStreamingEngine, SingleIn, async_trait,
 };
 use dynamo_runtime::protocols::{annotated::Annotated, maybe_error::MaybeError};
+
+/// Check if an error chain indicates the request should be migrated.
+fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
+    const MIGRATABLE: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
+    const NON_MIGRATABLE: &[ErrorType] = &[
+        // Future: ErrorType::Cancelled, ErrorType::ValidationError, etc.
+    ];
+    error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
+}
 
 pub struct Migration {
     migration_limit: u32,
@@ -121,18 +133,15 @@ impl RetryManager {
                 Some(stream) => stream,
                 None => {
                     tracing::error!("next() called with next_stream is None - should not happen");
-                    return Some(Annotated::from_err(
-                        Error::msg("next_stream is None").into(),
-                    ));
+                    return Some(Annotated::from_err(DynamoError::msg("next_stream is None")));
                 }
             };
             if let Some(response) = response_stream.next().await {
+                // Check if this is a migratable error that should trigger stream recreation.
                 if let Some(err) = response.err()
-                    && err
-                        .chain()
-                        .any(|e| e.to_string().starts_with(STREAM_ERR_MSG))
+                    && is_migratable(&err)
                 {
-                    tracing::warn!("Stream disconnected... recreating stream...");
+                    tracing::warn!("Stream disconnected... recreating stream... {}", err);
                     self.metrics.inc_migration_ongoing_request(&self.model_name);
                     if let Err(err) = self.new_stream().await {
                         tracing::warn!("Cannot recreate stream: {:#}", err);
@@ -162,10 +171,9 @@ impl RetryManager {
             }
             response_stream = Some(self.next_generate.generate(request).await);
             if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
-                && let Some(req_err) = err.downcast_ref::<NatsRequestError>()
-                && matches!(req_err.kind(), NatsNoResponders)
+                && is_migratable(err.as_ref())
             {
-                tracing::warn!("Creating new stream... retrying...");
+                tracing::warn!("Creating new stream... retrying... {}", err);
                 self.metrics.inc_migration_new_request(&self.model_name);
                 continue;
             }
@@ -206,6 +214,7 @@ mod tests {
     use super::*;
     use crate::http::service::metrics::Metrics;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_runtime::error::{DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -337,8 +346,12 @@ mod tests {
                 MockBehavior::FailThenSuccess => {
                     if call_num == 0 {
                         // First call - return "No responders available" error to trigger retry
-                        let nats_error: NatsRequestError = NatsNoResponders.into();
-                        return Err(nats_error.into());
+                        return Err(anyhow::anyhow!(
+                            DynamoError::builder()
+                                .error_type(ErrorType::CannotConnect)
+                                .message("no responders")
+                                .build()
+                        ));
                     } else {
                         // Subsequent calls - succeed with remaining responses
                         self.send_responses(responses_already_generated, self.num_responses)
@@ -362,8 +375,12 @@ mod tests {
                                 }
                             }
                             // Send the specific error that triggers retry logic
-                            let error_response =
-                                Annotated::from_err(anyhow::Error::msg(STREAM_ERR_MSG).into());
+                            let error_response = Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Disconnected)
+                                    .message("Stream ended before generation completed")
+                                    .build(),
+                            );
                             let _ = tx.send(error_response).await;
                         });
                     } else {
@@ -402,8 +419,12 @@ mod tests {
                                 }
                             }
                             // Send the specific error that triggers retry logic
-                            let error_response =
-                                Annotated::from_err(anyhow::Error::msg(STREAM_ERR_MSG).into());
+                            let error_response = Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Disconnected)
+                                    .message("Stream ended before generation completed")
+                                    .build(),
+                            );
                             let _ = tx.send(error_response).await;
                         });
 
@@ -415,8 +436,12 @@ mod tests {
                         ))
                     } else {
                         // Subsequent calls - always fail with NoResponders error (same as AlwaysFail)
-                        let nats_error: NatsRequestError = NatsNoResponders.into();
-                        Err(nats_error.into())
+                        Err(anyhow::anyhow!(
+                            DynamoError::builder()
+                                .error_type(ErrorType::CannotConnect)
+                                .message("no responders")
+                                .build()
+                        ))
                     }
                 }
                 MockBehavior::MidStreamFailAlwaysStreamError { fail_after } => {
@@ -436,8 +461,12 @@ mod tests {
                                 }
                             }
                             // Send the specific error that triggers retry logic
-                            let error_response =
-                                Annotated::from_err(anyhow::Error::msg(STREAM_ERR_MSG).into());
+                            let error_response = Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Disconnected)
+                                    .message("Stream ended before generation completed")
+                                    .build(),
+                            );
                             let _ = tx.send(error_response).await;
                         });
 
@@ -451,8 +480,12 @@ mod tests {
                         // Subsequent calls - immediately send stream error (no successful responses)
                         tokio::spawn(async move {
                             // Send the stream error immediately
-                            let error_response =
-                                Annotated::from_err(anyhow::Error::msg(STREAM_ERR_MSG).into());
+                            let error_response = Annotated::from_err(
+                                DynamoError::builder()
+                                    .error_type(ErrorType::Disconnected)
+                                    .message("Stream ended before generation completed")
+                                    .build(),
+                            );
                             let _ = tx.send(error_response).await;
                         });
 
@@ -466,8 +499,12 @@ mod tests {
                 }
                 MockBehavior::AlwaysFail => {
                     // Always fail with NoResponders error (same as FailThenSuccess first call)
-                    let nats_error: NatsRequestError = NatsNoResponders.into();
-                    Err(nats_error.into())
+                    Err(anyhow::anyhow!(
+                        DynamoError::builder()
+                            .error_type(ErrorType::CannotConnect)
+                            .message("no responders")
+                            .build()
+                    ))
                 }
             }
         }
@@ -741,12 +778,10 @@ mod tests {
             }
         }
 
-        // 4th response should be an error after retries are exhausted
+        // 4th response should be a Disconnected error after retries are exhausted
         let error_response = &responses[3];
-        assert!(error_response.err().is_some());
-        if let Some(error) = error_response.err() {
-            assert!(error.to_string().contains(STREAM_ERR_MSG));
-        }
+        let err = error_response.err().expect("expected error response");
+        assert_eq!(err.error_type(), ErrorType::Disconnected);
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3); // 2 retries + 1 final failure
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1); // initial ongoing failure retry
@@ -801,12 +836,10 @@ mod tests {
             }
         }
 
-        // 4th response should be an error after retries are exhausted
+        // 4th response should be a Disconnected error after retries are exhausted
         let error_response = &responses[3];
-        assert!(error_response.err().is_some());
-        if let Some(error) = error_response.err() {
-            assert!(error.to_string().contains(STREAM_ERR_MSG));
-        }
+        let err = error_response.err().expect("expected error response");
+        assert_eq!(err.error_type(), ErrorType::Disconnected);
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 4); // 3 retries + 1 final failure

@@ -29,6 +29,7 @@ pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
 pub mod config;
+pub mod indexer_standalone;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
@@ -41,6 +42,7 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use config::{KvRouterConfig, RouterConfigOverride};
+pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
@@ -78,6 +80,9 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
 
+// for standalone indexer query
+pub const KV_INDEXER_QUERY_ENDPOINT: &str = "kv_indexer_query";
+
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
@@ -88,23 +93,22 @@ pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
 }
 
 // for router discovery registration
-pub const KV_ROUTER_COMPONENT: &str = "kv-router";
-pub const KV_ROUTER_ENDPOINT: &str = "generate";
+pub const KV_ROUTER_ENDPOINT: &str = "router-discovery";
 
 /// Creates an EndpointId for the KV router in the given namespace.
-pub fn router_endpoint_id(namespace: String) -> EndpointId {
+pub fn router_endpoint_id(namespace: String, component: String) -> EndpointId {
     EndpointId {
         namespace,
-        component: KV_ROUTER_COMPONENT.to_string(),
+        component,
         name: KV_ROUTER_ENDPOINT.to_string(),
     }
 }
 
 /// Creates a DiscoveryQuery for the KV router in the given namespace.
-pub fn router_discovery_query(namespace: String) -> DiscoveryQuery {
+pub fn router_discovery_query(namespace: String, component: String) -> DiscoveryQuery {
     DiscoveryQuery::Endpoint {
         namespace,
-        component: KV_ROUTER_COMPONENT.to_string(),
+        component,
         endpoint: KV_ROUTER_ENDPOINT.to_string(),
     }
 }
