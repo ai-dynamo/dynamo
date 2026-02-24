@@ -88,7 +88,7 @@ python -m dynamo.mocker \
 | `--planner-profile-data` | None | Path to NPZ file with timing data |
 | `--num-workers` | 1 | Workers per process |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
-| `--disaggregation-mode` | `prefill_and_decode` | Worker mode: `prefill_and_decode` (aggregated), `prefill`, or `decode` |
+| `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
 | `--durable-kv-events` | False | Enable durable KV events via JetStream (disables local indexer) |
 | `--bootstrap-ports` | None | Ports for P/D rendezvous |
 
