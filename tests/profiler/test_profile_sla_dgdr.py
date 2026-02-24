@@ -367,7 +367,7 @@ class TestThoroughMocked:
         dgdr = _load_dgdr(CONFIGS_DIR / "6_thorough_no_planner_with_load.yaml")
         ops = _make_ops(tmp_path)
 
-        with _patch_kv_cache_log("thorough"):
+        with _patch_kv_cache_log("trtllm"):
             for p in _THOROUGH_PATCHES:
                 p.start()
             try:
@@ -414,7 +414,7 @@ class TestThoroughMocked:
             ),
         ]
 
-        with _patch_kv_cache_log("thorough"):
+        with _patch_kv_cache_log("trtllm"):
             all_patches = _THOROUGH_PATCHES + interp_patches
             for p in all_patches:
                 p.start()
