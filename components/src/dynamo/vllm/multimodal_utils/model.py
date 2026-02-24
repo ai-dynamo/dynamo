@@ -33,6 +33,10 @@ VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 class SupportedModels:
     """Supported multimodal model identifiers"""
 
+    # TODO: Replace this explicit model list with dynamic detection using
+    # HF config `architectures` field or vLLM's model registry, so any
+    # vLLM-supported VLM works without maintaining entries here.
+
     LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
     QWEN_2_VL_2B = "Qwen/Qwen2-VL-2B-Instruct"
     QWEN_2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -41,6 +45,7 @@ class SupportedModels:
     QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
     QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
     QWEN_3_VL_4B = "Qwen/Qwen3-VL-4B-Instruct"
+    QWEN_3_VL_4B_FP8 = "Qwen/Qwen3-VL-4B-Instruct-FP8"
     LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
 
 
@@ -122,6 +127,7 @@ QWEN_VL_MODELS = [
     SupportedModels.QWEN_3_VL_30B_A3B_FP8,
     SupportedModels.QWEN_3_VL_8B_FP8,
     SupportedModels.QWEN_3_VL_4B,
+    SupportedModels.QWEN_3_VL_4B_FP8,
 ]
 
 
