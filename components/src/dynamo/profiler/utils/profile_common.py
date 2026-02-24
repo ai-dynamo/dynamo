@@ -82,8 +82,6 @@ def derive_backend_image(profiler_image: str, backend: str) -> str:
     slash_idx = profiler_image.rfind("/")
     prefix = profiler_image[: slash_idx + 1] if slash_idx >= 0 else ""
     suffix = profiler_image[slash_idx + 1 :]
-
-    # Preserve the tag if present: "name:tag" → ":tag"
     colon_idx = suffix.find(":")
     tag = suffix[colon_idx:] if colon_idx >= 0 else ""
 
