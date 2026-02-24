@@ -38,6 +38,14 @@ static ACTUAL_TCP_RPC_PORT: OnceLock<u16> = OnceLock::new();
 static GLOBAL_TCP_SERVER: tokio::sync::OnceCell<Arc<SharedTcpServer>> =
     tokio::sync::OnceCell::const_new();
 
+/// Process-wide cancellation token for the global TCP server.
+///
+/// This token is independent of any individual runtime's cancellation token so that
+/// component Drop impls (e.g. KvRouter::drop → cancel) don't kill the shared accept
+/// loop while the OnceCell still hands out the (now-dead) server to later runtimes.
+static GLOBAL_TCP_SERVER_TOKEN: std::sync::LazyLock<CancellationToken> =
+    std::sync::LazyLock::new(CancellationToken::new);
+
 /// Get the actual TCP RPC port that the server is listening on.
 pub fn get_actual_tcp_rpc_port() -> anyhow::Result<u16> {
     ACTUAL_TCP_RPC_PORT.get().copied().ok_or_else(|| {
@@ -328,7 +336,7 @@ impl NetworkManager {
                     "Creating TCP request plane server"
                 );
 
-                let server = SharedTcpServer::new(bind_addr, self.cancellation_token.clone());
+                let server = SharedTcpServer::new(bind_addr, GLOBAL_TCP_SERVER_TOKEN.clone());
 
                 // Bind and start server, getting the actual bound address
                 let actual_addr = server.clone().bind_and_start().await?;

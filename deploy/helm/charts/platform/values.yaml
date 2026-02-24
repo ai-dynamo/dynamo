@@ -28,6 +28,10 @@ dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
+  # -- Whether to manage CRDs via a pre-install/pre-upgrade hook Job.
+  # The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
+  upgradeCRD: true
+
   # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
   natsAddr: ""
 
@@ -219,14 +223,8 @@ dynamo-operator:
     # -- Whether to enable checkpoint/restore functionality
     enabled: false
 
-    # -- Image used for init containers in checkpoint jobs (e.g., signal file cleanup)
-    initContainerImage: "busybox:latest"
-
     # -- Path written by worker when model is loaded and ready for checkpointing
     readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
-    # -- Path written by restore-entrypoint after successful CRIU restore
-    restoreMarkerFilePath: "/tmp/dynamo-restored"
 
     # Storage configuration
     # These settings tell the operator where to find checkpoint storage
@@ -234,9 +232,6 @@ dynamo-operator:
     storage:
       # -- Storage backend type: pvc, s3, or oci
       type: pvc
-
-      # -- Host path for signal files (communication between checkpoint pod and DaemonSet)
-      signalHostPath: "/var/lib/chrek/signals"
 
       # PVC storage configuration (used when type=pvc)
       pvc:
