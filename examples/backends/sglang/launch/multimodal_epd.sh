@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Multimodal E/PD: separate vision encoder (GPU 0) + combined PD worker (GPU 1).
+# GPUs: 2
 
 # Setup cleanup trap
 cleanup() {

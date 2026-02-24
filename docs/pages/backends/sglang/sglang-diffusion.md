@@ -16,6 +16,10 @@ Dynamo SGLang supports three types of diffusion-based generation: **LLM diffusio
 | Image Diffusion | `--image-diffusion-worker` | `/v1/images/generations` |
 | Video Generation | `--video-generation-worker` | `/v1/videos` |
 
+<Note>
+If you see a CuDNN version mismatch error on startup (`cuDNN frontend 1.8.1 requires cuDNN lib >= 9.5.0`), set `SGLANG_DISABLE_CUDNN_CHECK=1` before launching. This is common when PyTorch ships a CuDNN version older than what SGLang requires for Conv3d operations.
+</Note>
+
 ## LLM Diffusion
 
 Diffusion Language Models generate text through iterative refinement rather than autoregressive token-by-token generation. The model starts with masked tokens and progressively replaces them with predictions, refining low-confidence tokens each step.

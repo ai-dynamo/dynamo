@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Disaggregated serving on a single GPU (prefill + decode share memory).
+# GPUs: 1 (requires 16+ GB VRAM)
+#
 # Usage: ./disagg_same_gpu.sh [GPU_MEM_FRACTION]
 #   GPU_MEM_FRACTION: Fraction of GPU memory to use per worker (default: 0.45)
 #   Example: ./disagg_same_gpu.sh 0.45

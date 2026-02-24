@@ -163,6 +163,37 @@ For complete K8s deployment examples, see:
 - [SGLang aggregated router K8s example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_router.yaml)
 - [Kubernetes Deployment Guide](../../kubernetes/README.md)
 
+## Troubleshooting
+
+### CuDNN Version Check Fails
+
+```
+RuntimeError: cuDNN frontend 1.8.1 requires cuDNN lib >= 9.5.0
+```
+
+Set `SGLANG_DISABLE_CUDNN_CHECK=1` before launching. This is common when PyTorch ships a CuDNN version older than what SGLang's Conv3d models require. Affects vision and diffusion models.
+
+### Model Registration Fails with `config.json` Error
+
+```
+unable to extract config.json from directory ...
+```
+
+This happens with diffusers models (FLUX.1-dev, Wan2.1, etc.) that use `model_index.json` instead of `config.json`. Ensure you are using the correct worker flag (`--image-diffusion-worker` or `--video-generation-worker`) rather than the standard LLM worker mode. These flags use a registration path that does not require `config.json`.
+
+### GPU OOM on Startup
+
+If a previous run left orphaned GPU processes, the next launch may OOM. Check for zombie processes:
+
+```bash
+nvidia-smi  # look for lingering sgl_diffusion::scheduler or python processes
+kill -9 <PID>
+```
+
+### Disaggregated Workers Cannot Connect
+
+Ensure both prefill and decode workers can reach each other over TCP. The bootstrap mechanism uses `--disaggregation-bootstrap-port` (default: 12345). For multi-node setups, ensure the port is reachable across hosts and set `--host 0.0.0.0`.
+
 ## See Also
 
 - **[SGLang README](README.md)**: Quick start and feature overview

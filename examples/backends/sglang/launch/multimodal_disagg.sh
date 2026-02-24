@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Multimodal E/P/D: encoder (GPU 0), prefill (GPU 1), decode (GPU 2).
+# GPUs: 3
 
 # Setup cleanup trap
 cleanup() {

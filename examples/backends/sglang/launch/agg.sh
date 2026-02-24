@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated serving: single worker handles both prefill and decode.
+# GPUs: 1
 
 # Setup cleanup trap
 cleanup() {
