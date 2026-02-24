@@ -14,7 +14,7 @@ Every cached KV block in a distributed LLM system needs four pieces of informati
 
 **Why**: Identifies the content of this specific block, independent of context. Two blocks with the same tokens (and same LoRA adapter) have the same local hash. When a LoRA adapter name is provided, it is length-prefixed and appended to the byte buffer before hashing, ensuring that blocks under different adapters (or the base model) always produce distinct hashes.
 
-```
+```text
 Block at position 5: tokens [101, 102, 103, ...]
 LocalBlockHash = hash(tokens)                          = 0xABCD1234  (base model)
 LocalBlockHash = hash(tokens || len("my-lora") || "my-lora") = 0xDEAD5678  (LoRA adapter)
