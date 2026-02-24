@@ -45,7 +45,6 @@ spec:
             - --disaggregation-mode
             - decode
     VllmPrefillWorker:
-      envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
       replicas: 1
@@ -96,7 +95,6 @@ spec:
             - --tensor-parallelism
             - "2"
     VllmPrefillWorker:
-      envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
       replicas: 1
@@ -192,6 +190,51 @@ For DGDs backed by Kubernetes **Deployments** (single-node, non-multinode servic
 3. **Gradual replacement** — The operator gradually scales up new worker DCDs and scales down old ones, respecting `maxSurge` and `maxUnavailable` constraints. When a worker service is updated (all new replicas are ready, all old replicas are terminated), it is marked as completed.
 
 4. **Cleanup** — Once all worker services have completed the transition, old worker DCDs are deleted and the rolling update is marked as completed.
+
+```
+┌─ DynamoGraphDeployment: vllm-disagg ──────────────────────────────────────────────┐
+│                                                                                    │
+│  ┌─ DCD: Frontend ──────────┐                                                      │
+│  │                          │                                                      │
+│  │  ┌────────────────────┐  │   No changes —                                       │
+│  │  │ Pod (v1) ✓         │  │   not a worker component                             │
+│  │  └────────────────────┘  │                                                      │
+│  │                          │                                                      │
+│  └──────────────────────────┘                                                      │
+│                                                                                    │
+│  ┌─ OLD DCDs (hash: a1b2c3d4) ──────────────────────────────────────────────────┐  │
+│  │                                                                               │  │
+│  │  ┌─ DCD: VllmDecodeWorker-a1b2c3d4 ──┐  ┌─ DCD: VllmPrefillWorker-a1b2c3d4 ┐│  │
+│  │  │                                    │  │                                   ││  │
+│  │  │  ┌──────────────────────┐          │  │  ┌─────────────────────┐          ││  │
+│  │  │  │ Pod (v1) Terminating │          │  │  │ Pod (v1) Terminating│          ││  │
+│  │  │  └──────────────────────┘          │  │  └─────────────────────┘          ││  │
+│  │  │                                    │  │                                   ││  │
+│  │  │  Dynamo Namespace: vllm-disagg     │  │  Dynamo Namespace: vllm-disagg    ││  │
+│  │  │                  -a1b2c3d4         │  │                  -a1b2c3d4        ││  │
+│  │  └────────────────────────────────────┘  └───────────────────────────────────┘│  │
+│  │                                                                               │  │
+│  └───────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                    │
+│  ┌─ NEW DCDs (hash: f5e6d7c8) ──────────────────────────────────────────────────┐  │
+│  │                                                                               │  │
+│  │  ┌─ DCD: VllmDecodeWorker-f5e6d7c8 ──┐  ┌─ DCD: VllmPrefillWorker-f5e6d7c8 ┐│  │
+│  │  │                                    │  │                                   ││  │
+│  │  │  ┌──────────────────────┐          │  │  ┌─────────────────────┐          ││  │
+│  │  │  │ Pod (v2) ✓ NEW      │          │  │  │ Pod (v2) ✓ NEW     │          ││  │
+│  │  │  └──────────────────────┘          │  │  └─────────────────────┘          ││  │
+│  │  │                                    │  │                                   ││  │
+│  │  │  Dynamo Namespace: vllm-disagg     │  │  Dynamo Namespace: vllm-disagg    ││  │
+│  │  │                  -f5e6d7c8         │  │                  -f5e6d7c8        ││  │
+│  │  └────────────────────────────────────┘  └───────────────────────────────────┘│  │
+│  │                                                                               │  │
+│  └───────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                    │
+│  Old and new workers are in different Dynamo namespaces —                           │
+│  new prefill only discovers new decode, preventing cross-generation routing.        │
+│                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────┘
+```
 
 > [!NOTE]
 > Only worker component types (`worker`, `prefill`, `decode`) participate in managed rolling updates. Non-worker components like `frontend` are updated in-place without namespace isolation.
