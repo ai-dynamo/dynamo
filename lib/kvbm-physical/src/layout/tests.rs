@@ -7,16 +7,10 @@
 //! ensuring that layouts can be transmitted to remote nodes and reconstructed
 //! with all necessary metadata intact.
 
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
-use crate::layout::BlockDimension;
 use crate::layout::physical::PhysicalLayout;
-use crate::layout::{LayoutConfig, LayoutDescriptor};
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
-use dynamo_memory::Buffer;
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
-use dynamo_memory::nixl::NixlAgent;
-use dynamo_memory::nixl::{MemType, NixlDescriptor};
-use dynamo_memory::{MemoryDescriptor, MemoryRegion, StorageKind};
+use crate::layout::{BlockDimension, LayoutConfig, LayoutDescriptor};
+use dynamo_memory::nixl::{MemType, NixlAgent, NixlDescriptor};
+use dynamo_memory::{Buffer, MemoryDescriptor, MemoryRegion, StorageKind};
 use std::any::Any;
 use std::sync::Arc;
 
@@ -52,7 +46,6 @@ impl MemoryDescriptor for MockMemory {
 }
 
 /// Mock memory region for testing serialization
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 #[derive(Debug)]
 struct TestMemoryRegion {
     addr: usize,
@@ -61,7 +54,6 @@ struct TestMemoryRegion {
     descriptor: NixlDescriptor,
 }
 
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 impl TestMemoryRegion {
     fn new(addr: usize, size: usize, kind: StorageKind) -> Arc<Self> {
         Arc::new(Self {
@@ -78,7 +70,6 @@ impl TestMemoryRegion {
     }
 }
 
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 impl MemoryDescriptor for TestMemoryRegion {
     fn addr(&self) -> usize {
         self.addr
@@ -113,7 +104,6 @@ fn make_test_config() -> LayoutConfig {
         .unwrap()
 }
 
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 #[test]
 fn test_fully_contiguous_layout_serialization_roundtrip() {
     let agent = NixlAgent::new("test-fc-serialize").expect("failed to create agent");
@@ -182,7 +172,6 @@ fn test_fully_contiguous_layout_serialization_roundtrip() {
     assert!(reconstructed.layout().is_fully_contiguous());
 }
 
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 #[test]
 fn test_layer_separate_layout_serialization_roundtrip() {
     let agent = NixlAgent::new("test-ls-serialize").expect("failed to create agent");
@@ -260,7 +249,6 @@ fn test_layer_separate_layout_serialization_roundtrip() {
     assert!(!reconstructed.layout().is_fully_contiguous());
 }
 
-#[cfg(all(feature = "testing-nixl", feature = "testing-cuda"))]
 #[test]
 fn test_memory_region_calculation_after_deserialization() {
     let agent = NixlAgent::new("test-memory-calc").expect("failed to create agent");

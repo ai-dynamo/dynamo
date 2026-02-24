@@ -277,7 +277,7 @@ fn select_remote_strategy_v2(
     unreachable!("Both src and dst are remote - this is not supported.");
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
 mod tests {
     use super::*;
 

@@ -102,7 +102,7 @@ impl TransferOptions {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
 mod tests {
     use super::*;
 

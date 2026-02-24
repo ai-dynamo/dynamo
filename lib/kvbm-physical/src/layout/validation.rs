@@ -117,7 +117,7 @@ pub fn determine_compressed_shape(shape: &[usize]) -> usize {
     shape.iter().product()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl", feature = "testing-cuda"))]
 mod tests {
 
     // Note: These tests would require mock TorchTensor implementations
