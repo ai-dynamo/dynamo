@@ -23,8 +23,18 @@ spec:
             - type: disagg-profile-handler
             - name: prefill-filter
               type: label-filter
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "prefill"
+                allowsNoLabel: false
             - name: decode-filter
               type: label-filter
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "decode"
+                allowsNoLabel: false
             - name: picker
               type: max-score-picker
             - name: dyn-prefill
@@ -35,24 +45,14 @@ spec:
           - name: prefill
             plugins:
             - pluginRef: prefill-filter
-              parameters:
-                label: "nvidia.com/dynamo-sub-component-type"
-                validValues:
-                  - "prefill"
-                allowsNoLabel: false
             - pluginRef: dyn-prefill
-              weight: 1.0
+              weight: 1
             - pluginRef: picker
           - name: decode
             plugins:
             - pluginRef: decode-filter
-              parameters:
-                label: "nvidia.com/dynamo-sub-component-type"
-                validValues:
-                  - "decode"
-                allowsNoLabel: false
             - pluginRef: dyn-decode
-              weight: 1.0
+              weight: 1
             - pluginRef: picker
     VllmPrefillWorker:
       componentType: worker

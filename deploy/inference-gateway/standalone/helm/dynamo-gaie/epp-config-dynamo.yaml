@@ -28,6 +28,11 @@ plugins:
   # Label filter: restricts pods to decode workers
   - name: decode-filter
     type: label-filter
+    parameters:
+      label: "nvidia.com/dynamo-sub-component-type"
+      validValues:
+        - "decode"
+      allowsNoLabel: true
 
   # Picker: chooses the final endpoint after scoring
   - name: picker
@@ -41,11 +46,6 @@ schedulingProfiles:
   - name: decode
     plugins:
       - pluginRef: decode-filter
-        parameters:
-          label: "nvidia.com/dynamo-sub-component-type"
-          validValues:
-            - "decode"
-          allowsNoLabel: true
       - pluginRef: dyn-decode
         weight: 1
       - pluginRef: picker

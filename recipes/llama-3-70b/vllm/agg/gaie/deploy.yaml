@@ -30,22 +30,22 @@ spec:
             - type: disagg-profile-handler
             - name: decode-filter
               type: label-filter
+              # allowsNoLabel: true lets pods without the subComponentType label pass through,
+              # which is typical for aggregated deployments where workers don't have this label.
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "decode"
+                allowsNoLabel: true
             - name: picker
               type: max-score-picker
             - name: dyn-decode
               type: dyn-decode-scorer
           # Only a "decode" profile — no "prefill" profile means pure aggregated mode.
-          # allowsNoLabel: true lets pods without the subComponentType label pass through,
-          # which is typical for aggregated deployments where workers don't have this label.
           schedulingProfiles:
             - name: decode
               plugins:
                 - pluginRef: decode-filter
-                  parameters:
-                    label: "nvidia.com/dynamo-sub-component-type"
-                    validValues:
-                      - "decode"
-                    allowsNoLabel: true
                 - pluginRef: dyn-decode
                   weight: 1
                 - pluginRef: picker
