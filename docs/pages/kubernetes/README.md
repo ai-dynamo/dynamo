@@ -55,18 +55,14 @@ This validates kubectl connectivity, StorageClass configuration, and GPU availab
 export NAMESPACE=dynamo-system
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
-# 2. Install CRDs (skip if on shared cluster where CRDs already exist)
-helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
-helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
-
-# 3. Install Platform
+# 2. Install Platform (CRDs are automatically installed by the chart)
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
 **For Shared/Multi-Tenant Clusters:**
 
-If your cluster has namespace-restricted Dynamo operators, add this flag to step 3:
+If your cluster has namespace-restricted Dynamo operators, add this flag to step 2:
 ```bash
 --set dynamo-operator.namespaceRestriction.enabled=true
 ```
@@ -223,7 +219,7 @@ Key customization points include:
 - **Resource Allocation**: Configure GPU requirements under `resources.limits`
 - **Scaling**: Set `replicas` for number of worker instances
 - **Routing Mode**: Enable KV-cache routing by setting `DYN_ROUTER_MODE=kv` in Frontend envs
-- **Worker Specialization**: Add `--is-prefill-worker` flag for disaggregated prefill workers
+- **Worker Specialization**: Add `--disaggregation-mode prefill` flag for disaggregated prefill workers
 
 ## Additional Resources
 

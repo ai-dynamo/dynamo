@@ -19,6 +19,6 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
-    --is-prefill-worker \
+    --disaggregation-mode prefill \
     --connector lmcache nixl \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
