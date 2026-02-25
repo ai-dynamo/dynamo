@@ -87,7 +87,7 @@ docker run \
 | [**Diffusion Models**](sglang-diffusion.md) | ✅ | LLM diffusion, image, and video generation |
 | [**Request Cancellation**](../../fault-tolerance/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**Graceful Shutdown**](../../fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
-| [**Prometheus Metrics**](sglang-prometheus.md) | ✅ | SGLang + Dynamo metrics on `/metrics` |
+| [**Observability**](sglang-observability.md) | ✅ | Metrics, tracing, and Grafana dashboards |
 | [**KVBM**](../../components/kvbm/README.md) | ❌ | Planned |
 
 ## Quick Start
@@ -130,5 +130,5 @@ You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`.
 - **[Examples](sglang-examples.md)**: All deployment patterns with launch scripts
 - **[Disaggregation](sglang-disaggregation.md)**: P/D architecture and KV transfer details
 - **[Diffusion](sglang-diffusion.md)**: LLM, image, and video diffusion models
-- **[Prometheus Metrics](sglang-prometheus.md)**: Metrics integration and monitoring
+- **[Observability](sglang-observability.md)**: Metrics, tracing, and Grafana dashboards
 - **[Deploying SGLang with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy)**: Kubernetes deployment guide
