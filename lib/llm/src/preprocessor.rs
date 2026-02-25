@@ -946,6 +946,25 @@ impl OpenAIPreprocessor {
         jail.apply_with_finish_reason(stream)
     }
 
+    /// Check if reasoning parsing should be disabled based on per-request parameters.
+    /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
+    fn is_reasoning_disabled_by_request(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        match reasoning_parser {
+            Some("kimi_k25") => {
+                if let Some(args) = chat_template_args
+                    && let Some(thinking) = args.get("thinking")
+                {
+                    return thinking == &serde_json::Value::Bool(false);
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
     // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
     // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
@@ -1094,7 +1113,11 @@ impl
         );
 
         // Try to parse reasoning content only if parser is configured
-        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some();
+        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
+            && !Self::is_reasoning_disabled_by_request(
+                self.runtime_config.reasoning_parser.as_deref(),
+                request.chat_template_args.as_ref(),
+            );
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
@@ -1329,3 +1352,77 @@ impl
 }
 
 // Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_reasoning_disabled_by_request() {
+        let thinking_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("thinking".to_string(), serde_json::Value::Bool(true));
+            m
+        };
+        let thinking_false = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("thinking".to_string(), serde_json::Value::Bool(false));
+            m
+        };
+        let empty_args = std::collections::HashMap::new();
+
+        // (parser, args, expected_disabled, description)
+        let cases = [
+            (
+                Some("kimi_k25"),
+                Some(&thinking_false),
+                true,
+                "kimi_k25 + thinking=false → disabled",
+            ),
+            (
+                Some("kimi_k25"),
+                Some(&thinking_true),
+                false,
+                "kimi_k25 + thinking=true → enabled",
+            ),
+            (
+                Some("kimi_k25"),
+                None,
+                false,
+                "kimi_k25 + no args → enabled",
+            ),
+            (
+                Some("kimi_k25"),
+                Some(&empty_args),
+                false,
+                "kimi_k25 + empty args → enabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&thinking_false),
+                false,
+                "deepseek_r1 → never disabled",
+            ),
+            (
+                Some("basic"),
+                Some(&thinking_false),
+                false,
+                "basic → never disabled",
+            ),
+            (
+                None,
+                Some(&thinking_false),
+                false,
+                "no parser → never disabled",
+            ),
+        ];
+
+        for (parser, args, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::is_reasoning_disabled_by_request(parser, args),
+                expected,
+                "FAILED: {desc}",
+            );
+        }
+    }
+}

@@ -186,6 +186,8 @@ class labels:
     MODEL_NAME = "model_name"
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     WORKER_TYPE = "worker_type"
+    # Label for router instance (discovery.instance_id() of the frontend)
+    ROUTER_ID = "router_id"
 
 
 class model_info:
@@ -200,10 +202,20 @@ class name_prefix:
     COMPONENT = "dynamo_component"
     # Prefix for frontend service metrics
     FRONTEND = "dynamo_frontend"
+    # Prefix for KV router metrics (used with router_id label)
+    ROUTER = "dynamo_router"
+
+
+class router_request:
+    """Router per-request metrics (component-scoped via `MetricsHierarchy`)."""
+
+    # Prefix prepended to `frontend_service::*` names to form router metric names.
+    # e.g. `"router_"` + `frontend_service::REQUESTS_TOTAL` → `"router_requests_total"`.
+    METRIC_PREFIX = "router_"
 
 
 class routing_overhead:
-    """Routing overhead phase latency histogram names (component-scoped)."""
+    """Routing overhead phase latency histogram suffixes."""
 
     # Time spent computing block hashes
     BLOCK_HASHING_MS = "overhead_block_hashing_ms"
