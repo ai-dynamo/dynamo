@@ -563,14 +563,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             break;
                         };
 
-                        // Simulate KV transfer delay before prefill's first (and only) token.
-                        // This models the time to transfer KV cache to the decode worker.
-                        if token_count == 0
-                            && let Some(delay) = kv_transfer_delay
-                        {
-                            sleep_precise(delay).await;
-                        }
-
                         // Generate a token (with thinking boundaries if configured)
                         let token_id = if token_count == 0 && think_len > 0 {
                             reasoning.as_ref().unwrap().start_thinking_token_id
@@ -587,14 +579,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             ..Default::default()
                         };
 
-                        // Prefill: after first token, mark room complete (unblocks decode)
-                        if is_prefill
-                            && token_count == 1
-                            && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
-                        {
-                            server.complete_room(room_id);
-                        }
-
                         if signal.completed && token_count < max_output_tokens {
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
                             break;
@@ -602,6 +586,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
                         if signal.completed {
                             let _ = stream_tx.send(output);
+
+                            // Simulate KV transfer delay before prefill's first (and only) token.
+                            // This models the time to transfer KV cache to the decode worker.
+                            if token_count == 1
+                                && let Some(delay) = kv_transfer_delay
+                            {
+                                sleep_precise(delay).await;
+                            }
+
+                            // Prefill: after first token, mark room complete (unblocks decode)
+                            if is_prefill
+                                && token_count == 1
+                                && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
+                            {
+                                server.complete_room(room_id);
+                            }
+
                             let _ = stream_tx.send(LLMEngineOutput::length());
                             break;
                         }

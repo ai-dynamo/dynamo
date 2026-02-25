@@ -11,6 +11,7 @@ from pathlib import Path
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
+from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
 from .utils.planner_profiler_perf_data_converter import (
     convert_profile_results_to_npz,
     is_mocker_format_npz,
@@ -395,7 +396,7 @@ def parse_args():
     parser.add_argument(
         "--kv-transfer-bandwidth",
         type=float,
-        default=64.0,
+        default=DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS,
         help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
         "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
         "For intra-node NVLink, typical value is ~450.",
