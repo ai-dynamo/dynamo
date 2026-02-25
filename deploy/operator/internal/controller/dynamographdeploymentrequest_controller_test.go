@@ -365,10 +365,10 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "vllm",
-					Image:   "test-profiler:latest",
-					Hardware: &nvidiacomv1beta1.HardwareSpec{
+					Model:     "test-model",
+					Backend:   "vllm",
+					Image:     "test-profiler:latest",
+					AutoApply: false,					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
@@ -455,11 +455,11 @@ spec:
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 
-			// Check that DGD spec was generated
-			Expect(updated.Status.DGDName).NotTo(BeEmpty())
+			// Check that DGD spec was generated (stored in annotation)
+			Expect(updated.Annotations["nvidia.com/generated-dgd-spec"]).NotTo(BeEmpty())
 
-			// Verify state transitioned to Ready (since autoApply is false by default)
-			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseReady))
+			// autoApply defaults to true in v1beta1, so after profiling the DGDR transitions to Deploying
+			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying))
 		})
 	})
 
@@ -856,7 +856,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 	})
 
 	Context("When creating profiling job with inline config", func() {
-		It("Should pass config as --profile-config argument for online profiling", func() {
+		It("Should pass config as --config argument for online profiling", func() {
 			ctx := context.Background()
 			namespace := "default"
 			dgdrName := "test-args-online"
@@ -908,12 +908,12 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
 
-			// Verify profiler container has --profile-config argument
+			// Verify profiler container has --config argument
 			profilerContainer := job.Spec.Template.Spec.Containers[0]
 			args := profilerContainer.Args
 
-			// Check that --profile-config argument is present
-			Expect(args).Should(ContainElement("--profile-config"))
+			// Check that --config argument is present
+			Expect(args).Should(ContainElement("--config"))
 
 			// Clean up
 			_ = k8sClient.Delete(ctx, job)
@@ -972,12 +972,12 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
 
-			// Verify profiler container has --profile-config argument
+			// Verify profiler container has --config argument
 			profilerContainer := job.Spec.Template.Spec.Containers[0]
 			args := profilerContainer.Args
 
-			// Check that --profile-config argument is present
-			Expect(args).Should(ContainElement("--profile-config"))
+			// Check that --config argument is present
+			Expect(args).Should(ContainElement("--config"))
 
 			// Clean up
 			_ = k8sClient.Delete(ctx, job)
