@@ -11,6 +11,14 @@ use futures::StreamExt;
 
 use crate::protocols::TokenIdType;
 
+/// State captured at routing time for a deferred PIN after generation completes.
+pub(crate) struct PinState {
+    pub token_ids: Vec<TokenIdType>,
+    pub cc_client: CacheControlClient,
+    pub instance_id: u64,
+    pub ttl_seconds: u64,
+}
+
 /// A PushRouter client typed for cache_control requests/responses.
 ///
 /// Both request and response are untyped JSON. The worker's cache_control

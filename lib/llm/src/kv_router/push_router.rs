@@ -19,7 +19,7 @@ use tracing::Instrument;
 use crate::{
     kv_router::{
         CacheControlClient, KvRouter,
-        cache_control::{create_cache_control_client, spawn_pin_prefix},
+        cache_control::{PinState, create_cache_control_client, spawn_pin_prefix},
         metrics::RouterRequestMetrics,
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
@@ -67,13 +67,6 @@ struct RequestGuard {
     expected_output_tokens: Option<u32>,
     // PIN state: set when cache_control TTL is present and a cc_client exists
     pin_state: Option<PinState>,
-}
-
-struct PinState {
-    token_ids: Vec<u32>,
-    cc_client: CacheControlClient,
-    instance_id: u64,
-    ttl_seconds: u64,
 }
 
 impl RequestGuard {
@@ -452,31 +445,24 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let tracker = request.tracker.clone();
 
         // Extract pin state: lazily init cache_control client on first PIN request
-        let pin_state =
-            if let Some(ttl) = request.routing.as_ref().and_then(|r| r.cache_control_ttl) {
-                if let Some(cell) = &self.cache_control_cell {
-                    let component = self.chooser.client().endpoint.component().clone();
-                    match cell
-                        .get_or_try_init(|| create_cache_control_client(&component))
-                        .await
-                    {
-                        Ok(client) => Some(PinState {
-                            token_ids: request.token_ids.clone(),
-                            cc_client: client.clone(),
-                            instance_id,
-                            ttl_seconds: ttl,
-                        }),
-                        Err(e) => {
-                            tracing::warn!("Failed to create cache_control client: {e}");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+        let pin_state: Option<PinState> = (|| async {
+            let ttl = request.routing.as_ref().and_then(|r| r.cache_control_ttl)?;
+            let cell = self.cache_control_cell.as_ref()?;
+            let component = self.chooser.client().endpoint.component().clone();
+            let client = cell
+                .get_or_try_init(|| create_cache_control_client(&component))
+                .await
+                .inspect_err(|e| tracing::warn!("Failed to create cache_control client: {e}"))
+                .ok()?
+                .clone();
+            Some(PinState {
+                token_ids: request.token_ids.clone(),
+                cc_client: client,
+                instance_id,
+                ttl_seconds: ttl,
+            })
+        })()
+        .await;
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
