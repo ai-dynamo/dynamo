@@ -70,6 +70,12 @@ class AggPlanner:
         # Override: agg planner uses component_type DECODE for metrics fetching
         self.planner.component_type = SubComponentType.DECODE
 
+        # Name-based targeting: override decode_component_name for services
+        # without subComponentType (e.g., mx-target in multi-service DGDs)
+        self._use_component_name = bool(config.component_name)
+        if self._use_component_name:
+            self.planner.decode_component_name = config.component_name
+
         # Create both regression models (agg needs both TTFT and ITL)
         self.ttft_regression = LoadBasedRegressionModel(
             window_size=config.load_learning_window,
@@ -106,20 +112,24 @@ class AggPlanner:
 
             await self.planner.connector.wait_for_deployment_ready()
 
-        # Model name discovery runs in all modes (needed for metrics collection)
-        if not self.config.no_operation:
+        # Model name discovery
+        if self._use_component_name or self.config.no_operation:
+            # Name-based mode: _get_model_name fails for services without
+            # subComponentType, so use the config-provided model_name.
+            # Same path for no-operation mode.
+            model_name = self.config.model_name
+            if not model_name:
+                raise ValueError(
+                    "model_name is required when using component_name or "
+                    "no_operation mode. Please set model_name in the config."
+                )
+            self.planner.model_name = model_name.lower()
+            logger.info(f"Using model name from config: {self.planner.model_name}")
+        else:
             model_name = await self.planner._get_model_name(
                 require_prefill=False, require_decode=True
             )
             logger.info(f"Detected model name from deployment: {model_name}")
-            self.planner.model_name = model_name.lower()
-        else:
-            model_name = getattr(self.config, "model_name", None)
-            if not model_name:
-                raise ValueError(
-                    "Model name is required in no-operation mode. "
-                    "Please set model_name in the config."
-                )
             self.planner.model_name = model_name.lower()
 
         loops = [
@@ -253,8 +263,6 @@ class AggPlanner:
             return "up"
 
         # Scale down: ALL workers below boundary
-        # TODO: should we strictly enforce all workers below boundary?
-        # how about user-configurable percentage?
         if num_workers > 1:
             sensitivity = self.config.load_scaling_down_sensitivity / 100.0
             boundary = x_sla * (num_workers - 1) / num_workers * sensitivity
@@ -276,26 +284,33 @@ class AggPlanner:
                 require_prefill=False, require_decode=True
             )
             self.shared_state.num_d_workers = num_d
-            num_workers = num_d
 
             # Observe per-worker metrics
             await self._observe_engine_load_stats()
 
             # Reconcile worker counts
             prom_count = len(self.cached_load_metrics.recent)
-            if prom_count != num_workers:
-                logger.warning(
-                    f"Worker count mismatch: DGD reports {num_workers}, "
-                    f"router metrics reports {prom_count}. Skipping."
-                )
-                continue
+            if self._use_component_name:
+                # Name-based mode: workers span multiple services (e.g., mx-source +
+                # mx-target). Router reports ALL workers but get_workers_info only
+                # counts the targeted service. Use prom_count for scaling decisions
+                # (matches per-worker metrics) and apply delta to num_d.
+                num_workers_for_decision = prom_count
+            else:
+                if prom_count != num_d:
+                    logger.warning(
+                        f"Worker count mismatch: DGD reports {num_d}, "
+                        f"router metrics reports {prom_count}. Skipping."
+                    )
+                    continue
+                num_workers_for_decision = num_d
 
             if not self.cached_load_metrics.recent:
                 continue
 
             # Make scaling decisions separately for prefill and decode
-            p_decision = self._prefill_scaling_decision(num_workers)
-            d_decision = self._decode_scaling_decision(num_workers)
+            p_decision = self._prefill_scaling_decision(num_workers_for_decision)
+            d_decision = self._decode_scaling_decision(num_workers_for_decision)
 
             logger.info(
                 f"Agg scaling decisions: prefill={p_decision}, decode={d_decision}"
@@ -304,20 +319,22 @@ class AggPlanner:
             # Scale up if EITHER needs scale up
             # Scale down if BOTH need scale down
             if p_decision == "up" or d_decision == "up":
-                desired = num_workers + 1
+                desired = num_d + 1
             elif p_decision == "down" and d_decision == "down":
-                desired = num_workers - 1
+                desired = num_d - 1
             else:
                 logger.info("Agg scaling: no scaling needed")
                 continue
 
             desired = max(desired, self.config.min_endpoint)
+            if self.config.max_endpoint > 0:
+                desired = min(desired, self.config.max_endpoint)
             assert self.config.decode_engine_num_gpu is not None
             desired = _apply_component_gpu_budget(
                 desired, self.config.decode_engine_num_gpu, self.config
             )
 
-            logger.info(f"Agg load-based scaling: {num_workers} -> {desired}")
+            logger.info(f"Agg load-based scaling: {num_d} -> {desired}")
 
             if (
                 self.planner.prometheus_port != 0

@@ -31,6 +31,7 @@ from dynamo.planner.utils.exceptions import (
     DynamoGraphDeploymentNotFoundError,
     EmptyTargetReplicasError,
     ModelNameNotFoundError,
+    ServiceNotFoundError,
     SubComponentNotFoundError,
 )
 
@@ -1032,3 +1033,110 @@ def test_get_actual_worker_counts_no_components(kubernetes_connector, mock_kube_
     assert prefill_count == 0
     assert decode_count == 0
     assert is_stable is True
+
+
+# Tests for name-only service lookup (no subComponentType)
+
+
+def test_get_service_by_name_only():
+    deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "mx-source": {"replicas": 1},
+                "mx-target": {"replicas": 0},
+            }
+        },
+    }
+
+    service = get_service_from_sub_component_type_or_name(
+        deployment, component_name="mx-target"
+    )
+    assert service.name == "mx-target"
+    assert service.number_replicas() == 0
+
+
+def test_get_service_by_name_only_not_found():
+    deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {"services": {"mx-source": {"replicas": 1}}},
+    }
+
+    with pytest.raises(ServiceNotFoundError) as exc_info:
+        get_service_from_sub_component_type_or_name(
+            deployment, component_name="nonexistent"
+        )
+
+    assert exc_info.value.service_name == "nonexistent"
+
+
+def test_get_service_neither_provided():
+    deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {"services": {"mx-source": {"replicas": 1}}},
+    }
+
+    with pytest.raises(ValueError, match="Either sub_component_type or component_name"):
+        get_service_from_sub_component_type_or_name(deployment)
+
+
+@pytest.mark.asyncio
+async def test_add_component_by_name_only(kubernetes_connector, mock_kube_api):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "mx-target": {"replicas": 0},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    await kubernetes_connector.add_component(component_name="mx-target")
+
+    mock_kube_api.update_graph_replicas.assert_called_once_with(
+        "test-graph", "mx-target", 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_remove_component_by_name_only(kubernetes_connector, mock_kube_api):
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "mx-target": {"replicas": 2},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    await kubernetes_connector.remove_component(component_name="mx-target")
+
+    mock_kube_api.update_graph_replicas.assert_called_once_with(
+        "test-graph", "mx-target", 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_by_name_only(kubernetes_connector, mock_kube_api):
+    target_replicas = [
+        TargetReplica(component_name="mx-target", desired_replicas=3),
+    ]
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "mx-source": {"replicas": 1},
+                "mx-target": {"replicas": 0},
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.is_deployment_ready.return_value = True
+
+    await kubernetes_connector.set_component_replicas(target_replicas)
+
+    mock_kube_api.update_graph_replicas.assert_called_once_with(
+        "test-graph", "mx-target", 3
+    )
