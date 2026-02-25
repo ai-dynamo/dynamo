@@ -9,14 +9,18 @@ workers using diffusion models (Wan, Flux, Cosmos, etc.).
 
 import asyncio
 import logging
+from typing import Optional
 
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
-from dynamo.trtllm.utils.trtllm_utils import Config
+from dynamo.trtllm.args import Config
 
 
 async def init_video_diffusion_worker(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    shutdown_endpoints: Optional[list] = None,
 ) -> None:
     """Initialize and run the video diffusion worker.
 
@@ -27,8 +31,24 @@ async def init_video_diffusion_worker(
         runtime: The Dynamo distributed runtime.
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
+        shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
-    # Import diffusion-specific modules (lazy import to avoid loading heavy deps early)
+    # Check visual_gen availability early with a clear error message.
+    # visual_gen is part of TensorRT-LLM but only available on the feat/visual_gen
+    # branch — not yet in any release. Without this check, users would get a cryptic
+    # ImportError deep inside DiffusionEngine.initialize().
+    try:
+        import visual_gen  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "Video diffusion requires the 'visual_gen' package from TensorRT-LLM's "
+            "feat/visual_gen branch. Install with:\n"
+            "  git clone https://github.com/NVIDIA/TensorRT-LLM.git\n"
+            "  cd TensorRT-LLM && git checkout feat/visual_gen\n"
+            "  cd tensorrt_llm/visual_gen && pip install -e .\n"
+            "See: https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen"
+        ) from None
+
     from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
     from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
     from dynamo.trtllm.request_handlers.video_diffusion import VideoGenerationHandler
@@ -40,12 +60,13 @@ async def init_video_diffusion_worker(
         namespace=config.namespace,
         component=config.component,
         endpoint=config.endpoint,
-        store_kv=config.store_kv,
+        discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
-        model_path=config.model_path,
+        model_path=config.model,
         served_model_name=config.served_model_name,
-        output_dir=config.output_dir,
+        media_output_fs_url=config.media_output_fs_url,
+        media_output_http_url=config.media_output_http_url,
         default_height=config.default_height,
         default_width=config.default_width,
         default_num_frames=config.default_num_frames,
@@ -66,19 +87,23 @@ async def init_video_diffusion_worker(
         enable_async_cpu_offload=config.enable_async_cpu_offload,
     )
 
-    # Get the component and endpoint from the runtime
-    component = runtime.namespace(config.namespace).component(config.component)
-    endpoint = component.endpoint(config.endpoint)
+    # Get the endpoint from the runtime
+    endpoint = runtime.endpoint(
+        f"{config.namespace}.{config.component}.{config.endpoint}"
+    )
+
+    if shutdown_endpoints is not None:
+        shutdown_endpoints[:] = [endpoint]
 
     # Initialize the diffusion engine (auto-detects pipeline from model_index.json)
     engine = DiffusionEngine(diffusion_config)
     await engine.initialize()
 
     # Create the request handler
-    handler = VideoGenerationHandler(component, engine, diffusion_config)
+    handler = VideoGenerationHandler(engine, diffusion_config)
 
     # Register the model with Dynamo's discovery system
-    model_name = config.served_model_name or config.model_path
+    model_name = config.served_model_name or config.model
 
     # Use ModelType.Videos for video generation
     if not hasattr(ModelType, "Videos"):
@@ -91,13 +116,12 @@ async def init_video_diffusion_worker(
 
     logging.info(f"Registering model '{model_name}' with ModelType={model_type}")
 
-    # register_llm is a misnomer — it's actually Dynamo's generic model
-    # registration function and the video diffisuion model is not an llm
-    await register_llm(
+    # register_model is Dynamo's generic model registration function
+    await register_model(
         ModelInput.Text,
         model_type,
         endpoint,
-        config.model_path,
+        config.model,
         model_name,
     )
 

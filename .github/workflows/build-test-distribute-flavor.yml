@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: true
+      run_multi_gpu_tests:
+        description: 'Whether to run multi-gpu tests'
+        required: false
+        type: boolean
+        default: false
       copy_to_acr:
         description: 'Whether to copy images to ACR'
         required: false
@@ -85,7 +90,7 @@ on:
         description: 'Timeout in minutes for the copy to ACR step'
         required: false
         type: number
-        default: 5
+        default: 10
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -119,7 +124,7 @@ jobs:
   build:
     if: inputs.build_image
     name: Build ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
-    runs-on: prod-builder-v2
+    runs-on: prod-builder-v3
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
     env:
@@ -129,11 +134,6 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
-        with:
-          python-version: '3.12'
-          pip-install: jinja2 pyyaml
       - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support
         id: extra-tags
         shell: bash
@@ -327,9 +327,68 @@ jobs:
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
 
-# ============================================================================
-# COPY TO ACR
-# ============================================================================
+  # ============================================================================
+  # MULTI-GPU TESTS
+  # ============================================================================
+
+  multi-gpu-test:
+    # Multi-GPU support limited to AMD64 only
+    if: |
+        inputs.run_multi_gpu_tests &&
+        inputs.build_image &&
+        ( inputs.platform != 'arm64' )
+    needs: [build]
+    name: Multi-gpu Test ${{ inputs.framework }}-cuda${{ inputs.cuda_version }}-${{ inputs.platform }}
+    runs-on: prod-tester-amd-gpu-4-v1
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          CUDA_VERSION_RAW=${{ inputs.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull relevant images
+        shell: bash
+        run: |
+          start_time=$(date +%s)
+          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          docker pull quay.io/minio/minio
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "⏱️ Image pull duration: ${duration}s"
+      # Run GPU tests sequentially (only on amd64 runners with GPU)
+      # These are e2e tests marked with gpu_2 or gpu_4 that require GPU hardware
+      - name: Run GPU tests (sequential)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: '(gpu_2 or gpu_4) and pre_merge'
+          framework: ${{ inputs.framework }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ inputs.platform }}
+          enable_mypy: 'false' # already covered by CPU tests
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+
+  # ============================================================================
+  # COPY TO ACR
+  # ============================================================================
   copy-to-acr:
     needs: [build, test]
     # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)

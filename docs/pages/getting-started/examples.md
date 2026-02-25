@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Examples
 ---
 
 The examples below assume you build the latest image yourself from source. If using a prebuilt image, follow the examples from the corresponding branch.
@@ -9,7 +10,7 @@ The examples below assume you build the latest image yourself from source. If us
 
 Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph.
 
-[View Hello World Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/runtime/hello_world)
+[View Hello World Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend/hello_world)
 
 ## vLLM
 

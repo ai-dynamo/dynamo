@@ -5,12 +5,16 @@
 
 import argparse
 import os
-from typing import Any, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar, Union
 
 T = TypeVar("T")
 
 
-def env_or_default(env_var: str, default: T) -> T:
+def env_or_default(
+    env_var: str,
+    default: T,
+    value_type: Optional[Union[type, Callable[..., Any]]] = None,
+) -> T:
     """
     Get value from environment variable or return default.
 
@@ -19,32 +23,35 @@ def env_or_default(env_var: str, default: T) -> T:
     Args:
         env_var: Environment variable name (e.g., "DYN_NAMESPACE")
         default: Default value if env var not set
+        value_type: If provided, use this type to convert the env value. If None, the type
+        is taken from type(default). Use value_type when default is None but you still
+        want the env value coerced (e.g. env_or_default("DYN_FOO", None, value_type=int)).
 
     Returns:
         Environment variable value (type-converted) or default
-
-    Examples:
-        >>> env_or_default("DYN_NAMESPACE", "test")
-        "test"  # if DYN_NAMESPACE not set
-        >>> env_or_default("DYN_MIGRATION_LIMIT", 0)
-        5  # if DYN_MIGRATION_LIMIT="5"
     """
     value = os.environ.get(env_var)
     if value is None:
         return default
 
-    # Type conversion based on default type
-    if isinstance(default, bool):
+    # No type info available: default=None and no explicit value_type.
+    if value_type is None and default is None:
+        return value  # type: ignore[return-value]
+
+    # Prefer the explicit type if provided; otherwise derive from default
+    target_type = value_type if value_type is not None else type(default)
+
+    if target_type is bool:
         return value.lower() in ("true", "1", "yes", "on")  # type: ignore
-    elif isinstance(default, int):
+    if target_type is int:
         return int(value)  # type: ignore
-    elif isinstance(default, float):
+    if target_type is float:
         return float(value)  # type: ignore
-    elif isinstance(default, list):
-        # Env vars for list options (e.g. DYN_CONNECTOR) are space-separated; downstream expects a list.
+    if target_type is list:
         return [x.strip() for x in value.split() if x.strip()]  # type: ignore
-    else:
-        return value  # type: ignore
+
+    # Fall back to calling the type/callable for custom validators (e.g., pathlib.Path)
+    return target_type(value) if callable(target_type) else value  # type: ignore
 
 
 def add_argument(
@@ -55,7 +62,7 @@ def add_argument(
     default: Any,
     help: str,
     obsolete_flag: Optional[str] = None,
-    arg_type: Optional[type] = str,
+    arg_type: Optional[Union[type, Callable[..., Any]]] = str,
     **kwargs: Any,
 ) -> None:
     """
@@ -74,7 +81,12 @@ def add_argument(
         arg_type: Type for the argument (default: str)
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
-    default_with_env = env_or_default(env_var, default)
+    value_type_for_env: Optional[Union[type, Callable[..., Any]]] = None
+    if arg_type is not None and isinstance(arg_type, type):
+        value_type_for_env = arg_type
+    if isinstance(default, list) and (arg_type is None or arg_type is str):
+        value_type_for_env = None
+    default_with_env = env_or_default(env_var, default, value_type=value_type_for_env)
 
     names = [flag_name]
 
@@ -88,8 +100,9 @@ def add_argument(
         "dest": arg_dest,
         "default": default_with_env,
         "help": env_help,
-        "type": arg_type,
     }
+    if arg_type is not None:
+        add_arg_opts["type"] = arg_type
     kwargs.update(add_arg_opts)
 
     parser.add_argument(*names, **kwargs)
@@ -103,6 +116,7 @@ def add_negatable_bool_argument(
     default: bool,
     help: str,
     dest: Optional[str] = None,
+    obsolete_flag: Optional[str] = None,
 ) -> None:
     """
     Add negatable boolean flag (--foo / --no-foo).
@@ -113,16 +127,19 @@ def add_negatable_bool_argument(
         env_var: Environment variable name (e.g., "DYN_ENABLE_FEATURE")
         default: Default value
         help: Help text
+        dest: Optional destination name for the parsed value
+        obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')
     """
-    arg_dest = _get_dest_name(flag_name, dest)
-    default_with_env = env_or_default(env_var, default)
-
-    parser.add_argument(
-        flag_name,
-        dest=arg_dest,
+    add_argument(
+        parser,
+        flag_name=flag_name,
+        env_var=env_var,
+        default=default,
+        help=help,
+        dest=dest,
+        obsolete_flag=obsolete_flag,
+        arg_type=None,
         action=argparse.BooleanOptionalAction,
-        default=default_with_env,
-        help=_build_help_message(help, env_var, default),
     )
 
 

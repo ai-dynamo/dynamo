@@ -1,11 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Planner Examples
 ---
 
-# Planner Examples
+# Planner Examples: Throughput-Based Scaling
 
-Practical examples for deploying the SLA Planner with different configurations. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
+Practical examples for deploying the SLA Planner with throughput-based scaling. All examples below use the DGDR workflow with pre-deployment profiling. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
 
 ## Basic Examples
 
@@ -45,7 +46,7 @@ spec:
 Deploy:
 ```bash
 export NAMESPACE=your-namespace
-kubectl apply -f benchmarks/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
+kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
 ```
 
 ### Online Profiling (Real Measurements)
@@ -82,10 +83,10 @@ spec:
 
 Deploy:
 ```bash
-kubectl apply -f benchmarks/profiler/deploy/profile_sla_dgdr.yaml -n $NAMESPACE
+kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_dgdr.yaml -n $NAMESPACE
 ```
 
-Available sample DGDRs in `benchmarks/profiler/deploy/`:
+Available sample DGDRs in `components/src/dynamo/profiler/deploy/`:
 - **`profile_sla_dgdr.yaml`**: Standard online profiling for dense models
 - **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator
 - **`profile_sla_moe_dgdr.yaml`**: Online profiling for MoE models (SGLang)
@@ -126,7 +127,7 @@ spec:
 
 Deploy:
 ```bash
-kubectl apply -f benchmarks/profiler/deploy/profile_sla_moe_dgdr.yaml -n $NAMESPACE
+kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_moe_dgdr.yaml -n $NAMESPACE
 ```
 
 ### Using Existing DGD Configs (Custom Setups)

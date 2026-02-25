@@ -9,6 +9,9 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+# NOTE: Unlike vLLM/TRTLLM, the SGLang upstream runtime image already ships with the full CUDA
+# toolkit (nvcc, nvlink, ptxas, etc.), so no selective COPY of CUDA binaries is needed here.
+
 # cleanup unnecessary libs (python3-blinker conflicts with pip-installed blinker from Flask/dash)
 RUN apt remove -y python3-apt python3-blinker && \
     pip uninstall -y termplotlib
@@ -47,16 +50,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Copy attribution files
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 
+{% if context.sglang.enable_media_ffmpeg == "true" %}
 # Copy ffmpeg
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
-    true # in case ffmpeg not enabled
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+{% endif %}
 
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+# Copy wheels first (separate from benchmarks to avoid unnecessary cache invalidation)
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
@@ -64,8 +68,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 # Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=bind,source=.,target=/mnt/local_src \
-    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -81,21 +84,29 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
         pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
     fi
 
+# Copy benchmarks after wheel install so benchmarks changes don't invalidate the layer above
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+
 # Install common and test dependencies as root
-RUN --mount=type=bind,source=.,target=/mnt/local_src \
+RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/requirements.txt \
+    --mount=type=bind,source=container/deps/requirements.test.txt,target=/tmp/deps/requirements.test.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
-        --requirement /mnt/local_src/container/deps/requirements.txt \
-        --requirement /mnt/local_src/container/deps/requirements.test.txt \
+        --requirement /tmp/deps/requirements.txt \
+        --requirement /tmp/deps/requirements.test.txt \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
     #TODO: Temporary change until upstream sglang runtime image is updated
     pip install --break-system-packages "urllib3>=2.6.3" && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
-    chmod -R g+w /workspace/benchmarks && \
-    # Install NVIDIA packages based on CUDA version
+    chmod -R g+w /workspace/benchmarks
+
+# Force-reinstall NVIDIA packages in a separate layer so requirements.txt changes don't trigger re-download
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
     CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \
     if [ "$CUDA_MAJOR" = "12" ]; then \
         # Install NVIDIA packages that are needed for DeepEP to work properly

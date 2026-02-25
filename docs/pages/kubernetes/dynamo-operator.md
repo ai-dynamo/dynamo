@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Dynamo Operator
 ---
 
 ## Overview
@@ -121,7 +122,7 @@ For a user-focused guide on deploying and managing models with DynamoModel, see:
 
 ## Webhooks
 
-The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validation of custom resources before they are persisted to the cluster. Webhooks are **enabled by default** and ensure that invalid configurations are rejected immediately at the API server level.
+The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validation and mutation of custom resources before they are persisted to the cluster. Webhooks are a required component of the operator and ensure that invalid configurations are rejected immediately at the API server level.
 
 **Key Features:**
 - ✅ Shared certificate infrastructure across all webhook types
@@ -190,17 +191,13 @@ docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG .
 docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
 cd -
 
-# Install CRDs
+# Install platform with custom operator image (CRDs are automatically installed by the chart)
 cd deploy/helm/charts
-helm install dynamo-crds ./crds/ --namespace default
-
-# Install platform with custom operator image
 helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --create-namespace \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set etcd.enabled=false \
   --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 ```
 

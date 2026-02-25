@@ -2,6 +2,8 @@
 .vs/
 .vscode/
 .helix
+issues/
+plans/
 *rendered.Dockerfile
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
@@ -115,6 +117,9 @@ core
 /CLAUDE.md
 /CLAUDE.md.bak
 
+# AI generated worklogs
+worklogs/
+
 # Benchmarks
 benchmarks/results
 profiling_results*
@@ -128,3 +133,7 @@ package-lock.json
 
 # Compiled static libraries
 *.a
+
+# macOS
+.DS_Store
+**/.DS_Store

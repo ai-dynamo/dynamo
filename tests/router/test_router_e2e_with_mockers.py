@@ -47,7 +47,9 @@ pytestmark = [
 ]
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
-BASE_PORT = 9100  # Base port for all tests (high port to avoid conflicts)
+BASE_PORT = 9100  # Base port for general test allocations (frontend, system, etc.)
+BASE_PORT_BOOTSTRAP = 10100  # Base port for disagg bootstrap rendezvous
+BASE_PORT_ZMQ = 11100  # Base port for ZMQ KV event publishing
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
@@ -117,7 +119,7 @@ def _build_mocker_command(
         MODEL_NAME,
         "--endpoint",
         endpoint,
-        "--store-kv",
+        "--discovery-backend",
         store_backend,
         "--num-workers",
         str(num_workers),
@@ -125,9 +127,9 @@ def _build_mocker_command(
 
     # Add worker type flag for disaggregated mode
     if worker_type == "prefill":
-        command.append("--is-prefill-worker")
+        command.extend(["--disaggregation-mode", "prefill"])
     elif worker_type == "decode":
-        command.append("--is-decode-worker")
+        command.extend(["--disaggregation-mode", "decode"])
 
     # Add individual CLI arguments from mocker_args
     if "speedup_ratio" in mocker_args:
@@ -163,6 +165,8 @@ def _build_mocker_command(
         command.append("--durable-kv-events")
     if "bootstrap_ports" in mocker_args:
         command.extend(["--bootstrap-ports", mocker_args["bootstrap_ports"]])
+    if "zmq_kv_events_ports" in mocker_args:
+        command.extend(["--zmq-kv-events-ports", mocker_args["zmq_kv_events_ports"]])
 
     return command
 
@@ -177,18 +181,36 @@ class MockerProcess:
         num_mockers: int = 1,
         store_backend: str = "etcd",
         request_plane: str = "nats",
+        zmq_kv_events: bool = False,
     ):
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.component_name = "mocker"
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
+        self._zmq_kv_events_ports: list[int] = []
 
-        mocker_args = mocker_args or {}
+        mocker_args = (mocker_args or {}).copy()
         # Store dp_size for DP-aware test functions
         self.dp_size = mocker_args.get("dp_size")
         # Alias for consistency with vLLM/SGLang workers
         self.data_parallel_size = self.dp_size
+
+        # Allocate ZMQ base ports for KV event publishing.
+        # Each worker's DP ranks bind on base_port + dp_rank, so we need bases
+        # spaced dp_size apart. Allocate num_mockers * dp_size ports total,
+        # then pick every dp_size'th port as a base.
+        if zmq_kv_events:
+            dp_size = mocker_args.get("dp_size", 1)
+            self._zmq_kv_events_ports = allocate_ports(
+                num_mockers * dp_size, BASE_PORT_ZMQ
+            )
+            bases = [self._zmq_kv_events_ports[i * dp_size] for i in range(num_mockers)]
+            mocker_args["zmq_kv_events_ports"] = ",".join(str(p) for p in bases)
+            logger.info(
+                f"Allocated ZMQ KV event ports {self._zmq_kv_events_ports} "
+                f"(bases: {bases}) for {num_mockers} workers"
+            )
 
         command = _build_mocker_command(
             endpoint=self.endpoint,
@@ -222,6 +244,10 @@ class MockerProcess:
     def __exit__(self, exc_type, exc_val, exc_tb):
         logger.info("Stopping mocker process")
         self._process.__exit__(exc_type, exc_val, exc_tb)
+        if self._zmq_kv_events_ports:
+            deallocate_ports(self._zmq_kv_events_ports)
+            logger.info(f"Deallocated ZMQ KV event ports {self._zmq_kv_events_ports}")
+            self._zmq_kv_events_ports = []
 
 
 class DisaggMockerProcess:
@@ -267,7 +293,7 @@ class DisaggMockerProcess:
 
         # Allocate bootstrap ports for prefill workers if enabled (one per worker)
         if enable_bootstrap and worker_type == "prefill":
-            self._bootstrap_ports = allocate_ports(num_mockers, BASE_PORT)
+            self._bootstrap_ports = allocate_ports(num_mockers, BASE_PORT_BOOTSTRAP)
             mocker_args["bootstrap_ports"] = ",".join(
                 str(p) for p in self._bootstrap_ports
             )
@@ -479,15 +505,15 @@ def test_mocker_kv_router_overload_503(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], indirect=True
 )  # Use NATS Core (local indexer)
-def test_kv_push_router_bindings(
+def test_kv_router_bindings(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     request_plane,
     durable_kv_events,
 ):
-    """Test KvPushRouter Python bindings with mocker engines."""
-    logger.info("Starting KvPushRouter bindings test")
+    """Test KvRouter Python bindings with mocker engines."""
+    logger.info("Starting KvRouter bindings test")
     # Use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
@@ -507,9 +533,9 @@ def test_kv_push_router_bindings(
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(mockers.namespace)
-        component = namespace.component(mockers.component_name)
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(
+            f"{mockers.namespace}.{mockers.component_name}.generate"
+        )
 
         # Run Python router bindings test
         _test_python_router_bindings(
@@ -522,20 +548,22 @@ def test_kv_push_router_bindings(
 
 
 @pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
+    "store_backend,durable_kv_events,request_plane,router_event_threads",
     [
-        ("etcd", True, "nats"),  # JetStream mode - uses JetStream
-        ("etcd", False, "tcp"),  # NATS core mode (with gap detection) - no JetStream
-        ("file", True, "nats"),  # File backend - uses JetStream
+        ("etcd", True, "nats", 1),  # JetStream mode - uses JetStream
+        ("etcd", False, "tcp", 1),  # NATS core mode (with gap detection) - no JetStream
+        ("file", True, "nats", 1),  # File backend - uses JetStream
+        ("etcd", False, "tcp", 2),  # NATS core mode - multi-threaded indexer
     ],
     ids=[
         "jetstream",
         "nats_core",
         "file",
+        "nats_core_multi_thread",
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
-@pytest.mark.timeout(180)  # bumped for xdist contention (was 90s; up to 33s under load)
+@pytest.mark.timeout(180)
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
@@ -544,6 +572,7 @@ def test_indexers_sync(
     store_backend,
     durable_kv_events,
     request_plane,
+    router_event_threads,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
@@ -596,6 +625,7 @@ def test_indexers_sync(
             test_nats_interruption=not durable_kv_events,
             nats_server=nats_process if not durable_kv_events else None,
             durable_kv_events=durable_kv_events,
+            router_event_threads=router_event_threads,
         )
 
         logger.info("Indexers sync test completed successfully")
@@ -616,7 +646,6 @@ def test_query_instance_id_returns_worker_and_tokens(
         "block_size": BLOCK_SIZE,
         "durable_kv_events": durable_kv_events,
     }
-    os.makedirs(request.node.name, exist_ok=True)
 
     with MockerProcess(
         request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
@@ -639,15 +668,17 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.timeout(90)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events",
+    "durable_kv_events,use_kv_events,router_event_threads,zmq_kv_events",
     [
-        (True, True),  # JetStream mode with KV events
-        (False, True),  # NATS Core mode with local indexer (default)
-        (False, False),  # Approximate mode (--no-kv-events) - no KV events
+        (True, True, 1, False),  # JetStream mode with KV events
+        (False, True, 1, False),  # NATS Core mode with local indexer (default)
+        (False, False, 1, False),  # Approximate mode (--no-kv-events) - no KV events
+        (False, True, 2, False),  # NATS Core mode - multi-threaded indexer
+        (False, True, 1, True),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
     ],
-    ids=["jetstream", "nats_core", "no_kv_events"],
+    ids=["jetstream", "nats_core", "no_kv_events", "nats_core_multi_thread", "zmq"],
     indirect=["durable_kv_events"],
 )
 def test_router_decisions(
@@ -657,6 +688,8 @@ def test_router_decisions(
     durable_kv_events,
     use_kv_events,
     request_plane,
+    router_event_threads,
+    zmq_kv_events,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
@@ -675,7 +708,7 @@ def test_router_decisions(
     # durable_kv_events=True enables JetStream mode; False (default) uses NATS Core with local indexer
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
-        "block_size": BLOCK_SIZE,
+        "block_size": 8,
         "dp_size": 4,
         "durable_kv_events": durable_kv_events and use_kv_events,
     }
@@ -685,6 +718,7 @@ def test_router_decisions(
         mocker_args=mocker_args,
         num_mockers=2,
         request_plane=request_plane,
+        zmq_kv_events=zmq_kv_events,
     ) as mockers:
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
@@ -692,9 +726,7 @@ def test_router_decisions(
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the mockers
-        namespace = runtime.namespace(mockers.namespace)
-        component = namespace.component("mocker")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{mockers.namespace}.mocker.generate")
 
         _test_router_decisions(
             mockers,
@@ -704,6 +736,7 @@ def test_router_decisions(
             test_dp_rank=True,
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
+            router_event_threads=router_event_threads,
         )
 
 

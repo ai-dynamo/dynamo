@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Webhooks
 ---
 
 This document describes the webhook functionality in the Dynamo Operator, including validation webhooks, certificate management, and troubleshooting.
@@ -10,7 +11,6 @@ This document describes the webhook functionality in the Dynamo Operator, includ
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
-  - [Enabling/Disabling Webhooks](#enablingdisabling-webhooks)
   - [Certificate Management Options](#certificate-management-options)
   - [Advanced Configuration](#advanced-configuration)
 - [Certificate Management](#certificate-management)
@@ -30,10 +30,9 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
 
 ### Key Features
 
-- ✅ **Enabled by default** - Zero-touch validation out of the box
+- ✅ **Always enabled** - Webhooks are a required component of the operator
 - ✅ **Shared certificate infrastructure** - All webhook types use the same TLS certificates
 - ✅ **Automatic certificate generation** - No manual certificate management required
-- ✅ **Defense in depth** - Controllers validate when webhooks are disabled
 - ✅ **cert-manager integration** - Optional integration for automated certificate lifecycle
 - ✅ **Multi-operator support** - Lease-based coordination for cluster-wide and namespace-restricted deployments
 - ✅ **Immutability enforcement** - Critical fields protected via CEL validation rules
@@ -44,8 +43,11 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
   - `DynamoComponentDeployment` validation
   - `DynamoGraphDeployment` validation
   - `DynamoModel` validation
+  - `DynamoGraphDeploymentRequest` validation
+- **Mutating Webhooks**: Apply default values to resources on creation
+  - `DynamoGraphDeployment` defaulting
 
-**Note:** Future releases may add mutating webhooks (for defaults/transformations) and conversion webhooks (for CRD version migrations). All will use the same certificate infrastructure described in this document.
+**Note:** All webhook types use the same certificate infrastructure described in this document.
 
 ---
 
@@ -55,53 +57,56 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
 ┌─────────────────────────────────────────────────────────────────┐
 │                         API Server                               │
 │  1. User submits CR (kubectl apply)                             │
-│  2. API server calls ValidatingWebhookConfiguration             │
+│  2. API server calls MutatingWebhookConfiguration               │
 └────────────────────────┬────────────────────────────────────────┘
                          │ HTTPS (TLS required)
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                  Webhook Server (in Operator Pod)                │
-│  3. Validates CR against business rules                         │
-│  4. Returns admit/deny decision + warnings                      │
-└─────────────────────────────────────────────────────────────────┘
+│  3. Applies defaults (e.g., operator version annotation)        │
+│  4. Returns mutated CR                                          │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         API Server                               │
+│  5. API server calls ValidatingWebhookConfiguration             │
+└────────────────────────┬────────────────────────────────────────┘
+                         │ HTTPS (TLS required)
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  Webhook Server (in Operator Pod)                │
+│  6. Validates CR against business rules                         │
+│  7. Returns admit/deny decision + warnings                      │
+└────────────────────────┬────────────────────────────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      API Server                                  │
-│  5. If admitted: Persist CR to etcd                             │
-│  6. If denied: Return error to user                             │
+│  8. If admitted: Persist CR to etcd                             │
+│  9. If denied: Return error to user                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Validation Flow
+### Admission Flow
 
-1. **Webhook validation** (if enabled): Validates at API server level
-2. **CEL validation**: Kubernetes-native immutability checks (always active)
-3. **Controller validation** (if webhooks disabled): Defense-in-depth validation during reconciliation
+1. **Mutating webhooks**: Apply defaults and transformations before validation
+2. **Validating webhooks**: Validate the (possibly mutated) CR against business rules
+3. **CEL validation**: Kubernetes-native immutability checks (always active)
+
+---
+
+## Upgrading from versions with `webhook.enabled: false`
+
+The `webhook.enabled` Helm value has been removed. Webhooks are now a required component of the operator and are always active. If you previously ran with `webhook.enabled: false`, take the following steps before upgrading:
+
+1. **Remove `webhook.enabled`** from any custom values files. Helm will ignore the unknown key, but it should be cleaned up to avoid confusion.
+2. **Ensure port 9443 is reachable** from the Kubernetes API server to the operator pod. If you have `NetworkPolicy` rules or firewall configurations restricting traffic, add an ingress rule allowing the API server to reach the webhook server on port 9443.
+3. **Ensure webhook TLS certificates are available.** By default, Helm hooks generate self-signed certificates automatically during `helm upgrade` — no action needed. If you use cert-manager or externally managed certificates, verify your configuration is in place before upgrading.
 
 ---
 
 ## Configuration
-
-### Enabling/Disabling Webhooks
-
-Webhooks are **enabled by default**. To disable them:
-
-```yaml
-# Platform-level values.yaml
-dynamo-operator:
-  webhook:
-    enabled: false
-```
-
-**When to disable webhooks:**
-- During development/testing when rapid iteration is needed
-- In environments where admission webhooks are not supported
-- When troubleshooting validation issues
-
-**Note:** When webhooks are disabled, controllers perform validation during reconciliation (defense in depth).
-
----
 
 ### Certificate Management Options
 
@@ -122,9 +127,6 @@ The operator supports three certificate management modes:
 ```yaml
 dynamo-operator:
   webhook:
-    # Enable/disable validation webhooks
-    enabled: true
-
     # Certificate management
     certManager:
       enabled: false
@@ -454,7 +456,7 @@ If the namespace-restricted operator is deleted or becomes unhealthy:
 
 **Checks:**
 
-1. **Verify webhook is enabled**:
+1. **Verify webhook configuration exists**:
 ```bash
 kubectl get validatingwebhookconfiguration | grep dynamo
 ```
@@ -476,7 +478,7 @@ kubectl get service -n <namespace> | grep webhook
 4. **Check operator logs for webhook startup**:
 ```bash
 kubectl logs -n <namespace> deployment/<release>-dynamo-operator | grep webhook
-# Should see: "Webhooks are enabled - webhooks will validate, controllers will skip validation"
+# Should see: "Registering validation webhooks"
 # Should see: "Starting webhook server"
 ```
 
@@ -635,15 +637,15 @@ kubectl describe <resource-type> <name> -n <namespace>
 # Look for events mentioning webhook errors
 ```
 
-2. **Temporarily disable webhook**:
+2. **Temporarily work around the webhook**:
 ```bash
-# Option 1: Delete ValidatingWebhookConfiguration
-kubectl delete validatingwebhookconfiguration <name>
-
-# Option 2: Set failurePolicy to Ignore
+# Option 1: Set failurePolicy to Ignore
 kubectl patch validatingwebhookconfiguration <name> \
   --type='json' \
   -p='[{"op": "replace", "path": "/webhooks/0/failurePolicy", "value": "Ignore"}]'
+
+# Option 2 (last resort): Delete ValidatingWebhookConfiguration
+kubectl delete validatingwebhookconfiguration <name>
 ```
 
 3. **Delete resource again**:
@@ -651,7 +653,7 @@ kubectl patch validatingwebhookconfiguration <name> \
 kubectl delete <resource-type> <name> -n <namespace>
 ```
 
-4. **Re-enable webhook**:
+4. **Restore webhook configuration**:
 ```bash
 helm upgrade <release> dynamo-platform -n <namespace>
 ```
@@ -662,17 +664,15 @@ helm upgrade <release> dynamo-platform -n <namespace>
 
 ### Production Deployments
 
-1. ✅ **Keep webhooks enabled** (default) for real-time validation
-2. ✅ **Use `failurePolicy: Fail`** (default) to ensure validation is enforced
-3. ✅ **Monitor webhook latency** - Validation adds ~10-50ms per resource operation
-4. ✅ **Use cert-manager** for automated certificate lifecycle in large deployments
-5. ✅ **Test webhook configuration** in staging before production
+1. ✅ **Use `failurePolicy: Fail`** (default) to ensure validation is enforced
+2. ✅ **Monitor webhook latency** - Validation adds ~10-50ms per resource operation
+3. ✅ **Use cert-manager** for automated certificate lifecycle in large deployments
+4. ✅ **Test webhook configuration** in staging before production
 
 ### Development Deployments
 
-1. ✅ **Disable webhooks** for rapid iteration if needed
-2. ✅ **Use `failurePolicy: Ignore`** if webhook availability is problematic
-3. ✅ **Keep automatic certificates** (simpler than cert-manager for dev)
+1. ✅ **Use `failurePolicy: Ignore`** if webhook availability is problematic during development
+2. ✅ **Keep automatic certificates** (simpler than cert-manager for dev)
 
 ### Multi-Tenant Deployments
 

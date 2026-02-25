@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Router Design
 ---
 
 # Router Design
@@ -87,7 +88,7 @@ To get a feel for how KV Cache management works on a single worker with KV Cache
 
 1. **Request tokenization**: The incoming prompt is converted into tokens
 2. **Block partitioning**: The token sequence is divided into fixed-size blocks (e.g., 16 or 64 tokens per block)
-3. **Block hashing**: Each block of tokens is hashed to create a unique identifier
+3. **Block hashing**: Each block of tokens is hashed to create a unique identifier. When a LoRA adapter is active, the adapter name is incorporated into the hash so that blocks cached under different adapters produce distinct identifiers.
 4. **Cache lookup**:
     - For each block, the system checks if a matching block already exists in the KV cache
     - If a match is found, the existing KV cache block is reused
@@ -118,7 +119,7 @@ The two types of events are:
 - KV stored event
 - KV removed event
 
-The publisher can be initialized and used through C bindings or Python bindings.
+The publisher can be initialized and used through Python bindings.
 
 ### Deterministic Event IDs
 
@@ -129,6 +130,12 @@ Engines do not need to emit deterministic block identifiers in KV events, as the
 The KVIndexer builds and maintains a global view of cached blocks in a prefix tree. We modify the original prefix tree by also storing the worker id on each node. This is so we can return the number of matched blocks for each worker.
 
 The KVIndexer has a method `find_matches_for_request`, which takes in tokens and returns a dictionary with keys of worker id and values of the number of matched KV Blocks.
+
+The KVIndexer supports two backend implementations, selected via `--router-event-threads`:
+
+- **Single-threaded RadixTree** (default, `--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Supports TTL-based expiration and size-based pruning (for `--no-kv-events` approximate mode).
+
+- **ConcurrentRadixTree** (`--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing. Uses sticky worker routing (events for the same worker always go to the same thread) to ensure per-worker event serialization. Read operations (`find_matches`) execute concurrently with writes. Does not support TTL/pruning.
 
 ### Inter-Router Communication
 
@@ -217,7 +224,7 @@ graph TD
         E3[Engine 3<br/>LocalKvIndexer]
     end
 
-    subgraph "NATS Core"
+    subgraph "Event Plane (NATS / ZMQ)"
         NC[KV Events Pub/Sub<br/>- Block created<br/>- Block removed]
     end
 

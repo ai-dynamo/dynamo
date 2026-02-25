@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RouterConfigOverride;
+use crate::kv_router::protocols::BlockExtraInfo;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -34,14 +35,6 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_rank: Option<u32>,
 
-    /// Controls whether the router should manage local bookkeeping (add_request,
-    /// mark_prefill_completed, free) for this request.
-    ///
-    /// - `None` or `Some(true)`: Router handles bookkeeping locally (default behavior)
-    /// - `Some(false)`: External caller (e.g., GAIE sidecar) handles bookkeeping via C FFI
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enable_local_updates: Option<bool>,
-
     /// Expected number of output tokens for this request.
     /// Used as a hint for routing decisions to estimate resource requirements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +44,16 @@ pub struct RoutingHints {
     /// Used for LORA-aware routing and tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_name: Option<String>,
+
+    /// Priority jump in seconds for queue ordering.
+    /// A positive value decreases the effective arrival time, moving the request
+    /// ahead in the scheduler queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_jump: Option<f64>,
+
+    /// Backend engine scheduling priority forwarded to the generate call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -72,6 +75,20 @@ pub struct PrefillResult {
     /// Prompt token details produced during prefill
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<dynamo_async_openai::types::PromptTokensDetails>,
+}
+
+/// Optional multimodal routing-only data.
+/// This is used by the router to compute overlaps on an alternate token sequence
+/// (for example, MM-expanded tokens) without changing execution token_ids.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
+#[builder(default)]
+pub struct MmRoutingInfo {
+    /// Token IDs to use for routing overlap computation.
+    pub routing_token_ids: Vec<TokenIdType>,
+
+    /// Block-level multimodal metadata aligned with routing_token_ids blocks.
+    /// Use `None` entries for blocks without multimodal objects.
+    pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -103,6 +120,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
+
+    /// Optional multimodal routing-only fields (separate from execution payload).
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mm_routing_info: Option<MmRoutingInfo>,
 
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,
@@ -182,6 +204,19 @@ impl PreprocessedRequest {
     /// Get mutable access to routing hints, creating default if None
     pub fn routing_mut(&mut self) -> &mut RoutingHints {
         self.routing.get_or_insert_with(RoutingHints::default)
+    }
+
+    /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
+    /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
+    pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
+        let Some(mm) = self.mm_routing_info.as_ref() else {
+            return (&self.token_ids, None);
+        };
+        let tokens = mm.routing_token_ids.as_slice();
+        if tokens.is_empty() {
+            return (&self.token_ids, None);
+        }
+        (tokens, Some(mm.block_mm_infos.as_slice()))
     }
 }
 

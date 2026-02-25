@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Graceful Shutdown
 ---
 
 # Graceful Shutdown
@@ -11,10 +12,11 @@ This document describes how Dynamo components handle shutdown signals to ensure 
 
 Graceful shutdown in Dynamo ensures that:
 
-1. **No new requests are accepted** - Endpoints are immediately invalidated
-2. **In-flight requests complete** - Existing requests finish processing (configurable)
-3. **Resources are cleaned up** - Engines, connections, and temporary files are released
-4. **Pods restart cleanly** - Exit codes signal Kubernetes for proper restart behavior
+1. **Routing stops quickly** - Endpoints are unregistered from discovery first
+2. **In-flight requests can finish** - Workers keep serving during a short grace period
+3. **Endpoints drain** - After the grace period, endpoints are invalidated and optionally wait for in-flight work
+4. **Resources are cleaned up** - Engines, connections, and temporary files are released
+5. **Pods restart cleanly** - Exit codes signal Kubernetes for proper restart behavior
 
 ## Signal Handling
 
@@ -31,7 +33,7 @@ Each component registers signal handlers at startup:
 
 ```python
 def signal_handler():
-    asyncio.create_task(graceful_shutdown(runtime))
+    asyncio.create_task(graceful_shutdown(runtime, endpoints))
 
 for sig in (signal.SIGTERM, signal.SIGINT):
     loop.add_signal_handler(sig, signal_handler)
@@ -39,13 +41,15 @@ for sig in (signal.SIGTERM, signal.SIGINT):
 
 The `graceful_shutdown()` function:
 1. Logs the shutdown signal
-2. Calls `runtime.shutdown()` to invalidate endpoints
-3. Waits for in-flight requests (based on configuration)
-4. Returns to allow cleanup to proceed
+2. Unregisters all endpoints from discovery
+3. Waits for a configurable grace period (`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, default 5s)
+4. Calls `runtime.shutdown()` to invalidate endpoints and stop accepting new requests
+5. Waits for in-flight requests (based on `graceful_shutdown` per endpoint)
+6. Returns to allow cleanup to proceed
 
 ## Endpoint Draining
 
-When `runtime.shutdown()` is called, endpoints are immediately invalidated so no new requests are accepted. The behavior for in-flight requests depends on the `graceful_shutdown` parameter when serving the endpoint.
+After the grace period, `runtime.shutdown()` invalidates endpoints so no new requests are accepted. The behavior for in-flight requests depends on the `graceful_shutdown` parameter when serving the endpoint.
 
 ### Configuration
 

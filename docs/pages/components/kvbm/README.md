@@ -1,11 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: KVBM
 ---
 
 # KV Block Manager (KVBM)
 
-The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer for frameworks like vLLM and TensorRT-LLM.
+The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer and write-through cache for frameworks like vLLM and TensorRT-LLM.
 
 KVBM offers:
 - A **unified memory API** spanning GPU memory, pinned host memory, remote RDMA-accessible memory, local/distributed SSDs, and remote file/object/cloud storage systems
@@ -41,7 +42,7 @@ Offloading KV cache to CPU or storage is most effective when KV Cache exceeds GP
 
 ## Architecture
 
-![KVBM Architecture](/assets/img/kvbm-architecture.png)
+![KVBM Architecture](../../../assets/img/kvbm-architecture.png)
 *High-level layered architecture view of Dynamo KV Block Manager and how it interfaces with different components of the LLM inference ecosystem*
 
 KVBM has three primary logical layers:

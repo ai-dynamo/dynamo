@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Integration README
 ---
 
 {/* 2-3 sentence overview of this external integration */}
@@ -25,7 +26,7 @@
 ```bash
 # Add installation and usage from existing integration docs
 # Example pattern (LMCache):
-# python -m dynamo.vllm --model <model> --connector lmcache
+# python -m dynamo.vllm --model <model> --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 ```
 
 ## Configuration

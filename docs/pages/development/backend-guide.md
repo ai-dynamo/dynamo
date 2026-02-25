@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Writing Python Workers in Dynamo
 subtitle: Create custom Python workers and engines for Dynamo
 ---
 
@@ -16,7 +17,7 @@ The Python file must do three things:
 3. Attach a request handler
 
 ```
-from dynamo.llm import ModelInput, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
    # 1. Decorate a function to get the runtime
@@ -31,8 +32,8 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
     model_input = ModelInput.Tokens # or ModelInput.Text if engine handles pre-processing
     model_type = ModelType.Chat # or ModelType.Chat | ModelType.Completions if model can be deployed on chat and completions endpoints
     endpoint = component.endpoint("endpoint")
-    # Optional last param to register_llm is model_name. If not present derives it from model_path
-    await register_llm(model_input, model_type, endpoint, model_path)
+    # Optional last param to register_model is model_name. If not present derives it from model_path
+    await register_model(model_input, model_type, endpoint, model_path)
 
     # Initialize your engine here
     # engine = ...
@@ -69,7 +70,7 @@ The `model_type` can be:
 - ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat).
 - ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions).
 
-`register_llm` can also take the following kwargs:
+`register_model` can also take the following kwargs:
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name or the folder name.
 - `context_length`: Max model length in tokens. Defaults to the model's set max. Only set this if you need to reduce KV cache allocation to fit into VRAM.
 - `kv_cache_block_size`: Size of a KV block for the engine, in tokens. Defaults to 16.

@@ -18,18 +18,19 @@
 # This workflow handles all Fern documentation automation:
 #
 # 1. LINT (PRs): Validates Fern configuration and checks for broken links
-#    - Triggers on pull requests when docs/** files change
+#    - Triggers on PRs when docs/** files change
 #    - Runs `fern check` and `fern docs broken-links`
 #
-# 2. SYNC vNEXT (push to main): Syncs docs/ from main to docs-website branch
-#    - Triggers on push to main when docs/** files change
-#    - Preserves versioned documentation snapshots on docs-website branch
-#    - Publishes docs to Fern after syncing
+# 2. SYNC & PUBLISH/PREVIEW: Syncs docs/ from source branch to fern/ on docs-website
+#    - Triggers on push to main or PRs when docs/** files change
+#    - On main: commits and pushes to docs-website, then publishes via `fern generate --docs`
+#    - On PRs: generates a preview URL via `fern generate --docs --preview` and comments on PR
+#    - Preserves versioned documentation (products[0]) from docs-website's docs.yml
 #
 # 3. VERSION RELEASE (tags): Creates versioned documentation snapshot
 #    - Triggers on new version tags (vX.Y.Z format)
-#    - Creates pages-vX.Y.Z/ directory on docs-website branch
-#    - Updates docs.yml with new version entry
+#    - Creates fern/pages-vX.Y.Z/ directory on docs-website branch
+#    - Updates fern/docs.yml with new version entry
 #    - Publishes docs to Fern after releasing
 #
 # Note: The publish step is included inline because pushes made with GITHUB_TOKEN
@@ -49,12 +50,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag to release (e.g., v0.9.0). Leave empty to sync vNext.'
+        description: 'Version tag to release (e.g., v0.9.0). Leave empty to sync dev docs.'
         required: false
         type: string
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   # Detect changed files for conditional job execution
@@ -138,23 +140,33 @@ jobs:
         run: fern docs broken-links
 
   #############################################################################
-  # SYNC vNEXT - Run on push to main when docs/** files change
+  # SYNC & PUBLISH/PREVIEW - Syncs docs content to docs-website structure
+  # On main: commits, pushes, and publishes to Fern
+  # On PRs: generates a preview URL and comments on the PR
   #############################################################################
 
-  sync-vnext:
-    name: Sync vNext to docs-website
+  preview-or-publish-docs:
+    name: Preview or publish docs
     needs: changed-files
     if: |
-      github.ref == 'refs/heads/main' &&
+      github.ref_type != 'tag' &&
       (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main branch
+      - name: Determine context
+        id: ctx
+        run: |
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            echo "is_main=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_main=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout source branch
         uses: actions/checkout@v4
         with:
-          ref: main
-          path: main-checkout
+          path: source-checkout
           fetch-depth: 1
 
       - name: Checkout docs-website branch
@@ -164,74 +176,77 @@ jobs:
           path: docs-checkout
           fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Git
+      - name: Sync dev content from main
         run: |
-          cd docs-checkout
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Sync pages/ directory (dev content)
+          echo "Syncing pages/ to docs-website branch..."
+          rm -rf docs-checkout/fern/pages
+          cp -r source-checkout/docs/pages docs-checkout/fern/pages
 
-      - name: Sync vNext content from main
-        run: |
-          # Sync pages/ directory (vNext content)
-          echo "Syncing pages/ from main to docs-website branch..."
-          rm -rf docs-checkout/docs/pages
-          cp -r main-checkout/docs/pages docs-checkout/docs/pages
-
-          # Sync versions/next.yml (vNext navigation)
-          echo "Syncing versions/next.yml from main to docs-website branch..."
-          cp main-checkout/docs/versions/next.yml docs-checkout/docs/versions/next.yml
+          # Sync versions/dev.yml (dev navigation)
+          echo "Syncing versions/dev.yml to docs-website branch..."
+          cp source-checkout/docs/versions/dev.yml docs-checkout/fern/versions/dev.yml
 
           # Sync assets/ directory
-          echo "Syncing assets/ from main to docs-website branch..."
-          rm -rf docs-checkout/docs/assets
-          cp -r main-checkout/docs/assets docs-checkout/docs/assets
+          echo "Syncing assets/ to docs-website branch..."
+          rm -rf docs-checkout/fern/assets
+          cp -r source-checkout/docs/assets docs-checkout/fern/assets
 
           # Sync fern.config.json
-          echo "Syncing fern.config.json from main to docs-website branch..."
-          cp main-checkout/docs/fern.config.json docs-checkout/docs/fern.config.json
+          echo "Syncing fern.config.json to docs-website branch..."
+          cp source-checkout/docs/fern.config.json docs-checkout/fern/fern.config.json
 
           # Sync .gitignore if it exists
-          if [ -f main-checkout/docs/.gitignore ]; then
-            cp main-checkout/docs/.gitignore docs-checkout/docs/.gitignore
+          if [ -f source-checkout/docs/.gitignore ]; then
+            cp source-checkout/docs/.gitignore docs-checkout/fern/.gitignore
           fi
 
           # Sync convert_callouts.py script
-          if [ -f main-checkout/docs/convert_callouts.py ]; then
-            cp main-checkout/docs/convert_callouts.py docs-checkout/docs/convert_callouts.py
+          if [ -f source-checkout/docs/convert_callouts.py ]; then
+            cp source-checkout/docs/convert_callouts.py docs-checkout/fern/convert_callouts.py
+          fi
+
+          # Sync components/ directory (e.g., CustomFooter.tsx)
+          if [ -d source-checkout/docs/components ]; then
+            echo "Syncing components/ to docs-website branch..."
+            rm -rf docs-checkout/fern/components
+            cp -r source-checkout/docs/components docs-checkout/fern/components
+          fi
+
+          # Sync blogs/ directory
+          if [ -d source-checkout/docs/blogs ]; then
+            echo "Syncing blogs/ to docs-website branch..."
+            rm -rf docs-checkout/fern/blogs
+            cp -r source-checkout/docs/blogs docs-checkout/fern/blogs
+          fi
+
+          # Sync main.css
+          if [ -f source-checkout/docs/main.css ]; then
+            echo "Syncing main.css to docs-website branch..."
+            cp source-checkout/docs/main.css docs-checkout/fern/main.css
           fi
 
       - name: Convert GitHub callouts to Fern format
         run: |
           echo "Converting GitHub-style callouts to Fern format in pages/..."
-          python3 docs-checkout/docs/convert_callouts.py --dir docs-checkout/docs/pages
+          python3 docs-checkout/fern/convert_callouts.py --dir docs-checkout/fern/pages
           echo "Callout conversion complete."
 
-      - name: Update docs.yml preserving versions
+      - name: Update docs.yml preserving products
         run: |
-          cd docs-checkout/docs
+          cd docs-checkout/fern
 
-          # Extract the list of versioned entries from current docs.yml (on docs-website branch)
-          # These are entries after "path: ./versions/next.yml"
-          # We need to preserve them while updating the rest from main
+          # Save the full products[0] block from docs-website (versions, path, etc.)
+          yq '.products[0]' docs.yml > /tmp/preserved_product.yml
 
-          # Get version entries (lines containing "display-name: v" and their path lines)
-          VERSION_ENTRIES=$(awk '/- display-name: v/{found=1} found{print; if(/path:/) found=0}' docs.yml)
+          echo "Preserved products[0] block:"
+          cat /tmp/preserved_product.yml
 
-          # Copy docs.yml from main as base
-          cp ../../main-checkout/docs/docs.yml docs.yml
+          # Copy docs.yml from source to get config updates (redirects, layout, etc.)
+          cp ../../source-checkout/docs/docs.yml docs.yml
 
-          # If we had version entries, append them after the next.yml line
-          if [ -n "$VERSION_ENTRIES" ]; then
-            echo "Preserving version entries:"
-            echo "$VERSION_ENTRIES"
-
-            # Create a temp file with the version entries properly indented
-            echo "$VERSION_ENTRIES" > /tmp/version_entries.txt
-
-            # Insert version entries after the next.yml path line
-            sed -i '/path: \.\/versions\/next\.yml/r /tmp/version_entries.txt' docs.yml
-          fi
+          # Restore the preserved products[0] block
+          yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
 
           echo "Updated docs.yml:"
           cat docs.yml
@@ -249,13 +264,66 @@ jobs:
             git status --short
           fi
 
-      - name: Commit and push changes
+      - name: Setup Node.js
         if: steps.changes.outputs.has_changes == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Fern CLI
+        if: steps.changes.outputs.has_changes == 'true'
+        run: npm install -g fern-api
+
+      ##########################################################################
+      # PREVIEW - Generate a preview URL for docs changes
+      ##########################################################################
+
+      - name: Generate docs preview
+        if: steps.ctx.outputs.is_main != 'true' && steps.changes.outputs.has_changes == 'true'
+        id: preview
+        working-directory: docs-checkout/fern
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+        run: |
+          OUTPUT=$(fern generate --docs --preview 2>&1)
+          FERN_EXIT=$?
+          echo "$OUTPUT"
+          if [ $FERN_EXIT -ne 0 ]; then
+            echo "::warning::Fern docs preview generation failed (exit $FERN_EXIT)"
+          fi
+          URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K\S+') || true
+          if [ -n "$URL" ]; then
+            echo "url=$URL" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Comment preview URL on PR
+        if: steps.ctx.outputs.is_main != 'true' && steps.preview.outputs.url != '' && startsWith(github.ref, 'refs/heads/pull-request/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${GITHUB_REF##*/}"
+          gh pr comment "https://github.com/${{ github.repository }}/pull/${PR_NUM}" \
+            --edit-last --create-if-none \
+            --body "🌿 **Fern Docs Preview:** ${{ steps.preview.outputs.url }}/dev"
+
+      ##########################################################################
+      # PUSH AND PUBLISH - push changes to docs-website branch and publish docs
+      ##########################################################################
+
+      - name: Setup Git
+        if: steps.ctx.outputs.is_main == 'true' && steps.changes.outputs.has_changes == 'true'
+        run: |
+          cd docs-checkout
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit and push changes
+        if: steps.ctx.outputs.is_main == 'true' && steps.changes.outputs.has_changes == 'true'
         run: |
           cd docs-checkout
 
           git add -A
-          git commit -m "docs(fern): sync vNext from main
+          git commit -m "docs(fern): sync dev from main
 
           Automated sync of docs/ directory from main branch.
           Preserves versioned documentation snapshots.
@@ -264,29 +332,13 @@ jobs:
 
           git push origin docs-website
 
-          echo "Successfully synced vNext docs to docs-website branch"
-
-      - name: Setup Node.js
-        if: steps.changes.outputs.has_changes == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install Fern CLI
-        if: steps.changes.outputs.has_changes == 'true'
-        run: npm install -g fern-api
-
-      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
-      - name: Create fern directory symlink
-        if: steps.changes.outputs.has_changes == 'true'
-        working-directory: docs-checkout/docs
-        run: ln -s . fern
+          echo "Successfully synced dev docs to docs-website branch"
 
       - name: Publish Docs
-        if: steps.changes.outputs.has_changes == 'true'
+        if: steps.ctx.outputs.is_main == 'true' && steps.changes.outputs.has_changes == 'true'
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
-        working-directory: docs-checkout/docs
+        working-directory: docs-checkout/fern
         run: fern generate --docs
 
   #############################################################################
@@ -333,13 +385,13 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
-          if [ -d "docs/pages-$TAG" ]; then
-            echo "::error::Version $TAG already exists (docs/pages-$TAG directory found)"
+          if [ -d "fern/pages-$TAG" ]; then
+            echo "::error::Version $TAG already exists (fern/pages-$TAG directory found)"
             exit 1
           fi
 
-          if [ -f "docs/versions/$TAG.yml" ]; then
-            echo "::error::Version $TAG already exists (docs/versions/$TAG.yml found)"
+          if [ -f "fern/versions/$TAG.yml" ]; then
+            echo "::error::Version $TAG already exists (fern/versions/$TAG.yml found)"
             exit 1
           fi
 
@@ -354,22 +406,22 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
-          echo "Creating docs/pages-$TAG/ from docs/pages/..."
+          echo "Creating fern/pages-$TAG/ from fern/pages/..."
 
           # Copy current pages/ to pages-vX.Y.Z/
-          cp -r docs/pages "docs/pages-$TAG"
+          cp -r fern/pages "fern/pages-$TAG"
 
-          echo "Created docs/pages-$TAG/"
-          ls -la "docs/pages-$TAG/" | head -20
+          echo "Created fern/pages-$TAG/"
+          ls -la "fern/pages-$TAG/" | head -20
 
       - name: Update GitHub links to 'main' to version tag
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
-          echo "Updating GitHub links from 'tree/main' to 'tree/$TAG' in docs/pages-$TAG/..."
+          echo "Updating GitHub links from 'tree/main' to 'tree/$TAG' in fern/pages-$TAG/..."
 
           # Find all markdown files and replace tree/main with tree/vX.Y.Z
-          find "docs/pages-$TAG" -name "*.md" -o -name "*.mdx" | while read file; do
+          find "fern/pages-$TAG" -name "*.md" -o -name "*.mdx" | while read file; do
             if grep -q "github.com/ai-dynamo/dynamo/tree/main" "$file"; then
               echo "Updating: $file"
               sed -i "s|github.com/ai-dynamo/dynamo/tree/main|github.com/ai-dynamo/dynamo/tree/$TAG|g" "$file"
@@ -377,7 +429,7 @@ jobs:
           done
 
           # Also update blob/main references (for direct file links)
-          find "docs/pages-$TAG" -name "*.md" -o -name "*.mdx" | while read file; do
+          find "fern/pages-$TAG" -name "*.md" -o -name "*.mdx" | while read file; do
             if grep -q "github.com/ai-dynamo/dynamo/blob/main" "$file"; then
               echo "Updating blob links: $file"
               sed -i "s|github.com/ai-dynamo/dynamo/blob/main|github.com/ai-dynamo/dynamo/blob/$TAG|g" "$file"
@@ -391,19 +443,19 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
 
           echo "Converting GitHub-style callouts to Fern format in pages-$TAG/..."
-          python3 docs/convert_callouts.py --dir "docs/pages-$TAG"
+          python3 fern/convert_callouts.py --dir "fern/pages-$TAG"
           echo "Callout conversion complete."
 
       - name: Create version config file
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           VERSION="${{ steps.version.outputs.version }}"
-          VERSION_FILE="docs/versions/$TAG.yml"
+          VERSION_FILE="fern/versions/$TAG.yml"
 
           echo "Creating version config: $VERSION_FILE"
 
-          # Copy next.yml as template
-          cp docs/versions/next.yml "$VERSION_FILE"
+          # Copy dev.yml as template
+          cp fern/versions/dev.yml "$VERSION_FILE"
 
           # Update the comment at the top
           sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
@@ -419,45 +471,51 @@ jobs:
       - name: Update docs.yml with new version
         run: |
           TAG="${{ steps.version.outputs.tag }}"
-          DOCS_FILE="docs/docs.yml"
+          DOCS_FILE="fern/docs.yml"
 
           echo "Updating $DOCS_FILE to include $TAG..."
 
           # Check if version already in docs.yml
-          if grep -q "display-name: $TAG" "$DOCS_FILE"; then
+          if yq ".products[0].versions[] | select(.display-name == \"$TAG\")" "$DOCS_FILE" | grep -q .; then
             echo "Version $TAG already in docs.yml, skipping update"
             exit 0
           fi
 
-          # Insert new version after "Next" entry
-          # The new version should be inserted after the "path: ./versions/next.yml" line
-          # Use a temp file approach for reliable multi-line insertion
-          awk -v tag="$TAG" '
-            /path: \.\/versions\/next\.yml/ {
-              print
-              print "  - display-name: " tag
-              print "    path: ./versions/" tag ".yml"
-              next
-            }
-            { print }
-          ' "$DOCS_FILE" > "${DOCS_FILE}.tmp" && mv "${DOCS_FILE}.tmp" "$DOCS_FILE"
+          # Find the index of the "dev" entry and insert new version right after it
+          DEV_IDX=$(yq '.products[0].versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' "$DOCS_FILE")
+          INSERT_IDX=$((DEV_IDX + 1))
 
-          echo "Updated docs.yml versions section:"
-          grep -A 20 "^versions:" "$DOCS_FILE"
+          yq -i "
+            .products[0].versions |= (
+              .[:$INSERT_IDX] +
+              [{\"display-name\": \"$TAG\", \"path\": \"./versions/$TAG.yml\", \"slug\": \"$TAG\", \"availability\": \"stable\"}] +
+              .[$INSERT_IDX:]
+            )
+          " "$DOCS_FILE"
+
+          # Update the top-level entry to point to the new version
+          yq -i ".products[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+
+          # Update the "Latest" entry to point to the new version
+          yq -i ".products[0].versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+          yq -i ".products[0].versions[0].display-name = \"Latest ($TAG)\"" "$DOCS_FILE"
+
+          echo "Updated docs.yml products/versions section:"
+          yq '.products[0].versions' "$DOCS_FILE"
 
       - name: Commit and push changes
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
-          git add "docs/pages-$TAG/"
-          git add "docs/versions/$TAG.yml"
-          git add docs/docs.yml
+          git add "fern/pages-$TAG/"
+          git add "fern/versions/$TAG.yml"
+          git add fern/docs.yml
 
           git commit -m "docs(fern): release version $TAG
 
-          - Created docs/pages-$TAG/ with documentation snapshot
-          - Created docs/versions/$TAG.yml version navigation config
-          - Updated docs/docs.yml to include $TAG in version list
+          - Created fern/pages-$TAG/ with documentation snapshot
+          - Created fern/versions/$TAG.yml version navigation config
+          - Updated fern/docs.yml to include $TAG in version list
 
           Automated by fern-docs workflow
           Source tag: $TAG"
@@ -469,18 +527,13 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install Fern CLI
         run: npm install -g fern-api
 
-      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
-      - name: Create fern directory symlink
-        working-directory: ./docs
-        run: ln -s . fern
-
       - name: Publish Docs
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
-        working-directory: ./docs
+        working-directory: ./fern
         run: fern generate --docs

@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Support Matrix
 ---
 
 # Dynamo Support Matrix
@@ -15,8 +16,9 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.15.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
+| **main (ToT)** | `0.15.1` | `0.5.9` | `1.3.0rc3` | `0.9.0` |
 | **v1.0.0** *(planned)* | `0.15.0` | *Latest as of 2/17* | *Latest as of 2/17* | `0.10.0` |
+| **v0.9.1** *(in progress)* | `0.14.1` | `0.5.8` | `1.3.0rc3` | `0.9.0` |
 | **v0.9.0** *(in progress)* | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
 | **v0.8.1.post3** *(in progress)* | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post3` | `0.8.0` |
 | **v0.8.1.post2** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post2` | `0.8.0` |
@@ -162,8 +164,7 @@ For version-specific artifact details, installation commands, and release histor
   - [Kubernetes Operator](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator)
 
 - **Helm Charts**: [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) hosts the helm charts supporting Kubernetes deployments of Dynamo:
-  - [Dynamo CRDs](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-crds)
-  - [Dynamo Platform](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform)
+  - [Dynamo Platform](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform) (includes CRDs)
   - [Dynamo Graph](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-graph)
 
 - **Rust Crates**:

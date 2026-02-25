@@ -9,24 +9,51 @@ use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
 use super::*;
-use crate::Component;
+use crate::Endpoint;
 use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
 use rs::pipeline::{AsyncEngine, SingleIn};
+use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
+use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
 use llm_rs::kv_router::protocols::*;
-use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks, start_zmq_listener};
+use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use serde_json::json;
 
+fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BlockExtraInfo>>> {
+    depythonize(obj).map_err(to_pyerr)
+}
+
 #[pyfunction]
-#[pyo3(signature = (tokens, kv_block_size, block_mm_infos=None))]
+#[pyo3(name = "start_kv_block_indexer", signature = (endpoint, block_size, kv_router_config))]
+pub fn start_kv_block_indexer_py<'p>(
+    py: Python<'p>,
+    endpoint: &Endpoint,
+    block_size: u32,
+    kv_router_config: &super::entrypoint::KvRouterConfig,
+) -> PyResult<Bound<'p, PyAny>> {
+    let component = endpoint.inner.component().clone();
+    let config = kv_router_config.inner();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        llm_rs::kv_router::indexer_standalone::start_kv_block_indexer(
+            &component, &config, block_size,
+        )
+        .await
+        .map_err(to_pyerr)?;
+        Ok(())
+    })
+}
+
+#[pyfunction]
+#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None))]
 pub fn compute_block_hash_for_seq_py(
     _py: Python,
     tokens: Vec<u32>,
     kv_block_size: usize,
     block_mm_infos: Option<Bound<PyAny>>,
+    lora_name: Option<String>,
 ) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -34,21 +61,17 @@ pub fn compute_block_hash_for_seq_py(
         ));
     }
 
-    // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
-    let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
+    let mm_infos = block_mm_infos
         .as_ref()
-        .map(|infos_py| {
-            depythonize::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Failed to convert block_mm_infos: {}",
-                    e
-                ))
-            })
-        })
+        .map(depythonize_block_mm_infos)
         .transpose()?;
 
-    let hashes =
-        compute_block_hash_for_seq(&tokens, kv_block_size as u32, mm_infos_rust.as_deref());
+    let hashes = compute_block_hash_for_seq(
+        &tokens,
+        kv_block_size as u32,
+        mm_infos.as_deref(),
+        lora_name.as_deref(),
+    );
 
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }
@@ -69,14 +92,14 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (component))]
+    #[pyo3(signature = (endpoint))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
-        component: Component,
+        endpoint: Endpoint,
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
-        let rs_component = component.inner.clone();
+        let rs_component = endpoint.inner.component().clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             rs_publisher
                 .create_endpoint(rs_component)
@@ -100,127 +123,6 @@ impl WorkerMetricsPublisher {
 }
 
 #[pyclass]
-#[derive(Clone)]
-pub struct ZmqKvEventPublisherConfig {
-    #[pyo3(get, set)]
-    pub worker_id: WorkerId,
-    #[pyo3(get, set)]
-    pub kv_block_size: usize,
-    #[pyo3(get, set)]
-    pub zmq_endpoint: String,
-    #[pyo3(get, set)]
-    pub zmq_topic: String,
-    #[pyo3(get, set)]
-    pub enable_local_indexer: bool, // whether the underlying KvEventPublisher publishes to
-    // both global and worker-local KvIndexers
-    #[pyo3(get, set)]
-    pub dp_rank: DpRank, // data parallel rank for this publisher
-}
-
-#[pymethods]
-impl ZmqKvEventPublisherConfig {
-    #[new]
-    #[pyo3(signature = (
-        worker_id,
-        kv_block_size,
-        zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
-        zmq_topic = "".to_string(),
-        enable_local_indexer = true,
-        dp_rank = 0
-    ))]
-    pub fn new(
-        worker_id: WorkerId,
-        kv_block_size: usize,
-        zmq_endpoint: String,
-        zmq_topic: String,
-        enable_local_indexer: bool,
-        dp_rank: DpRank,
-    ) -> Self {
-        Self {
-            worker_id,
-            kv_block_size,
-            zmq_endpoint,
-            zmq_topic,
-            enable_local_indexer,
-            dp_rank,
-        }
-    }
-}
-
-/// A ZMQ-based key-value cache event listener that operates independently
-/// of the dynamo runtime or event plane infrastructure.
-#[pyclass]
-pub(crate) struct ZmqKvEventListener {
-    event_receiver: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<KvCacheEvent>>>,
-    shutdown_token: tokio_util::sync::CancellationToken,
-}
-
-#[pymethods]
-impl ZmqKvEventListener {
-    #[new]
-    #[pyo3(signature = (zmq_endpoint, zmq_topic, kv_block_size))]
-    fn new(zmq_endpoint: String, zmq_topic: String, kv_block_size: usize) -> PyResult<Self> {
-        if kv_block_size == 0 {
-            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
-        }
-
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<KvCacheEvent>();
-            let shutdown_token = tokio_util::sync::CancellationToken::new();
-            // Standalone listener needs its own event ID counter
-            let next_event_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-            tokio::spawn(start_zmq_listener(
-                zmq_endpoint,
-                zmq_topic,
-                tx,
-                shutdown_token.clone(),
-                kv_block_size as u32,
-                next_event_id,
-            ));
-
-            Ok(Self {
-                event_receiver: Arc::new(tokio::sync::Mutex::new(rx)),
-                shutdown_token,
-            })
-        })
-    }
-
-    fn get_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let receiver = self.event_receiver.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut rx = receiver.lock().await;
-            let mut events = Vec::new();
-
-            // Drain all available events
-            while let Ok(event) = rx.try_recv() {
-                events.push(event);
-            }
-
-            // Convert events to JSON strings
-            let json_events: Result<Vec<String>, _> =
-                events.iter().map(serde_json::to_string).collect();
-
-            match json_events {
-                Ok(json_strings) => Ok(json_strings),
-                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Failed to serialize events to JSON: {}",
-                    e
-                ))),
-            }
-        })
-    }
-}
-
-// manual shutdown needed as it's not tied to the dynamo DRT
-impl Drop for ZmqKvEventListener {
-    fn drop(&mut self) {
-        self.shutdown_token.cancel();
-    }
-}
-
-#[pyclass]
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
     kv_block_size: usize,
@@ -231,40 +133,32 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_config=None))]
+    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None))]
     fn new(
-        component: Component,
+        endpoint: Endpoint,
         worker_id: WorkerId,
         kv_block_size: usize,
         dp_rank: DpRank,
         enable_local_indexer: bool,
-        zmq_config: Option<ZmqKvEventPublisherConfig>,
+        zmq_endpoint: Option<String>,
+        zmq_topic: Option<String>,
     ) -> PyResult<Self> {
-        // worker_id is not used; connection_id is inferred from the component.
         let _ = worker_id;
 
-        // When zmq_config is provided, use its fields for kv_block_size/dp_rank/enable_local_indexer
-        let (kv_block_size, dp_rank, enable_local_indexer, source_config) =
-            if let Some(ref cfg) = zmq_config {
-                (
-                    cfg.kv_block_size,
-                    cfg.dp_rank,
-                    cfg.enable_local_indexer,
-                    Some(KvEventSourceConfig::Zmq {
-                        endpoint: cfg.zmq_endpoint.clone(),
-                        topic: cfg.zmq_topic.clone(),
-                    }),
-                )
-            } else {
-                (kv_block_size, dp_rank, enable_local_indexer, None)
-            };
+        let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
+            endpoint: ep,
+            topic: zmq_topic.unwrap_or_default(),
+        });
 
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
+        // Extract component from endpoint
+        let component = endpoint.inner.component().clone();
+
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component.inner,
+            component,
             kv_block_size as u32,
             source_config,
             enable_local_indexer,
@@ -281,36 +175,27 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None, block_mm_infos=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None))]
     fn publish_stored(
         &self,
         py: Python,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
         block_hashes: Vec<i64>,
-        lora_id: u64,
         parent_hash: Option<i64>,
         block_mm_infos: Option<Bound<PyAny>>,
+        lora_name: Option<String>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
         let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
 
-        // Use shared monotonic event_id counter from the inner publisher
         let event_id = inner.next_event_id();
 
-        // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
-        let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
+        let mm_infos = block_mm_infos
             .as_ref()
-            .map(|infos_py| {
-                depythonize::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Failed to convert block_mm_infos: {}",
-                        e
-                    ))
-                })
-            })
+            .map(depythonize_block_mm_infos)
             .transpose()?;
 
         py.allow_threads(|| {
@@ -324,9 +209,9 @@ impl KvEventPublisher {
                         &token_ids,
                         &num_block_tokens,
                         &block_hashes_u64,
-                        lora_id,
+                        lora_name.as_deref(),
                         &warning_count,
-                        mm_infos_rust.as_deref(),
+                        mm_infos.as_deref(),
                     ),
                 }),
                 dp_rank,
@@ -719,8 +604,8 @@ async fn create_kv_router_from_endpoint(
 }
 
 #[pyclass]
-pub(crate) struct KvPushRouter {
-    inner: Arc<llm_rs::kv_router::KvPushRouter>,
+pub(crate) struct KvRouter {
+    inner: Arc<RsKvPushRouter>,
 }
 
 /// Inject worker_id info from tracker into response's disaggregated_params.
@@ -749,27 +634,25 @@ fn inject_worker_id_from_tracker(
 }
 
 // TODO: can this reuse the stream conversion method in Client bindings?
-impl KvPushRouter {
+impl KvRouter {
     /// Helper method to process a request and create a Python async generator
     fn process_request_to_stream<'p>(
         py: Python<'p>,
-        inner: Arc<llm_rs::kv_router::KvPushRouter>,
+        inner: Arc<RsKvPushRouter>,
         request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
         tracker: Option<Arc<RequestTracker>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let single_in = SingleIn::new(request);
             let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
-            let (tx, rx) = tokio::sync::mpsc::channel(100);
+            let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(100);
 
-            // Spawn a task to process the stream
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut first_item = true;
                 let mut first_token_gauges_observed = false;
 
                 while let Some(mut response) = stream.next().await {
-                    // Inject worker_id into first response if tracker is available
                     if first_item {
                         first_item = false;
                         if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
@@ -777,7 +660,6 @@ impl KvPushRouter {
                         }
                     }
 
-                    // Observe per-worker TTFT/ISL gauges on first response with actual tokens
                     if !first_token_gauges_observed {
                         let has_tokens = response
                             .data
@@ -792,7 +674,6 @@ impl KvPushRouter {
                         }
                     }
 
-                    // Convert LLMEngineOutput to PyObject
                     let py_response = Python::with_gil(|py| {
                         pythonize(py, &response.data)
                             .map(|obj| obj.unbind())
@@ -801,8 +682,8 @@ impl KvPushRouter {
 
                     match py_response {
                         Ok(obj) => {
-                            if tx.send(obj).await.is_err() {
-                                break; // Receiver dropped
+                            if tx.send(RsAnnotated::from_data(obj)).await.is_err() {
+                                break;
                             }
                         }
                         Err(e) => {
@@ -812,23 +693,19 @@ impl KvPushRouter {
                     }
                 }
 
-                // Observe per-worker ITL gauge at stream end
                 if let Some(ref tracker) = tracker {
                     tracker.observe_finish_gauges();
                 }
             });
 
-            // Return a Python async generator wrapper
-            Ok(KvPushRouterStream {
-                rx: Arc::new(tokio::sync::Mutex::new(rx)),
-            })
+            Ok(crate::AsyncResponseStream::new(rx, false))
         })
     }
 }
 
 #[pymethods]
-impl KvPushRouter {
-    /// Create a new KvPushRouter for KV-aware routing to workers.
+impl KvRouter {
+    /// Create a new KvRouter for KV-aware routing to workers.
     ///
     /// # Arguments
     /// * `endpoint` - The endpoint to route requests to
@@ -869,8 +746,7 @@ impl KvPushRouter {
             )
             .await?;
 
-            // Create KvPushRouter (kv_router is already Arc<KvRouter>)
-            let kv_push_router = llm_rs::kv_router::KvPushRouter::new(push_router, kv_router);
+            let kv_push_router = RsKvPushRouter::new(push_router, kv_router);
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),
@@ -879,7 +755,7 @@ impl KvPushRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -892,6 +768,9 @@ impl KvPushRouter {
         worker_id: Option<WorkerId>,
         dp_rank: Option<DpRank>,
         extra_args: Option<PyObject>,
+        block_mm_infos: Option<PyObject>,
+        multi_modal_data: Option<PyObject>,
+        mm_routing_info: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
@@ -925,6 +804,29 @@ impl KvPushRouter {
             None
         };
 
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
+
+        let multi_modal_data: Option<llm_rs::protocols::common::preprocessor::MultimodalDataMap> =
+            if let Some(obj) = multi_modal_data {
+                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+            } else {
+                None
+            };
+
+        let mm_routing_info: Option<llm_rs::protocols::common::preprocessor::MmRoutingInfo> =
+            if let Some(obj) = mm_routing_info {
+                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+            } else {
+                block_mm_infos.map(
+                    |infos| llm_rs::protocols::common::preprocessor::MmRoutingInfo {
+                        routing_token_ids: token_ids.clone(),
+                        block_mm_infos: infos,
+                    },
+                )
+            };
+
         // Create tracker to capture worker routing info from KvRouter
         let tracker = Arc::new(RequestTracker::new());
 
@@ -938,6 +840,8 @@ impl KvPushRouter {
             .sampling_options(sampling_options)
             .output_options(output_options)
             .router_config_override(router_config_override)
+            .multi_modal_data(multi_modal_data)
+            .mm_routing_info(mm_routing_info)
             .extra_args(extra_args)
             .tracker(Some(tracker.clone()));
 
@@ -980,13 +884,15 @@ impl KvPushRouter {
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None, lora_name=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
         router_config_override: Option<PyObject>,
         request_id: Option<String>,
+        block_mm_infos: Option<PyObject>,
+        lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: llm_rs::kv_router::RouterConfigOverride =
@@ -996,6 +902,10 @@ impl KvPushRouter {
             None
         };
 
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
+
         let chooser = self.inner.chooser.clone();
         let update_states = request_id.is_some();
 
@@ -1004,9 +914,12 @@ impl KvPushRouter {
                 .find_best_match(
                     request_id.as_deref(),
                     &token_ids,
+                    block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
-                    None, // lora_name not exposed in Python API yet
+                    lora_name,
+                    0.0,
+                    None, // allowed_worker_ids not exposed in Python API yet
                 )
                 .await
                 .map_err(to_pyerr)?;
@@ -1042,16 +955,18 @@ impl KvPushRouter {
         })
     }
 
+    #[pyo3(signature = (token_ids, lora_name=None))]
     fn get_potential_loads<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
+        lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
-                .get_potential_loads(&token_ids)
+                .get_potential_loads(&token_ids, None, lora_name.as_deref())
                 .await
                 .map_err(to_pyerr)?;
 
@@ -1074,35 +989,6 @@ impl KvPushRouter {
             // Serialize to JSON string
             let json_str = serde_json::to_string(&events).map_err(to_pyerr)?;
             Ok(json_str)
-        })
-    }
-}
-
-// Python async generator wrapper for the stream
-#[pyclass]
-pub(crate) struct KvPushRouterStream {
-    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<PyObject>>>,
-}
-
-#[pymethods]
-impl KvPushRouterStream {
-    #[pyo3(name = "__aiter__")]
-    fn aiter(slf: Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-        Ok(slf.clone().into_any().unbind())
-    }
-
-    #[pyo3(name = "__anext__")]
-    fn anext<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let rx = self.rx.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut rx = rx.lock().await;
-            match rx.recv().await {
-                Some(obj) => Ok(obj),
-                None => Err(pyo3::exceptions::PyStopAsyncIteration::new_err(
-                    "Stream exhausted",
-                )),
-            }
         })
     }
 }

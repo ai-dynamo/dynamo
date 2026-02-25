@@ -1,11 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Integration with Dynamo
 ---
 
 # Checkpoint/Restore for Fast Pod Startup
 
-> ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. It requires privileged mode for restore operations. See [Limitations](#limitations) for details.
+> ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. The ChReK DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
 
 Reduce cold start times for LLM inference workers from ~3 minutes to ~30 seconds using container checkpointing.
 
@@ -22,7 +23,7 @@ Checkpointing captures the complete state of a running worker pod (including GPU
 
 - Dynamo Platform installed (v0.4.0+)
 - ChReK Helm chart installed (separate from platform)
-- GPU nodes with CRIU support
+- GPU nodes with containerd runtime (CRIU is bundled in ChReK images)
 - RWX PVC storage (PVC is currently the only supported backend)
 
 ## Quick Start
@@ -349,9 +350,9 @@ Or use `auto` mode and the operator will find/create it automatically.
 ⚠️ **Important**: ChReK has significant limitations that impact production readiness:
 
 ### Security Considerations
-- **🔴 Privileged mode required**: Restore pods **must run in privileged mode** for CRIU to function
-- Privileged containers have elevated host access, which may violate security policies in many production environments
-- This requirement applies to all worker pods that restore from checkpoints
+- **🔴 Privileged DaemonSet**: The ChReK DaemonSet runs in privileged mode with `hostPID`, `hostIPC`, and `hostNetwork` to perform CRIU operations externally
+- Workload pods (checkpoint jobs, restore pods) do **not** need privileged mode — all CRIU privilege lives in the DaemonSet
+- The privileged DaemonSet has elevated host access, which may violate security policies in many production environments
 
 ### Technical Limitations
 - **vLLM backend only**: Currently only the vLLM backend supports checkpoint/restore. SGLang and TensorRT-LLM support is planned.
@@ -373,7 +374,7 @@ ChReK is **experimental/beta** and best suited for:
 
 1. Check the checkpoint job:
    ```bash
-   kubectl get jobs -l nvidia.com/checkpoint-source=true -n dynamo-system
+   kubectl get jobs -l nvidia.com/chrek-is-checkpoint-source=true -n dynamo-system
    kubectl logs job/checkpoint-<name> -n dynamo-system
    ```
 
@@ -429,10 +430,10 @@ Check logs for "Falling back to cold start" message.
 | Variable | Description |
 |----------|-------------|
 | `DYN_CHECKPOINT_STORAGE_TYPE` | Backend: `pvc`, `s3`, `oci` |
-| `DYN_CHECKPOINT_LOCATION` | Source location (URI) |
-| `DYN_CHECKPOINT_PATH` | Local path to tar file |
-| `DYN_CHECKPOINT_HASH` | Identity hash (debugging) |
-| `DYN_CHECKPOINT_SIGNAL_FILE` | Signal file (creation mode only) |
+| `DYN_CHECKPOINT_LOCATION` | Full checkpoint location (checkpoint jobs) |
+| `DYN_CHECKPOINT_PATH` | Base checkpoint directory (restore pods, PVC) |
+| `DYN_CHECKPOINT_HASH` | Identity hash |
+| `DYN_READY_FOR_CHECKPOINT_FILE` | Ready-for-checkpoint file path (checkpoint jobs) |
 
 ## Complete Example
 

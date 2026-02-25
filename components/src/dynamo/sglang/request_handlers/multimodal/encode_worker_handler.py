@@ -6,14 +6,19 @@ import logging
 from typing import AsyncIterator, Optional
 
 import torch
+
+# MMEncoder chain imports compiled CUDA ops; may fail in CPU-only environments.
+try:
+    from sglang.srt.disaggregation.encode_server import MMEncoder
+except (ImportError, OSError):
+    MMEncoder = None  # type: ignore[assignment]
 from sglang.srt.parser.conversation import chat_templates
-from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
+from transformers import AutoTokenizer
 
 import dynamo.nixl_connect as connect
-from dynamo._core import Client, Component, Context
+from dynamo._core import Client, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
-from dynamo.sglang.multimodal_utils import ImageLoader, encode_image_embeddings
 from dynamo.sglang.protocol import SglangMultimodalRequest
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -32,8 +37,6 @@ except ImportError as e:
 
     DEVICE = "cpu"
 
-CACHE_SIZE_MAXIMUM = 8
-
 
 class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
     """
@@ -43,28 +46,26 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         config: Config,
         pd_worker_client: Client,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
-        super().__init__(
-            component, engine=None, config=config, shutdown_event=shutdown_event
-        )
+        super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
         self.pd_worker_client = pd_worker_client
         self.model = config.server_args.model_path
-        self.served_model_name = config.server_args.served_model_name
 
-        self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
+        if MMEncoder is None:
+            raise RuntimeError(
+                "MMEncoder is not available. "
+                "Multimodal encode worker requires a CUDA environment."
+            )
 
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=True
-        )
-        self.vision_model = AutoModel.from_pretrained(
-            self.model,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
+        # torch.distributed requires a dist_init_method even for tp=1;
+        # port 0 lets the OS assign a free port.
+        self.encoder = MMEncoder(
+            server_args=config.server_args,
+            dist_init_method="tcp://127.0.0.1:0",
+            rank=0,
         )
 
         # Load tokenizer to convert image token string to integer ID
@@ -112,45 +113,37 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
                 request = SglangMultimodalRequest.model_validate(request)
 
         # The following steps encode the requested image for SGLang:
-        # 1. Open the image from the provided URL.
-        # 2. Process the image using the processor (which handles tokenization).
-        # 3. Extract input_ids and image data from processed result.
-        # 4. Run the image through the vision model to get precomputed embeddings.
-        # 5. Create SGLang-specific multimodal data format.
-        # 6. Create a descriptor for the embeddings and send to downstream worker.
+        # 1. Pass the image URL to MMEncoder which loads, preprocesses, and
+        #    runs the vision encoder.
+        # 2. Add a batch dimension and store metadata on the request.
+        # 3. Expand the single image placeholder token to match patch count.
+        # 4. Create a NIXL descriptor and send embeddings to downstream worker.
+        # 5. Stream the downstream worker's response back to the caller.
 
         try:
             if not request.multimodal_input.image_url:
                 raise ValueError("image_url is required for the encode worker.")
 
-            image = await self.image_loader.load_image(
-                request.multimodal_input.image_url
-            )
-
-            image_embeds = self.image_processor(images=image, return_tensors="pt")
-            precomputed_embeddings = encode_image_embeddings(
-                model_name=self.served_model_name,
-                image_embeds=image_embeds,
-                vision_encoder=self.vision_model,
-                projector=None,
+            image_grid_dim, mm_embedding = await self.encoder._encode(
+                [request.multimodal_input.image_url]
             )
 
             image_grid_thw = (
-                image_embeds["image_grid_thw"].tolist()
-                if "image_grid_thw" in image_embeds
-                else None
+                image_grid_dim.tolist()
+                if isinstance(image_grid_dim, torch.Tensor)
+                else image_grid_dim
             )
 
             # Store the image data info in the request for downstream
+            request.processor_output = {"image_grid_thw": image_grid_thw}
             request.image_grid_thw = image_grid_thw
-            request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            request.embeddings_shape = tuple(mm_embedding.shape)
 
             # Replace the single image token with multiple image tokens based on embedding shape
             image_token_id_index = request.request.token_ids.index(self.image_token_id)
 
-            num_image_tokens = precomputed_embeddings.shape[
-                1
-            ]  # Number of image patches
+            num_image_tokens = mm_embedding.shape[0]  # Number of image patches
+
             # Replace single image token with multiple image tokens
             request.request.token_ids = (
                 request.request.token_ids[:image_token_id_index]
@@ -161,7 +154,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             )
 
             # Create descriptor for the multimodal data
-            descriptor = connect.Descriptor(precomputed_embeddings)
+            descriptor = connect.Descriptor(mm_embedding)
 
             with await self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()

@@ -35,7 +35,9 @@ COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 
 # Install system dependencies
-RUN dnf install -y almalinux-release-synergy && \
+# Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
+RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
+    dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
         # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
@@ -75,8 +77,7 @@ RUN dnf install -y almalinux-release-synergy && \
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
-        zlib-devel && \
-    dnf clean all && rm -rf /var/cache/dnf/
+        zlib-devel
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -138,10 +139,10 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
         /tmp/use-sccache.sh install; \
     fi
 
-# Set SCCACHE environment variables
+# Set SCCACHE environment variables (RUSTC_WRAPPER is set dynamically by
+# setup-env only when the sccache server starts successfully)
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
 # Build FFmpeg from source
 # Do not delete the source tarball for legal reasons
@@ -152,9 +153,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export RUSTC_WRAPPER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     dnf install -y pkg-config && \
     cd /tmp && \
@@ -190,9 +189,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
      git clone https://github.com/openucx/ucx.git && \
@@ -225,9 +222,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
     git clone https://github.com/ofiwg/libfabric.git && \
@@ -257,6 +252,9 @@ ARG AWS_SDK_CPP_VERSION=1.11.581
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
+    fi && \
     git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
         https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
     mkdir -p /tmp/aws-sdk-cpp/build && \
@@ -281,9 +279,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone "https://github.com/ai-dynamo/nixl.git" && \
@@ -317,16 +313,13 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /workspace/nixl && \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
-COPY launch/ /opt/dynamo/launch/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
@@ -340,10 +333,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
-        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-        export RUSTC_WRAPPER="sccache"; \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
     fi && \
+    mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
@@ -370,7 +362,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 # Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        export UV_CACHE_DIR=/root/.cache/uv && \
         source ${VIRTUAL_ENV}/bin/activate && \
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi

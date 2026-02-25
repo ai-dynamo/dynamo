@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Autoscaling
 ---
 
 This guide explains how to configure autoscaling for DynamoGraphDeployment (DGD) services using the `sglang-agg` example from `examples/backends/sglang/deploy/agg.yaml`.
@@ -40,7 +41,7 @@ spec:
 
 ## Overview
 
-Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAdapter` (DGDSA) resource. When you deploy a DGD, the operator automatically creates one adapter per service (unless explicitly disabled). These adapters implement the Kubernetes [Scale subresource](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#scale-subresource), enabling integration with:
+Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAdapter` (DGDSA) resource. To have the operator create a DGDSA for a service, follow the Enabling DGDSA for a Service section below. These adapters implement the Kubernetes [Scale subresource](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#scale-subresource), enabling integration with:
 
 | Autoscaler | Description | Best For |
 |------------|-------------|----------|
@@ -95,7 +96,7 @@ kubectl get dgdsa -n default
 
 ## Replica Ownership Model
 
-When DGDSA is enabled (the default), it becomes the **source of truth** for replica counts. This follows the same pattern as Kubernetes Deployments owning ReplicaSets.
+When DGDSA is enabled, it becomes the **source of truth** for replica counts. This follows the same pattern as Kubernetes Deployments owning ReplicaSets.
 
 ### How It Works
 
@@ -592,9 +593,9 @@ spec:
 
 ## Manual Scaling
 
-### With DGDSA Enabled (Default)
+### With DGDSA Enabled
 
-When DGDSA is enabled (the default), scale via the adapter:
+When DGDSA is enabled, scale via the adapter:
 
 ```bash
 kubectl scale dgdsa sglang-agg-decode -n default --replicas=3
@@ -614,7 +615,7 @@ kubectl get dgdsa sglang-agg-decode -n default
 If an autoscaler (KEDA, HPA, Planner) is managing the adapter, your change will be overwritten on the next evaluation cycle.
 </Note>
 
-### With DGDSA Disabled
+### With DGDSA Disabled (default)
 
 If you've disabled the scaling adapter for a service, edit the DGD directly:
 

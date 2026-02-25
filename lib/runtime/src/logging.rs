@@ -122,7 +122,6 @@ impl Default for LoggingConfig {
                 ("tokenizers".to_string(), "error".to_string()),
                 ("axum".to_string(), "error".to_string()),
                 ("tonic".to_string(), "error".to_string()),
-                ("mistralrs_core".to_string(), "error".to_string()),
                 ("hf_hub".to_string(), "error".to_string()),
                 ("opentelemetry".to_string(), "error".to_string()),
                 ("opentelemetry-otlp".to_string(), "error".to_string()),

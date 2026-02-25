@@ -246,6 +246,74 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 > ```
 > However, by the time of release, the aiperf version included in the vLLM runtime container should be up to date enough to use as-is.
 
+### Step 4 (Alternative): Priority Queue Benchmark
+
+`real_data_priority_benchmark.py` measures whether the router's priority queue correctly differentiates high-, medium-, and low-priority requests. It splits a trace into three tiers, runs a **baseline** (no priority tagging) and a **priority-tagged** run using the same split, then produces a bar chart comparing TTFT across tiers.
+
+#### How it works
+
+1. The trace is synthesized (same parameters as `real_data_benchmark.py`) and split into low / medium / high tiers according to `--priority-distribution`.
+2. Each tier is sent to aiperf as a concurrent stream. In the priority-tagged run, every request carries an OpenAI-compatible extension header:
+   ```json
+   {"nvext": {"agent_hints": {"latency_sensitivity": <value>}}}
+   ```
+   The `latency_sensitivity` value acts as a **priority jump** (in seconds) inside the router's scheduler queue -- a higher value shifts the request's effective arrival time earlier, giving it priority over lower-valued requests.
+3. Two separate aiperf seeds are used for baseline vs. priority runs to ensure different generated prompt content and prevent mocker KV cache cross-contamination.
+
+#### Prerequisites: enable the priority queue
+
+The router queue only activates when `--router-queue-threshold` is set. Without it, requests bypass the queue entirely and priority has no effect.
+
+```bash
+# Launch the router with priority queue enabled.
+# The fraction (e.g. 1.2) controls the busy threshold:
+# workers are considered "busy" when active prefill tokens exceed
+# threshold * max_num_batched_tokens. Values > 1.0 effectively make
+# the queue always active.
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-reset-states \
+    --router-queue-threshold 1.2
+```
+
+#### Running the benchmark
+
+Because the mocker default speedup ratio is 1.0 (real-time), you need a sufficiently high `--speedup-ratio` to generate enough concurrent load for requests to actually queue up. A ratio of 8 or higher is recommended:
+
+```bash
+python real_data_priority_benchmark.py \
+    --input-dataset mooncake_trace.jsonl \
+    --num-requests 5000 \
+    --speedup-ratio 8 \
+    --prefix-len-multiplier 4 \
+    --prefix-root-multiplier 4
+```
+
+**Priority-specific parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--priority-distribution` | `0.5,0.3,0.2` | Fraction of requests assigned to low/medium/high tiers (must sum to 1.0) |
+| `--priority-values` | `0,1,2` | `latency_sensitivity` values for low/medium/high tiers (seconds of priority jump) |
+
+Examples:
+
+```bash
+# Equal tier sizes with aggressive priority differentiation.
+# --priority-values sets the latency_sensitivity per tier (low, medium, high).
+# Each value is a priority jump in seconds: the router subtracts it from the
+# request's arrival time, so higher values move the request further ahead
+# in the queue. Here low gets no boost, medium jumps 2s ahead, high jumps 5s.
+python real_data_priority_benchmark.py \
+    --input-dataset mooncake_trace.jsonl \
+    --num-requests 5000 \
+    --speedup-ratio 8 \
+    --priority-distribution 0.33,0.34,0.33 \
+    --priority-values 0,2,5
+```
+
+The benchmark outputs a `ttft_comparison.png` bar chart in the results directory showing TTFT (p50 with p25-p75 error bars) for each tier, comparing baseline vs. priority-tagged runs. If the priority queue is working correctly, high-priority requests should show lower TTFT in the priority run compared to baseline, while low-priority requests may show slightly higher TTFT.
+
 ### Step 4 (Alternative): Agent Benchmark (Concurrency-Based Multi-Turn)
 
 For benchmarking with multi-turn conversation traces using concurrency-based load generation (instead of timestamp-based replay), use `agent_benchmark.py`. This is useful for testing how the system handles multiple concurrent agent sessions.

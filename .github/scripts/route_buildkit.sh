@@ -6,39 +6,42 @@
 # route_buildkit.sh - Discover and route BuildKit pods for CI builds
 # =============================================================================
 #
-# ROUTING LOGIC:
-# --------------
-# Routing is optimized for Docker layer caching based on shared base images:
-#   - vLLM and SGLang share the same base image (cuda-dl-base) when CUDA versions match
-#   - TensorRT-LLM uses a different base (pytorch), so it's isolated
-#   - General builds have no framework, grouped with trtllm for isolation
+# ROUTING LOGIC (Coverage-Aware Ranked Rendezvous Hashing with SHA-256):
+# ---------------------------------------------------------
+# Routing is optimized for Docker layer caching, linear scaling, and
+# 100% pod utilization across any number of BuildKit pods.
 #
-# Pool assignment is also optimized for uneven uptime: pod 0 is the only pod
-# running outside business hours (via KEDA), so it accumulates fallback cache
-# for all flavors overnight. To compensate, pool 0 is assigned the LIGHTEST
-# daytime workload (trtllm + general), while pool 2 (only active during
-# business hours) gets the HEAVIEST workload (vllm/sglang-cuda12).
+# CACHE GROUPS (3 distinct groups to maximize layer reuse):
+#   - Group 0 (cuda-dl-base-13):    vLLM & SGLang (CUDA 13.x)
+#   - Group 1 (cuda-dl-base-12):    vLLM & SGLang (CUDA 12.x)
+#   - Group 2 (general-trt-combined): TRT-LLM & General Builds
 #
-# Flavors are routed to BuildKit pods using modulo 3 on the pod index:
-#   - Pool 0 (idx % 3 == 0): trtllm-cuda13, general      (lightest - offsets overnight fallback load)
-#   - Pool 1 (idx % 3 == 1): vllm-cuda13, sglang-cuda13  (share cuda-dl-base + wheel_builder cache)
-#   - Pool 2 (idx % 3 == 2): vllm-cuda12, sglang-cuda12  (heaviest - only active during business hours)
+# ALGORITHM:
+# 1. SCORING: Each group key is hashed with every active pod index (SHA-256)
+#    to produce a uniformly distributed score per (group, arch, pod) triple.
+# 2. RANKING: Pods are sorted by score (descending) per group. StatefulSet
+#    pod names are constant, so rankings are stable across invocations.
+# 3. POOL SIZING: Pool Size = ceil(Active Pods / 3) ensures even distribution.
+# 4. COVERAGE-AWARE SELECTION: Pools are built round-by-round across all 3
+#    groups simultaneously. In each round, each group picks its highest-ranked
+#    pod that is NOT YET in any group's pool (preferring uncovered pods).
+#    This guarantees every active pod appears in at least one group's pool.
+# 5. RANDOM PICK: ONE pod is randomly selected from the candidate pool.
 #
-# FALLBACK: If no pods match the target pool, the highest available index is used.
-#
-# EXPECTED ROUTING TABLE (pod indices returned for each flavor):
-# +------+---------------+---------+-------------+---------------+-------------+---------------+
-# | Pods | trtllm-cuda13 | general | vllm-cuda13 | sglang-cuda13 | vllm-cuda12 | sglang-cuda12 |
-# |      | (mod 0)       | (mod 0) | (mod 1)     | (mod 1)       | (mod 2)     | (mod 2)       |
-# +------+---------------+---------+-------------+---------------+-------------+---------------+
-# |  1   | 0             | 0       | 0 (fb)      | 0 (fb)        | 0 (fb)      | 0 (fb)        |
-# |  2   | 0             | 0       | 1           | 1             | 1 (fb)      | 1 (fb)        |
-# |  3   | 0             | 0       | 1           | 1             | 2           | 2             |
-# |  4   | 0, 3          | 0, 3    | 1           | 1             | 2           | 2             |
-# |  5   | 0, 3          | 0, 3    | 1, 4        | 1, 4          | 2           | 2             |
-# |  6   | 0, 3          | 0, 3    | 1, 4        | 1, 4          | 2, 5        | 2, 5          |
-# +------+---------------+---------+-------------+---------------+-------------+---------------+
-# (fb) = fallback - no pods matched target pool, returns max available index
+# LOAD DISTRIBUTION (cksum-based, all pods utilized):
+# +------+------+-------------------+-------------------+---------------------+
+# | Pods | Pool | G0: vLLM/SGL C13  | G1: vLLM/SGL C12  | G2: TRT-LLM/General |
+# +------+------+-------------------+-------------------+---------------------+
+# |  1   |  1   | {0}               | {0}               | {0}                 |
+# |  2   |  1   | {0}               | {1}               | {1}                 |
+# |  3   |  1   | {0}               | {2}               | {1}                 |
+# |  4   |  2   | {0, 3}            | {2, 1}            | {1, 2}             |
+# |  5   |  2   | {0, 3}            | {2, 4}            | {1, 2}             |
+# |  6   |  2   | {0, 3}            | {5, 1}            | {2, 4}             |
+# |  7   |  3   | {0, 3, 4}         | {5, 1, 2}         | {2, 6, 5}          |
+# |  8   |  3   | {7, 0, 3}         | {5, 1, 4}         | {2, 6, 5}          |
+# |  9   |  3   | {7, 0, 3}         | {8, 5, 1}         | {2, 6, 4}          |
+# +------+------+-------------------+-------------------+---------------------+
 #
 # =============================================================================
 
@@ -133,7 +136,7 @@ fi
 # --- CONFIGURATION ---
 NAMESPACE="buildkit"
 PORT="1234"
-MAX_POD_CHECK=10  # How many pod indices to probe (e.g., 0 to 3)
+MAX_POD_CHECK=10
 # ---------------------
 
 if ! command -v nslookup &> /dev/null; then
@@ -141,8 +144,13 @@ if ! command -v nslookup &> /dev/null; then
     exit 1
 fi
 
+if ! command -v sha256sum &> /dev/null; then
+    echo "❌ Error: sha256sum not found. Please install coreutils."
+    exit 1
+fi
+
 # --- RETRY CONFIGURATION ---
-MAX_RETRIES=${MAX_RETRIES:-8}
+MAX_RETRIES=${MAX_RETRIES:-2}
 RETRY_DELAY=${RETRY_DELAY:-30}
 # ---------------------------
 
@@ -166,64 +174,109 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-# Function to route flavors to specific active indices based on Modulo 3
+GROUP_KEYS=("cuda-dl-base-13" "cuda-dl-base-12" "general-trt-combined")
+
+# Map a flavor + CUDA version to a group index (0, 1, or 2)
+flavor_to_group() {
+  local flavor=$1
+  local cuda_major=${2%%.*}
+  case "$flavor" in
+    vllm|sglang)
+      case "$cuda_major" in
+        13) echo 0 ;;
+        *)  echo 1 ;;
+      esac
+      ;;
+    trtllm|general|*) echo 2 ;;
+  esac
+}
+
+# Compute coverage-aware pool assignments for all 3 groups.
+# Outputs pipe-separated pools: "pool0|pool1|pool2"
+compute_group_pools() {
+  local arch=$1
+  local -a available_indices=("${@:2}")
+  local count=${#available_indices[@]}
+
+  if [ "$count" -eq 0 ]; then
+    echo "||"
+    return
+  fi
+
+  local pool_size=$(( (count + 2) / 3 ))
+
+  local rank0="" rank1="" rank2=""
+  for g in 0 1 2; do
+    local scored_list=()
+    for idx in "${available_indices[@]}"; do
+      local combo="${GROUP_KEYS[$g]}-buildkit-${arch}-${idx}"
+      local score=$(echo -n "$combo" | sha256sum | awk '{print $1}')
+      scored_list+=("${score}:${idx}")
+    done
+    local sorted_str=$(printf "%s\n" "${scored_list[@]}" | sort -r | cut -d':' -f2 | tr '\n' ' ')
+    if [ "$g" -eq 0 ]; then rank0="$sorted_str"; fi
+    if [ "$g" -eq 1 ]; then rank1="$sorted_str"; fi
+    if [ "$g" -eq 2 ]; then rank2="$sorted_str"; fi
+  done
+
+  local pool0=" " pool1=" " pool2=" "
+  local covered=" "
+
+  for (( round=0; round<pool_size; round++ )); do
+    for g in 0 1 2; do
+      local current_rank="" current_pool=""
+      if [ "$g" -eq 0 ]; then current_rank="$rank0"; current_pool="$pool0"; fi
+      if [ "$g" -eq 1 ]; then current_rank="$rank1"; current_pool="$pool1"; fi
+      if [ "$g" -eq 2 ]; then current_rank="$rank2"; current_pool="$pool2"; fi
+
+      local picked=""
+      for candidate in $current_rank; do
+        [[ "$current_pool" == *" $candidate "* ]] && continue
+        if [[ "$covered" != *" $candidate "* ]]; then
+          picked=$candidate; break
+        fi
+      done
+      if [ -z "$picked" ]; then
+        for candidate in $current_rank; do
+          [[ "$current_pool" == *" $candidate "* ]] && continue
+          picked=$candidate; break
+        done
+      fi
+
+      if [ -n "$picked" ]; then
+        current_pool="${current_pool}${picked} "
+        covered="${covered}${picked} "
+        if [ "$g" -eq 0 ]; then pool0="$current_pool"; fi
+        if [ "$g" -eq 1 ]; then pool1="$current_pool"; fi
+        if [ "$g" -eq 2 ]; then pool2="$current_pool"; fi
+      fi
+    done
+  done
+
+  pool0=$(echo "$pool0" | xargs)
+  pool1=$(echo "$pool1" | xargs)
+  pool2=$(echo "$pool2" | xargs)
+  echo "${pool0}|${pool1}|${pool2}"
+}
+
+# Route a flavor to its group's pre-computed pool.
 get_target_indices() {
   local flavor=$1
   local cuda_version=$2
-  # Read remaining arguments as an array of available indices
-  local -a available_indices=("${@:3}")
+  local arch=$3
+  local -a available_indices=("${@:4}")
 
   if [ ${#available_indices[@]} -eq 0 ]; then
     echo ""
     return
   fi
 
+  local group=$(flavor_to_group "$flavor" "$cuda_version")
   local cuda_major=${cuda_version%%.*}
-  local route_key="${flavor}-cuda${cuda_major}"
-  local target_mod
+  echo "    [DEBUG] Routing Key: '$flavor-cuda$cuda_major' -> Group: $group (${GROUP_KEYS[$group]})" >&2
 
-  case "$route_key" in
-    # --- POOL 0: Isolated builds — lightest load offsets overnight fallback accumulation ---
-    trtllm-cuda13|general-*)
-      target_mod=0
-      ;;
-    # --- POOL 1: CUDA 13 builds (vLLM + SGLang share cuda-dl-base:cuda13.0) ---
-    vllm-cuda13|sglang-cuda13)
-      target_mod=1
-      ;;
-    # --- POOL 2: CUDA 12 builds — heaviest load, only active during business hours ---
-    vllm-cuda12|sglang-cuda12)
-      target_mod=2
-      ;;
-    # --- FALLBACK ---
-    *)
-      target_mod=0
-      ;;
-  esac
-
-  echo "    [DEBUG] Routing Key: '$route_key' -> Worker Index Modulo: $target_mod" >&2
-
-  local final_targets=()
-
-  # Filter the AVAILABLE indices (not just 0..count)
-  for idx in "${available_indices[@]}"; do
-    if [ $(( idx % 3 )) -eq "$target_mod" ]; then
-      final_targets+=("$idx")
-    fi
-  done
-
-  # If no pods match the specific modulo, fallback to the highest available index
-  if [ "${#final_targets[@]}" -eq "0" ]; then
-    local max_idx=${available_indices[0]}
-    for idx in "${available_indices[@]}"; do
-      if [ "$idx" -gt "$max_idx" ]; then
-        max_idx=$idx
-      fi
-    done
-    echo "$max_idx"
-  else
-    echo "${final_targets[@]}"
-  fi
+  local all_pools=$(compute_group_pools "$arch" "${available_indices[@]}")
+  echo "$all_pools" | cut -d'|' -f$((group + 1))
 }
 
 # Process each architecture
@@ -270,21 +323,21 @@ for ARCH in "${ARCHS[@]}"; do
 
   # Iterate over flavors and set outputs
   for flavor in "${FLAVORS[@]}"; do
-    # Pass the discovered ACTIVE_INDICES to the routing function
-    TARGET_INDICES=($(get_target_indices "$flavor" "$CUDA_VERSION" "${ACTIVE_INDICES[@]}"))
+    # Pass the discovered ACTIVE_INDICES to the routing function to get the candidate pool
+    TARGET_INDICES=($(get_target_indices "$flavor" "$CUDA_VERSION" "$ARCH" "${ACTIVE_INDICES[@]}"))
 
     ADDRS=""
-    for idx in "${TARGET_INDICES[@]}"; do
-      POD_NAME="${POD_PREFIX}-${idx}"
-      ADDR="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
-      if [ -z "$ADDRS" ]; then
-        ADDRS="$ADDR"
-      else
-        ADDRS="${ADDRS},${ADDR}"
-      fi
-    done
+    # 2. Get the number of elements in the candidate pool array
+    TARGET_INDICES_LENGTH=${#TARGET_INDICES[@]}
 
-    echo "    -> Routing ${flavor}_${ARCH} to pod indices: ${TARGET_INDICES[*]}"
+    # 3. Generate a random index between 0 and length-1
+    # The $RANDOM variable provides a number between 0 and 32767.
+    RANDOM_INDEX=$(($RANDOM % $TARGET_INDICES_LENGTH))
+    RANDOM_VALUE="${TARGET_INDICES[$RANDOM_INDEX]}"
+    POD_NAME="${POD_PREFIX}-${RANDOM_VALUE}"
+    ADDRS="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
+
+    echo "    -> Routing ${flavor}_${ARCH} to Candidate Pool: {${TARGET_INDICES[*]}} | Selected: ${RANDOM_VALUE}"
 
     # Write to GitHub Output
     echo "${flavor}_${ARCH}=$ADDRS" >> "$GITHUB_OUTPUT"

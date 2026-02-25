@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Quickstart
 ---
 
 This guide covers running Dynamo **using the CLI on your local machine or VM**.
@@ -98,13 +99,13 @@ Start the frontend, then start a worker for your chosen backend.
 
 <Tip>
 To run in a single terminal (useful in containers), append `> logfile.log 2>&1 &`
-to run processes in background. Example: `python3 -m dynamo.frontend --store-kv file > dynamo.frontend.log 2>&1 &`
+to run processes in background. Example: `python3 -m dynamo.frontend --discovery-backend file > dynamo.frontend.log 2>&1 &`
 </Tip>
 
 ```bash
 # Start the OpenAI compatible frontend (default port is 8000)
-# --store-kv file avoids needing etcd (frontend and workers must share a disk)
-python3 -m dynamo.frontend --store-kv file
+# --discovery-backend file avoids needing etcd (frontend and workers must share a disk)
+python3 -m dynamo.frontend --discovery-backend file
 ```
 
 In another terminal (or same terminal if using background mode), start a worker:
@@ -112,19 +113,19 @@ In another terminal (or same terminal if using background mode), start a worker:
 **SGLang**
 
 ```bash
-python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --store-kv file
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
 ```
 
 **TensorRT-LLM**
 
 ```bash
-python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --store-kv file
+python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
 ```
 
 **vLLM**
 
 ```bash
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --store-kv file \
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
   --kv-events-config '{"enable_kv_cache_events": false}'
 ```
 
@@ -137,6 +138,10 @@ For dependency-free local development, disable KV event publishing (avoids NATS)
 
 **TensorRT-LLM only:** The warning `Cannot connect to ModelExpress server/transport error. Using direct download.`
 is expected and can be safely ignored.
+</Note>
+
+<Note>
+**Deprecation notice:** vLLM automatically enables KV event publishing when prefix caching is active. In a future release, this will change — KV events will be disabled by default for all backends. Start using `--kv-events-config` explicitly to prepare.
 </Note>
 
 ## Test Your Deployment

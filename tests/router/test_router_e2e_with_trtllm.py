@@ -22,6 +22,7 @@ from tests.router.common import (  # utilities
 from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,11 @@ class TRTLLMProcess:
         self.worker_processes = []
         self.store_backend = store_backend
 
+        # Dynamically allocate unique system ports (one per worker) to avoid
+        # conflicts when tests run in parallel via pytest-xdist.
+        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        request.addfinalizer(lambda: deallocate_ports(self._system_ports))
+
         if trtllm_args is None:
             trtllm_args = {}
 
@@ -182,8 +188,8 @@ class TRTLLMProcess:
                 command.append("--enable-attention-dp")
 
             # Each TRT-LLM worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
-            # See examples/backends/trtllm/launch/disagg_same_gpu.sh for reference.
-            system_port = 8081 + worker_idx
+            # Ports are dynamically allocated for xdist-safe parallel execution.
+            system_port = self._system_ports[worker_idx]
 
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
@@ -191,7 +197,6 @@ class TRTLLMProcess:
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
-                # Set unique system port for each worker to avoid port conflicts
                 "DYN_SYSTEM_PORT": str(system_port),
             }
 
@@ -238,6 +243,7 @@ class TRTLLMProcess:
                 # Manually initialize the process without blocking on health checks
                 process._logger = logging.getLogger(process.__class__.__name__)
                 process._command_name = process.command[0]
+                process.log_dir = resolve_test_output_path(process.log_dir)
                 os.makedirs(process.log_dir, exist_ok=True)
                 log_name = f"{process._command_name}.log.txt"
                 process._log_path = os.path.join(process.log_dir, log_name)
@@ -401,10 +407,8 @@ def test_router_decisions_trtllm_attention_dp(
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
-        # Use the namespace from the vLLM workers
-        namespace = runtime.namespace(trtllm_workers.namespace)
-        component = namespace.component("tensorrt_llm")
-        endpoint = component.endpoint("generate")
+        # Use the namespace from the TRT-LLM workers
+        endpoint = runtime.endpoint(f"{trtllm_workers.namespace}.tensorrt_llm.generate")
 
         _test_router_decisions(
             trtllm_workers,
@@ -419,6 +423,11 @@ def test_router_decisions_trtllm_attention_dp(
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "router_event_threads",
+    [1, 2],
+    ids=["single_thread", "multi_thread"],
+)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
     request,
@@ -426,6 +435,7 @@ def test_router_decisions_trtllm_multiple_workers(
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
+    router_event_threads,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting TRT-LLM router prefix reuse test with two workers")
@@ -444,12 +454,8 @@ def test_router_decisions_trtllm_multiple_workers(
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
 
-        # Initialize TRT-LLM workers
-        # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(trtllm_workers.namespace)
-        component = namespace.component("tensorrt_llm")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{trtllm_workers.namespace}.tensorrt_llm.generate")
 
         _test_router_decisions(
             trtllm_workers,
@@ -458,6 +464,7 @@ def test_router_decisions_trtllm_multiple_workers(
             request,
             test_dp_rank=False,
             block_size=TRTLLM_BLOCK_SIZE,
+            router_event_threads=router_event_threads,
         )
 
 

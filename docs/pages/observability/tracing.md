@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Tracing
 ---
 
 # Distributed Tracing with Tempo
@@ -72,8 +73,8 @@ cd examples/backends/vllm/launch
 ./disagg.sh
 ```
 
-**Note:** the example vLLM `disagg.sh` sets additional per-worker port environment variables (e.g., `DYN_VLLM_KV_EVENT_PORT`,
-`VLLM_NIXL_SIDE_CHANNEL_PORT`) to avoid ZMQ "Address already in use" conflicts when multiple workers run on the same host. If you run the components manually, make sure you mirror those port settings.
+**Note:** the example vLLM `disagg.sh` sets per-worker `--kv-events-config` with unique ZMQ endpoints and unique
+`VLLM_NIXL_SIDE_CHANNEL_PORT` values to avoid "Address already in use" conflicts when multiple workers run on the same host. If you run the components manually, make sure you mirror those settings.
 
 ```bash
 #!/bin/bash
@@ -99,13 +100,13 @@ DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
 # Run prefill worker, make sure to wait for start up
 export OTEL_SERVICE_NAME=dynamo-worker-prefill
 DYN_SYSTEM_PORT=8082 \
-DYN_VLLM_KV_EVENT_PORT=20081 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
     --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" \
-    --is-prefill-worker &
+    --disaggregation-mode prefill \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 ```
 
 For disaggregated deployments, this separates prefill and decode onto different GPUs for better resource utilization.
@@ -144,7 +145,7 @@ http://localhost:8000/v1/chat/completions
 
 Below is an example of what a trace looks like in Grafana Tempo:
 
-![Trace Example](/assets/img/trace.png)
+![Trace Example](../../assets/img/trace.png)
 
 ### 6. Stop Services
 

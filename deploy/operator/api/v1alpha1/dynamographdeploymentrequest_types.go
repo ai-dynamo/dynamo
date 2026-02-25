@@ -28,8 +28,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
-
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -49,7 +47,7 @@ type ConfigMapKeySelector struct {
 
 // ProfilingConfigSpec defines configuration for the profiling process.
 // This structure maps directly to the profile_sla.py config format.
-// See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
+// See dynamo/profiler/utils/profiler_argparse.py for the complete schema.
 type ProfilingConfigSpec struct {
 	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.
 	// The profiler will validate the configuration and report any errors.
@@ -89,7 +87,25 @@ type ProfilingConfigSpec struct {
 	// For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint.
 	// +kubebuilder:validation:Optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// NodeSelector is a selector which must match a node's labels for the profiling pod to be scheduled on that node.
+	// For example, to schedule on ARM64 nodes, use {"kubernetes.io/arch": "arm64"}.
+	// +kubebuilder:validation:Optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
+
+// +kubebuilder:validation:Enum=Initializing;Pending;Profiling;Deploying;Ready;DeploymentDeleted;Failed
+type DGDRState string
+
+const (
+	DGDRStateInitializing      DGDRState = "Initializing"
+	DGDRStatePending           DGDRState = "Pending"
+	DGDRStateProfiling         DGDRState = "Profiling"
+	DGDRStateDeploying         DGDRState = "Deploying"
+	DGDRStateReady             DGDRState = "Ready"
+	DGDRStateDeploymentDeleted DGDRState = "DeploymentDeleted"
+	DGDRStateFailed            DGDRState = "Failed"
+)
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
 // When autoApply is enabled, these overrides are applied to the generated DGD resource.
@@ -146,22 +162,28 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:default=false
 	UseMocker bool `json:"useMocker,omitempty"`
 
-	// EnableGpuDiscovery controls whether the profiler should automatically discover GPU
-	// resources from the Kubernetes cluster nodes. When enabled, the profiler will override
-	// any manually specified hardware configuration (minNumGpusPerEngine, maxNumGpusPerEngine,
-	// numGpusPerNode) with values detected from the cluster.
-	// Requires cluster-wide node access permissions - only available with cluster-scoped operators.
-	// +kubebuilder:default=false
-	// +kubebuilder:validation:Optional
-	EnableGpuDiscovery bool `json:"enableGpuDiscovery,omitempty"`
-
 	// ProfilingConfig provides the complete configuration for the profiling job.
+	// Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes
+	// cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted),
+	// discovered GPU configuration is used as defaults when hardware configuration is not manually
+	// specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values
+	// always take precedence over auto-discovered values. If GPU discovery fails (e.g.,
+	// namespace-restricted operator without node permissions), manual hardware config is required.
 	// This configuration is passed directly to the profiler.
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
 	// Note: deployment.model and engine.backend are automatically set from the high-level
 	// modelName and backend fields and should not be specified in this config.
 	// +kubebuilder:validation:Required
 	ProfilingConfig ProfilingConfigSpec `json:"profilingConfig"`
+
+	// EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.
+	// DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always
+	// attempted automatically. Setting this field has no effect - the operator will always try to discover
+	// GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped
+	// operator without permissions), manual hardware configuration is required regardless of this setting.
+	// +optional
+	// +kubebuilder:default=true
+	EnableGPUDiscovery *bool `json:"enableGpuDiscovery,omitempty"`
 
 	// AutoApply indicates whether to automatically create a DynamoGraphDeployment
 	// after profiling completes. If false, only the spec is generated and stored in status.
@@ -186,7 +208,8 @@ type DeploymentStatus struct {
 
 	// State is the current state of the DynamoGraphDeployment.
 	// This value is mirrored from the DGD's status.state field.
-	State string `json:"state,omitempty"`
+	// +kubebuilder:default=initializing
+	State DGDState `json:"state"`
 
 	// Created indicates whether the DGD has been successfully created.
 	// Used to prevent recreation if the DGD is manually deleted by users.
@@ -197,9 +220,8 @@ type DeploymentStatus struct {
 // The controller updates this status as the DGDR progresses through its lifecycle.
 type DynamoGraphDeploymentRequestStatus struct {
 	// State is a high-level textual status of the deployment request lifecycle.
-	// Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"
-	// Empty string ("") represents the initial state before initialization.
-	State string `json:"state,omitempty"`
+	// +kubebuilder:default=Initializing
+	State DGDRState `json:"state"`
 
 	// Backend is extracted from profilingConfig.config.engine.backend for display purposes.
 	// This field is populated by the controller and shown in kubectl output.
@@ -241,7 +263,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // specific performance and resource constraints, enabling SLA-driven deployments.
 //
 // Lifecycle:
-//  1. Initial → Pending: Validates spec and prepares for profiling
+//  1. Initializing → Pending: Validates spec and prepares for profiling
 //  2. Pending → Profiling: Creates and runs profiling job (online or AIC)
 //  3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
 //  4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
@@ -251,9 +273,15 @@ type DynamoGraphDeploymentRequestStatus struct {
 // The spec becomes immutable once profiling starts. Users must delete and recreate
 // the DGDR to modify configuration after this point.
 //
+// DEPRECATION NOTICE: v1alpha1 DynamoGraphDeploymentRequest is deprecated.
+// Please migrate to nvidia.com/v1beta1 DynamoGraphDeploymentRequest.
+// v1alpha1 will be removed in a future release.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeploymentRequest is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentRequest"
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.status.backend`
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
@@ -271,16 +299,13 @@ type DynamoGraphDeploymentRequest struct {
 }
 
 // SetState updates the State field in the DGDR status.
-func (s *DynamoGraphDeploymentRequest) SetState(state string) {
+func (s *DynamoGraphDeploymentRequest) SetState(state DGDRState) {
 	s.Status.State = state
 }
 
 // GetState returns the current lifecycle state
 func (d *DynamoGraphDeploymentRequest) GetState() string {
-	if d.Status.State == "" {
-		return consts.ResourceStateUnknown
-	}
-	return d.Status.State
+	return string(d.Status.State)
 }
 
 // GetSpec returns the spec of this DGDR as a generic interface.

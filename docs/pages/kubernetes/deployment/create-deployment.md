@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Creating Deployments
 ---
 
 The scripts in the `examples/<backend>/launch` folder like [agg.sh](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
@@ -147,7 +148,6 @@ Consult the corresponding sh file. Each of the python commands to launch a compo
 
 The front end is launched with "python3 -m dynamo.frontend [--http-port 8000] [--router-mode kv]"
 Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MODEL --your-flags `command.
-If you are a Dynamo contributor the [dynamo run guide](../../reference/cli.md) for details on how to run this command.
 
 
 ## Step 3: Key Customization Points
@@ -186,7 +186,8 @@ If you are a Dynamo contributor the [dynamo run guide](../../reference/cli.md) f
 
 ```yaml
    args:
-     - --is-prefill-worker  # For disaggregated prefill workers
+     - --disaggregation-mode
+     - prefill  # For disaggregated prefill workers
 ```
 
 ### Image Pull Secret Configuration

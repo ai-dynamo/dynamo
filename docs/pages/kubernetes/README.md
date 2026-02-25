@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Deployment Guide
 ---
 
 # Deploying Dynamo on Kubernetes
@@ -45,7 +46,7 @@ Before deploying the platform, run the pre-deployment checks to ensure the clust
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README) for more details.
+This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for more details.
 
 ## 1. Install Platform First
 
@@ -54,18 +55,14 @@ This validates kubectl connectivity, StorageClass configuration, and GPU availab
 export NAMESPACE=dynamo-system
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
-# 2. Install CRDs (skip if on shared cluster where CRDs already exist)
-helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
-helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
-
-# 3. Install Platform
+# 2. Install Platform (CRDs are automatically installed by the chart)
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
 **For Shared/Multi-Tenant Clusters:**
 
-If your cluster has namespace-restricted Dynamo operators, add this flag to step 3:
+If your cluster has namespace-restricted Dynamo operators, add this flag to step 2:
 ```bash
 --set dynamo-operator.namespaceRestriction.enabled=true
 ```
@@ -78,9 +75,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend      | Aggregated | Aggregated + Router | Disaggregated | Disaggregated + Router | Disaggregated + Planner | Disaggregated Multi-node |
 |--------------|:----------:|:-------------------:|:-------------:|:----------------------:|:-----------------------:|:------------------------:|
-| **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
-| **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
+| **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ## 3. Deploy Your First Model
 
@@ -222,7 +219,7 @@ Key customization points include:
 - **Resource Allocation**: Configure GPU requirements under `resources.limits`
 - **Scaling**: Set `replicas` for number of worker instances
 - **Routing Mode**: Enable KV-cache routing by setting `DYN_ROUTER_MODE=kv` in Frontend envs
-- **Worker Specialization**: Add `--is-prefill-worker` flag for disaggregated prefill workers
+- **Worker Specialization**: Add `--disaggregation-mode prefill` flag for disaggregated prefill workers
 
 ## Additional Resources
 
@@ -231,7 +228,7 @@ Key customization points include:
 - **[Managing Models with DynamoModel](deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
 - **[Operator Documentation](dynamo-operator.md)** - How the platform works
 - **[Service Discovery](service-discovery.md)** - Discovery backends and configuration
-- **[Helm Charts](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/README)** - For advanced users
+- **[Helm Charts](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/README.md)** - For advanced users
 - **[Checkpointing](chrek/README.md)** - Fast pod startup with checkpoint/restore
 - **[GitOps Deployment with FluxCD](fluxcd.md)** - For advanced users
 - **[Logging](observability/logging.md)** - For logging setup

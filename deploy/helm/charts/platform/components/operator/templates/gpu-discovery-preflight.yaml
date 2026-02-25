@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Pre-install check: verifies the installer has permission to create the GPU discovery ClusterRole.
+# Runs only when namespaceRestriction.enabled=true and gpuDiscovery.enabled=true (the default).
+# If the check fails, installation is aborted with a clear error message explaining the options.
+{{- if and .Values.namespaceRestriction.enabled .Values.gpuDiscovery.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-gpu-discovery-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-gpu-discovery-preflight
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["selfsubjectaccessreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-gpu-discovery-preflight
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-gpu-discovery-preflight
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dynamo-operator.fullname" . }}-gpu-discovery-preflight
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-gpu-discovery-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 60
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-gpu-discovery-preflight
+      {{- if .Values.controllerManager.tolerations }}
+      tolerations:
+        {{- toYaml .Values.controllerManager.tolerations | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: check
+          image: alpine/k8s:1.34.1
+          command:
+            - /bin/sh
+            - -c
+            - |
+              if kubectl auth can-i create clusterroles --all-namespaces > /dev/null 2>&1; then
+                echo "GPU discovery preflight check passed: installer has ClusterRole creation permissions."
+                exit 0
+              else
+                echo ""
+                echo "ERROR: GPU discovery requires ClusterRole creation permissions, but the installer"
+                echo "does not have them. This is needed to grant the namespace-scoped operator"
+                echo "read-only node access for automatic GPU hardware discovery."
+                echo ""
+                echo "Options:"
+                echo "  1. Ask your cluster admin to grant ClusterRole creation permissions and re-run."
+                echo ""
+                echo "  2. Disable GPU discovery and provide hardware config manually in each DGDR:"
+                echo "     helm install ... --set dynamo-operator.gpuDiscovery.enabled=false"
+                echo ""
+                echo "     Then in your DynamoGraphDeploymentRequest:"
+                echo "     spec:"
+                echo "       profilingConfig:"
+                echo "         config:"
+                echo "           hardware:"
+                echo "             numGpusPerNode: 8"
+                echo "             gpuModel: \"H100-SXM5-80GB\""
+                echo "             gpuVramMib: 81920"
+                echo ""
+                exit 1
+              fi
+{{- end }}

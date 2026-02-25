@@ -9,7 +9,7 @@ use crate::{
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
     http::service::metrics::Metrics,
-    namespace::is_global_namespace,
+    namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -24,6 +24,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
+        .http_cancel_token(Some(distributed_runtime.primary_token()))
         .with_request_template(engine_config.local_model().request_template());
 
     // Set HTTP metrics port if provided (for parallel test execution)
@@ -37,18 +38,16 @@ pub async fn run(
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
             // Listen for models registering themselves, add them to gRPC service
-            let namespace = model.namespace().unwrap_or("");
-            let target_namespace = if is_global_namespace(namespace) {
-                None
-            } else {
-                Some(namespace.to_string())
-            };
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+                model.namespace(),
+                model.namespace_prefix(),
+            );
             run_watcher(
                 distributed_runtime.clone(),
                 grpc_service.state().manager_clone(),
                 router_config.clone(),
                 migration_limit,
-                target_namespace,
+                namespace_filter,
             )
             .await?;
             grpc_service
@@ -112,7 +111,7 @@ async fn run_watcher(
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
     migration_limit: u32,
-    target_namespace: Option<String>,
+    namespace_filter: NamespaceFilter,
 ) -> anyhow::Result<()> {
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
     let metrics = Arc::new(Metrics::new());
@@ -139,9 +138,7 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj
-            .watch(discovery_stream, target_namespace.as_deref())
-            .await;
+        watch_obj.watch(discovery_stream, namespace_filter).await;
     });
 
     Ok(())

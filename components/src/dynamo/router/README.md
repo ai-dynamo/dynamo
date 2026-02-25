@@ -18,9 +18,9 @@ This component is **fully configurable** and works with any Dynamo backend (vLLM
 ```bash
 python -m dynamo.router \
     --endpoint dynamo.prefill.generate \
-    --block-size 64 \
+    --router-block-size 64 \
     --router-reset-states \
-    --no-track-active-blocks
+    --no-router-track-active-blocks
 ```
 
 ### Arguments
@@ -29,16 +29,16 @@ python -m dynamo.router \
 - `--endpoint`: Full endpoint path for workers in the format `namespace.component.endpoint` (e.g., `dynamo.prefill.generate`)
 
 **Router Configuration:**
-For detailed descriptions of all KV router configuration options including `--block-size`, `--kv-overlap-score-weight`, `--router-temperature`, `--no-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, and `--no-track-active-blocks`, see the [Router Guide](/docs/pages/components/router/router-guide.md).
+All router options use the `--router-*` prefix (e.g., `--router-block-size`, `--router-kv-overlap-score-weight`, `--router-temperature`, `--router-kv-events` / `--no-router-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, `--router-track-active-blocks` / `--no-router-track-active-blocks`). Legacy names without the prefix (e.g., `--block-size`, `--kv-events`) are still accepted but deprecated. For detailed descriptions, see the [Router Guide](/docs/pages/components/router/router-guide.md).
 
 ## Architecture
 
 The standalone router exposes two endpoints via the Dynamo runtime:
 
-1. **`find_best_worker`**: Given a request with token IDs, returns the best worker to handle it
-2. **`free`**: Cleans up router state when a request completes
+1. **`generate`**: Routes requests to the best worker and streams back generation results (KV-aware routing).
+2. **`best_worker_id`**: Given token IDs, returns the best worker ID for the request without routing; useful for debugging or custom routing logic.
 
-Clients query the `find_best_worker` endpoint to determine which worker should process each request, then call the selected worker directly.
+Clients call the `generate` endpoint to stream completions, or call `best_worker_id` to decide which worker to use and then contact that worker directly.
 
 ## Example: Manual Disaggregated Serving (Alternative Setup)
 
@@ -59,22 +59,22 @@ python -m dynamo.frontend \
 # Start standalone router for prefill workers
 python -m dynamo.router \
     --endpoint dynamo.prefill.generate \
-    --block-size 64 \
+    --router-block-size 64 \
     --router-reset-states \
-    --no-track-active-blocks
+    --no-router-track-active-blocks
 
 # Start decode workers
 python -m dynamo.vllm --model MODEL_NAME --block-size 64 &
 
 # Start prefill workers
-python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
+python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode prefill &
 ```
 
 >[!Note]
-> **Why `--no-track-active-blocks` for prefill routing?**
+> **Why `--no-router-track-active-blocks` for prefill routing?**
 > Active block tracking is used for load balancing across decode (generation) phases. For prefill-only routing, decode load is not relevant, so disabling this reduces overhead and simplifies the router state.
 >
-> **Why `--block-size` is required for standalone routers:**
+> **Why `--router-block-size` is required for standalone routers:**
 > Unlike the frontend router which can infer block size from the ModelDeploymentCard (MDC) during worker registration, standalone routers cannot access the MDC and must have the block size explicitly specified. This is a work in progress to enable automatic inference.
 
 ## Configuration Best Practices
@@ -82,8 +82,8 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
 >[!Note]
 > **Block Size Matching:**
 > The block size must match across:
-> - Standalone router (`--block-size`)
-> - All worker instances (`--block-size`)
+> - Standalone router (`--router-block-size`)
+> - All worker instances (backend-specific, e.g. `--block-size` for vLLM)
 >
 > **Endpoint Matching:**
 > The `--endpoint` argument must match where your target workers register. For example:
@@ -95,9 +95,9 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
 
 To integrate the standalone router with a backend:
 
-1. Clients should query the `router.find_best_worker` endpoint before sending requests
-2. Workers should register at the endpoint specified by the `--endpoint` argument
-3. Clients should call the `router.free` endpoint when requests complete
+1. Workers should register at the endpoint specified by the `--endpoint` argument
+2. Clients call the `router.generate` endpoint to stream completions (router selects the best worker), or call `router.best_worker_id` to get the best worker ID and then send requests to that worker
+3. Router state is updated automatically as requests are routed; no separate "free" call is required
 
 See [`components/src/dynamo/vllm/handlers.py`](../vllm/handlers.py) for a reference implementation (search for `prefill_router_client`).
 

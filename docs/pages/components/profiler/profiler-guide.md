@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Profiler Guide
 ---
 
 # Profiler Guide
@@ -50,7 +51,7 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 
 ### Kubernetes Deployment (DGDR)
 
-The recommended deployment method is through DGDRs. Sample configurations are provided in `benchmarks/profiler/deploy/`:
+The recommended deployment method is through DGDRs. Sample configurations are provided in `components/src/dynamo/profiler/deploy/`:
 
 | Sample | Description |
 |--------|-------------|
@@ -148,7 +149,7 @@ curl http://localhost:8000/v1/models
 For advanced use cases or local development:
 
 ```bash
-python -m benchmarks.profiler.profile_sla \
+python -m dynamo.profiler.profile_sla \
   --backend vllm \
   --config path/to/disagg.yaml \
   --model meta-llama/Llama-3-8B \
@@ -170,12 +171,12 @@ The profiler follows a 5-step process:
    - **Prefill**:
      - TP/TEP: Measure TTFT with batch size = 1 (assuming ISL is long enough to saturate compute) without KV reuse.
      - DEP: Attention uses data parallelism. Send a single burst with total concurrency `attention_dp_size × attn_dp_num_req_ratio` (defaults to 4) and compute the reported TTFT as `time_to_first_token.max / attn_dp_num_req_ratio` from the AIPerf summary of that burst.
-   ![Prefill Performance](/assets/img/h100-prefill-performance.png)
+   ![Prefill Performance](../../../assets/img/h100-prefill-performance.png)
    - **Decode**: Measure the ITL under different numbers of in-flight requests, from 1 to the maximum the KV cache can hold. To measure ITL without being affected by piggy-backed prefill requests, the script enables KV-reuse and warms up the engine by issuing the same prompts before measuring.
-   ![Decode Performance](/assets/img/h100-decode-performance.png)
+   ![Decode Performance](../../../assets/img/h100-decode-performance.png)
 4. **Recommendation**: Select optimal parallelization mapping for prefill and decode that achieves the highest per-GPU throughput while adhering to the SLA on TTFT and ITL.
 5. **In-Depth Profiling on the Recommended P/D Engine**: Interpolate TTFT with ISL and ITL with active KV cache and decode context length for more accurate performance estimation.
-![ITL Interpolation](/assets/img/pd-interpolation.png)
+![ITL Interpolation](../../../assets/img/pd-interpolation.png)
    - **Prefill**: Measures TTFT and throughput per GPU across different input lengths with batch size=1.
    - **Decode**: Measures ITL and throughput per GPU under various KV cache loads and decode context lengths.
 
@@ -226,14 +227,35 @@ See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#
 
 ### Automatic GPU Discovery
 
-Cluster-scoped operators can optionally enable automatic GPU discovery:
+The operator automatically discovers GPU resources from cluster nodes, providing hardware info (GPU model, VRAM, GPUs per node) and automatic profiling search space calculation.
+
+**Requirements:**
+- **Cluster-scoped operators**: Have node read permissions by default
+- **Namespace-scoped operators**: GPU discovery is enabled by default when installing via Helm — the chart provisions the required ClusterRole/ClusterRoleBinding automatically
+
+**For namespace-scoped operators**, GPU discovery is controlled by a Helm value:
+
+```bash
+# GPU discovery enabled (default) — Helm provisions read-only node access automatically
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=true
+
+# GPU discovery disabled — you must provide hardware config manually in each DGDR
+helm install dynamo-platform ... --set dynamo-operator.gpuDiscovery.enabled=false
+```
+
+If GPU discovery is disabled, provide hardware config manually in the DGDR:
 
 ```yaml
 spec:
-  enableGpuDiscovery: true
+  profilingConfig:
+    config:
+      hardware:
+        numGpusPerNode: 8
+        gpuModel: "H100-SXM5-80GB"
+        gpuVramMib: 81920
 ```
 
-This is only available with cluster-scoped operators (`namespaceRestriction.enabled=false`) as it requires cluster-wide node access permissions.
+If GPU discovery is disabled and no manual hardware config is provided, the DGDR will be rejected at admission time.
 
 ## Configuration
 
@@ -644,4 +666,4 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 - [SLA Planner Guide](../planner/planner-guide.md) - End-to-end deployment workflow
 - [SLA Planner Architecture](../planner/planner-guide.md) - How the Planner uses profiling data
 - [DGDR API Reference](../../kubernetes/api-reference.md) - DGDR specification
-- [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/profiler/utils/profiler_argparse.py) - Full CLI reference
+- [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/utils/profiler_argparse.py) - Full CLI reference

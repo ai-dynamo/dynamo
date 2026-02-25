@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Prometheus
 ---
 
 # vLLM Prometheus Metrics
@@ -22,7 +23,7 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 | Variable/Flag | Description | Default | Example |
 |---------------|-------------|---------|---------|
 | `DYN_SYSTEM_PORT` | System metrics/health port. Required to expose `/metrics` endpoint. | `-1` (disabled) | `8081` |
-| `--connector` | KV connector to use. Use `lmcache` to enable LMCache metrics. | `nixl` | `--connector lmcache` |
+| `--kv-transfer-config` | KV transfer configuration JSON. Use LMCache connector to enable LMCache metrics. | - | `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` |
 
 ## Getting Started Quickly
 
@@ -108,18 +109,18 @@ For the complete and authoritative list of all vLLM metrics, see the [official v
 
 ## LMCache Metrics
 
-When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set, LMCache metrics (prefixed with `lmcache:`) are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+When LMCache is enabled with `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` and `DYN_SYSTEM_PORT` is set, LMCache metrics (prefixed with `lmcache:`) are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
 
 ### Minimum Requirements
 
 To access LMCache metrics, both of these are required:
-1. `--connector lmcache` - Enables LMCache in vLLM
+1. `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` - Enables LMCache in vLLM
 2. `DYN_SYSTEM_PORT=8081` - Enables Dynamo's metrics HTTP endpoint
 
 **Example:**
 ```bash
 DYN_SYSTEM_PORT=8081 \
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 ```
 
 ### Viewing LMCache Metrics

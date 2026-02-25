@@ -9,28 +9,20 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import sglang as sgl
 import zmq
 import zmq.asyncio
-from prometheus_client import CollectorRegistry
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
 
 if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
     from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
-from dynamo.llm import (
-    KvEventPublisher,
-    WorkerMetricsPublisher,
-    ZmqKvEventPublisherConfig,
-)
-from dynamo.runtime import Component, Endpoint
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
-
-# Create a dedicated registry for dynamo_component metrics
-# This ensures these metrics are isolated and can be exposed via their own callback
-DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
 
 
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
@@ -71,7 +63,6 @@ class DynamoSglangPublisher:
         self,
         engine: sgl.Engine,
         config: Config,
-        component: Component,
         generate_endpoint: Endpoint,
         component_gauges: LLMBackendMetrics,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
@@ -81,7 +72,6 @@ class DynamoSglangPublisher:
         Args:
             engine: The SGLang engine instance.
             config: SGLang configuration including server args.
-            component: The Dynamo runtime component.
             generate_endpoint: The Dynamo endpoint for generation requests.
             metrics_labels: Optional list of label key-value pairs for metrics.
             component_gauges: LLM backend metrics instance (created via LLMBackendMetrics()).
@@ -90,7 +80,6 @@ class DynamoSglangPublisher:
         self.server_args = config.server_args
         self.dynamo_args = config.dynamo_args
         self.generate_endpoint = generate_endpoint
-        self.component = component
         self.metrics_publisher = WorkerMetricsPublisher()
         self.component_gauges = component_gauges
         # Endpoint creation is deferred to async context in setup_sgl_metrics
@@ -260,19 +249,17 @@ class DynamoSglangPublisher:
 
                 zmq_ep = format_zmq_endpoint(zmq_ep, local_ip)
 
-                zmq_config = ZmqKvEventPublisherConfig(
-                    worker_id=self.generate_endpoint.connection_id(),
-                    kv_block_size=self.server_args.page_size,
-                    zmq_endpoint=zmq_ep,
-                    enable_local_indexer=self.dynamo_args.enable_local_indexer,
-                    dp_rank=dp_rank,
-                )
                 logging.info(
                     f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} "
                     f"(connecting to {zmq_ep})"
                 )
                 publisher = KvEventPublisher(
-                    component=self.component, zmq_config=zmq_config
+                    endpoint=self.generate_endpoint,
+                    kv_block_size=self.server_args.page_size,
+                    zmq_endpoint=zmq_ep,
+                    zmq_topic="",
+                    enable_local_indexer=self.dynamo_args.enable_local_indexer,
+                    dp_rank=dp_rank,
                 )
                 self.kv_publishers.append(publisher)
 
@@ -284,7 +271,7 @@ class DynamoSglangPublisher:
 
 def setup_prometheus_registry(
     engine: sgl.Engine, generate_endpoint: Endpoint, config: Config
-) -> CollectorRegistry:
+) -> "CollectorRegistry":
     """Set up Prometheus registry for SGLang metrics collection.
 
     SGLang uses multiprocess architecture where metrics are stored in shared memory.
@@ -332,7 +319,6 @@ def setup_prometheus_registry(
 async def setup_sgl_metrics(
     engine: sgl.Engine,
     config: Config,
-    component: Component,
     generate_endpoint: Endpoint,
 ) -> tuple[DynamoSglangPublisher, asyncio.Task, list[tuple[str, str]]]:
     """Create publisher, initialize metrics, and start the metrics publishing loop.
@@ -340,7 +326,6 @@ async def setup_sgl_metrics(
     Args:
         engine: The SGLang engine instance.
         config: SGLang configuration including server args.
-        component: The Dynamo runtime component.
         generate_endpoint: The Dynamo endpoint for generation requests.
 
     Returns:
@@ -355,14 +340,19 @@ async def setup_sgl_metrics(
     # Always register the Dynamo component metrics callback (total_blocks,
     # gpu_cache_usage, model_load_time). These use a dedicated registry that
     # doesn't need MultiProcessCollector or PROMETHEUS_MULTIPROC_DIR.
+    # Import CollectorRegistry lazily to avoid importing prometheus_client
+    # before set_prometheus_multiproc_dir() has been called.
+    from prometheus_client import CollectorRegistry
+
+    dynamo_component_registry = CollectorRegistry()
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
-        registry=DYNAMO_COMPONENT_REGISTRY,
+        registry=dynamo_component_registry,
     )
 
     # Create all Dynamo component gauges using the dedicated registry
     component_gauges = LLMBackendMetrics(
-        registry=DYNAMO_COMPONENT_REGISTRY,
+        registry=dynamo_component_registry,
         model_name=engine.server_args.served_model_name,
         component_name=config.dynamo_args.component,
     )
@@ -371,13 +361,12 @@ async def setup_sgl_metrics(
     publisher = DynamoSglangPublisher(
         engine,
         config,
-        component,
         generate_endpoint,
         component_gauges=component_gauges,
         metrics_labels=metrics_labels,
     )
     # Create endpoint in async context (must await before publishing)
-    await publisher.metrics_publisher.create_endpoint(component)
+    await publisher.metrics_publisher.create_endpoint(generate_endpoint)
     logging.debug("SGLang metrics publisher endpoint created")
 
     publisher.init_engine_metrics_publish()
@@ -386,3 +375,33 @@ async def setup_sgl_metrics(
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")
     return publisher, task, metrics_labels
+
+
+async def handle_non_leader_node(
+    engine: sgl.Engine,
+    publisher: DynamoSglangPublisher,
+    metrics_task: asyncio.Task,
+) -> None:
+    """
+    Handle non-leader node (node_rank >= 1) in multi-node deployments.
+
+    Non-leader nodes run scheduler processes but don't handle requests directly.
+    They still need:
+    - KV event publishing (subscribe to local DP ranks, forward to NATS)
+    - Metrics collection from local schedulers
+    - Prometheus metrics exposure
+    """
+    logging.info(
+        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
+        "Running with metrics and KV event publishing for local DP ranks."
+    )
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            pass
+        publisher.cleanup()

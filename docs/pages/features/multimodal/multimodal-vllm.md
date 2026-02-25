@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: vLLM Multimodal
 ---
 
 # vLLM Multimodal
@@ -46,10 +47,8 @@ vLLM supports all multimodal deployment patterns. See [Architecture Patterns](RE
 | Processor | `--multimodal-processor` | HTTP entry, tokenization |
 | Encode Worker | `--multimodal-encode-worker` | Media encoding |
 | PD Worker | `--multimodal-worker` | Prefill + Decode |
-| Prefill Worker | `--multimodal-worker --is-prefill-worker` | Prefill only |
+| Prefill Worker | `--multimodal-worker --disaggregation-mode prefill` | Prefill only |
 | Decode Worker | `--multimodal-decode-worker` | Decode only |
-| Encode+Prefill Worker | `--multimodal-encode-prefill-worker --is-prefill-worker` | Combined (Llama 4) |
-| vLLM Native Encoder | `--vllm-native-encoder-worker` | vLLM-native encoding with ECConnector |
 
 ## Use the Latest Release
 
@@ -464,7 +463,7 @@ Dynamo's Rust SDK supports two input types that determine how the HTTP frontend 
 
 ```python
 # Processor - Entry point from HTTP frontend
-await register_llm(
+await register_model(
     ModelInput.Text,        # Frontend sends raw text
     ModelType.Chat,
     generate_endpoint,
@@ -473,7 +472,7 @@ await register_llm(
 )
 
 # Workers - Internal components
-await register_llm(
+await register_model(
     ModelInput.Tokens,      # Expect pre-tokenized input
     ModelType.Chat,         # or ModelType.Prefill for prefill workers
     generate_endpoint,
@@ -481,6 +480,82 @@ await register_llm(
     ...
 )
 ```
+
+## LoRA Adapters on Multimodal Workers
+
+Multimodal workers support dynamic loading and unloading of LoRA adapters at runtime via the management API. This enables serving fine-tuned multimodal models alongside the base model.
+
+### Loading a LoRA Adapter
+
+Load an adapter on a running multimodal worker via the `load_lora` endpoint:
+
+```bash
+# For components workers (URI-based, requires DYN_LORA_ENABLED=true)
+curl -X POST http://<worker-host>:<port>/load_lora \
+  -H "Content-Type: application/json" \
+  -d '{
+    "lora_name": "my-vlm-adapter",
+    "source": {"uri": "s3://my-bucket/adapters/my-vlm-adapter"}
+  }'
+
+# For example workers (path-based)
+curl -X POST http://<worker-host>:<port>/load_lora \
+  -H "Content-Type: application/json" \
+  -d '{
+    "lora_name": "my-vlm-adapter",
+    "lora_path": "/path/to/adapter"
+  }'
+```
+
+### Sending Requests with a LoRA
+
+Set the `model` field in the request to the LoRA adapter name:
+
+```bash
+curl -X POST http://<frontend-host>:<port>/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "my-vlm-adapter",
+    "messages": [
+      {"role": "user", "content": [
+        {"type": "text", "text": "Describe this image"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+      ]}
+    ]
+  }'
+```
+
+Requests without a LoRA name (or with the base model name) will use the base model.
+
+### Unloading a LoRA Adapter
+
+```bash
+curl -X POST http://<worker-host>:<port>/unload_lora \
+  -H "Content-Type: application/json" \
+  -d '{"lora_name": "my-vlm-adapter"}'
+```
+
+### Listing Loaded Adapters
+
+```bash
+curl -X POST http://<worker-host>:<port>/list_loras
+```
+
+### Disaggregated Mode
+
+In disaggregated (prefill/decode) deployments, the **same LoRA adapter must be loaded on both the prefill and decode workers**. The LoRA identity (`model` field) is automatically propagated from the prefill worker to the decode worker in the forwarded request.
+
+```bash
+# Load on prefill worker
+curl -X POST http://<prefill-worker>/load_lora \
+  -d '{"lora_name": "my-adapter", "source": {"uri": "s3://bucket/adapter"}}'
+
+# Load on decode worker (same adapter)
+curl -X POST http://<decode-worker>/load_lora \
+  -d '{"lora_name": "my-adapter", "source": {"uri": "s3://bucket/adapter"}}'
+```
+
+If a LoRA is loaded on the prefill worker but not on the decode worker, the decode worker will fall back to the base model for that request.
 
 ## Known Limitations
 

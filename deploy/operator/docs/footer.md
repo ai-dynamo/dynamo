@@ -167,39 +167,98 @@ The operator automatically selects between two deployment modes based on paralle
 
 ## Environment Variables
 
-The operator automatically injects environment variables based on component type and configuration:
+The operator automatically injects environment variables into component containers based on component type, backend framework, and operator configuration. User-provided `envs` values always take precedence over operator defaults.
 
 ### All Components
 
-- **`DYN_NAMESPACE`**: The Dynamo namespace for the component
-- **`DYN_PARENT_DGD_K8S_NAME`**: The parent DynamoGraphDeployment Kubernetes resource name
-- **`DYN_PARENT_DGD_K8S_NAMESPACE`**: The parent DynamoGraphDeployment Kubernetes namespace
+These environment variables are injected into every component container regardless of type.
+
+| Variable | Purpose | Default | Type | Source |
+| --- | --- | --- | --- | --- |
+| `DYN_NAMESPACE` | Dynamo service namespace used for service discovery and routing | Derived from DGD spec | `string` | Downward API annotation on checkpoint-restored pods |
+| `DYN_COMPONENT` | Identifies the component type for runtime behavior | One of: `frontend`, `worker`, `prefill`, `decode`, `planner`, `epp` | `string` | Set from component spec |
+| `DYN_PARENT_DGD_K8S_NAME` | Kubernetes name of the parent DynamoGraphDeployment resource | — | `string` | Set from DGD metadata |
+| `DYN_PARENT_DGD_K8S_NAMESPACE` | Kubernetes namespace of the parent DynamoGraphDeployment resource | — | `string` | Set from DGD metadata |
+| `POD_NAME` | Current pod name | — | `string` | Downward API (`metadata.name`) |
+| `POD_NAMESPACE` | Current pod namespace | — | `string` | Downward API (`metadata.namespace`) |
+| `POD_UID` | Current pod UID | — | `string` | Downward API (`metadata.uid`) |
+| `DYN_DISCOVERY_BACKEND` | Service discovery backend for inter-component communication | `kubernetes` | `string` | Options: `kubernetes`, `etcd` |
+
+### Infrastructure (Conditional)
+
+These are injected into all components when the corresponding infrastructure service is configured in the operator's `OperatorConfiguration`.
+
+| Variable | Purpose | Default | Type | Condition |
+| --- | --- | --- | --- | --- |
+| `NATS_SERVER` | NATS messaging server address | — | `string` | Set when `infrastructure.natsAddress` is configured |
+| `ETCD_ENDPOINTS` | etcd endpoint addresses for distributed state | — | `string` | Set when `infrastructure.etcdAddress` is configured |
+| `MODEL_EXPRESS_URL` | Model Express service URL for model management | — | `string` | Set when `infrastructure.modelExpressURL` is configured |
+| `PROMETHEUS_ENDPOINT` | Prometheus endpoint for metrics collection | — | `string` | Set when `infrastructure.prometheusEndpoint` is configured |
 
 ### Frontend Components
 
-- **`DYNAMO_PORT`**: `8000`
-- **`DYN_HTTP_PORT`**: `8000`
+| Variable | Purpose | Default | Type |
+| --- | --- | --- | --- |
+| `DYNAMO_PORT` | HTTP port the frontend listens on | `8000` | `int` |
+| `DYN_HTTP_PORT` | HTTP port for the frontend service (alias) | `8000` | `int` |
+| `DYN_NAMESPACE_PREFIX` | Namespace prefix used for frontend request routing | Same as `DYN_NAMESPACE` | `string` |
 
 ### Worker Components
 
-- **`DYN_SYSTEM_PORT`**: `9090` (automatically enables the system metrics server)
-- **`DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`**: `["generate"]`
-- **`DYN_SYSTEM_ENABLED`**: `true` (needed for runtime images 0.6.1 and older)
+| Variable | Purpose | Default | Type |
+| --- | --- | --- | --- |
+| `DYN_SYSTEM_ENABLED` | Enables the system HTTP server for health checks and metrics | `true` | `string` (boolean) |
+| `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Endpoints whose health status is used for readiness | `["generate"]` | `string` (JSON array) |
+| `DYN_SYSTEM_PORT` | Port for the system HTTP server (health, metrics) | `9090` | `int` |
+| `DYN_HEALTH_CHECK_ENABLED` | Disables the legacy health check mechanism in favor of the system server | `false` | `string` (boolean) |
+| `NIXL_TELEMETRY_ENABLE` | Enables or disables NIXL telemetry collection | `n` | `string` | Options: `y`, `n` |
+| `NIXL_TELEMETRY_EXPORTER` | Telemetry exporter format for NIXL metrics | `prometheus` | `string` |
+| `NIXL_TELEMETRY_PROMETHEUS_PORT` | Port for NIXL Prometheus metrics endpoint | `19090` | `int` |
+| `DYN_NAMESPACE_WORKER_SUFFIX` | Hash suffix appended to worker namespace for rolling updates | — | `string` | Only set during rolling update transitions |
 
 ### Planner Components
 
-- **`PLANNER_PROMETHEUS_PORT`**: `9085`
+| Variable | Purpose | Default | Type |
+| --- | --- | --- | --- |
+| `PLANNER_PROMETHEUS_PORT` | Port for the planner's Prometheus metrics endpoint | `9085` | `int` |
 
-### VLLM Backend (with compilation cache)
+### EPP (Endpoint Picker Plugin) Components
 
-When a volume mount is configured with `useAsCompilationCache: true`:
-- **`VLLM_CACHE_ROOT`**: Set to the mount point of the cache volume
+| Variable | Purpose | Default | Type |
+| --- | --- | --- | --- |
+| `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
+| `RUST_LOG` | Rust log level and filter configuration | `debug,dynamo_llm::kv_router=trace` | `string` |
 
-## Service Account
+### VLLM Backend
 
-Planner components automatically receive the following service account:
+| Variable | Purpose | Default | Type | Condition |
+| --- | --- | --- | --- | --- |
+| `VLLM_CACHE_ROOT` | Directory for vLLM compilation cache artifacts | — | `string` | Set when a volume mount has `useAsCompilationCache: true` |
+| `VLLM_NIXL_SIDE_CHANNEL_HOST` | Host IP for the NIXL side channel in multiprocessing mode | Pod IP | `string` | Multinode mp backend only (Downward API: `status.podIP`) |
 
-- **`serviceAccountName`**: `planner-serviceaccount`
+### TensorRT-LLM Backend
+
+| Variable | Purpose | Default | Type | Condition |
+| --- | --- | --- | --- | --- |
+| `OMPI_MCA_orte_keep_fqdn_hostnames` | Instructs OpenMPI to preserve FQDN hostnames for inter-node communication | `1` | `string` | Multinode deployments only |
+
+### Checkpoint / Restore
+
+These environment variables are injected when checkpoint/restore is enabled for a component.
+
+| Variable | Purpose | Default | Type | Condition |
+| --- | --- | --- | --- | --- |
+| `DYN_CHECKPOINT_PATH` | Base directory where checkpoint data is stored | From operator checkpoint config `storage.pvc.basePath` | `string` | PVC storage type |
+| `DYN_CHECKPOINT_LOCATION` | Full checkpoint URI (for non-PVC backends) | — | `string` | S3 or OCI storage type |
+| `DYN_CHECKPOINT_HASH` | Identity hash that uniquely identifies the checkpoint | — | `string` | Always set when checkpoint is enabled |
+| `SKIP_WAIT_FOR_CHECKPOINT` | Skips the checkpoint readiness polling loop; checks once and proceeds | — | `string` | Set on restored and DGD pods |
+
+## Service Accounts
+
+The following component types automatically receive dedicated service accounts:
+
+- **Planner**: `planner-serviceaccount`
+- **EPP**: `epp-serviceaccount`
 
 ## Image Pull Secrets
 
@@ -236,12 +295,26 @@ Default container ports are configured based on component type:
 - **Name**: `http`
 
 ### Worker Components
-- **Port**: 9090
+- **Port**: 9090 (system)
 - **Protocol**: TCP
 - **Name**: `system`
+- **Port**: 19090 (NIXL)
+- **Protocol**: TCP
+- **Name**: `nixl`
 
 ### Planner Components
 - **Port**: 9085
+- **Protocol**: TCP
+- **Name**: `metrics`
+
+### EPP Components
+- **Port**: 9002 (gRPC)
+- **Protocol**: TCP
+- **Name**: `grpc`
+- **Port**: 9003 (gRPC health)
+- **Protocol**: TCP
+- **Name**: `grpc-health`
+- **Port**: 9090 (metrics)
 - **Protocol**: TCP
 - **Name**: `metrics`
 
@@ -264,14 +337,17 @@ For users who want to understand the implementation details or contribute to the
 
 - **Health Probes, Security Context & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, security context, environment variables, shared memory, and pod configurations
 - **Component-Specific Defaults**:
+  - [`internal/dynamo/component_common.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/component_common.go) - Base container and pod spec shared by all component types
   - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/component_frontend.go)
   - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/component_worker.go)
   - [`internal/dynamo/component_planner.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/component_planner.go)
+  - [`internal/dynamo/component_epp.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/component_epp.go)
 - **Image Pull Secrets**: [`internal/secrets/docker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/secrets/docker.go) - Implements the docker secret indexer and automatic discovery
 - **Backend-Specific Behavior**:
   - [`internal/dynamo/backend_vllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/backend_vllm.go)
   - [`internal/dynamo/backend_sglang.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/backend_sglang.go)
   - [`internal/dynamo/backend_trtllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/backend_trtllm.go)
+- **Checkpoint / Restore**: [`internal/checkpoint/dgd_integration.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/dgd_integration.go) - Checkpoint env var injection and volume setup
 - **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes

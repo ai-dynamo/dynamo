@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Metrics
 ---
 
 ## Overview
@@ -109,6 +110,19 @@ For more information about validating the deployment, see the [vLLM README](../.
 
 ## Set Up Metrics Collection
 
+### Enable NIXL Telemetry (Optional)
+
+To enable NIXL telemetry metrics in addition to Dynamo metrics, set the following environment variables in your worker component:
+
+spec:
+  services:
+    YourWorker:
+      envs:
+        - name: NIXL_TELEMETRY_ENABLE
+          value: "y"
+
+NIXL telemetry is disabled by default. When enabled, NIXL metrics will be exposed on the port specified by `NIXL_TELEMETRY_PROMETHEUS_PORT` (19090 by default).
+
 ### Create PodMonitors
 
 The Prometheus Operator uses PodMonitor resources to automatically discover and scrape metrics from pods. To enable this discovery, the Dynamo operator automatically creates PodMonitor resource and adds these labels to all pods:
@@ -158,7 +172,7 @@ Visit http://localhost:9090 and try these example queries:
 - `dynamo_frontend_requests_total`
 - `dynamo_frontend_time_to_first_token_seconds_bucket`
 
-![Prometheus UI showing Dynamo metrics](/assets/img/prometheus-k8s.png)
+![Prometheus UI showing Dynamo metrics](../../../assets/img/prometheus-k8s.png)
 
 ### In Grafana
 ```bash
@@ -176,7 +190,7 @@ Visit http://localhost:3000 and log in with the credentials captured above.
 
 Once logged in, find the Dynamo dashboard under General.
 
-![Grafana dashboard showing Dynamo metrics](/assets/img/grafana-k8s.png)
+![Grafana dashboard showing Dynamo metrics](../../../assets/img/grafana-k8s.png)
 
 ## Operator Metrics
 

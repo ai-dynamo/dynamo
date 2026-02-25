@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: TensorRT-LLM
 ---
 
 # LLM Deployment using TensorRT-LLM
@@ -70,8 +71,8 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 > [!NOTE]
-> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
-> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events. Workers must be explicitly configured to publish events. Use `--no-router-kv-events` on the frontend for prediction-based routing without events
 > - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Build container
@@ -81,11 +82,11 @@ docker compose -f deploy/docker-compose.yml up -d
 apt-get update && apt-get -y install git git-lfs
 
 # On an x86 machine:
-python container/render.py --framework=trtllm --target=runtime --output-short-filename
+python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
 docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 
 # On an ARM machine:
-python container/render.py --framework=trtllm --target=runtime --platform=arm64 --output-short-filename
+python container/render.py --framework=trtllm --target=runtime --platform=arm64 --output-short-filename --cuda-version=13.1
 docker build -t dynamo:trtllm-latest -f container/rendered.Dockerfile .
 ```
 
@@ -237,22 +238,24 @@ The pipeline type is **auto-detected** from the model's `model_index.json` — n
 python -m dynamo.trtllm \
   --modality video_diffusion \
   --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-  --output-dir /tmp/videos
+  --media-output-fs-url file:///tmp/dynamo_media
 ```
 
 ### API Endpoint
 
-Video generation uses the `/v1/videos/generations` endpoint:
+Video generation uses the `/v1/videos` endpoint:
 
 ```bash
-curl -X POST http://localhost:8000/v1/videos/generations \
+curl -X POST http://localhost:8000/v1/videos \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "A cat playing piano",
     "model": "wan_t2v",
-    "size": "832x480",
     "seconds": 4,
-    "fps": 24
+    "size": "832x480",
+    "nvext": {
+      "fps": 24
+    }
   }'
 ```
 
@@ -260,7 +263,7 @@ curl -X POST http://localhost:8000/v1/videos/generations \
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--output-dir` | Directory for generated videos | `/tmp/dynamo_videos` |
+| `--media-output-fs-url` | Filesystem URL for storing generated media | `file:///tmp/dynamo_media` |
 | `--default-height` | Default video height | `480` |
 | `--default-width` | Default video width | `832` |
 | `--default-num-frames` | Default frame count | `81` |
@@ -361,7 +364,7 @@ The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size`
 
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance-sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 

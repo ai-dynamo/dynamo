@@ -1,26 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Combined benchmark for KvIndexer and KvIndexerSharded.
+//! Combined benchmark for KvIndexer, KvIndexerSharded, and PositionalIndexer (nested).
 //!
 //! Provides two modes:
-//! - `microbench`: Per-operation latency benchmarks comparing single vs sharded indexer
+//! - `microbench`: Per-operation latency benchmarks comparing indexer implementations
 //! - `stress`: Queue saturation stress test under load
+//!
+//! Supported indexer types: single, sharded, nested, all
 //!
 //! Run with:
 //!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- microbench --help
 //!   cargo bench --package dynamo-kv-router --bench kv_indexer_bench --features bench -- stress --help
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use dynamo_bench::common::LatencyStats;
 use dynamo_kv_router::{
-    bench_utils::{LatencyStats, SequenceData, generate_sequences, median},
-    indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded},
+    ConcurrentRadixTree,
+    bench_utils::{SequenceData, generate_sequences},
+    indexer::{
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ThreadPoolIndexer,
+    },
+    nested_map::PositionalIndexer,
     protocols::{LocalBlockHash, RouterEvent},
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
 // ============================================================================
@@ -29,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(name = "kv_indexer_bench")]
-#[command(about = "Combined benchmark for KvIndexer and KvIndexerSharded")]
+#[command(about = "Combined benchmark for KvIndexer, KvIndexerSharded, and PositionalIndexer")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -41,7 +49,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Per-operation latency benchmarks comparing single vs sharded indexer
+    /// Per-operation latency benchmarks comparing indexer implementations
     Microbench(MicrobenchArgs),
     /// Queue saturation stress test under load
     Stress(StressArgs),
@@ -54,8 +62,12 @@ enum IndexerType {
     Single,
     /// Sharded KvIndexer (multiple shards with separate trees)
     Sharded,
-    /// Run both and compare
-    Both,
+    /// Nested PositionalIndexer (position-based HashMap with jump search)
+    Nested,
+    /// Concurrent radix tree (lock-per-node with DashMap lookup)
+    Concurrent,
+    /// Run all indexer types and compare
+    All,
 }
 
 /// Common arguments shared between subcommands
@@ -104,12 +116,16 @@ struct MicrobenchArgs {
     num_prefix_prompts: usize,
 
     /// Indexer type to benchmark
-    #[arg(long, value_enum, default_value = "both")]
+    #[arg(long, value_enum, default_value = "all")]
     indexer_type: IndexerType,
 
     /// Number of shards for sharded indexer
     #[arg(long, default_value = "4")]
     num_shards: usize,
+
+    /// Jump size for nested/positional indexer
+    #[arg(long, default_value = "32")]
+    jump_size: usize,
 
     /// Run only specific benchmark (store, find_matches, remove, or all)
     #[arg(long, default_value = "all")]
@@ -148,6 +164,10 @@ struct StressArgs {
     /// Number of shards for sharded indexer
     #[arg(long, default_value = "4")]
     num_shards: usize,
+
+    /// Jump size for nested/positional indexer
+    #[arg(long, default_value = "32")]
+    jump_size: usize,
 }
 
 // ============================================================================
@@ -200,6 +220,44 @@ impl BenchableIndexer for KvIndexerSharded {
 
     fn name(&self) -> &str {
         "KvIndexerSharded"
+    }
+}
+
+#[async_trait::async_trait]
+impl BenchableIndexer for ThreadPoolIndexer<PositionalIndexer> {
+    async fn apply_event(&mut self, event: RouterEvent) {
+        KvIndexerInterface::apply_event(self, event).await;
+    }
+
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError> {
+        KvIndexerInterface::find_matches(self, sequence).await?;
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "PositionalIndexer (nested)"
+    }
+}
+
+#[async_trait::async_trait]
+impl BenchableIndexer for ThreadPoolIndexer<ConcurrentRadixTree> {
+    async fn apply_event(&mut self, event: RouterEvent) {
+        KvIndexerInterface::apply_event(self, event).await;
+    }
+
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError> {
+        KvIndexerInterface::find_matches(self, sequence).await?;
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "ConcurrentRadixTree"
     }
 }
 
@@ -358,7 +416,7 @@ async fn bench_store<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations).unwrap()
+    LatencyStats::from_durations(&durations).unwrap()
 }
 
 /// Benchmark find_matches operation (hit case)
@@ -385,7 +443,7 @@ async fn bench_find_matches_hit<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations).unwrap()
+    LatencyStats::from_durations(&durations).unwrap()
 }
 
 /// Benchmark find_matches operation (miss case)
@@ -413,7 +471,7 @@ async fn bench_find_matches_miss<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations).unwrap()
+    LatencyStats::from_durations(&durations).unwrap()
 }
 
 /// Benchmark apply_event (remove) operation
@@ -444,7 +502,7 @@ async fn bench_remove<I: BenchableIndexer>(
         }
     }
 
-    LatencyStats::from_durations(durations).unwrap()
+    LatencyStats::from_durations(&durations).unwrap()
 }
 
 /// Run all microbenchmarks for an indexer
@@ -523,122 +581,111 @@ fn print_microbench_comparison(results: &[MicrobenchResults], _depth: usize) {
     println!("COMPARISON SUMMARY");
     println!("========================================\n");
 
-    let single = &results[0];
-    let sharded = &results[1];
+    // Build dynamic column headers
+    let mut header = format!("{:<30}", "Metric");
+    for result in results {
+        header.push_str(&format!(
+            " {:>15}",
+            result
+                .indexer_name
+                .split_whitespace()
+                .next()
+                .unwrap_or(&result.indexer_name)
+        ));
+    }
+    println!("{}", header);
+    println!("{}", "-".repeat(30 + results.len() * 16));
 
-    println!(
-        "{:<30} {:>15} {:>15} {:>10}",
-        "Metric", "Single", "Sharded", "Ratio"
-    );
-    println!("{}", "-".repeat(72));
-
-    // Construction
-    let single_constr = single.construction_time.as_secs_f64() * 1000.0;
-    let sharded_constr = sharded.construction_time.as_secs_f64() * 1000.0;
-    println!(
-        "{:<30} {:>12.2}ms {:>12.2}ms {:>9.2}x",
-        "Construction time",
-        single_constr,
-        sharded_constr,
-        single_constr / sharded_constr
-    );
+    // Construction time
+    let mut row = format!("{:<30}", "Construction time (ms)");
+    for result in results {
+        row.push_str(&format!(
+            " {:>15.2}",
+            result.construction_time.as_secs_f64() * 1000.0
+        ));
+    }
+    println!("{}", row);
 
     // Store p50
-    if let (Some(s1), Some(s2)) = (&single.store_stats, &sharded.store_stats) {
-        let s1_us = s1.p50.as_nanos() as f64 / 1000.0;
-        let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
-        println!(
-            "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Store p50",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
-        );
+    let mut row = format!("{:<30}", "Store p50 (us)");
+    for result in results {
+        if let Some(stats) = &result.store_stats {
+            row.push_str(&format!(" {:>15.2}", stats.p50.as_nanos() as f64 / 1000.0));
+        } else {
+            row.push_str(&format!(" {:>15}", "-"));
+        }
     }
+    println!("{}", row);
 
     // Find matches hit p50
-    if let (Some(s1), Some(s2)) = (
-        &single.find_matches_hit_stats,
-        &sharded.find_matches_hit_stats,
-    ) {
-        let s1_us = s1.p50.as_nanos() as f64 / 1000.0;
-        let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
-        println!(
-            "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Find matches (hit) p50",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
-        );
+    let mut row = format!("{:<30}", "Find hit p50 (us)");
+    for result in results {
+        if let Some(stats) = &result.find_matches_hit_stats {
+            row.push_str(&format!(" {:>15.2}", stats.p50.as_nanos() as f64 / 1000.0));
+        } else {
+            row.push_str(&format!(" {:>15}", "-"));
+        }
     }
+    println!("{}", row);
 
     // Find matches hit p99
-    if let (Some(s1), Some(s2)) = (
-        &single.find_matches_hit_stats,
-        &sharded.find_matches_hit_stats,
-    ) {
-        let s1_us = s1.p99.as_nanos() as f64 / 1000.0;
-        let s2_us = s2.p99.as_nanos() as f64 / 1000.0;
-        println!(
-            "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Find matches (hit) p99",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
-        );
+    let mut row = format!("{:<30}", "Find hit p99 (us)");
+    for result in results {
+        if let Some(stats) = &result.find_matches_hit_stats {
+            row.push_str(&format!(" {:>15.2}", stats.p99.as_nanos() as f64 / 1000.0));
+        } else {
+            row.push_str(&format!(" {:>15}", "-"));
+        }
     }
+    println!("{}", row);
 
     // Find matches miss p50
-    if let (Some(s1), Some(s2)) = (
-        &single.find_matches_miss_stats,
-        &sharded.find_matches_miss_stats,
-    ) {
-        let s1_us = s1.p50.as_nanos() as f64 / 1000.0;
-        let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
-        println!(
-            "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Find matches (miss) p50",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
-        );
+    let mut row = format!("{:<30}", "Find miss p50 (us)");
+    for result in results {
+        if let Some(stats) = &result.find_matches_miss_stats {
+            row.push_str(&format!(" {:>15.2}", stats.p50.as_nanos() as f64 / 1000.0));
+        } else {
+            row.push_str(&format!(" {:>15}", "-"));
+        }
     }
+    println!("{}", row);
 
     // Remove p50
-    if let (Some(s1), Some(s2)) = (&single.remove_stats, &sharded.remove_stats) {
-        let s1_us = s1.p50.as_nanos() as f64 / 1000.0;
-        let s2_us = s2.p50.as_nanos() as f64 / 1000.0;
-        println!(
-            "{:<30} {:>12.2}us {:>12.2}us {:>9.2}x",
-            "Remove p50",
-            s1_us,
-            s2_us,
-            s1_us / s2_us
-        );
+    let mut row = format!("{:<30}", "Remove p50 (us)");
+    for result in results {
+        if let Some(stats) = &result.remove_stats {
+            row.push_str(&format!(" {:>15.2}", stats.p50.as_nanos() as f64 / 1000.0));
+        } else {
+            row.push_str(&format!(" {:>15}", "-"));
+        }
     }
+    println!("{}", row);
 
-    // Throughput comparison
+    // Throughput
     println!();
-    println!(
-        "{:<30} {:>15} {:>15} {:>10}",
-        "Throughput (ops/sec)", "Single", "Sharded", "Ratio"
-    );
-    println!("{}", "-".repeat(72));
-
-    if let (Some(s1), Some(s2)) = (
-        &single.find_matches_hit_stats,
-        &sharded.find_matches_hit_stats,
-    ) {
-        println!(
-            "{:<30} {:>12.0}/s {:>12.0}/s {:>9.2}x",
-            "Find matches (hit)",
-            s1.throughput_ops_sec,
-            s2.throughput_ops_sec,
-            s2.throughput_ops_sec / s1.throughput_ops_sec
-        );
+    let mut header = format!("{:<30}", "Throughput (ops/sec)");
+    for result in results {
+        header.push_str(&format!(
+            " {:>15}",
+            result
+                .indexer_name
+                .split_whitespace()
+                .next()
+                .unwrap_or(&result.indexer_name)
+        ));
     }
+    println!("{}", header);
+    println!("{}", "-".repeat(30 + results.len() * 16));
 
-    println!("\nNote: Ratio > 1.0 means sharded is faster for that metric.");
+    let mut row = format!("{:<30}", "Find matches (hit)");
+    for result in results {
+        if let Some(stats) = &result.find_matches_hit_stats {
+            row.push_str(&format!(" {:>15.0}", stats.throughput_ops_sec));
+        } else {
+            row.push_str(&format!(" {:>15}", "-"));
+        }
+    }
+    println!("{}", row);
 }
 
 async fn run_microbench_mode(args: MicrobenchArgs) {
@@ -692,7 +739,7 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
     let mut results = Vec::new();
 
     // Benchmark single indexer
-    if matches!(args.indexer_type, IndexerType::Single | IndexerType::Both) {
+    if matches!(args.indexer_type, IndexerType::Single | IndexerType::All) {
         let token = CancellationToken::new();
         let mut indexer = KvIndexer::new(token.clone(), args.common.block_size, metrics.clone());
         let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
@@ -702,7 +749,7 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
     }
 
     // Benchmark sharded indexer
-    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::Both) {
+    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::All) {
         let token = CancellationToken::new();
         let mut indexer = KvIndexerSharded::new(
             token.clone(),
@@ -713,6 +760,35 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
         let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
         results.push(result);
         token.cancel();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Benchmark nested indexer
+    if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
+        let mut indexer = ThreadPoolIndexer::new(
+            PositionalIndexer::new(args.jump_size),
+            args.num_shards,
+            args.common.block_size,
+        );
+        let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
+        results.push(result);
+        indexer.shutdown();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Benchmark concurrent radix tree indexer
+    if matches!(
+        args.indexer_type,
+        IndexerType::Concurrent | IndexerType::All
+    ) {
+        let mut indexer = ThreadPoolIndexer::new(
+            ConcurrentRadixTree::new(),
+            args.num_shards,
+            args.common.block_size,
+        );
+        let result = run_microbenchmarks(&mut indexer, sequences, extra_sequences, &args).await;
+        results.push(result);
+        indexer.shutdown();
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -727,7 +803,7 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
             result.print(args.common.depth);
         }
 
-        if results.len() == 2 {
+        if results.len() >= 2 {
             print_microbench_comparison(&results, args.common.depth);
         }
     }
@@ -779,7 +855,7 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
         let _ = indexer.find_matches(seq.local_hashes.clone()).await;
         baseline_durations.push(start.elapsed());
     }
-    let stats = LatencyStats::from_durations(baseline_durations.clone()).unwrap();
+    let stats = LatencyStats::from_durations(&baseline_durations).unwrap();
     let baseline_service_time = stats.p50;
     let theoretical_max = stats.throughput_ops_sec;
 
@@ -795,16 +871,6 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
     // Phase 3: Pre-generate Lookup Sequences
     println!("\nPhase 3: Pre-generating Lookup Sequences");
     let expected_requests = (args.arrival_rate * args.duration as f64).ceil() as usize + 100;
-    let lookup_sequences: Vec<Vec<LocalBlockHash>> = (0..expected_requests)
-        .map(|i| {
-            let seq = &sequences[i % sequences.len()];
-            seq.local_hashes.clone()
-        })
-        .collect();
-    println!(
-        "  Pre-generated {} lookup sequences",
-        lookup_sequences.len()
-    );
 
     // Phase 4: Stress Test
     println!("\nPhase 4: Stress Test");
@@ -817,11 +883,12 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
 
     let start = Instant::now();
     let mut request_id = 0u64;
-    let interval = Duration::from_secs_f64(1.0 / args.arrival_rate);
+    let mut interval = interval(Duration::from_secs_f64(1.0 / args.arrival_rate));
 
     while start.elapsed() < Duration::from_secs(args.duration) {
-        let submit_time = Instant::now();
-        let seq = lookup_sequences[request_id as usize].clone();
+        let seq = sequences[request_id as usize % sequences.len()]
+            .local_hashes
+            .clone();
 
         // Track in-flight
         let current = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
@@ -834,6 +901,7 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
         let verbose = args.common.verbose;
 
         tokio::spawn(async move {
+            let submit_time = Instant::now();
             let result = indexer.find_matches(seq).await;
             let complete_time = Instant::now();
             in_flight_clone.fetch_sub(1, Ordering::Relaxed);
@@ -854,7 +922,7 @@ async fn run_stress_test<I: BenchableIndexer + 'static>(
         });
 
         request_id += 1;
-        tokio::time::sleep(interval).await;
+        interval.tick().await;
     }
 
     let submitted = request_id;
@@ -974,7 +1042,7 @@ fn print_stress_results(args: &StressArgs, results: &StressResults) {
         println!("    Achieved: {:.1} req/sec", achieved_throughput);
         println!();
 
-        if let Some(stats) = LatencyStats::from_durations(results.latencies.clone()) {
+        if let Some(stats) = LatencyStats::from_durations(&results.latencies) {
             println!("  Latency (end-to-end, includes queue wait):");
             println!("    min:  {:>12?}", stats.min);
             println!("    p50:  {:>12?}", stats.p50);
@@ -1039,96 +1107,90 @@ fn print_stress_comparison(results: &[StressResults], args: &StressArgs) {
     println!("STRESS TEST COMPARISON SUMMARY");
     println!("========================================\n");
 
-    let single = &results[0];
-    let sharded = &results[1];
-
-    println!(
-        "{:<35} {:>18} {:>18} {:>10}",
-        "Metric", "Single", "Sharded", "Ratio"
-    );
-    println!("{}", "-".repeat(85));
+    // Build dynamic column headers
+    let mut header = format!("{:<35}", "Metric");
+    for result in results {
+        let short_name = result
+            .indexer_name
+            .split_whitespace()
+            .next()
+            .unwrap_or(&result.indexer_name);
+        header.push_str(&format!(" {:>18}", short_name));
+    }
+    println!("{}", header);
+    println!("{}", "-".repeat(35 + results.len() * 19));
 
     // Construction time
-    let single_constr = single.construction_time.as_secs_f64() * 1000.0;
-    let sharded_constr = sharded.construction_time.as_secs_f64() * 1000.0;
-    println!(
-        "{:<35} {:>15.2}ms {:>15.2}ms {:>9.2}x",
-        "Construction time",
-        single_constr,
-        sharded_constr,
-        single_constr / sharded_constr
-    );
+    let mut row = format!("{:<35}", "Construction time (ms)");
+    for result in results {
+        row.push_str(&format!(
+            " {:>18.2}",
+            result.construction_time.as_secs_f64() * 1000.0
+        ));
+    }
+    println!("{}", row);
 
     // Baseline service time
-    let single_baseline = single.baseline_service_time.as_nanos() as f64 / 1000.0;
-    let sharded_baseline = sharded.baseline_service_time.as_nanos() as f64 / 1000.0;
-    println!(
-        "{:<35} {:>15.2}us {:>15.2}us {:>9.2}x",
-        "Baseline service time",
-        single_baseline,
-        sharded_baseline,
-        single_baseline / sharded_baseline
-    );
+    let mut row = format!("{:<35}", "Baseline service time (us)");
+    for result in results {
+        row.push_str(&format!(
+            " {:>18.2}",
+            result.baseline_service_time.as_nanos() as f64 / 1000.0
+        ));
+    }
+    println!("{}", row);
 
     // Completed requests
-    println!(
-        "{:<35} {:>18} {:>18} {:>9.2}x",
-        "Completed requests",
-        single.completed,
-        sharded.completed,
-        sharded.completed as f64 / single.completed as f64
-    );
+    let mut row = format!("{:<35}", "Completed requests");
+    for result in results {
+        row.push_str(&format!(" {:>18}", result.completed));
+    }
+    println!("{}", row);
 
     // Max in-flight
-    println!(
-        "{:<35} {:>18} {:>18}",
-        "Max in-flight", single.max_in_flight, sharded.max_in_flight
-    );
+    let mut row = format!("{:<35}", "Max in-flight");
+    for result in results {
+        row.push_str(&format!(" {:>18}", result.max_in_flight));
+    }
+    println!("{}", row);
 
     // Timed out
-    println!(
-        "{:<35} {:>18} {:>18}",
-        "Timed out", single.timed_out, sharded.timed_out
-    );
-
-    // Latency comparison
-    if let (Some(s1), Some(s2)) = (
-        LatencyStats::from_durations(single.latencies.clone()),
-        LatencyStats::from_durations(sharded.latencies.clone()),
-    ) {
-        let s1_p50 = s1.p50.as_nanos() as f64 / 1000.0;
-        let s2_p50 = s2.p50.as_nanos() as f64 / 1000.0;
-        println!(
-            "{:<35} {:>15.2}us {:>15.2}us {:>9.2}x",
-            "Latency p50",
-            s1_p50,
-            s2_p50,
-            s1_p50 / s2_p50
-        );
-
-        let s1_p99 = s1.p99.as_nanos() as f64 / 1000.0;
-        let s2_p99 = s2.p99.as_nanos() as f64 / 1000.0;
-        println!(
-            "{:<35} {:>15.2}us {:>15.2}us {:>9.2}x",
-            "Latency p99",
-            s1_p99,
-            s2_p99,
-            s1_p99 / s2_p99
-        );
-
-        let test_duration = args.duration as f64 + args.in_flight_timeout as f64;
-        let s1_throughput = single.completed as f64 / test_duration;
-        let s2_throughput = sharded.completed as f64 / test_duration;
-        println!(
-            "{:<35} {:>14.1}/s {:>14.1}/s {:>9.2}x",
-            "Achieved throughput",
-            s1_throughput,
-            s2_throughput,
-            s2_throughput / s1_throughput
-        );
+    let mut row = format!("{:<35}", "Timed out");
+    for result in results {
+        row.push_str(&format!(" {:>18}", result.timed_out));
     }
+    println!("{}", row);
 
-    println!("\nNote: Ratio > 1.0 means sharded is better for that metric.");
+    // Latency p50
+    let mut row = format!("{:<35}", "Latency p50 (us)");
+    for result in results {
+        if let Some(stats) = LatencyStats::from_durations(&result.latencies) {
+            row.push_str(&format!(" {:>18.2}", stats.p50.as_nanos() as f64 / 1000.0));
+        } else {
+            row.push_str(&format!(" {:>18}", "-"));
+        }
+    }
+    println!("{}", row);
+
+    // Latency p99
+    let mut row = format!("{:<35}", "Latency p99 (us)");
+    for result in results {
+        if let Some(stats) = LatencyStats::from_durations(&result.latencies) {
+            row.push_str(&format!(" {:>18.2}", stats.p99.as_nanos() as f64 / 1000.0));
+        } else {
+            row.push_str(&format!(" {:>18}", "-"));
+        }
+    }
+    println!("{}", row);
+
+    // Achieved throughput
+    let test_duration = args.duration as f64 + args.in_flight_timeout as f64;
+    let mut row = format!("{:<35}", "Achieved throughput (req/s)");
+    for result in results {
+        let throughput = result.completed as f64 / test_duration;
+        row.push_str(&format!(" {:>18.1}", throughput));
+    }
+    println!("{}", row);
 }
 
 async fn run_stress_mode(args: StressArgs) {
@@ -1159,9 +1221,12 @@ async fn run_stress_mode(args: StressArgs) {
         eprintln!("Error: arrival_rate must be > 0.0");
         std::process::exit(1);
     }
-    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::Both) && args.num_shards == 0
+    if matches!(
+        args.indexer_type,
+        IndexerType::Sharded | IndexerType::Nested | IndexerType::All
+    ) && args.num_shards == 0
     {
-        eprintln!("Error: num_shards must be > 0 when using Sharded or Both indexer type");
+        eprintln!("Error: num_shards must be > 0 when using Sharded, Nested, or All indexer type");
         std::process::exit(1);
     }
 
@@ -1186,8 +1251,12 @@ async fn run_stress_mode(args: StressArgs) {
     println!("  Duration: {}s", args.duration);
     println!("  In-flight timeout: {}s", args.in_flight_timeout);
     println!("  Indexer type: {:?}", args.indexer_type);
-    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::Both) {
-        println!("  Num shards: {}", args.num_shards);
+    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::All) {
+        println!("  Num shards (sharded): {}", args.num_shards);
+    }
+    if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
+        println!("  Num workers (nested): {}", args.num_shards);
+        println!("  Jump size (nested): {}", args.jump_size);
     }
 
     // Generate sequences
@@ -1209,7 +1278,7 @@ async fn run_stress_mode(args: StressArgs) {
     let mut all_results = Vec::new();
 
     // Test single indexer
-    if matches!(args.indexer_type, IndexerType::Single | IndexerType::Both) {
+    if matches!(args.indexer_type, IndexerType::Single | IndexerType::All) {
         let token = CancellationToken::new();
         let mut indexer = KvIndexer::new(token.clone(), args.common.block_size, metrics.clone());
 
@@ -1251,7 +1320,7 @@ async fn run_stress_mode(args: StressArgs) {
     }
 
     // Test sharded indexer
-    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::Both) {
+    if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::All) {
         let token = CancellationToken::new();
         let mut indexer = KvIndexerSharded::new(
             token.clone(),
@@ -1297,8 +1366,109 @@ async fn run_stress_mode(args: StressArgs) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Print comparison if both were run
-    if all_results.len() == 2 {
+    // Test nested indexer
+    if matches!(args.indexer_type, IndexerType::Nested | IndexerType::All) {
+        let indexer = ThreadPoolIndexer::new(
+            PositionalIndexer::new(args.jump_size),
+            args.num_shards,
+            args.common.block_size,
+        );
+
+        println!(
+            "\n  Applying {} store events to PositionalIndexer...",
+            sequences.len()
+        );
+        let construction_start = Instant::now();
+
+        for (event_id, seq) in sequences.iter().enumerate() {
+            let event = seq.to_store_event(event_id as u64);
+            indexer.apply_event(event).await;
+
+            if args.common.verbose && (event_id + 1) % 100 == 0 {
+                println!("    Applied {}/{} events...", event_id + 1, sequences.len());
+            }
+        }
+
+        indexer.flush().await;
+
+        let construction_time = construction_start.elapsed();
+        let construction_events = sequences.len() as u64;
+
+        println!("  Tree construction completed in {:?}", construction_time);
+        println!(
+            "  Throughput: {:.0} events/sec",
+            construction_events as f64 / construction_time.as_secs_f64()
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let indexer = Arc::new(indexer);
+
+        let mut results = run_stress_test(indexer.clone(), &sequences, &args).await;
+        results.construction_time = construction_time;
+        results.construction_events = construction_events;
+
+        print_stress_results(&args, &results);
+        all_results.push(results);
+
+        indexer.shutdown();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Test concurrent radix tree indexer
+    if matches!(
+        args.indexer_type,
+        IndexerType::Concurrent | IndexerType::All
+    ) {
+        let indexer = ThreadPoolIndexer::new(
+            ConcurrentRadixTree::new(),
+            args.num_shards,
+            args.common.block_size,
+        );
+
+        println!(
+            "\n  Applying {} store events to ConcurrentRadixTree...",
+            sequences.len()
+        );
+        let construction_start = Instant::now();
+
+        for (event_id, seq) in sequences.iter().enumerate() {
+            let event = seq.to_store_event(event_id as u64);
+            indexer.apply_event(event).await;
+
+            if args.common.verbose && (event_id + 1) % 100 == 0 {
+                println!("    Applied {}/{} events...", event_id + 1, sequences.len());
+            }
+        }
+
+        indexer.flush().await;
+
+        let construction_time = construction_start.elapsed();
+        let construction_events = sequences.len() as u64;
+
+        println!("  Tree construction completed in {:?}", construction_time);
+        println!(
+            "  Throughput: {:.0} events/sec",
+            construction_events as f64 / construction_time.as_secs_f64()
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let indexer = Arc::new(indexer);
+
+        let mut results = run_stress_test(indexer.clone(), &sequences, &args).await;
+        results.construction_time = construction_time;
+        results.construction_events = construction_events;
+
+        print_stress_results(&args, &results);
+        all_results.push(results);
+
+        indexer.shutdown();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Print comparison if multiple were run
+    if all_results.len() >= 2 {
         print_stress_comparison(&all_results, &args);
     }
 

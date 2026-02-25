@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Event Plane
 ---
 
 # Dynamo Event Plane
@@ -72,8 +73,9 @@ Example setup:
 export NATS_SERVER=nats://nats-server:4222
 export DYN_EVENT_PLANE=nats
 
-# Start workers -- they publish events to NATS automatically
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
+# Start workers -- explicitly enable KV event publishing
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+    --kv-events-config '{"publisher":"nats","topic":"kv-events","enable_kv_cache_events":true}'
 
 # Start frontend -- it subscribes to events from NATS automatically
 python3 -m dynamo.frontend --router-mode kv
@@ -93,7 +95,8 @@ Example setup:
 export DYN_EVENT_PLANE=zmq
 
 # Start workers -- each binds a ZMQ socket, registers with discovery
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+  --kv-events-config '{"publisher":"zmq","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 
 # Start frontend -- discovers workers and connects directly
 python3 -m dynamo.frontend --router-mode kv
@@ -104,10 +107,10 @@ python3 -m dynamo.frontend --router-mode kv
 If you do not need KV-aware routing, you can disable the event plane entirely:
 
 ```bash
-python3 -m dynamo.frontend --router-mode kv --no-kv-events
+python3 -m dynamo.frontend --router-mode kv --no-router-kv-events
 ```
 
-With `--no-kv-events`:
+With `--no-router-kv-events`:
 
 - The router falls back to prediction-based cache-aware routing (estimates cache state from routing decisions).
 - No NATS server or ZMQ sockets are needed.

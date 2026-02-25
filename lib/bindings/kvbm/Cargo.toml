@@ -28,23 +28,13 @@ dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
 
 anyhow = { version = "1" }
-async-stream = { version = "0.3" }
-async-trait = { version = "0.1" }
 derive-getters = "0.5"
-either = { version = "1.13", features = ["serde"] }
-futures = { version = "0.3" }
-local-ip-address = { version = "0.6" }
-once_cell = { version = "1.20.3" }
-rand = { version = "0.9" }
-socket2 = { version = "0.6" }
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
 thiserror = { version = "2.0" }
 tokio = { version = "1.46.0", features = ["full"] }
-tokio-stream = { version = "0" }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { version = "0"  }
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
@@ -65,11 +55,7 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
   "unstable-streams",
 ] }
 
-pythonize = "0.23"
-
 dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
-cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
-prometheus = "0.14.0"
+cudarc = { version = "0.19.2", features = ["cuda-12020"], optional = true }
 
 [dev-dependencies]
-rstest = "0.25"

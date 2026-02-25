@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Multi-Node
 ---
 
 # Multi-node Examples
@@ -78,19 +79,31 @@ Deploy prefill and decode workers on separate nodes for optimized resource utili
 # Start ingress
 python -m dynamo.frontend --router-mode kv &
 
-# Start prefill worker
+# Start decode worker
 python -m dynamo.vllm \
-  --model meta-llama/Llama-3.3-70B-Instruct
+  --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
-  --enforce-eager
+  --enforce-eager \
+  --disaggregation-mode decode
 ```
 
 **Node 2**: Run prefill worker
 ```bash
-# Start decode worker
+# Start prefill worker
 python -m dynamo.vllm \
-  --model meta-llama/Llama-3.3-70B-Instruct
+  --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager \
-  --is-prefill-worker
+  --disaggregation-mode prefill
 ```
+
+### Multi-node Tensor/Pipeline Parallelism
+
+When the total parallelism (TP × PP) exceeds the number of GPUs on a single node,
+you need multiple nodes to host a **single** model instance. One node runs the full
+`dynamo.vllm` process (head) while additional nodes run in `--headless` mode,
+spawning only vLLM workers.
+
+See [`examples/backends/vllm/launch/multi_node_tp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/multi_node_tp.sh) for a ready-to-use launch script that supports both head and worker roles via `--head` / `--worker` flags. The model, TP size, and node count are configurable via `MODEL`, `TENSOR_PARALLEL_SIZE`, and `NNODES` environment variables.
+
+For details on the flags used for multi-node distributed execution (`--master-addr`, `--master-port`, `--nnodes`, `--node-rank`), see the [vLLM multiprocessing docs](https://docs.vllm.ai/en/stable/serving/parallelism_scaling/#running-vllm-with-multiprocessing).

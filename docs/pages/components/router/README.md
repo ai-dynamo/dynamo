@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Router
 ---
 
 # Router
@@ -22,7 +23,7 @@ This command:
 - Exposes the service on port 8000 (configurable)
 - Automatically handles all backend workers registered to the Dynamo endpoint
 
-Backend workers register themselves using the `register_llm` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
+Backend workers register themselves using the `register_model` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
 
 #### CLI Arguments
 
@@ -31,8 +32,8 @@ Backend workers register themselves using the `register_llm` API, after which th
 | `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
 | `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
-| `--kv-events` / `--no-kv-events` | `--kv-events` | Enable/disable real-time KV event tracking |
-| `--kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
+| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
+| `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT). |
 
 For all available options: `python -m dynamo.frontend --help`
 
@@ -70,8 +71,8 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round_robin` |
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` |
 | `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | Backend-specific |
-| `--no-kv-events` | `DYN_KV_EVENTS=false` | `true` |
-| `--kv-overlap-score-weight` | `DYN_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
+| `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS=false` | `true` |
+| `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
 
 For complete K8s examples and advanced configuration, see [K8s Examples](router-examples.md#k8s-examples).
 
@@ -82,8 +83,8 @@ For more configuration options and tuning guidelines, see the [Router Guide](rou
 ## Prerequisites and Limitations
 
 **Requirements:**
-- **Dynamic endpoints only**: KV router requires `register_llm()` with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
-- Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../../development/backend-guide.md))
+- **Dynamic endpoints only**: KV router requires `register_model()` with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
+- Backend workers must call `register_model()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../../development/backend-guide.md))
 - You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
 
 **Multimodal Support:**

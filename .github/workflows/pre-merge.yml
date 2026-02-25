@@ -68,7 +68,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
       contents: read
     steps:
@@ -124,13 +124,16 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
       contents: read
     steps:
     - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       with:
         lfs: true
+    - name: Verify Cargo lock file is in sync
+      working-directory: ${{ matrix.dir }}
+      run: cargo metadata --locked --format-version 1
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
@@ -157,3 +160,8 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Install and Run cargo-machete
+      working-directory: ${{ matrix.dir }}
+      run: |
+        cargo-machete --version || cargo install cargo-machete@0.9.1
+        cargo machete

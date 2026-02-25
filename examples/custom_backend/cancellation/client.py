@@ -54,10 +54,10 @@ async def main():
 
     # Connect to middle server or direct server based on argument
     if use_middle_server:
-        endpoint = runtime.namespace("demo").component("middle").endpoint("generate")
+        endpoint = runtime.endpoint("demo.middle.generate")
         print("Client connecting to middle server...")
     else:
-        endpoint = runtime.namespace("demo").component("server").endpoint("generate")
+        endpoint = runtime.endpoint("demo.server.generate")
         print("Client connecting directly to backend server...")
 
     client = await endpoint.client()

@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: vLLM
 ---
 
 # LLM Deployment using vLLM
@@ -65,8 +66,8 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 > [!NOTE]
-> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
-> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events. For vLLM, KV events are currently enabled by default when prefix caching is active (**deprecated** — use `--kv-events-config` explicitly). Use `--no-router-kv-events` on the frontend for prediction-based routing without events
 > - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Pull or build container
@@ -158,9 +159,9 @@ For complete Kubernetes deployment instructions, configurations, and troubleshoo
 vLLM workers are configured through command-line arguments. Key parameters include:
 
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
-- `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
+- `--disaggregation-mode <mode>`: Worker role for disaggregated serving. Accepted values: `prefill`, `decode`, `agg` (default)
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
-- `--connector`: Specify which kv_transfer_config you want vllm to use `[nixl, lmcache, kvbm, none]`. This is a helper flag which overwrites the engines KVTransferConfig.
+- `--kv-transfer-config`: JSON string specifying the vLLM KVTransferConfig (e.g., `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`). See vLLM documentation for details.
 - `--enable-prompt-embeds`: **Enable prompt embeddings feature** (opt-in, default: disabled)
   - **Required for:** Accepting pre-computed prompt embeddings via API
   - **Default behavior:** Prompt embeddings DISABLED - requests with `prompt_embeds` will fail

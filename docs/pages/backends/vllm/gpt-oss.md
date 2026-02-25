@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: GPT-OSS
 ---
 
 # Running gpt-oss-120b Disaggregated with vLLM
@@ -45,7 +46,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3  python -m dynamo.vllm \
 CUDA_VISIBLE_DEVICES=4,5,6,7  python -m dynamo.vllm \
   --model openai/gpt-oss-120b \
   --tensor-parallel-size 4 \
-  --is-prefill-worker \
+  --disaggregation-mode prefill \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony
 ```
