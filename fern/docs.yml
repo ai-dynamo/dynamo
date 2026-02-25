@@ -53,6 +53,8 @@ navbar-links:
     links:
       - text: All Posts
         href: /dynamo/dev/blog
+      - text: "Flash Indexer: Inter-Galactic KV Routing"
+        href: /dynamo/dev/blog/flash-indexer
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 footer: ./components/CustomFooter.tsx
