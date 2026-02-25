@@ -362,8 +362,10 @@ curl -s -u dynamo:dynamo 'http://localhost:3000/api/search?query=SGLang' | pytho
 # Fetch a specific dashboard by UID
 curl -s -u dynamo:dynamo http://localhost:3000/api/dashboards/uid/<dashboard-uid> | python3 -m json.tool
 
-# Snapshot current metrics for a panel via Prometheus range query
-curl -s 'http://localhost:9090/api/v1/query_range?query=sglang:cache_hit_rate&start=2024-01-01T00:00:00Z&end=2024-01-01T01:00:00Z&step=15s'
+# Snapshot current metrics via Prometheus range query (last hour)
+START=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
+END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+curl -s "http://localhost:9090/api/v1/query_range?query=sglang:cache_hit_rate&start=${START}&end=${END}&step=15s"
 ```
 
 This is useful for automated benchmarking pipelines where you want to capture metrics programmatically alongside performance results.
