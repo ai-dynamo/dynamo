@@ -4,8 +4,10 @@
 """vLLM model loader for GPU Memory Service integration.
 
 Provides a model loader that loads weights via GMS for cross-process sharing.
-The loader uses RW_OR_RO mode: first process loads from disk (RW), subsequent
-processes import from GMS metadata (RO).
+By default the loader uses RW_OR_RO mode: first process loads from disk (RW),
+subsequent processes import from GMS metadata (RO).  Set
+``gms_weights_import_only: true`` in ``--model-loader-extra-config`` to force
+RO mode, which blocks until weights are committed.
 """
 
 from __future__ import annotations
@@ -17,10 +19,11 @@ from typing import TYPE_CHECKING
 import torch
 from gpu_memory_service import get_or_create_gms_client_memory_manager
 from gpu_memory_service.client.torch.module import materialize_module_from_gms
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.types import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import (
     finalize_gms_write,
+    get_requested_lock_type,
     setup_meta_tensor_workaround,
 )
 
@@ -65,7 +68,9 @@ def register_gms_loader(load_format: str = "gms") -> None:
             gms_client, pool = get_or_create_gms_client_memory_manager(
                 get_socket_path(device),
                 device,
-                mode=RequestedLockType.RW_OR_RO,
+                mode=get_requested_lock_type(
+                    self.load_config.model_loader_extra_config
+                ),
                 tag="weights",
             )
 
