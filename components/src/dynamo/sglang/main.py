@@ -4,9 +4,7 @@
 import asyncio
 import logging
 import sys
-import time
 
-import sglang as sgl
 import uvloop
 
 from dynamo.common.config_dump import dump_config
@@ -14,12 +12,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
-from dynamo.sglang.checkpoint_restore import (
-    CHECKPOINT_SLEEP_MODE_LEVEL,
-    SGLangCheckpointAdapter,
-    get_checkpoint_config,
-    setup_engine_for_checkpoint,
-)
+from dynamo.sglang.checkpoint_restore import handle_checkpoint_mode
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
@@ -47,33 +40,10 @@ async def worker():
 
         config.server_args.load_format = setup_gms(config.server_args)
 
-    # Check checkpoint mode and validate env vars EARLY (fail fast if misconfigured)
-    early_exit, checkpoint_cfg = get_checkpoint_config()
-    if early_exit:
+    # Checkpoint mode: engine must be created BEFORE runtime (no NATS/etcd during CRIU)
+    should_exit, pre_created_engine = await handle_checkpoint_mode(config.server_args)
+    if should_exit:
         return
-
-    # CHECKPOINT MODE: Load engine BEFORE runtime creation.
-    # This allows checkpointing GPU state before runtime connections are established.
-    pre_created_engine = None
-    if checkpoint_cfg is not None:
-        logging.info("Checkpoint mode enabled (watcher-driven signals)")
-
-        # Checkpoint mode requires memory saver — enable before engine init
-        setup_engine_for_checkpoint(config.server_args)
-
-        start_time = time.time()
-        engine = sgl.Engine(server_args=config.server_args)
-        load_time = time.time() - start_time
-        logging.info(f"SGLang engine loaded in {load_time:.2f}s (checkpoint mode)")
-
-        engine_client = SGLangCheckpointAdapter(engine)
-
-        if not await checkpoint_cfg.run_lifecycle(
-            engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
-        ):
-            return
-
-        pre_created_engine = engine
 
     dynamo_args = config.dynamo_args
     shutdown_event = asyncio.Event()

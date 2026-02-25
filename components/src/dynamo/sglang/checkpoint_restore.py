@@ -32,17 +32,18 @@ import asyncio
 import logging
 import os
 import signal
+import time
 from typing import Optional
 
 import sglang as sgl
 
 logger = logging.getLogger(__name__)
 
-CHECKPOINT_SLEEP_MODE_LEVEL = 1
+_SLEEP_MODE_LEVEL = 1
 
 # Memory tags to release/resume for CRIU checkpoint/restore.
 # All GPU resources must be released so CRIU can snapshot the process cleanly.
-CHECKPOINT_MEMORY_TAGS = ["kv_cache", "weights", "cuda_graph"]
+_MEMORY_TAGS = ["kv_cache", "weights", "cuda_graph"]
 
 
 class SGLangCheckpointAdapter:
@@ -63,11 +64,9 @@ class SGLangCheckpointAdapter:
         )
 
         # Drain in-flight requests before touching GPU memory
-        await self._engine.tokenizer_manager.pause_generation(
-            PauseGenerationReqInput()
-        )
+        await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
         await self._engine.tokenizer_manager.release_memory_occupation(
-            ReleaseMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS), None
+            ReleaseMemoryOccupationReqInput(tags=_MEMORY_TAGS), None
         )
 
     async def wake_up(self) -> None:
@@ -77,22 +76,11 @@ class SGLangCheckpointAdapter:
         )
 
         await self._engine.tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS), None
+            ResumeMemoryOccupationReqInput(tags=_MEMORY_TAGS), None
         )
         await self._engine.tokenizer_manager.continue_generation(
             ContinueGenerationReqInput()
         )
-
-
-def setup_engine_for_checkpoint(server_args) -> None:
-    """Configure server_args for checkpoint mode before engine creation.
-
-    Mirrors vLLM's ``config.engine_args.enable_sleep_mode = True``.
-    Enables torch_memory_saver with CPU backup so weights are offloaded
-    to CPU (preserved across CRIU) while KV cache is just freed.
-    """
-    server_args.enable_memory_saver = True
-    server_args.enable_weights_cpu_backup = True
 
 
 class CheckpointConfig:
@@ -208,24 +196,23 @@ class CheckpointConfig:
                     task.cancel()
 
 
-def get_checkpoint_config() -> tuple[bool, Optional[CheckpointConfig]]:
-    """Resolve checkpoint configuration, handling early-exit and cold-start cases.
+async def handle_checkpoint_mode(server_args) -> tuple[bool, Optional[sgl.Engine]]:
+    """Single entry point for checkpoint/restore integration.
 
-    Checkpoint mode is detected by DYN_READY_FOR_CHECKPOINT_FILE being set.
+    Must be called BEFORE runtime creation so the engine can be checkpointed
+    without active NATS/etcd connections.
 
     Returns:
-        (early_exit, config) where:
-        - early_exit=True, config=None: checkpoint job re-run, checkpoint already
-          exists — caller should return immediately.
-        - early_exit=False, config=None: not in checkpoint mode, or regular worker
-          with no checkpoint available yet — cold-start normally.
-        - early_exit=False, config=CheckpointConfig: checkpoint lifecycle should run.
+        (should_exit, engine) where:
+        - (True, None): caller should return immediately (checkpoint already
+          exists, or checkpoint completed successfully).
+        - (False, None): not in checkpoint mode — cold-start normally.
+        - (False, engine): restore completed — caller should use this engine.
     """
     if "DYN_READY_FOR_CHECKPOINT_FILE" not in os.environ:
         return False, None
 
-    # Validate checkpoint location: either a full location or path + hash must be set.
-    # Check the value (not just presence) so an empty string is treated as unset.
+    # Validate: either a full location or path + hash must be set.
     if not os.environ.get("DYN_CHECKPOINT_LOCATION"):
         path = os.environ.get("DYN_CHECKPOINT_PATH", "")
         hash_ = os.environ.get("DYN_CHECKPOINT_HASH", "")
@@ -239,11 +226,26 @@ def get_checkpoint_config() -> tuple[bool, Optional[CheckpointConfig]]:
     checkpoint_exists = cfg.checkpoint_exists()
 
     if cfg.is_checkpoint_job and checkpoint_exists:
-        # Idempotent checkpoint job re-run: checkpoint already exists.
         return True, None
 
     if not cfg.is_checkpoint_job and not checkpoint_exists:
-        # Regular worker with no checkpoint available yet: cold-start normally.
         return False, None
 
-    return False, cfg
+    logger.info("Checkpoint mode enabled (watcher-driven signals)")
+
+    # Enable memory_saver + weights CPU backup so weights survive CRIU
+    # (mirrors vLLM's enable_sleep_mode = True)
+    server_args.enable_memory_saver = True
+    server_args.enable_weights_cpu_backup = True
+
+    start_time = time.time()
+    engine = sgl.Engine(server_args=server_args)
+    logger.info(
+        f"SGLang engine loaded in {time.time() - start_time:.2f}s (checkpoint mode)"
+    )
+
+    adapter = SGLangCheckpointAdapter(engine)
+    if not await cfg.run_lifecycle(adapter, _SLEEP_MODE_LEVEL):
+        return True, None
+
+    return False, engine
