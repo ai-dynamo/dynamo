@@ -131,7 +131,7 @@ pub async fn prepare_engine(
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine, model.card().tokenizer_hf()?)
+            >(model.card(), inner_engine, model.card().tokenizer()?)
             .await?;
 
             let service_name = model.service_name().to_string();
@@ -150,7 +150,7 @@ pub async fn prepare_engine(
 pub async fn build_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     engine: ExecutionContext,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
 ) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
 where
     Req: Data,
@@ -165,9 +165,9 @@ where
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?
             .into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
+    let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 
     Ok(frontend
@@ -187,7 +187,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     decode_fallback: bool,
     migration_limit: u32,
@@ -206,7 +206,7 @@ where
     let PromptFormatter::OAI(formatter) =
         PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
             .context("OpenAIPreprocessor.new_with_parts")?;
     build_routed_pipeline_with_preprocessor(
         card,
@@ -216,7 +216,7 @@ where
         worker_monitor,
         chooser,
         preprocessor,
-        hf_tokenizer,
+        tokenizer,
         prefill_chooser,
         decode_fallback,
         migration_limit,
@@ -234,7 +234,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
-    hf_tokenizer: tokenizers::Tokenizer,
+    tokenizer: crate::tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     decode_fallback: bool,
     migration_limit: u32,
@@ -252,7 +252,7 @@ where
 {
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
+    let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
 
     // For KV routing, use the client from the chooser to ensure shared state
