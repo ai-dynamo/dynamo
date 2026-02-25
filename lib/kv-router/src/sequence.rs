@@ -351,4 +351,95 @@ mod tests {
         assert_eq!(seq_manager.active_blocks(), 0);
         assert_eq!(seq_manager.active_tokens(), 0);
     }
+
+    #[test]
+    fn test_output_blocks_with_fractional_decay() {
+        let block_size = 4;
+        let mut seq_manager = ActiveSequences::new(block_size);
+
+        // Add request with 3 prefill blocks
+        seq_manager.add_request("r1".to_string(), Some(vec![1, 2, 3]), 12, 0, None);
+        assert_eq!(seq_manager.active_blocks(), 3);
+
+        // Add output block with 0.5 decay fraction.
+        // This adds a random block and sets all single-ref blocks to 0.5.
+        assert!(seq_manager.add_output_block(&"r1".to_string(), Some(0.5)));
+        // 4 unique blocks, all single-ref → all fractional at 0.5
+        // active_blocks = 4 - 4 + 4*0.5 = 2
+        assert_eq!(seq_manager.active_blocks(), 2);
+
+        // Add second request sharing prefix [1, 2]
+        seq_manager.add_request("r2".to_string(), Some(vec![1, 2]), 8, 0, None);
+        // Blocks 1,2 now have strong_count=2 but still have fractional 0.5 from before
+        // No new unique blocks → active_blocks = 4 - 4 + 2.0 = 2
+        assert_eq!(seq_manager.active_blocks(), 2);
+
+        // Add another output block with 0.0 decay for r1.
+        // set_single_ref_blocks_as_fractional updates only single-ref blocks:
+        //   blocks 1,2: strong_count=2, NOT updated (remain 0.5)
+        //   block 3, old output, new output: strong_count=1, set to 0.0
+        // active_blocks = 5 - 5 + (0.5+0.5+0.0+0.0+0.0) = 1
+        assert!(seq_manager.add_output_block(&"r1".to_string(), Some(0.0)));
+        assert_eq!(seq_manager.active_blocks(), 1);
+
+        // Free both requests, verify clean state
+        seq_manager.free(&"r2".to_string());
+        seq_manager.free(&"r1".to_string());
+        assert_eq!(seq_manager.active_blocks(), 0);
+        assert_eq!(seq_manager.active_tokens(), 0);
+    }
+
+    #[test]
+    fn test_mark_prefill_completed() {
+        let block_size = 4;
+        let mut seq_manager = ActiveSequences::new(block_size);
+
+        // Add request with isl=12, overlap=0 → active_tokens=12
+        seq_manager.add_request("r1".to_string(), Some(vec![1, 2, 3]), 12, 0, None);
+        assert_eq!(seq_manager.active_tokens(), 12);
+
+        // Mark prefill completed → active_tokens drops to 0
+        seq_manager.mark_prefill_completed(&"r1".to_string());
+        assert_eq!(seq_manager.active_tokens(), 0);
+
+        // Double-mark: no panic, still 0
+        seq_manager.mark_prefill_completed(&"r1".to_string());
+        assert_eq!(seq_manager.active_tokens(), 0);
+
+        // Add second request with isl=8
+        seq_manager.add_request("r2".to_string(), Some(vec![4, 5]), 8, 0, None);
+        assert_eq!(seq_manager.active_tokens(), 8);
+
+        // Free it (internally calls mark_prefill_completed) → active_tokens=0
+        seq_manager.free(&"r2".to_string());
+        assert_eq!(seq_manager.active_tokens(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_force_expiry() {
+        let block_size = 4;
+        let mut seq_manager = ActiveSequences::new(block_size);
+
+        // Add two requests
+        seq_manager.add_request("r1".to_string(), Some(vec![1, 2]), 8, 0, None);
+        seq_manager.add_request("r2".to_string(), Some(vec![3, 4]), 8, 0, None);
+        assert_eq!(seq_manager.active_blocks(), 4);
+
+        // First expiry cycle: advance past EXPIRY_DURATION.
+        // This populates expiry_requests with {r1, r2} but doesn't expire anything
+        // since expiry_requests started empty.
+        tokio::time::advance(Duration::from_secs(301)).await;
+        let expired = seq_manager.force_expiry();
+        assert!(expired.is_empty());
+
+        // Second expiry cycle: advance again so the timer expires.
+        // Adding r3 triggers force_expiry which drains {r1, r2}.
+        tokio::time::advance(Duration::from_secs(301)).await;
+        let expired = seq_manager.add_request("r3".to_string(), Some(vec![5]), 4, 0, None);
+        assert_eq!(expired, HashSet::from(["r1".to_string(), "r2".to_string()]));
+
+        // Only r3's block remains
+        assert_eq!(seq_manager.active_blocks(), 1);
+        assert_eq!(seq_manager.active_tokens(), 4);
+    }
 }
