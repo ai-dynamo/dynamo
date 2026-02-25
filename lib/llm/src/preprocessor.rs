@@ -949,6 +949,7 @@ impl OpenAIPreprocessor {
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
+    /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false.
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -962,21 +963,17 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            _ => false,
+            Some("nemotron_nano") => {
+                if let Some(args) = chat_template_args
+                    && let Some(enable_thinking) = args.get("enable_thinking")
+                {
+                    return enable_thinking == &serde_json::Value::Bool(false);
+                }
+                false
+            }
+            _ => true,
         }
     }
-
-    // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
-    // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
-    // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
-    pub fn parse_reasoning_content_from_stream<S>(
-        stream: S,
-        parser_name: String,
-    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
-    where
-        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
-    {
-        // Initialize reasoning parser from parser_name
         let reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
             parser_name.as_ref(),
         )) as Box<dyn ReasoningParser>;
