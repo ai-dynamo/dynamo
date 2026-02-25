@@ -279,7 +279,7 @@ impl PrefillRouter {
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
-        let _prefill_router = self.prefill_router.get()?;
+        self.prefill_router.get()?;
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
@@ -387,6 +387,13 @@ impl PrefillRouter {
             ));
         };
 
+        if let Some(err) = first_output.err() {
+            return Err(PrefillError::PrefillError(
+                "Prefill router returned error in output".to_string(),
+                Some(Box::new(err)),
+            ));
+        }
+
         let mut prompt_tokens_details = first_output
             .data
             .as_ref()
@@ -402,13 +409,6 @@ impl PrefillRouter {
                     .as_ref()
                     .and_then(|u| u.prompt_tokens_details.clone());
             }
-        }
-
-        if let Some(err) = first_output.err() {
-            return Err(PrefillError::PrefillError(
-                "Prefill router returned error in output".to_string(),
-                Some(Box::new(err)),
-            ));
         }
 
         let Some(output) = &first_output.data else {
@@ -608,6 +608,13 @@ impl
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
 
+        enum PrefillOutcome {
+            /// Bootstrap optimization: prefill spawned in background, bootstrap info ready
+            Bootstrap(BootstrapInfo),
+            /// Synchronous prefill completed with result
+            Completed(PrefillResult),
+        }
+
         let prefill_result = async {
             if let Some((worker_id, dp_rank, bootstrap_info)) = self
                 .build_bootstrap_info(&prefill_req, preselected_worker)
@@ -634,7 +641,7 @@ impl
                 // This allows set_phase(Decode) below to proceed only after prefill routing is done
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_permit);
 
-                Ok((None, Some(worker_id), Some(bootstrap_info)))
+                Ok(PrefillOutcome::Bootstrap(bootstrap_info))
             } else {
                 // Original prefill path: wait for prefill to complete
                 tracing::debug!("Using original prefill path");
@@ -646,11 +653,9 @@ impl
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
-                let result = self.call_prefill(prefill_context).await;
+                let (result, _worker_info) = self.call_prefill(prefill_context).await?;
 
-                result.map(|(result, worker_info)| {
-                    (Some(result), worker_info.map(|(id, _)| id), None)
-                })
+                Ok(PrefillOutcome::Completed(result))
             }
         }
         .await;
@@ -666,7 +671,7 @@ impl
 
         // Handle prefill result
         match prefill_result {
-            Ok((maybe_prefill_result, _prefill_worker_id, bootstrap_info)) => {
+            Ok(outcome) => {
                 tracing::debug!("Prefill completed, proceeding to decode");
 
                 // Set phase to Decode for the decode request.
@@ -679,18 +684,17 @@ impl
 
                 let mut decode_req = req;
 
-                // Update request with prefill result
-                if let Some(prefill_result) = maybe_prefill_result {
-                    decode_req.prefill_result = Some(prefill_result);
+                match outcome {
+                    PrefillOutcome::Bootstrap(info) => {
+                        decode_req.bootstrap_info = Some(info);
+                    }
+                    PrefillOutcome::Completed(result) => {
+                        decode_req.prefill_result = Some(result);
+                    }
                 }
 
                 // Restore original max_tokens for decode
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-                // Inject bootstrap_info for decode worker
-                if let Some(info) = bootstrap_info {
-                    decode_req.bootstrap_info = Some(info);
-                }
 
                 // Set router_config_override for decode:
                 // - overlap_score_weight = 0 (no KV cache overlap scoring for decode)
