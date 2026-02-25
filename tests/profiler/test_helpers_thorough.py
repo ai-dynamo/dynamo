@@ -20,6 +20,7 @@ sys.path.insert(0, str(project_root))
 
 try:
     from dynamo.profiler.thorough import _pick_thorough_best_config
+    from dynamo.profiler.utils.aic_dataframe import build_decode_row, build_prefill_row
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
@@ -49,9 +50,33 @@ def _make_dgdr(**overrides) -> DynamoGraphDeploymentRequestSpec:
 
 
 def _stub_dfs():
-    """Minimal prefill/decode DataFrames that satisfy pick function inputs."""
-    prefill_df = pd.DataFrame([{"ttft": 50.0, "tp(p)": 1}])
-    decode_df = pd.DataFrame([{"tpot": 10.0, "tp(d)": 1}])
+    """Minimal prefill/decode DataFrames that satisfy pick function inputs.
+
+    Uses build_prefill_row / build_decode_row so the DataFrames contain all
+    columns expected by _build_disagg_summary_dict (called via
+    build_disagg_df_from_static in load_match / default paths).
+    """
+    prefill_row = build_prefill_row(
+        model="Qwen/Qwen3-32B",
+        isl=4000,
+        osl=1000,
+        ttft=50.0,
+        tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1,
+        backend="trtllm",
+        system="h200_sxm",
+    )
+    decode_row = build_decode_row(
+        tpot=10.0,
+        thpt_per_gpu=100.0,
+        num_request=1,
+        num_gpus=1,
+        osl=1000,
+        tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1,
+        backend="trtllm",
+        system="h200_sxm",
+    )
+    prefill_df = pd.DataFrame([prefill_row])
+    decode_df = pd.DataFrame([decode_row])
     return prefill_df, decode_df
 
 

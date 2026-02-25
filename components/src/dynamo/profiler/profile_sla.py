@@ -241,7 +241,7 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
         if ops.dry_run:
             logger.warning("Dry run mode — no DGD config produced (expected).")
             with open(output_file, "w") as f:
-                yaml.safe_dump({}, f, sort_keys=False)
+                yaml.safe_dump(None, f, sort_keys=False)
         else:
             error_msg = "Profiler did not produce a DGD config."
             logger.error(error_msg)
