@@ -212,6 +212,9 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       - name: Tag and Push CUDA 13 Runtime Images
+        # For trtllm (CUDA 13.1 only, no CUDA 12 variant), an additional alias tag
+        # without the cuda13 suffix is created so that downstream consumers (e.g.,
+        # deployment tests, crane copy) can reference it as the default trtllm image.
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
@@ -262,6 +265,9 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       - name: Tag and Push CUDA 13 Runtime Images
+        # For trtllm (CUDA 13.1 only, no CUDA 12 variant), an additional alias tag
+        # without the cuda13 suffix is created so that downstream consumers (e.g.,
+        # deployment tests, crane copy) can reference it as the default trtllm image.
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
