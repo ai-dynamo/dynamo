@@ -19,7 +19,6 @@ members = [
     "lib/bench",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
-    "lib/config",
     "lib/velo-common",
     "lib/velo-backend",
     "lib/velo-events",
