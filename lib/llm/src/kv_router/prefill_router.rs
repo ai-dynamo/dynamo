@@ -209,8 +209,10 @@ impl PrefillRouter {
                 )
                 .await?;
 
-            // Extract client from kv_chooser to ensure shared state
-            let client = kv_chooser.client().clone();
+            let client = kv_chooser
+                .client()
+                .expect("PrefillRouter requires a KvRouter with a Client")
+                .clone();
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
             if let Some(monitor) =

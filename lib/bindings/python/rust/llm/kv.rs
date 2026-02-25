@@ -16,6 +16,7 @@ use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
+use llm_rs::kv_router::KvRouter as RsKvRouter;
 use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
@@ -746,6 +747,45 @@ impl KvRouter {
             Ok(Self {
                 inner: Arc::new(kv_push_router),
             })
+        })
+    }
+
+    /// Create a standalone KvRouter without dynamo endpoint/runtime.
+    /// best_worker(), free(), and mark_prefill_complete() are
+    /// available; generate() will raise an error.
+    #[staticmethod]
+    #[pyo3(signature = (block_size, num_workers, kv_router_config))]
+    fn standalone(
+        block_size: usize,
+        num_workers: usize,
+        kv_router_config: &super::entrypoint::KvRouterConfig,
+    ) -> PyResult<Self> {
+        let config = kv_router_config.inner();
+        // Enter the Tokio runtime context because new_standalone spawns
+        // background tasks (scheduler loop) via tokio::spawn.
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        let _guard = runtime.enter();
+
+        let workers = llm_rs::kv_router::build_static_workers(
+            num_workers as u32,
+            1,
+            config.router_max_tree_size as u64,
+            256,
+            1,
+        );
+        let inner_router = RsKvRouter::new_standalone(
+            workers,
+            block_size as u32,
+            None,
+            Some(config),
+            "decode",
+        )
+        .map_err(to_pyerr)?;
+
+        let kv_push_router =
+            RsKvPushRouter::new_chooser_only(Arc::new(inner_router));
+        Ok(Self {
+            inner: Arc::new(kv_push_router),
         })
     }
 

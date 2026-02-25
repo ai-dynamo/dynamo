@@ -1327,6 +1327,26 @@ class KvRouter:
         """
         ...
 
+    @staticmethod
+    def standalone(
+        block_size: int,
+        num_workers: int,
+        kv_router_config: KvRouterConfig,
+    ) -> "KvRouter":
+        """
+        Create a standalone KvRouter without a dynamo endpoint or runtime.
+
+        Only best_worker(), free(), and mark_prefill_complete() are 
+        available. generate() will raise an error because there is
+        no backend PushRouter to forward requests to.
+
+        Args:
+            block_size: The KV cache block size
+            num_workers: Number of workers to create
+            kv_router_config: Configuration for the KV router
+        """
+        ...
+
     async def generate(
         self,
         token_ids: List[int],

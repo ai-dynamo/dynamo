@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "bench")]
 use std::time::Instant;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
+use tokio_util::sync::CancellationToken;
 
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
@@ -257,6 +258,139 @@ impl KvScheduler {
             }
 
             tracing::trace!("background endpoint subscriber shutting down");
+        });
+
+        Ok(KvScheduler {
+            request_tx,
+            slots,
+            queue,
+        })
+    }
+
+    /// Start a standalone KvScheduler with a static set of workers
+    pub fn start_standalone(
+        cancellation_token: CancellationToken,
+        block_size: u32,
+        workers: HashMap<WorkerId, ModelRuntimeConfig>,
+        selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
+        kv_router_config: &KvRouterConfig,
+        worker_type: &'static str,
+    ) -> Result<Self, KvSchedulerError> {
+        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
+
+        let slots = Arc::new(
+            ActiveSequencesMultiWorker::new_standalone(
+                cancellation_token.clone(),
+                block_size as usize,
+                workers.clone(),
+                worker_type,
+            ),
+        );
+
+        // Create a watch channel seeded with the static workers
+        let (static_tx, rx): (watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>, _) =
+            watch::channel(workers);
+        let workers_with_configs: RuntimeConfigWatch = rx;
+
+        let slots_clone = slots.clone();
+        let scheduler_rx = workers_with_configs.clone();
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
+        let scheduler_cancel_token = cancellation_token;
+
+        let ready_notify = Arc::new(Notify::new());
+        let queue = Arc::new(SchedulerQueue::new(
+            slots.clone(),
+            workers_with_configs,
+            ready_notify.clone(),
+            kv_router_config.router_queue_threshold,
+        ));
+        let queue_clone = queue.clone();
+
+        tokio::spawn(async move {
+            let _keep_alive = static_tx;
+            let mut request_rx = request_rx;
+            let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
+            tracing::trace!("standalone scheduler background task started");
+
+            loop {
+                tokio::select! {
+                    _ = scheduler_cancel_token.cancelled() => {
+                        tracing::trace!("standalone scheduler background task shutting down");
+                        break;
+                    }
+                    request = request_rx.recv() => {
+                        let Some(request) = request else {
+                            tracing::warn!("scheduler shutdown");
+                            break;
+                        };
+                        tracing::trace!("received request to be scheduled");
+                        queue_clone.enqueue(request).await;
+                    }
+                    _ = ready_notify.notified() => {}
+                    _ = recheck_interval.tick() => {
+                        queue_clone.update().await;
+                    }
+                }
+
+                while let Some(mut request) = queue_clone.try_dequeue().await {
+                    let (decode_blocks, prefill_tokens) = slots_clone
+                        .potential_blocks_and_tokens(
+                            request.token_seq.clone(),
+                            request.isl_tokens,
+                            request.overlaps.clone(),
+                        )
+                        .await;
+                    request.decode_blocks = decode_blocks;
+                    request.prefill_tokens = prefill_tokens;
+
+                    let workers: HashMap<WorkerId, ModelRuntimeConfig> =
+                        scheduler_rx.borrow().clone();
+
+                    match selector.select_worker(&workers, &request, block_size) {
+                        Ok(selection) => {
+                            let response = SchedulingResponse {
+                                best_worker: selection.worker,
+                                overlap_blocks: selection.overlap_blocks,
+                            };
+                            request.respond(response);
+
+                            if !request.update_states {
+                                continue;
+                            }
+
+                            let Some(request_id) = request.maybe_request_id else {
+                                tracing::error!(
+                                    "No request_id provided to add_request to the slot tracker"
+                                );
+                                continue;
+                            };
+
+                            if let Err(e) = slots_clone
+                                .add_request(SequenceRequest {
+                                    request_id: request_id.clone(),
+                                    token_sequence: request.token_seq,
+                                    isl: request.isl_tokens,
+                                    overlap: selection.overlap_blocks,
+                                    expected_output_tokens: None,
+                                    worker: selection.worker,
+                                    lora_name: request.lora_name.clone(),
+                                })
+                                .await
+                            {
+                                tracing::warn!("Failed to add request {request_id}: {e}");
+                            }
+                        }
+                        Err(KvSchedulerError::NoEndpoints) => {
+                            tracing::warn!("No endpoints available, dropping request");
+                        }
+                        Err(e) => {
+                            tracing::error!("Error scheduling request: {:?}", e);
+                        }
+                    }
+                }
+            }
+
+            tracing::trace!("Standalone scheduler shutting down");
         });
 
         Ok(KvScheduler {

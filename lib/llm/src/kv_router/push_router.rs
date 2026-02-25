@@ -19,7 +19,7 @@ use crate::{
     kv_router::{
         KvRouter,
         metrics::RouterRequestMetrics,
-        protocols::{TokensWithHashes, WorkerWithDpRank},
+        protocols::WorkerWithDpRank,
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -29,7 +29,8 @@ use crate::{
 };
 
 pub struct KvPushRouter {
-    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    /// None in standalone mode.
+    inner: Option<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>,
     pub chooser: Arc<KvRouter>,
 }
 
@@ -179,7 +180,18 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
-        KvPushRouter { inner, chooser }
+        KvPushRouter {
+            inner: Some(inner),
+            chooser,
+        }
+    }
+
+    /// Create a KvPushRouter that only stores the chooser (no PushRouter).
+    pub fn new_chooser_only(chooser: Arc<KvRouter>) -> Self {
+        KvPushRouter {
+            inner: None,
+            chooser,
+        }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -345,32 +357,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             overlap_amount,
         } = selection;
 
-        // In approximate mode (use_kv_events=false), record the routing decision
-        // so the indexer can track cache state based on routing decisions.
-        // This covers both pre-selected workers and find_best_match selections.
-        if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
-            let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-            let mut tokens_with_hashes =
-                TokensWithHashes::new(request.token_ids.clone(), self.chooser.block_size());
-            if let Err(e) = self
-                .chooser
-                .indexer()
-                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
-                .await
-            {
-                tracing::warn!(
-                    request_id = %context_id,
-                    worker_id = instance_id,
-                    dp_rank = dp_rank,
-                    error = %e,
-                    "Failed to record routing decision in approximate mode"
-                );
-            }
-        }
 
         // Record routing metrics on tracker and observe ISL + prefill start.
+        let client = self.chooser.client().ok_or_else(|| {
+            anyhow::anyhow!("KvPushRouter requires a KvRouter with a Client (not standalone)")
+        })?;
         let request_metrics =
-            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
+            RouterRequestMetrics::from_component(client.endpoint.component());
         if let Some(ref tracker) = request.tracker {
             let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);
@@ -428,8 +421,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
-        let mut response_stream = self
-            .inner
+        let push_router = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "KvPushRouter::generate() requires a PushRouter (not available in standalone mode)"
+            )
+        })?;
+        let mut response_stream = push_router
             .direct(updated_request, instance_id)
             .instrument(tracing::info_span!(
                 "kv_router.route_request",

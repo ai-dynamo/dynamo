@@ -420,12 +420,13 @@ pub struct ActiveSequencesMultiWorker {
     request_to_lora: Arc<DashMap<RequestId, String>>,
     handles: Arc<DashMap<WorkerWithDpRank, std::thread::JoinHandle<()>>>,
     block_size: usize,
-    component: Component,
+    component: Option<Component>,
+    parent_cancel_token: CancellationToken,
     router_id: u64,
-    /// Publisher for sequence events
-    event_publisher: EventPublisher,
-    /// Publisher for metrics (namespace-scoped)
-    metrics_publisher: EventPublisher,
+    /// Publisher for sequence events (None in standalone mode)
+    event_publisher: Option<EventPublisher>,
+    /// Publisher for metrics (namespace-scoped, None in standalone mode)
+    metrics_publisher: Option<EventPublisher>,
     replica_sync: bool,
     /// Worker type for Prometheus metrics labeling ("prefill" or "decode")
     worker_type: &'static str,
@@ -442,6 +443,7 @@ impl ActiveSequencesMultiWorker {
     ) -> Result<Self> {
         assert!(block_size > 1, "block_size must be greater than 1");
 
+        let parent_cancel_token = component.drt().runtime().primary_token();
         let senders = Arc::new(DashMap::new());
         let handles = Arc::new(DashMap::new());
         let request_to_worker = Arc::new(DashMap::new());
@@ -453,7 +455,6 @@ impl ActiveSequencesMultiWorker {
 
             for dp_rank in 0..dp_size {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                // Create a child cancellation token from the component's runtime
                 let cancel_token = component.drt().runtime().child_token();
                 let (sender, handle) = Self::start_worker(block_size, cancel_token);
                 senders.insert(worker, sender);
@@ -472,9 +473,10 @@ impl ActiveSequencesMultiWorker {
             request_to_lora: request_to_lora.clone(),
             handles,
             block_size,
-            component: component.clone(),
-            event_publisher,
-            metrics_publisher,
+            component: Some(component.clone()),
+            parent_cancel_token,
+            event_publisher: Some(event_publisher),
+            metrics_publisher: Some(metrics_publisher),
             router_id,
             replica_sync,
             worker_type,
@@ -490,7 +492,6 @@ impl ActiveSequencesMultiWorker {
             let cancel_token = component.drt().runtime().child_token();
 
             tokio::spawn(async move {
-                // NATS subscription loop
                 if let Err(e) = Self::subscribe_to_events(
                     senders_clone,
                     request_to_worker_clone,
@@ -507,6 +508,50 @@ impl ActiveSequencesMultiWorker {
         }
 
         Ok(multi_worker)
+    }
+
+    /// Standalone ActiveSequencesMultiWorker without a Component or event transport.
+    /// For standalone routing without dynamo discovery.
+    pub fn new_standalone(
+        parent_cancel_token: CancellationToken,
+        block_size: usize,
+        workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
+        worker_type: &'static str,
+    ) -> Self {
+        assert!(block_size > 1, "block_size must be greater than 1");
+
+        let senders = Arc::new(DashMap::new());
+        let handles = Arc::new(DashMap::new());
+        let request_to_worker = Arc::new(DashMap::new());
+        let request_to_lora = Arc::new(DashMap::new());
+
+        for (worker_id, config) in workers_with_configs {
+            let dp_size = config.data_parallel_size;
+            for dp_rank in 0..dp_size {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                let cancel_token = parent_cancel_token.child_token();
+                let (sender, handle) = Self::start_worker(block_size, cancel_token);
+                senders.insert(worker, sender);
+                handles.insert(worker, handle);
+            }
+        }
+
+        let router_id = rand::random::<u64>();
+
+        Self {
+            senders,
+            request_to_worker,
+            request_to_lora,
+            handles,
+            block_size,
+            component: None,
+            parent_cancel_token,
+            event_publisher: None,
+            metrics_publisher: None,
+            router_id,
+            replica_sync: false,
+            worker_type,
+        }
     }
 
     /// Helper method to start a worker task
@@ -774,7 +819,7 @@ impl ActiveSequencesMultiWorker {
 
             let (sender, handle) = Self::start_worker(
                 self.block_size,
-                self.component.drt().runtime().child_token(),
+                self.parent_cancel_token.child_token(),
             );
             self.senders.insert(*worker, sender);
             self.handles.insert(*worker, handle);
@@ -812,19 +857,21 @@ impl ActiveSequencesMultiWorker {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
 
         if self.replica_sync {
-            let event = ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::AddRequest {
-                    token_sequence: token_sequence.clone(),
-                    isl,
-                    overlap,
-                    expected_output_tokens,
-                },
-                router_id: self.router_id,
-                lora_name: lora_name.clone(),
-            };
-            self.event_publisher.publish(&event).await?;
+            if let Some(ref publisher) = self.event_publisher {
+                let event = ActiveSequenceEvent {
+                    request_id: request_id.clone(),
+                    worker,
+                    data: ActiveSequenceEventData::AddRequest {
+                        token_sequence: token_sequence.clone(),
+                        isl,
+                        overlap,
+                        expected_output_tokens,
+                    },
+                    router_id: self.router_id,
+                    lora_name: lora_name.clone(),
+                };
+                publisher.publish(&event).await?;
+            }
         }
 
         self.request_to_worker.insert(request_id.clone(), worker);
@@ -883,19 +930,21 @@ impl ActiveSequencesMultiWorker {
             .clone();
 
         if self.replica_sync {
-            let lora_name = self
-                .request_to_lora
-                .get(request_id)
-                .map(|entry| entry.value().clone());
+            if let Some(ref publisher) = self.event_publisher {
+                let lora_name = self
+                    .request_to_lora
+                    .get(request_id)
+                    .map(|entry| entry.value().clone());
 
-            let event = ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: event_data,
-                router_id: self.router_id,
-                lora_name,
-            };
-            self.event_publisher.publish(&event).await?;
+                let event = ActiveSequenceEvent {
+                    request_id: request_id.clone(),
+                    worker,
+                    data: event_data,
+                    router_id: self.router_id,
+                    lora_name,
+                };
+                publisher.publish(&event).await?;
+            }
         }
 
         sender
@@ -1062,9 +1111,10 @@ impl ActiveSequencesMultiWorker {
             active_prefill_tokens: Some(active_tokens as u64),
         };
 
-        if let Err(e) = self.metrics_publisher.publish(&active_load).await {
-            // This is expected if NATS is not available - the local gauge update above already succeeded
-            tracing::trace!("Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}");
+        if let Some(ref publisher) = self.metrics_publisher {
+            if let Err(e) = publisher.publish(&active_load).await {
+                tracing::trace!("Failed to publish ActiveLoad to NATS for worker {worker:?}: {e:?}");
+            }
         }
     }
 

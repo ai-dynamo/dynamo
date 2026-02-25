@@ -181,6 +181,46 @@ impl Indexer {
         ))
     }
 
+    /// Create an Indexer without a Component, using unregistered metrics and a
+    /// caller-provided CancellationToken.
+    pub fn new_standalone(
+        cancellation_token: tokio_util::sync::CancellationToken,
+        kv_router_config: &KvRouterConfig,
+        block_size: u32,
+    ) -> Self {
+        if kv_router_config.overlap_score_weight == 0.0 {
+            return Indexer::None;
+        }
+
+        if kv_router_config.router_event_threads > 1 {
+            return Indexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
+                ConcurrentRadixTree::new(),
+                kv_router_config.router_event_threads as usize,
+                block_size,
+            )));
+        }
+
+        let kv_indexer_metrics = Arc::new(indexer::KvIndexerMetrics::new_unregistered());
+
+        let prune_config = if !kv_router_config.use_kv_events {
+            Some(PruneConfig {
+                ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
+                max_tree_size: kv_router_config.router_max_tree_size,
+                prune_target_ratio: kv_router_config.router_prune_target_ratio,
+            })
+        } else {
+            None
+        };
+
+        Indexer::KvIndexer(KvIndexer::new_with_frequency(
+            cancellation_token,
+            None,
+            block_size,
+            kv_indexer_metrics,
+            prune_config,
+        ))
+    }
+
     pub(crate) async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
@@ -274,7 +314,8 @@ pub struct KvRouter {
     block_size: u32,
     kv_router_config: KvRouterConfig,
     cancellation_token: tokio_util::sync::CancellationToken,
-    client: Client,
+    /// None in standalone mode (no dynamo discovery).
+    client: Option<Client>,
 }
 
 impl KvRouter {
@@ -331,13 +372,50 @@ impl KvRouter {
             block_size,
             kv_router_config,
             cancellation_token,
-            client,
+            client: Some(client),
         })
     }
 
-    /// Get a reference to the client used by this KvRouter
-    pub fn client(&self) -> &Client {
-        &self.client
+    /// Create a standalone KvRouter with a fixed set of workers
+    pub fn new_standalone(
+        workers: HashMap<protocols::WorkerId, ModelRuntimeConfig>,
+        block_size: u32,
+        selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
+        kv_router_config: Option<KvRouterConfig>,
+        worker_type: &'static str,
+    ) -> Result<Self> {
+        let kv_router_config = kv_router_config.unwrap_or_default();
+        kv_router_config.validate()?;
+
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
+
+        let indexer =
+            Indexer::new_standalone(cancellation_token.clone(), &kv_router_config, block_size);
+
+        let scheduler = KvScheduler::start_standalone(
+            cancellation_token.clone(),
+            block_size,
+            workers,
+            selector,
+            &kv_router_config,
+            worker_type,
+        )?;
+
+        tracing::info!("Standalone KV Routing initialized");
+        Ok(Self {
+            indexer,
+            scheduler,
+            block_size,
+            kv_router_config,
+            cancellation_token,
+            client: None,
+        })
+    }
+
+    /// Get a reference to the client used by this KvRouter.
+    /// Returns `None` in standalone mode.
+    pub fn client(&self) -> Option<&Client> {
+        self.client.as_ref()
     }
 
     pub fn indexer(&self) -> &Indexer {
@@ -425,14 +503,32 @@ impl KvRouter {
             "find_best_match completed"
         );
 
-        // Note: Routing decision recording (for approximate mode) is now handled
-        // by KvPushRouter::generate after select_worker returns.
-
         let overlap_amount = overlap_scores
             .scores
             .get(&best_worker)
             .copied()
             .unwrap_or(0);
+
+        // In approximate mode (use_kv_events=false), record the routing decision
+        // so the indexer tracks estimated cache state per worker.
+        if update_states && !self.kv_router_config.use_kv_events {
+            let mut tokens_with_hashes =
+                TokensWithHashes::new(tokens.to_vec(), self.block_size);
+            if let Err(e) = self
+                .indexer
+                .process_routing_decision_for_request(&mut tokens_with_hashes, best_worker)
+                .await
+            {
+                tracing::warn!(
+                    context_id = ?context_id,
+                    worker_id = best_worker.worker_id,
+                    dp_rank = best_worker.dp_rank,
+                    error = %e,
+                    "Failed to record routing decision in approximate mode"
+                );
+            }
+        }
+
         Ok((best_worker, overlap_amount))
     }
 
@@ -447,6 +543,27 @@ impl KvRouter {
         lora_name: Option<String>,
         router_config_override: Option<&RouterConfigOverride>,
     ) {
+        // Approximate-mode indexer update for pre-selected workers (the
+        // find_best_match path handles its own update; this covers callers
+        // that skip find_best_match and register a worker directly).
+        if !self.kv_router_config.use_kv_events {
+            let mut tokens_with_hashes =
+                TokensWithHashes::new(tokens.to_vec(), self.block_size);
+            if let Err(e) = self
+                .indexer
+                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+                .await
+            {
+                tracing::warn!(
+                    request_id = %request_id,
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    error = %e,
+                    "Failed to record routing decision in approximate mode (add_request)"
+                );
+            }
+        }
+
         let isl_tokens = tokens.len();
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
@@ -586,6 +703,40 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let stream = stream::iter(vec![response]);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
+}
+
+/// Build a static worker map for [`KvRouter::new_standalone`].
+///
+/// Each entry in `ranks` describes one DP rank. Workers are numbered
+/// starting from `base_worker_id`, with one `ModelRuntimeConfig` per unique
+/// worker. Multiple DP ranks on the same physical worker share a config.
+///
+/// # Arguments
+///
+/// * `num_workers` — number of distinct worker IDs to create.
+/// * `base_worker_id` — first worker ID.
+/// * `total_kv_blocks` — KV block budget per worker.
+/// * `max_num_seqs` — maximum concurrent sequences per worker.
+/// * `data_parallel_size` — DP degree per worker.
+pub fn build_static_workers(
+    num_workers: u32,
+    base_worker_id: protocols::WorkerId,
+    total_kv_blocks: u64,
+    max_num_seqs: u64,
+    data_parallel_size: u32,
+) -> HashMap<protocols::WorkerId, ModelRuntimeConfig> {
+    (0..num_workers)
+        .map(|i| {
+            let worker_id = base_worker_id + i as u64;
+            let config = ModelRuntimeConfig {
+                total_kv_blocks: Some(total_kv_blocks),
+                max_num_seqs: Some(max_num_seqs),
+                data_parallel_size,
+                ..Default::default()
+            };
+            (worker_id, config)
+        })
+        .collect()
 }
 
 impl Drop for KvRouter {

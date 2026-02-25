@@ -258,7 +258,10 @@ where
         let Some(ref chooser) = chooser else {
             anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
         };
-        chooser.client().clone()
+        chooser
+            .client()
+            .expect("RouterMode::KV requires a KvRouter with a Client")
+            .clone()
     } else {
         client.clone()
     };
