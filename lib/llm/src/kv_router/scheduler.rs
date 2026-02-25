@@ -207,7 +207,7 @@ impl KvScheduler {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Result<WorkerWithDpRank, KvSchedulerError> {
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
         #[cfg(feature = "bench")]
         let start = Instant::now();
 
@@ -249,7 +249,7 @@ impl KvScheduler {
             "scheduler.schedule completed"
         );
 
-        Ok(response.best_worker)
+        Ok(response)
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
@@ -408,7 +408,11 @@ impl WorkerSelector for DefaultWorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
 
-        if workers.is_empty() {
+        let allowed_ids = request.allowed_worker_ids.as_ref();
+
+        if allowed_ids.map_or(workers.is_empty(), |ids| {
+            !workers.keys().any(|wid| ids.contains(wid))
+        }) {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
@@ -428,10 +432,10 @@ impl WorkerSelector for DefaultWorkerSelector {
             .and_then(|cfg| cfg.overlap_score_weight)
             .unwrap_or(self.kv_router_config.overlap_score_weight);
 
-        // Calculate logits for each worker with dp_rank
-        // Outer loop: iterate over all workers from runtime config
-        // Inner loop: iterate over all dp_ranks for each worker
-        for (worker_id, config) in workers.iter() {
+        for (worker_id, config) in workers
+            .iter()
+            .filter(|(wid, _)| allowed_ids.map_or(true, |ids| ids.contains(wid)))
+        {
             let data_parallel_size = config.data_parallel_size;
 
             for dp_rank in 0..data_parallel_size {

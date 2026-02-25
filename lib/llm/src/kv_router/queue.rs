@@ -145,20 +145,8 @@ impl SchedulerQueue {
 
         let selection = {
             let workers = self.workers_with_configs.borrow();
-            if let Some(ref allowed_ids) = request.allowed_worker_ids {
-                let mut filtered = workers.clone();
-                filtered.retain(|worker_id, _| allowed_ids.contains(worker_id));
-                tracing::debug!(
-                    allowed_count = allowed_ids.len(),
-                    filtered_worker_count = filtered.len(),
-                    "Applied allowed_worker_ids filter"
-                );
-                self.selector
-                    .select_worker(&filtered, &request, self.block_size)
-            } else {
-                self.selector
-                    .select_worker(&workers, &request, self.block_size)
-            }
+            self.selector
+                .select_worker(&workers, &request, self.block_size)
         };
 
         let selection = match selection {

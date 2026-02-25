@@ -410,13 +410,13 @@ impl KvRouter {
         });
         let seq_hash_elapsed = start.elapsed();
 
-        let best_worker = self
+        let response = self
             .scheduler
             .schedule(
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
-                overlap_scores.clone(),
+                overlap_scores,
                 router_config_override,
                 update_states,
                 lora_name,
@@ -445,15 +445,7 @@ impl KvRouter {
             "find_best_match completed"
         );
 
-        // Note: Routing decision recording (for approximate mode) is now handled
-        // by KvPushRouter::generate after select_worker returns.
-
-        let overlap_amount = overlap_scores
-            .scores
-            .get(&best_worker)
-            .copied()
-            .unwrap_or(0);
-        Ok((best_worker, overlap_amount))
+        Ok((response.best_worker, response.overlap_blocks))
     }
 
     #[allow(clippy::too_many_arguments)]
