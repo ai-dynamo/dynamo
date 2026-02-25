@@ -174,6 +174,7 @@ impl KvIndexerInterface for NaiveNestedMap {
     async fn find_matches_for_request(
         &self,
         _tokens: &[u32],
+        _lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
         unimplemented!("not used in bench")
     }
@@ -384,6 +385,7 @@ impl KvIndexerInterface for InvertedIndex {
     async fn find_matches_for_request(
         &self,
         _tokens: &[u32],
+        _lora_name: Option<&str>,
     ) -> Result<OverlapScores, KvRouterError> {
         unimplemented!("not used in bench")
     }

@@ -18,46 +18,38 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
       eppConfig:
-        # This configuration uses Dynamo's KV-aware scorer for intelligent routing
+        # This config uses the same disagg-profile-handler as disaggregated deployments.
+        # The handler's graceful degradation feature makes this possible:
+        # - With no "prefill" profile defined, it runs only the "decode" profile.
+        # - The decode scorer receives isDisaggregated=false, so the Dynamo KV router
+        #   uses full overlap scoring (overlap_score_weight=1.0) for aggregated mode.
+        # - If prefill workers were added later (and a prefill profile configured),
+        #   the same handler would automatically switch to disaggregated routing.
         config:
-          # Plugins define the behavior of EPP
           plugins:
-            # Required: tells EPP which profile to use (even if you only have one)
-            - type: single-profile-handler
-            # Picker: chooses the final endpoint after scoring
+            - type: disagg-profile-handler
+            - name: decode-filter
+              type: label-filter
+              # allowsNoLabel: true lets pods without the subComponentType label pass through,
+              # which is typical for aggregated deployments where workers don't have this label.
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "decode"
+                allowsNoLabel: true
             - name: picker
               type: max-score-picker
-            - name: dyn-kv
-              type: kv-aware-scorer
-          # Scheduling profiles configure which plugins are used and their weights
+            - name: dyn-decode
+              type: dyn-decode-scorer
+          # Only a "decode" profile — no "prefill" profile means pure aggregated mode.
           schedulingProfiles:
-            - name: default
+            - name: decode
               plugins:
-                - pluginRef: dyn-kv
+                - pluginRef: decode-filter
+                - pluginRef: dyn-decode
                   weight: 1
                 - pluginRef: picker
-    Frontend:
-      envFromSecret: hf-token-secret
-      componentType: frontend
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
-          command:
-            - python3
-          args:
-            - -m
-            - dynamo.frontend
-            - --router-mode
-            - direct
-      envs:
-        - name: HF_HOME
-          value: /opt/models
-      replicas: 1
-    VllmPrefillWorker:
+    VllmDecodeWorker:
       componentType: worker
       envFromSecret: hf-token-secret
       volumeMounts:
@@ -83,6 +75,64 @@ spec:
           - -c
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
+              # Frontend sidecar: receives requests from kGateway on port 8000
+        # and routes them to the vLLM worker in the same pod
+        containers:
+          - name: frontend
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            command:
+              - python3
+            args:
+              - -m
+              - dynamo.frontend
+              - --router-mode
+              - direct
+            ports:
+              - containerPort: 8000
+                name: http
+                protocol: TCP
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
+            env:
+              - name: DYNAMO_PORT
+                value: "8000"
+              - name: DYN_HTTP_PORT
+                value: "8000"
+              - name: DYN_NAMESPACE
+                value: my-model-vllm-agg
+              - name: DYN_COMPONENT
+                value: frontend
+              - name: DYN_DISCOVERY_BACKEND
+                value: kubernetes
+              - name: DYN_PARENT_DGD_K8S_NAME
+                value: llama3-70b-agg
+              - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                value: my-model
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: POD_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_UID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.uid
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
       replicas: 1
       resources:
         limits:

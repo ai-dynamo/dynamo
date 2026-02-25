@@ -64,7 +64,7 @@ type ProfilingConfigSpec struct {
 
 	// ProfilerImage specifies the container image to use for profiling jobs.
 	// This image contains the profiler code and dependencies needed for SLA-based profiling.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
 	// +kubebuilder:validation:Required
 	ProfilerImage string `json:"profilerImage"`
 
@@ -132,7 +132,7 @@ type DeploymentOverridesSpec struct {
 	// WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
 	// This image is used for both temporary DGDs created during online profiling and the final DGD.
 	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
 	// +kubebuilder:validation:Optional
 	WorkersImage string `json:"workersImage,omitempty"`
 }
