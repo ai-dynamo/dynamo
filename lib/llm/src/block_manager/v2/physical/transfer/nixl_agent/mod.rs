@@ -220,6 +220,11 @@ impl std::ops::Deref for NixlAgent {
 #[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn is_gpu_environment() -> bool {
+        Path::new("/dev/nvidiactl").exists() || Path::new("/dev/nvgpu").exists()
+    }
 
     #[test]
     fn test_agent_backend_tracking() {
@@ -235,13 +240,11 @@ mod tests {
 
     #[test]
     fn test_require_backend() {
-        let agent = match NixlAgent::new_with_backends("test", &["UCX"]) {
-            Ok(agent) => agent,
-            Err(_) => {
-                eprintln!("Skipping test_require_backend: UCX not available");
-                return;
-            }
-        };
+        if !is_gpu_environment() {
+            eprintln!("Skipping test_require_backend: CPU environment detected");
+            return;
+        }
+        let agent = NixlAgent::new_with_backends("test", &["UCX"]).expect("Need UCX for test");
 
         // Should succeed for available backend
         assert!(agent.require_backend("UCX").is_ok());
@@ -252,14 +255,13 @@ mod tests {
 
     #[test]
     fn test_require_backends_strict() {
+        if !is_gpu_environment() {
+            eprintln!("Skipping test_require_backends_strict: CPU environment detected");
+            return;
+        }
         // Should succeed if UCX is available
-        let agent = match NixlAgent::require_backends("test_strict", &["UCX"]) {
-            Ok(agent) => agent,
-            Err(_) => {
-                eprintln!("Skipping test_require_backends_strict: UCX not available");
-                return;
-            }
-        };
+        let agent = NixlAgent::require_backends("test_strict", &["UCX"])
+            .expect("Failed to require backends");
         assert!(agent.has_backend("UCX"));
 
         // Should fail if any backend is missing (GDS likely not available)

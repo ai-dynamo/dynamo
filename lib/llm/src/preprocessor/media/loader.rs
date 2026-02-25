@@ -158,9 +158,19 @@ mod tests {
     use super::super::rdma::DataType;
     use super::*;
     use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
+    use std::path::Path;
+
+    fn is_gpu_environment() -> bool {
+        Path::new("/dev/nvidiactl").exists() || Path::new("/dev/nvgpu").exists()
+    }
 
     #[tokio::test]
     async fn test_fetch_and_decode() {
+        if !is_gpu_environment() {
+            println!("test test_fetch_and_decode ... ignored (CPU environment detected)");
+            return;
+        }
+
         let test_image_bytes =
             include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");
 
@@ -184,16 +194,8 @@ mod tests {
             ..Default::default()
         };
 
-        let loader: MediaLoader = match MediaLoader::new(media_decoder, Some(fetcher)) {
-            Ok(l) => l,
-            Err(e) => {
-                println!(
-                    "test test_fetch_and_decode ... ignored (NIXL/UCX not available: {})",
-                    e
-                );
-                return;
-            }
-        };
+        let loader: MediaLoader =
+            MediaLoader::new(media_decoder, Some(fetcher)).expect("Failed to create MediaLoader");
 
         let image_url = ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
@@ -204,14 +206,7 @@ mod tests {
             .fetch_and_decode_media_part(&content_part, None)
             .await;
 
-        let descriptor = match result {
-            Ok(descriptor) => descriptor,
-            Err(e) if e.to_string().contains("NIXL agent is not available") => {
-                println!("test test_fetch_and_decode ... ignored (NIXL agent not available)");
-                return;
-            }
-            Err(e) => panic!("Failed to fetch and decode image: {}", e),
-        };
+        let descriptor = result.expect("Failed to fetch and decode image");
         mock.assert_async().await;
         assert_eq!(descriptor.tensor_info.dtype, DataType::UINT8);
 
