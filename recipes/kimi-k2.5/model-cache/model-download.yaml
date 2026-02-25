@@ -23,18 +23,18 @@ spec:
                 name: hf-token-secret
           env:
             - name: MODEL_NAME
-              value: openai/gpt-oss-120b
+              value: moonshotai/Kimi-K2.5
             - name: HF_HOME
               value: /model-store
             - name: HF_HUB_ENABLE_HF_TRANSFER
               value: "1"
             - name: MODEL_REVISION
-              value: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
+              value: 3367c8d1c68584429fab7faf845a32d5195b6ac1
           args:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub hf_transfer
-              hf download $MODEL_NAME --revision $MODEL_REVISION --exclude "original/*" --exclude "metal/*"
+              hf download $MODEL_NAME --revision $MODEL_REVISION --exclude "docs/*" --exclude "figures/*"
           volumeMounts:
             - name: model-cache
               mountPath: /model-store
