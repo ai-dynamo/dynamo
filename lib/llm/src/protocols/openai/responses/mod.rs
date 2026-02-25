@@ -4,11 +4,11 @@
 pub mod stream_converter;
 
 use dynamo_async_openai::types::responses::{
-    AssistantRole, FunctionCallOutput, FunctionToolCall, InputContent, InputItem, InputParam,
-    InputRole, Instructions, Item, MessageItem, OutputItem, OutputMessage, OutputMessageContent,
-    OutputStatus, OutputTextContent, Reasoning, Response, ResponseTextParam, Role as ResponseRole,
-    ServiceTier, Status, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
-    Truncation,
+    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
+    InputParam, InputRole, Instructions, Item, MessageItem, OutputItem, OutputMessage,
+    OutputMessageContent, OutputStatus, OutputTextContent, Reasoning, Response, ResponseTextParam,
+    Role as ResponseRole, ServiceTier, Status, TextResponseFormatConfiguration, Tool,
+    ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -624,6 +624,8 @@ pub struct ResponseParams {
     pub reasoning: Option<Reasoning>,
     pub text: Option<ResponseTextParam>,
     pub service_tier: Option<ServiceTier>,
+    pub include: Option<Vec<IncludeEnum>>,
+    pub truncation: Option<Truncation>,
 }
 
 /// Normalize tools so that `FunctionTool.strict` is always set.
@@ -741,6 +743,24 @@ pub fn chat_completion_to_response(
         output.push(make_text_message(message_id, String::new()));
     }
 
+    // Apply `include` filtering: strip logprobs from output text unless
+    // the caller explicitly requested them via `message.output_text.logprobs`.
+    let keep_logprobs = params
+        .include
+        .as_ref()
+        .is_some_and(|inc| inc.contains(&IncludeEnum::MessageOutputTextLogprobs));
+    if !keep_logprobs {
+        for item in &mut output {
+            if let OutputItem::Message(msg) = item {
+                for content in &mut msg.content {
+                    if let OutputMessageContent::OutputText(text) = content {
+                        text.logprobs = None;
+                    }
+                }
+            }
+        }
+    }
+
     let created_at = chat_resp.created as u64;
     let response = Response {
         id: response_id,
@@ -776,7 +796,7 @@ pub fn chat_completion_to_response(
                 .unwrap_or_default(),
         ),
         top_p: params.top_p.or(Some(1.0)),
-        truncation: Some(Truncation::Disabled),
+        truncation: Some(params.truncation.unwrap_or(Truncation::Disabled)),
         // Nullable but required to be present (null is valid)
         billing: None,
         conversation: None,
@@ -1474,5 +1494,108 @@ thinking
             }
             other => panic!("Expected Item::Message(Output), got {:?}", other),
         }
+    }
+
+    // ── PR2: include filtering + truncation echo-back tests ──
+
+    fn make_chat_resp_with_text(text: &str) -> NvCreateChatCompletionResponse {
+        use dynamo_async_openai::types::{
+            ChatChoice, ChatCompletionMessageContent, ChatCompletionResponseMessage, FinishReason,
+        };
+        NvCreateChatCompletionResponse {
+            choices: vec![ChatChoice {
+                index: 0,
+                #[allow(deprecated)]
+                message: ChatCompletionResponseMessage {
+                    content: Some(ChatCompletionMessageContent::Text(text.into())),
+                    role: dynamo_async_openai::types::Role::Assistant,
+                    tool_calls: None,
+                    refusal: None,
+                    reasoning_content: None,
+                    function_call: None,
+                    audio: None,
+                },
+                finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
+                logprobs: None,
+            }],
+            created: 0,
+            id: "test".into(),
+            model: "m".into(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion".into(),
+            usage: None,
+            nvext: None,
+        }
+    }
+
+    #[test]
+    fn test_include_logprobs_stripped_by_default() {
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams::default();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+
+        for item in &resp.inner.output {
+            if let OutputItem::Message(msg) = item {
+                for content in &msg.content {
+                    if let OutputMessageContent::OutputText(t) = content {
+                        assert!(
+                            t.logprobs.is_none(),
+                            "logprobs should be stripped by default"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_include_logprobs_kept_when_requested() {
+        use dynamo_async_openai::types::responses::IncludeEnum;
+
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            ..Default::default()
+        };
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+
+        let mut found_text = false;
+        for item in &resp.inner.output {
+            if let OutputItem::Message(msg) = item {
+                for content in &msg.content {
+                    if let OutputMessageContent::OutputText(t) = content {
+                        found_text = true;
+                        assert!(
+                            t.logprobs.is_some(),
+                            "logprobs should be preserved when included"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(found_text, "Expected text output");
+    }
+
+    #[test]
+    fn test_truncation_auto_echoed_back() {
+        use dynamo_async_openai::types::responses::Truncation;
+
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams {
+            truncation: Some(Truncation::Auto),
+            ..Default::default()
+        };
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        assert_eq!(resp.inner.truncation, Some(Truncation::Auto));
+    }
+
+    #[test]
+    fn test_truncation_defaults_to_disabled() {
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams::default();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
+        assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
     }
 }
