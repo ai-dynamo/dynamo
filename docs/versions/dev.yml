@@ -97,6 +97,8 @@ navigation:
             path: ../pages/features/multimodal/multimodal-sglang.md
       - page: Tool Calling
         path: ../pages/agents/tool-calling.md
+      - page: SGLang for Agentic Workloads
+        path: ../pages/backends/sglang/agents.md
       - page: LoRA Adapters
         path: ../pages/features/lora/README.md
       - section: Observability (Local)
@@ -282,6 +284,8 @@ navigation:
             path: ../pages/backends/vllm/vllm-omni.md
       - section: SGLang Details
         contents:
+          - page: Agentic Workloads
+            path: ../pages/backends/sglang/agents.md
           - page: Expert Distribution (EPLB)
             path: ../pages/backends/sglang/expert-distribution-eplb.md
           - page: GPT-OSS

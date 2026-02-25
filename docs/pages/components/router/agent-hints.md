@@ -99,5 +99,7 @@ This is most effective for reasoning models in agentic loops, where the conversa
 
 ## See Also
 
+- **[SGLang for Agentic Workloads](../../backends/sglang/agents.md)**: SGLang engine flags for priority scheduling, eviction policies, and cache pinning
+- **[NVIDIA Request Extensions (nvext)](../frontend/nvext.md)**: Full `nvext` field reference including `cache_control`
 - **[Router Guide](router-guide.md)**: Full router configuration and CLI arguments
 - **[Router Examples](router-examples.md)**: Usage patterns and benchmarking
