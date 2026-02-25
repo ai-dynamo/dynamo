@@ -10,14 +10,14 @@ The Dynamo Profiler is an automated performance analysis tool that measures mode
 
 ## Feature Matrix
 
-| Feature | vLLM | SGLang | TensorRT-LLM |
-|---------|------|--------|--------------|
+| Feature | SGLang | TensorRT-LLM | vLLM |
+|---------|--------|--------------|------|
 | Dense Model Profiling | ✅ | ✅ | ✅ |
-| MoE Model Profiling | 🚧 | ✅ | 🚧 |
-| AI Configurator (Offline) | ❌ | ❌ | ✅ |
+| MoE Model Profiling | ✅ | 🚧 | 🚧 |
+| AI Configurator (Offline) | ❌ | ✅ | ❌ |
 | Online Profiling (AIPerf) | ✅ | ✅ | ✅ |
 | Interactive WebUI | ✅ | ✅ | ✅ |
-| Runtime Profiling Endpoints | ❌ | ✅ | ❌ |
+| Runtime Profiling Endpoints | ✅ | ❌ | ❌ |
 
 ## Quick Start
 

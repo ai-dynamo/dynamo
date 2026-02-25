@@ -32,8 +32,10 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 )
 
@@ -67,8 +69,15 @@ func createTestReconciler(objs ...runtime.Object) *DynamoGraphDeploymentReconcil
 		Build()
 
 	return &DynamoGraphDeploymentReconciler{
-		Client:   fakeClient,
-		Recorder: record.NewFakeRecorder(10),
+		Client:        fakeClient,
+		Recorder:      record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &commonController.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
 	}
 }
 
