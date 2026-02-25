@@ -26,8 +26,10 @@ fn get_cached_model_path(model_name: &str, ignore_weights: bool) -> Option<PathB
     let config_path = repo.get("config.json")?;
 
     // Check for tokenizer files (at least one must exist)
-    let has_tokenizer =
-        repo.get("tokenizer.json").is_some() || repo.get("tokenizer_config.json").is_some();
+    let has_tokenizer = repo.get("tokenizer.json").is_some()
+        || repo.get("tokenizer_config.json").is_some()
+        || repo.get("tiktoken.model").is_some()
+        || has_tiktoken_file(config_path.parent()?);
 
     if !has_tokenizer {
         return None;
@@ -50,6 +52,15 @@ fn get_cached_model_path(model_name: &str, ignore_weights: bool) -> Option<PathB
     let snapshot_path = config_path.parent()?.to_path_buf();
     tracing::info!("Found cached model '{model_name}' at {snapshot_path:?}, skipping download");
     Some(snapshot_path)
+}
+
+/// Check if the snapshot directory contains any `*.tiktoken` file (e.g. `qwen.tiktoken`).
+fn has_tiktoken_file(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.path().extension().is_some_and(|ext| ext == "tiktoken"))
 }
 
 /// Check if offline mode is enabled via HF_HUB_OFFLINE environment variable.
