@@ -1,4 +1,4 @@
-apiVersion: dynamo.nvidia.com/v1beta1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeploymentRequest
 metadata:
   name: qwen3-32b-thorough-no-planner-with-load

@@ -1,4 +1,4 @@
-apiVersion: dynamo.nvidia.com/v1beta1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeploymentRequest
 metadata:
   name: deepseek-r1-thorough-sglang-overrides
