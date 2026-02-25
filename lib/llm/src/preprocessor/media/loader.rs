@@ -186,8 +186,8 @@ mod tests {
                 ..Default::default()
             };
 
-            let loader: MediaLoader =
-                MediaLoader::new(media_decoder, Some(fetcher)).expect("Failed to create MediaLoader");
+            let loader: MediaLoader = MediaLoader::new(media_decoder, Some(fetcher))
+                .expect("Failed to create MediaLoader");
 
             let image_url =
                 ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
@@ -195,7 +195,9 @@ mod tests {
                 ChatCompletionRequestMessageContentPartImage { image_url },
             );
 
-            let result = loader.fetch_and_decode_media_part(&content_part, None).await;
+            let result = loader
+                .fetch_and_decode_media_part(&content_part, None)
+                .await;
 
             let descriptor = result.expect("Failed to fetch and decode image");
             mock.assert_async().await;
