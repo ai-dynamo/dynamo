@@ -15,6 +15,7 @@
 
 import json
 import logging
+import logging.config
 import os
 import tempfile
 
@@ -93,8 +94,7 @@ def configure_dynamo_logging(
     dyn_level = log_level_mapping(dyn_var)
 
     # configure inference engine loggers
-    if not get_bool_env_var("DYN_SKIP_VLLM_LOG_FORMATTING"):
-        configure_vllm_logging(dyn_level)
+    configure_vllm_logging(dyn_level)
     if not get_bool_env_var("DYN_SKIP_SGLANG_LOG_FORMATTING"):
         configure_sglang_logging(dyn_level)
     if not get_bool_env_var("DYN_SKIP_TRTLLM_LOG_FORMATTING"):
@@ -165,16 +165,30 @@ def configure_sglang_logging(dyn_level: int):
 
 def configure_vllm_logging(dyn_level: int):
     """
-    vLLM requires a logging config file to be set in the environment.
-    This function creates a temporary file with the VLLM logging config and sets the
-    VLLM_LOGGING_CONFIG_PATH environment variable to the path of the file.
+    Configure vLLM logging for the main process and subprocesses.
+
+    Main process: replaces vLLM's StreamHandler with dynamo's LogHandler so logs
+    flow through the Rust logging bridge.
+
+    Subprocesses (EngineCore, workers): use vLLM's DEFAULT_LOGGING_CONFIG
+    (StreamHandler to stderr) since the Rust runtime is not initialized there.
+    Setting VLLM_CONFIGURE_LOGGING=1 without VLLM_LOGGING_CONFIG_PATH causes
+    vLLM to use its built-in default config in spawned subprocesses.
+
+    The dyn_level param is kept for signature compatibility but does not control
+    the vLLM logger level. Use VLLM_LOGGING_LEVEL env var instead.
     """
-
     os.environ["VLLM_CONFIGURE_LOGGING"] = "1"
-    vllm_level = logging.getLevelName(dyn_level)
 
-    # Create a temporary config file for VLLM
-    vllm_config = {
+    # vLLM level is controlled exclusively by VLLM_LOGGING_LEVEL.
+    # DYN_LOG controls dynamo logging only — it does not affect vLLM.
+    vllm_level = os.environ.get("VLLM_LOGGING_LEVEL", "INFO").upper()
+
+    # Main process only: replace vLLM's StreamHandler with dynamo's LogHandler
+    # so vllm logs in the main process flow through the Rust logging bridge.
+    # Subprocesses (EngineCore, workers) use vLLM's DEFAULT_LOGGING_CONFIG
+    # (StreamHandler to stderr) since the Rust runtime is not available there.
+    main_config = {
         "formatters": {"simple": {"format": "%(message)s"}},
         "handlers": {
             "dynamo": {
@@ -189,10 +203,7 @@ def configure_vllm_logging(dyn_level: int):
         "version": 1,
         "disable_existing_loggers": False,
     }
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(vllm_config, f)
-        os.environ["VLLM_LOGGING_CONFIG_PATH"] = f.name
+    logging.config.dictConfig(main_config)
 
 
 def map_dyn_log_to_tllm_level(dyn_log_value: str) -> str:
