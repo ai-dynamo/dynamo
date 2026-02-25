@@ -20,10 +20,10 @@ import os
 
 import pandas as pd
 import yaml
-
 from aiconfigurator.generator.enumerate import enumerate_profiling_configs
 from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_match
 from aiconfigurator.sdk.task import TaskConfig
+
 from deploy.utils.dynamo_deployment import DynamoDeploymentClient
 from dynamo.planner.defaults import SubComponentType
 from dynamo.profiler.rapid import _generate_dgd_from_pick
@@ -40,7 +40,10 @@ from dynamo.profiler.utils.aiperf import (
 from dynamo.profiler.utils.config import Config, get_service_name_by_type
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
-from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    ModelCacheSpec,
+)
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_backend_image,
@@ -50,66 +53,18 @@ from dynamo.profiler.utils.profile_decode import get_num_request_range
 logger = logging.getLogger(__name__)
 
 
-async def run_thorough(
-    dgdr: DynamoGraphDeploymentRequestSpec,
+async def _benchmark_prefill_candidates(
+    prefill_candidates,
     ops: ProfilerOperationalConfig,
-    picking_mode: str,
+    isl: int,
+    osl: int,
     model: str,
     system: str,
     backend: str,
-    total_gpus: int,
-    isl: int,
-    osl: int,
-    target_ttft: float,
-    target_tpot: float,
-    request_latency: float | None,
     deployment_clients: list,
-) -> dict:
-    """Enumerate candidates, deploy + benchmark each, build DataFrames, pick."""
-    logger.warning("THOROUGH mode: only disagg configurations are supported.")
-
-    # --- Stage 1: Enumeration ---
-    prefill_candidates, decode_candidates = enumerate_profiling_configs(
-        model_path=model,
-        system=system,
-        backend=backend,
-        image=derive_backend_image(dgdr.image, backend),
-        isl=isl,
-        osl=osl,
-        num_gpus_per_node=dgdr.hardware.numGpusPerNode,
-        k8s_pvc_name=dgdr.modelCache.pvcName if dgdr.modelCache else None,
-        k8s_pvc_mount_path=dgdr.modelCache.pvcMountPath
-        if dgdr.modelCache
-        else "/workspace/model_cache",
-        k8s_model_path_in_pvc=dgdr.modelCache.pvcModelPath if dgdr.modelCache else None,
-    )
-
-    logger.info(
-        "Enumerated %d prefill candidates, %d decode candidates",
-        len(prefill_candidates),
-        len(decode_candidates),
-    )
-
-    # --- Apply DGD overrides to each candidate ---
-    if dgdr.overrides and dgdr.overrides.dgd:
-        for candidate in prefill_candidates:
-            candidate.dgd_config = apply_dgd_overrides(
-                candidate.dgd_config, dgdr.overrides.dgd
-            )
-        for candidate in decode_candidates:
-            candidate.dgd_config = apply_dgd_overrides(
-                candidate.dgd_config, dgdr.overrides.dgd
-            )
-        logger.info(
-            "Applied DGD overrides to %d prefill + %d decode candidates.",
-            len(prefill_candidates),
-            len(decode_candidates),
-        )
-
-    config_modifier = CONFIG_MODIFIERS[backend]
-
-    # --- Stage 2: Benchmarking ---
-    # --- Benchmark prefill candidates ---
+    config_modifier,
+) -> pd.DataFrame:
+    """Deploy each prefill candidate, measure TTFT, return prefill_df."""
     prefill_rows: list[dict] = []
     for candidate in prefill_candidates:
         num_gpus = candidate.num_gpus
@@ -185,9 +140,21 @@ async def run_thorough(
                 )
             )
 
-    prefill_df = pd.DataFrame(prefill_rows) if prefill_rows else pd.DataFrame()
+    return pd.DataFrame(prefill_rows) if prefill_rows else pd.DataFrame()
 
-    # --- Benchmark decode candidates ---
+
+async def _benchmark_decode_candidates(
+    decode_candidates,
+    ops: ProfilerOperationalConfig,
+    isl: int,
+    osl: int,
+    model: str,
+    system: str,
+    backend: str,
+    deployment_clients: list,
+    config_modifier,
+) -> pd.DataFrame:
+    """Deploy each decode candidate, sweep num_request, return decode_df."""
     decode_rows: list[dict] = []
     for candidate in decode_candidates:
         num_gpus = candidate.num_gpus
@@ -284,7 +251,134 @@ async def run_thorough(
         await client.delete_deployment()
         deployment_clients.remove(client)
 
-    decode_df = pd.DataFrame(decode_rows) if decode_rows else pd.DataFrame()
+    return pd.DataFrame(decode_rows) if decode_rows else pd.DataFrame()
+
+
+def _pick_thorough_best_config(
+    prefill_df: pd.DataFrame,
+    decode_df: pd.DataFrame,
+    picking_mode: str,
+    target_ttft: float,
+    target_tpot: float,
+    request_latency: float | None,
+    total_gpus: int,
+    dgdr: DynamoGraphDeploymentRequestSpec,
+) -> dict:
+    """Dispatch to pick_autoscale / pick_load_match / pick_default, return result dict."""
+    if picking_mode == "autoscale":
+        return pick_autoscale(prefill_df, decode_df, target_ttft, target_tpot)
+    elif picking_mode == "load_match":
+        disagg_df = build_disagg_df_from_static(prefill_df, decode_df)
+        lm_kwargs: dict = {
+            "pareto_df": disagg_df,
+            "serving_mode": "disagg",
+            "top_n": 5,
+        }
+        if request_latency is not None:
+            lm_kwargs["target_request_latency"] = request_latency
+        else:
+            lm_kwargs["target_tpot"] = target_tpot
+        if dgdr.workload and dgdr.workload.requestRate is not None:
+            lm_kwargs["target_request_rate"] = dgdr.workload.requestRate
+        if dgdr.workload and dgdr.workload.concurrency is not None:
+            lm_kwargs["target_concurrency"] = dgdr.workload.concurrency
+        if total_gpus:
+            lm_kwargs["max_total_gpus"] = total_gpus
+        return pick_load_match(**lm_kwargs)
+    else:
+        disagg_df = build_disagg_df_from_static(prefill_df, decode_df)
+        pk_kwargs: dict = {
+            "pareto_df": disagg_df,
+            "total_gpus": total_gpus,
+            "serving_mode": "disagg",
+            "top_n": 5,
+        }
+        if request_latency is not None:
+            pk_kwargs["target_request_latency"] = request_latency
+        else:
+            pk_kwargs["target_tpot"] = target_tpot
+        return pick_default(**pk_kwargs)
+
+
+async def run_thorough(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    ops: ProfilerOperationalConfig,
+    picking_mode: str,
+    model: str,
+    system: str,
+    backend: str,
+    total_gpus: int,
+    isl: int,
+    osl: int,
+    target_ttft: float,
+    target_tpot: float,
+    request_latency: float | None,
+    deployment_clients: list,
+) -> dict:
+    """Enumerate candidates, deploy + benchmark each, build DataFrames, pick."""
+    logger.warning("THOROUGH mode: only disagg configurations are supported.")
+
+    # --- Stage 1: Enumeration ---
+    model_cache = dgdr.modelCache or ModelCacheSpec()
+    prefill_candidates, decode_candidates = enumerate_profiling_configs(
+        model_path=model,
+        system=system,
+        backend=backend,
+        image=derive_backend_image(dgdr.image, backend),
+        isl=isl,
+        osl=osl,
+        num_gpus_per_node=dgdr.hardware.numGpusPerNode,
+        k8s_pvc_name=model_cache.pvcName,
+        k8s_pvc_mount_path=model_cache.pvcMountPath,
+        k8s_model_path_in_pvc=model_cache.pvcModelPath,
+    )
+
+    logger.info(
+        "Enumerated %d prefill candidates, %d decode candidates",
+        len(prefill_candidates),
+        len(decode_candidates),
+    )
+
+    if dgdr.overrides and dgdr.overrides.dgd:
+        for candidate in prefill_candidates:
+            candidate.dgd_config = apply_dgd_overrides(
+                candidate.dgd_config, dgdr.overrides.dgd
+            )
+        for candidate in decode_candidates:
+            candidate.dgd_config = apply_dgd_overrides(
+                candidate.dgd_config, dgdr.overrides.dgd
+            )
+        logger.info(
+            "Applied DGD overrides to %d prefill + %d decode candidates.",
+            len(prefill_candidates),
+            len(decode_candidates),
+        )
+
+    config_modifier = CONFIG_MODIFIERS[backend]
+
+    # --- Stage 2: Benchmarking ---
+    prefill_df = await _benchmark_prefill_candidates(
+        prefill_candidates,
+        ops,
+        isl,
+        osl,
+        model,
+        system,
+        backend,
+        deployment_clients,
+        config_modifier,
+    )
+    decode_df = await _benchmark_decode_candidates(
+        decode_candidates,
+        ops,
+        isl,
+        osl,
+        model,
+        system,
+        backend,
+        deployment_clients,
+        config_modifier,
+    )
 
     # --- Stage 3: Picking ---
     if prefill_df.empty:
@@ -304,38 +398,16 @@ async def run_thorough(
             "chosen_exp": None,
         }
 
-    if picking_mode == "autoscale":
-        result = pick_autoscale(prefill_df, decode_df, target_ttft, target_tpot)
-    elif picking_mode == "load_match":
-        disagg_df = build_disagg_df_from_static(prefill_df, decode_df)
-        lm_kwargs: dict = {
-            "pareto_df": disagg_df,
-            "serving_mode": "disagg",
-            "top_n": 5,
-        }
-        if request_latency is not None:
-            lm_kwargs["target_request_latency"] = request_latency
-        else:
-            lm_kwargs["target_tpot"] = target_tpot
-        if dgdr.workload:
-            lm_kwargs["target_request_rate"] = dgdr.workload.requestRate
-            lm_kwargs["target_concurrency"] = dgdr.workload.concurrency
-        if total_gpus:
-            lm_kwargs["max_total_gpus"] = total_gpus
-        result = pick_load_match(**lm_kwargs)
-    else:
-        disagg_df = build_disagg_df_from_static(prefill_df, decode_df)
-        pk_kwargs: dict = {
-            "pareto_df": disagg_df,
-            "total_gpus": total_gpus,
-            "serving_mode": "disagg",
-            "top_n": 5,
-        }
-        if request_latency is not None:
-            pk_kwargs["target_request_latency"] = request_latency
-        else:
-            pk_kwargs["target_tpot"] = target_tpot
-        result = pick_default(**pk_kwargs)
+    result = _pick_thorough_best_config(
+        prefill_df,
+        decode_df,
+        picking_mode,
+        target_ttft,
+        target_tpot,
+        request_latency,
+        total_gpus,
+        dgdr,
+    )
 
     best_config_df = result.get("best_config_df", pd.DataFrame())
 

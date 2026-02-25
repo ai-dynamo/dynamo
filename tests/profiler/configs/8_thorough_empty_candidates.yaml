@@ -12,8 +12,6 @@ hardware:
   totalGpus: 1
   numGpusPerNode: 1
 workload:
-  isl: 4000
-  osl: 1000
   requestRate: 1.0
 sla:
   ttft: 5000.0

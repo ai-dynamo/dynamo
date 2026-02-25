@@ -10,11 +10,7 @@ hardware:
   gpuSku: h200_sxm
   totalGpus: 8
   numGpusPerNode: 8
-workload:
-  isl: 4000
-  osl: 1000
 sla:
-  ttft: 2000.0
   itl: 50.0
 searchStrategy: thorough
 features:
