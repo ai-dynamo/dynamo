@@ -8,9 +8,10 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.sglang.args import Config, DisaggregationMode
+from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -20,7 +21,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     def __init__(
         self,
-        component: Component,
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
@@ -30,7 +30,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """Initialize decode worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
@@ -38,7 +37,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
-            component,
             engine,
             config,
             publisher,
@@ -109,6 +107,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        priority = (request.get("routing") or {}).get("priority")
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -144,6 +143,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._priority_kwargs(priority),
             )
 
             if self.skip_tokenizer_init:
@@ -182,6 +182,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._priority_kwargs(priority),
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
@@ -232,11 +233,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
-                # If request is not finished yet, but there are no outputs, return an error.
+                # Empty, non-final chunks can happen during scheduler idle ticks.
+                # Keep waiting for the next chunk unless cancellation was requested.
                 if not output_ids and not finish_reason:
-                    if not context.is_stopped():
-                        yield {"finish_reason": "error", "token_ids": []}
-                    break
+                    if context.is_stopped():
+                        break
+                    continue
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids

@@ -195,6 +195,8 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
 >
 > See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
 
+> **Deprecation notice:** vLLM automatically enables KV event publishing when prefix caching is active. In a future release, this will change — KV events will be disabled by default for all backends. Start using `--kv-events-config` explicitly to prepare.
+
 #### Send a Request
 
 ```bash
@@ -377,7 +379,7 @@ For Slurm or other distributed deployments (and KV-aware routing):
 
 To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
 
-See [SGLang on Slurm](examples/backends/sglang/slurm_jobs/README.md) and [TRT-LLM on Slurm](examples/basics/multinode/trtllm/README.md) for deployment examples.
+See [TRT-LLM on Slurm](examples/basics/multinode/trtllm/README.md) for deployment examples.
 
 ## More News
 

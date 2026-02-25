@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import logging
 import os
 import socket
+import warnings
 from typing import Any, Dict, Optional
 
-from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 
@@ -21,21 +22,19 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.constants import DisaggregationMode
 
 from . import envs
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
-VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     component: str
-    endpoint: str
-    is_prefill_worker: bool
-    is_decode_worker: bool
     custom_jinja_template: Optional[str] = None
     discovery_backend: str
     request_plane: str
@@ -53,18 +52,6 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         DynamoVllmConfig.validate(self)
-
-    def has_connector(self, connector_name: str) -> bool:
-        """
-        Check if a specific connector is enabled.
-
-        Args:
-            connector_name: Name of the connector to check (e.g., "kvbm", "nixl")
-
-        Returns:
-            True if the connector is in the connector list, False otherwise
-        """
-        return self.connector is not None and connector_name in self.connector
 
 
 @register_encoder(Config)
@@ -85,6 +72,7 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser(
         description="Dynamo vLLM worker configuration",
         formatter_class=argparse.RawTextHelpFormatter,
+        allow_abbrev=False,
     )
 
     # Build argument parser
@@ -152,32 +140,40 @@ def update_dynamo_config_with_engine(
     else:
         dynamo_config.served_model_name = None
 
-    # TODO: move to "disaggregation_mode" as the other engines.
-    if dynamo_config.multimodal_processor or dynamo_config.ec_processor:
+    # Capture user-provided --endpoint before defaults overwrite it
+    user_endpoint = dynamo_config.endpoint
+
+    if dynamo_config.route_to_encoder:
         dynamo_config.component = "processor"
         dynamo_config.endpoint = "generate"
-    elif (
-        dynamo_config.vllm_native_encoder_worker
-        or dynamo_config.multimodal_encode_worker
-        or dynamo_config.multimodal_encode_prefill_worker
-    ):
+    elif dynamo_config.multimodal_encode_worker:
         dynamo_config.component = "encoder"
         dynamo_config.endpoint = "generate"
     elif dynamo_config.multimodal_decode_worker:
         dynamo_config.component = "decoder"
         dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_worker and dynamo_config.is_prefill_worker:
+    elif (
+        dynamo_config.multimodal_worker
+        and dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
+    ):
         dynamo_config.component = "backend"
         dynamo_config.endpoint = "generate"
     elif dynamo_config.omni:
         dynamo_config.component = "backend"
         dynamo_config.endpoint = "generate"
-    elif dynamo_config.is_prefill_worker:
+    elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
         dynamo_config.component = "prefill"
         dynamo_config.endpoint = "generate"
     else:
         dynamo_config.component = "backend"
         dynamo_config.endpoint = "generate"
+
+    # If user provided --endpoint, override namespace/component/endpoint
+    if user_endpoint is not None:
+        parsed_ns, parsed_comp, parsed_ep = parse_endpoint(user_endpoint)
+        dynamo_config.namespace = parsed_ns
+        dynamo_config.component = parsed_comp
+        dynamo_config.endpoint = parsed_ep
 
     if dynamo_config.custom_jinja_template is not None:
         expanded_template_path = os.path.expanduser(
@@ -190,60 +186,42 @@ def update_dynamo_config_with_engine(
                 "Please ensure the file exists and the path is correct."
             )
 
-    normalized = [c.lower() for c in (dynamo_config.connector or [])]
-    invalid = [c for c in normalized if c not in VALID_CONNECTORS]
-    if invalid:
-        raise ValueError(
-            f"Invalid connector(s): {', '.join(invalid)}. "
-            f"Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
-        )
+    # --connector is no longer supported for vLLM. Raise hard error if explicitly set.
+    _reject_connector_flag(dynamo_config)
 
+    # If disaggregation mode is prefill, require explicit --kv-transfer-config
     has_kv_transfer_config = (
         hasattr(engine_config, "kv_transfer_config")
         and engine_config.kv_transfer_config is not None
     )
-    if not normalized or "none" in normalized or "null" in normalized:
-        if len(normalized) > 1:
+    if (
+        dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
+        and not has_kv_transfer_config
+    ):
+        raise ValueError(
+            "--connector is deprecated and the default is no longer nixl. "
+            "When using --disaggregation-mode prefill, you must explicitly "
+            "provide --kv-transfer-config. Example:\n"
+            "  --kv-transfer-config "
+            '\'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\''
+        )
+
+    # Clear connector list (no longer used for vLLM)
+    dynamo_config.connector = []  # type: ignore[assignment]
+
+    # Validate ModelExpress P2P server URL
+    if getattr(engine_config, "load_format", None) in ("mx-source", "mx-target"):
+        if not dynamo_config.model_express_url:
             raise ValueError(
-                "'none' and 'null' cannot be combined with other connectors"
+                f"--model-express-url or MODEL_EXPRESS_URL env var is required "
+                f"when using --load-format={engine_config.load_format}"
             )
-        dynamo_config.connector = []  # type: ignore[assignment]
-    else:
-        if has_kv_transfer_config:
-            raise ValueError(
-                "Cannot specify both --kv-transfer-config and --connector flags"
-            )
-        dynamo_config.connector = normalized  # type: ignore[assignment]
 
 
 def update_engine_config_with_dynamo(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
-    """Update engine config base on Dynamo config."""
-    # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
-    # With TP=1, vLLM defaults to UniProcExecutor which runs scheduler and worker in the same
-    # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,
-    # blocking NIXL's add_remote_agent from completing. Using "mp" backend forces separate
-    # processes, avoiding the GIL contention.
-    # Note: Only apply for NIXL - other connectors (kvbm, lmcache) work fine with UniProcExecutor
-    # and forcing mp can expose race conditions in vLLM's scheduler.
-    # See: https://github.com/vllm-project/vllm/issues/29369
-    connector_list = (
-        [c.lower() for c in dynamo_config.connector] if dynamo_config.connector else []
-    )
-    uses_nixl = "nixl" in connector_list
-    tp_size = getattr(engine_config, "tensor_parallel_size", None) or 1
-    if (
-        uses_nixl
-        and tp_size == 1
-        and getattr(engine_config, "distributed_executor_backend", None) is None
-    ):
-        logger.info(
-            "Setting --distributed-executor-backend=mp for TP=1 to avoid "
-            "UniProcExecutor GIL contention with NIXL connector"
-        )
-        engine_config.distributed_executor_backend = "mp"
-
+    """Update engine config based on Dynamo config."""
     if engine_config.enable_prefix_caching is None:
         logger.debug(
             "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
@@ -257,12 +235,7 @@ def update_engine_config_with_dynamo(
             f"Setting reasonable default of {engine_config.block_size} for block_size"
         )
 
-    if dynamo_config.has_connector("nixl") or (
-        # Check if the user provided their own kv_transfer_config
-        getattr(engine_config, "kv_transfer_config", None) is not None
-        # and the connector is NixlConnector
-        and engine_config.kv_transfer_config.kv_connector == "NixlConnector"
-    ):
+    if _uses_nixl_connector(engine_config):
         ensure_side_channel_host()
 
     defaults = {
@@ -277,9 +250,6 @@ def update_engine_config_with_dynamo(
         "disable_log_stats": False,
     }
 
-    kv_transfer_config = create_kv_transfer_config(dynamo_config, engine_config)
-    if kv_transfer_config:
-        defaults["kv_transfer_config"] = kv_transfer_config
     kv_cfg = create_kv_events_config(dynamo_config, engine_config)
     defaults["kv_events_config"] = kv_cfg
     dynamo_config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
@@ -304,10 +274,10 @@ def create_kv_events_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
-    if dynamo_config.is_decode_worker:
+    if dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
         logger.info(
-            f"Decode worker detected (is_decode_worker={dynamo_config.is_decode_worker}): "
-            f"kv_events_config disabled (decode workers don't publish KV events)"
+            "Decode worker detected (disaggregation_mode=decode): "
+            "kv_events_config disabled (decode workers don't publish KV events)"
         )
         return None
 
@@ -329,6 +299,16 @@ def create_kv_events_config(
     # Create default events config for prefix caching
     # TODO: move this to configuration system.
     port = envs.DYN_VLLM_KV_EVENT_PORT
+    warnings.warn(
+        "Automatic KV events configuration is deprecated and will be removed in "
+        "the next release. After that, KV events will be disabled by default "
+        "(matching upstream vLLM). To preserve current behavior, pass "
+        "--kv-events-config explicitly. For example:\n"
+        f'  --kv-events-config \'{{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:{port}"}}\'\n'
+        "See docs/pages/backends/vllm/README.md for details.",
+        FutureWarning,
+        stacklevel=2,
+    )
     logger.info(
         f"Using env-var DYN_VLLM_KV_EVENT_PORT={port} to create kv_events_config"
     )
@@ -340,54 +320,135 @@ def create_kv_events_config(
     )
 
 
-def create_kv_transfer_config(
-    dynamo_config: Config, engine_config: AsyncEngineArgs
-) -> Optional[KVTransferConfig]:
-    """Create KVTransferConfig based on user config or connector list.
+def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
+    """Check if the user-provided --kv-transfer-config uses NixlConnector.
 
-    Handles logging and returns the appropriate config or None.
+    Handles both direct usage (kv_connector="NixlConnector") and nested usage
+    inside PdConnector (kv_connector_extra_config.connectors contains
+    "NixlConnector").
     """
-    has_user_kv_config = (
-        hasattr(engine_config, "kv_transfer_config")
-        and engine_config.kv_transfer_config is not None
-    )
-    if has_user_kv_config:
-        logger.info("Using user-provided kv_transfer_config from --kv-transfer-config")
-        return None
-    if not dynamo_config.connector:
-        logger.info("Using vLLM defaults for kv_transfer_config")
-        return None
-    logger.info(
-        f"Creating kv_transfer_config from --connector {dynamo_config.connector}"
-    )
+    kv_cfg = getattr(engine_config, "kv_transfer_config", None)
+    if kv_cfg is None:
+        return False
+    if kv_cfg.kv_connector == "NixlConnector":
+        return True
+    # PdConnector wraps multiple connectors in kv_connector_extra_config.
+    # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
+    if kv_cfg.kv_connector == "PdConnector":
+        extra = kv_cfg.kv_connector_extra_config or {}
+        for entry in extra.get("connectors", []):
+            if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
+                return True
+    return False
+
+
+def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
+    """Check if the user-provided --kv-transfer-config uses DynamoConnector (KVBM).
+
+    Handles both direct usage and nested usage inside PdConnector.
+    """
+    kv_cfg = getattr(engine_config, "kv_transfer_config", None)
+    if kv_cfg is None:
+        return False
+    if kv_cfg.kv_connector == "DynamoConnector":
+        return True
+    if kv_cfg.kv_connector == "PdConnector":
+        extra = kv_cfg.kv_connector_extra_config or {}
+        for entry in extra.get("connectors", []):
+            if (
+                isinstance(entry, dict)
+                and entry.get("kv_connector") == "DynamoConnector"
+            ):
+                return True
+    return False
+
+
+def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
+    """Convert a legacy --connector list to the equivalent --kv-transfer-config JSON.
+
+    Used in error messages to help users migrate.
+    """
     multi_connectors = []
-    for conn in dynamo_config.connector:
-        if conn == "lmcache":
-            connector_cfg = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
-        elif conn == "nixl":
-            connector_cfg = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
-        elif conn == "kvbm":
-            connector_cfg = {
-                "kv_connector": "DynamoConnector",
-                "kv_connector_module_path": "kvbm.vllm_integration.connector",
-                "kv_role": "kv_both",
-            }
-        else:
-            continue
-        multi_connectors.append(connector_cfg)
+    for conn in connectors:
+        c = conn.lower()
+        if c == "lmcache":
+            multi_connectors.append(
+                {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+            )
+        elif c == "nixl":
+            multi_connectors.append(
+                {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+            )
+        elif c == "kvbm":
+            multi_connectors.append(
+                {
+                    "kv_connector": "DynamoConnector",
+                    "kv_connector_module_path": "kvbm.vllm_integration.connector",
+                    "kv_role": "kv_both",
+                }
+            )
 
-    # For single connector, return direct config
     if len(multi_connectors) == 1:
-        cfg = multi_connectors[0]
-        return KVTransferConfig(**cfg)
+        return json.dumps(multi_connectors[0])
 
-    # For multiple connectors, use PdConnector
-    return KVTransferConfig(
-        kv_connector="PdConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"connectors": multi_connectors},
-        kv_connector_module_path="kvbm.vllm_integration.connector",
+    return json.dumps(
+        {
+            "kv_connector": "PdConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"connectors": multi_connectors},
+            "kv_connector_module_path": "kvbm.vllm_integration.connector",
+        }
     )
+
+
+def _reject_connector_flag(dynamo_config: Config) -> None:
+    """Raise ValueError if --connector was explicitly set (CLI or DYN_CONNECTOR env var).
+
+    The --connector flag is no longer supported for the vLLM backend.
+    Users must use --kv-transfer-config instead.
+    """
+    connector_list = dynamo_config.connector or []
+
+    # Check if --connector was explicitly provided via CLI or DYN_CONNECTOR env var
+    env_connector = os.environ.get("DYN_CONNECTOR")
+    explicitly_set = bool(connector_list) or (env_connector is not None)
+
+    if not explicitly_set:
+        return
+
+    # Normalize: "none"/"null" means no connector
+    normalized = [c.lower() for c in connector_list]
+    if normalized and all(c in ("none", "null") for c in normalized):
+        # --connector none/null: tell user it's no longer needed
+        raise ValueError(
+            "--connector is no longer supported for the vLLM backend. "
+            "'--connector none' is no longer needed — the default is already "
+            "no connector. Simply remove the --connector flag."
+        )
+
+    # Active connectors: show migration path
+    if normalized:
+        equiv = _connector_to_kv_transfer_json(normalized)
+        raise ValueError(
+            "--connector is no longer supported for the vLLM backend. "
+            "Use --kv-transfer-config instead.\n"
+            f"  Equivalent: --kv-transfer-config '{equiv}'"
+        )
+
+    # DYN_CONNECTOR env var set but parsed to empty list
+    if env_connector is not None:
+        env_values = [v.strip().lower() for v in env_connector.split() if v.strip()]
+        if env_values and not all(v in ("none", "null") for v in env_values):
+            equiv = _connector_to_kv_transfer_json(env_values)
+            raise ValueError(
+                "The DYN_CONNECTOR environment variable is no longer supported "
+                "for the vLLM backend. Use --kv-transfer-config instead.\n"
+                f"  Equivalent: --kv-transfer-config '{equiv}'"
+            )
+        raise ValueError(
+            "The DYN_CONNECTOR environment variable is no longer supported "
+            "for the vLLM backend. Use --kv-transfer-config instead."
+        )
 
 
 def get_host_ip() -> str:

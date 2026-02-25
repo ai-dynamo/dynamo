@@ -33,9 +33,6 @@ use super::{
 };
 use ingress::push_handler::WorkHandlerMetrics;
 
-// Define stream error message constant
-pub const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-
 // Add Prometheus metrics types
 use crate::metrics::MetricsHierarchy;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};

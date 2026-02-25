@@ -63,7 +63,7 @@ if [[ $HEAD_NODE -eq 1 ]]; then
 
     # run processor (CPU-only to avoid competing for GPU memory with workers)
     CUDA_VISIBLE_DEVICES="" \
-    python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME &
+    python -m dynamo.vllm --route-to-encoder --enable-multimodal --model $MODEL_NAME &
 
     # Prefill worker handles prompt processing and image encoding
     # Uses all 8 GPUs for tensor-parallel
@@ -72,7 +72,7 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     python -m dynamo.vllm \
         --enable-multimodal \
         --model $MODEL_NAME \
-        --is-prefill-worker \
+        --disaggregation-mode prefill \
         $MODEL_SPECIFIC_ARGS \
         --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' \
         "${EXTRA_ARGS[@]}" &

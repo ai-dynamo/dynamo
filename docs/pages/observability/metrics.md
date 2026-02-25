@@ -86,7 +86,7 @@ Dynamo exposes several categories of metrics:
 - **Frontend Metrics** (`dynamo_frontend_*`) - Request handling, token processing, and latency measurements
 - **Component Metrics** (`dynamo_component_*`) - Request counts, processing times, byte transfers, and system uptime
 - **Specialized Component Metrics** (e.g., `dynamo_preprocessor_*`) - Component-specific metrics
-- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/prometheus.md) (`vllm:*`), [SGLang](../backends/sglang/prometheus.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus.md) (`trtllm_*`)
+- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/prometheus.md) (`vllm:*`), [SGLang](../backends/sglang/sglang-prometheus.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus.md) (`trtllm_*`)
 
 ## Runtime Hierarchy
 
@@ -112,7 +112,7 @@ The core Dynamo backend system automatically exposes metrics on the system statu
 - `dynamo_component_request_duration_seconds`: Request processing time (histogram)
 - `dynamo_component_requests_total`: Total requests processed (counter)
 - `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
-- `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge)
+- `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge). Automatically updated before each Prometheus scrape on both the frontend (`/metrics` on port 8000) and system status server (`/metrics` on port 8081).
 
 **Access backend component metrics:**
 ```bash
@@ -216,6 +216,75 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 - **Inflight**: Measures total request lifetime including processing time
 - **HTTP Queue**: Measures queuing time before processing begins (including prefill time)
 - **HTTP Queue ≤ Inflight** (HTTP queue is a subset of inflight time)
+
+### Router Metrics
+
+When using the KV cache router (`--router-mode kv`), the frontend exposes additional metrics for monitoring routing decisions and overhead. These metrics are not registered when using `round-robin` or `random` routing, so they will not appear in `/metrics` output at all. Defined in `lib/llm/src/kv_router/metrics.rs`.
+
+For router configuration and tuning, see the [Router Guide](../components/router/router-guide.md).
+
+#### Router Request Metrics (`dynamo_router_*`)
+
+Histograms and counters for aggregate request-level statistics. Only registered when `--router-mode kv` is used. If no requests have been routed yet, the metrics will exist but show zero values. Exposed on the frontend port (default 8000) at `/metrics`.
+
+All metrics carry a `router_id` constant label (the frontend's discovery instance ID). Filter in Prometheus with:
+
+```promql
+dynamo_router_requests_total{router_id="12345"}
+```
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_router_requests_total` | Counter | Total requests processed by the router |
+| `dynamo_router_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
+| `dynamo_router_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
+| `dynamo_router_input_sequence_tokens` | Histogram | Input sequence length (tokens) |
+| `dynamo_router_output_sequence_tokens` | Histogram | Output sequence length (tokens) |
+| `dynamo_router_kv_hit_rate` | Histogram | Predicted KV cache hit rate at routing time (0.0-1.0) |
+
+#### Per-Request Routing Overhead (`dynamo_router_overhead_*`)
+
+Histograms (in milliseconds) tracking the time spent in each phase of the routing decision for every request. Created on first routing decision. Same `router_id` label as the request metrics above.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_router_overhead_block_hashing_ms` | Histogram | Time computing block hashes |
+| `dynamo_router_overhead_indexer_find_matches_ms` | Histogram | Time in indexer find_matches |
+| `dynamo_router_overhead_seq_hashing_ms` | Histogram | Time computing sequence hashes |
+| `dynamo_router_overhead_scheduling_ms` | Histogram | Time in scheduler worker selection |
+| `dynamo_router_overhead_total_ms` | Histogram | Total routing overhead per request |
+
+#### KV Indexer Metrics
+
+Tracks KV cache events applied to the router's radix tree index. Only appears when `--router-kv-overlap-score-weight` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--router-kv-overlap-score-weight 0` is set or no KV events have been received.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_component_kv_cache_events_applied` | Counter | KV cache events applied to the index |
+
+**Additional labels:** `status` (`ok` / `error`), `event_type` (`stored` / `removed` / `cleared`)
+
+#### Per-Worker Load and Timing Gauges (`dynamo_frontend_worker_*`)
+
+These appear once workers register and begin serving requests. They are registered on the frontend's local Prometheus registry (not component-scoped) and do not carry `dynamo_namespace` or `dynamo_component` labels.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_frontend_worker_active_decode_blocks` | Gauge | Active KV cache decode blocks per worker |
+| `dynamo_frontend_worker_active_prefill_tokens` | Gauge | Active prefill tokens queued per worker |
+| `dynamo_frontend_worker_last_time_to_first_token_seconds` | Gauge | Last observed TTFT per worker (seconds) |
+| `dynamo_frontend_worker_last_input_sequence_tokens` | Gauge | Last observed input sequence length per worker |
+| `dynamo_frontend_worker_last_inter_token_latency_seconds` | Gauge | Last observed ITL per worker (seconds) |
+
+**Labels:**
+
+| Label | Example Value | Description |
+|-------|---------------|-------------|
+| `worker_id` | `7890` | Worker instance ID (etcd lease ID) |
+| `dp_rank` | `0` | Data-parallel rank |
+| `worker_type` | `prefill` or `decode` | Worker role |
+
+In disaggregated mode, the `worker_type` label shows both `"prefill"` and `"decode"` values; in aggregated mode, all workers report as `"decode"`.
 
 ## Related Documentation
 

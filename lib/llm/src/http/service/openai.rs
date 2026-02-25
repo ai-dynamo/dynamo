@@ -34,7 +34,7 @@ use super::{
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
     metrics::{
-        Endpoint, EventConverter, process_response_and_observe_metrics,
+        Endpoint, ErrorType, EventConverter, process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
     service_v2,
@@ -67,8 +67,8 @@ const VALIDATION_PREFIX: &str = "Validation: ";
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
-/// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
-fn get_body_limit() -> usize {
+/// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
+pub(super) fn get_body_limit() -> usize {
     std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -91,6 +91,32 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
         Some(reason) => reason.to_string(),
         None => "UnknownError".to_string(),
     }
+}
+
+/// Classify error for metrics based on status code and message
+fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
+    match code {
+        StatusCode::BAD_REQUEST => {
+            // 400
+            if message.starts_with("Validation:") {
+                ErrorType::Validation
+            } else {
+                ErrorType::Internal
+            }
+        }
+        StatusCode::NOT_FOUND => ErrorType::NotFound, // 404
+        StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented, // 501
+        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503
+        StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
+        _ if code.is_client_error() => ErrorType::Validation, // other 4xx
+        _ => ErrorType::Internal,                     // everything else
+    }
+}
+
+/// Extract ErrorType from ErrorResponse for metrics
+fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
+    classify_error_for_metrics(response.0, &response.1.message)
 }
 
 impl ErrorMessage {
@@ -248,7 +274,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 // TODO: Similar function exists in lib/llm/src/grpc/service/openai.rs but with different signature and simpler logic
-fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
+pub(super) fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
     // Try to get request id from trace context
     if let Some(trace_context) = get_distributed_tracing_context()
         && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
@@ -368,33 +394,37 @@ async fn completions_single(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     let model = request.inner.model.clone();
+
+    // Create inflight_guard early to ensure all errors are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     // todo - error handling should be more robust
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
+        .get_completions_engine_with_parsing(&model)
+        .map_err(|_| {
+            let err_response = ErrorMessage::model_not_found();
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
 
-    // Create inflight_guard before calling engine to ensure errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Completions, streaming);
-
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -465,13 +495,20 @@ async fn completions_single(
                     request_id,
                     e
                 );
-                ErrorMessage::internal_server_error(&format!(
+                let err_response = ErrorMessage::internal_server_error(&format!(
                     "Failed to fold completions stream for {}: {:?}",
                     request_id, e
-                ))
+                ));
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -492,26 +529,28 @@ async fn completions_batch(
     let streaming = request.inner.stream.unwrap_or(false);
     let model = request.inner.model.clone();
 
+    // Create inflight_guard early to ensure all errors are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
+        .get_completions_engine_with_parsing(&model)
+        .map_err(|_| {
+            let err_response = ErrorMessage::model_not_found();
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
-
-    // Create inflight_guard before calling engine to ensure errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Completions, streaming);
 
     // Generate streams for each prompt in the batch
     let mut all_streams = Vec::new();
@@ -530,10 +569,11 @@ async fn completions_batch(
         let single_request_context = Context::with_id(single_request, unique_request_id);
 
         // Generate stream for this prompt
-        let stream = engine
-            .generate(single_request_context)
-            .await
-            .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+        let stream = engine.generate(single_request_context).await.map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
         // Capture context from first stream
         if first_ctx.is_none() {
@@ -627,13 +667,20 @@ async fn completions_batch(
                     request_id,
                     e
                 );
-                ErrorMessage::internal_server_error(&format!(
+                let err_response = ErrorMessage::internal_server_error(&format!(
                     "Failed to fold completions stream for {}: {:?}",
                     request_id, e
-                ))
+                ));
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -658,28 +705,30 @@ async fn embeddings(
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
 
-    // Create http_queue_guard early - tracks time waiting to be processed
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
-
-    // todo - error handling should be more robust
-    let engine = state
-        .manager()
-        .get_embeddings_engine(model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    // this will increment the inflight gauge for the model
+    // Create inflight_guard early to ensure all errors are counted
     let mut inflight =
         state
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Embeddings, streaming);
 
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
+
+    // todo - error handling should be more robust
+    let engine = state.manager().get_embeddings_engine(model).map_err(|_| {
+        let err_response = ErrorMessage::model_not_found();
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate embeddings"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
@@ -702,7 +751,10 @@ async fn embeddings(
                 request_id,
                 e
             );
-            ErrorMessage::internal_server_error("Failed to fold embeddings stream")
+            let err_response =
+                ErrorMessage::internal_server_error("Failed to fold embeddings stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     inflight.mark_ok();
@@ -760,23 +812,40 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        let comment_str = event
-            .comment
-            .as_ref()
-            .map(|c| c.join(", "))
-            .unwrap_or_else(|| "Unknown error".to_string());
+        // Extract error string: prefer DynamoError field, fallback to legacy comment.
+        // Use message() instead of to_string() for DynamoError to avoid prefixing
+        // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
+        let error_str = if let Some(ref dynamo_err) = event.error {
+            let mut parts = Vec::new();
+            let mut current: Option<&dyn std::error::Error> = Some(dynamo_err);
+            while let Some(e) = current {
+                if let Some(de) = e.downcast_ref::<dynamo_runtime::error::DynamoError>() {
+                    parts.push(de.message().to_string());
+                } else {
+                    parts.push(e.to_string());
+                }
+                current = e.source();
+            }
+            parts.join(", ")
+        } else {
+            event
+                .comment
+                .as_ref()
+                .map(|c| c.join(", "))
+                .unwrap_or_else(|| "Unknown error".to_string())
+        };
 
-        // Try to parse comment as error JSON to extract status code
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str) {
+        // Try to parse as error JSON to extract status code
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
             let code = error_payload
                 .code
                 .and_then(|c| StatusCode::from_u16(c).ok())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(comment_str);
+            let message = error_payload.message.unwrap_or(error_str);
             return Some((message, code));
         }
 
-        return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
@@ -821,7 +890,7 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
 
 /// Checks if the first event in the stream is a backend error.
 /// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise.
-async fn check_for_backend_error(
+pub(super) async fn check_for_backend_error(
     mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
     + Send
     + Unpin
@@ -874,22 +943,11 @@ async fn chat_completions(
 
     let request_id = request.id().to_string();
 
-    // Handle unsupported fields - if Some(resp) is returned by
-    // validate_chat_completion_unsupported_fields,
-    // then a field was used that is unsupported. We will log an error message
-    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceed.
-    validate_chat_completion_unsupported_fields(&request)?;
+    // Determine streaming mode early
+    // todo - decide on default
+    let streaming = request.inner.stream.unwrap_or(false);
 
-    // Handle required fields like messages shouldn't be empty.
-    validate_chat_completion_required_fields(&request)?;
-
-    // Validate stream_options is only used when streaming (NVBug 5662680)
-    validate_chat_completion_stream_options(&request)?;
-
-    // Handle Rest of Validation Errors
-    validate_chat_completion_fields_generic(&request)?;
-
-    // Apply template values if present
+    // Apply template values first to resolve the model before creating metrics guards
     if let Some(template) = template {
         if request.inner.model.is_empty() {
             request.inner.model = template.model.clone();
@@ -901,43 +959,72 @@ async fn chat_completions(
             request.inner.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
-    tracing::trace!("Received chat completions request: {:?}", request.content());
 
-    // todo - decide on default
-    let streaming = request.inner.stream.unwrap_or(false);
-
+    // Capture the resolved model after template application for metrics and engine lookup
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     // todo - determine the proper error code for when a request model is not present
     let model = request.inner.model.clone();
+
+    tracing::trace!("Received chat completions request: {:?}", request.content());
+
+    // Create inflight_guard early to ensure all errors (including validation) are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
+
+    // Handle unsupported fields - if Some(resp) is returned by
+    // validate_chat_completion_unsupported_fields,
+    // then a field was used that is unsupported. We will log an error message
+    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
+    if let Err(err_response) = validate_chat_completion_unsupported_fields(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
+    // Handle required fields like messages shouldn't be empty.
+    if let Err(err_response) = validate_chat_completion_required_fields(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
+    // Validate stream_options is only used when streaming (NVBug 5662680)
+    if let Err(err_response) = validate_chat_completion_stream_options(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
+    // Handle Rest of Validation Errors
+    if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     // Create HTTP queue guard after template resolution so labels are correct
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
+        .get_chat_completions_engine_with_parsing(&model)
+        .map_err(|_| {
+            let err_response = ErrorMessage::model_not_found();
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     let annotations = request.annotations();
 
-    // Create inflight_guard before calling engine to ensure errors are counted
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
-
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -1001,6 +1088,7 @@ async fn chat_completions(
                 .await
                 .map_err(|error_response| {
                     tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
                     error_response
                 })?;
 
@@ -1023,13 +1111,20 @@ async fn chat_completions(
                         "Failed to parse chat completion response: {:?}",
                         e
                     );
-                    ErrorMessage::internal_server_error(&format!(
+                    let err_response = ErrorMessage::internal_server_error(&format!(
                         "Failed to parse chat completion response: {}",
                         e
-                    ))
+                    ));
+                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    err_response
                 })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
         Ok(Json(response).into_response())
     }
 }
@@ -1187,18 +1282,6 @@ async fn responses(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Create http_queue_guard early - tracks time waiting to be processed
-    // model is Option<String> in upstream; extract to String, defaulting to empty
-    let model = request.inner.model.clone().unwrap_or_default();
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
-
-    // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
-    // then a field was used that is unsupported. We will log an error message
-    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceed.
-    if let Some(resp) = validate_response_unsupported_fields(&request) {
-        return Ok(resp.into_response());
-    }
-
     // Apply template values if present, with sensible defaults for the Responses API.
     // Unlike chat completions where backends may have their own defaults, the Responses API
     // should provide a generous default to avoid truncated responses (especially with
@@ -1220,6 +1303,24 @@ async fn responses(
     }
     tracing::trace!("Received responses request: {:?}", request.inner);
 
+    let model = request.inner.model.clone().unwrap_or_default();
+    let streaming = request.inner.stream.unwrap_or(false);
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Responses, streaming);
+
+    // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
+    // then a field was used that is unsupported. We will log an error message
+    // and early return a 501 NOT_IMPLEMENTED status code.
+    if let Some(resp) = validate_response_unsupported_fields(&request) {
+        inflight_guard.mark_error(ErrorType::NotImplemented);
+        return Ok(resp.into_response());
+    }
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
@@ -1231,8 +1332,6 @@ async fn responses(
         tool_choice: request.inner.tool_choice.clone(),
         instructions: request.inner.instructions.clone(),
     };
-
-    let streaming = request.inner.stream.unwrap_or(false);
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
@@ -1243,11 +1342,13 @@ async fn responses(
                 error = %e,
                 "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest",
             );
-            ErrorMessage::not_implemented_error(
+            let err_response = ErrorMessage::not_implemented_error(
                 VALIDATION_PREFIX.to_string()
                     + "Failed to convert responses request: "
                     + &e.to_string(),
-            )
+            );
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
         })?;
 
     // For non-streaming responses, we still use internal streaming for aggregation,
@@ -1260,31 +1361,28 @@ async fn responses(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let engine = state
+    let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
-
-    let parsing_options = state.manager().get_parsing_options(&model);
+        .get_chat_completions_engine_with_parsing(&model)
+        .map_err(|_| {
+            let err_response = ErrorMessage::model_not_found();
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     tracing::trace!("Issuing generate call for responses");
 
     // issue the generate call on the engine
-    let engine_stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+    let engine_stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // Capture the context to cancel the stream if the client disconnects
     let ctx = engine_stream.context();
-
-    // Create inflight_guard now that actual processing has begun
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Responses, streaming);
 
     if streaming {
         // For streaming responses, we return HTTP 200 immediately without checking for errors.
@@ -1379,6 +1477,7 @@ async fn responses(
                 .await
                 .map_err(|error_response| {
                     tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
                     error_response
                 })?;
 
@@ -1396,10 +1495,12 @@ async fn responses(
                 .await
                 .map_err(|e| {
                     tracing::error!(request_id, "Failed to fold responses stream: {:?}", e);
-                    ErrorMessage::internal_server_error(&format!(
+                    let err_response = ErrorMessage::internal_server_error(&format!(
                         "Failed to fold responses stream: {}",
                         e
-                    ))
+                    ));
+                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    err_response
                 })?;
 
         // Convert NvCreateChatCompletionResponse --> NvResponse
@@ -1410,10 +1511,18 @@ async fn responses(
                     "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
                     e
                 );
-                ErrorMessage::internal_server_error("Failed to convert internal response")
+                let err_response =
+                    ErrorMessage::internal_server_error("Failed to convert internal response");
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
             })?;
 
         inflight_guard.mark_ok();
+        // If the engine context was killed (client disconnect), the response was
+        // assembled but never delivered. Override to cancelled.
+        if ctx.is_killed() {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+        }
 
         Ok(Json(response).into_response())
     }
@@ -2463,6 +2572,7 @@ mod tests {
             id: None,
             event: Some("error".to_string()),
             comment: Some(vec!["Backend service unavailable".to_string()]),
+            error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);
@@ -2489,6 +2599,7 @@ mod tests {
             id: None,
             event: Some("error".to_string()),
             comment: Some(vec![error_json.to_string()]),
+            error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);
@@ -2525,6 +2636,7 @@ mod tests {
             id: Some("msg-1".to_string()),
             event: None,
             comment: None,
+            error: None,
         };
 
         let test_stream = stream::iter(vec![normal_event.clone()]);
@@ -2571,6 +2683,7 @@ mod tests {
             id: None,
             event: None,
             comment: Some(vec!["Connection timeout".to_string()]),
+            error: None,
         };
 
         let test_stream = stream::iter(vec![error_event]);
@@ -2582,5 +2695,93 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(error_response.1.message, "Connection timeout");
         }
+    }
+
+    #[test]
+    fn test_classify_error_for_metrics_validation() {
+        // 400 with "Validation:" prefix to validation
+        let error_type =
+            classify_error_for_metrics(StatusCode::BAD_REQUEST, "Validation: Invalid parameter");
+        assert_eq!(error_type, ErrorType::Validation);
+
+        // 400 WITHOUT "Validation:" to internal (fallback)
+        let error_type = classify_error_for_metrics(StatusCode::BAD_REQUEST, "Some other error");
+        assert_eq!(error_type, ErrorType::Internal);
+    }
+
+    #[test]
+    fn test_classify_error_for_metrics_status_codes() {
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::NOT_FOUND, "Model not found"),
+            ErrorType::NotFound
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::NOT_IMPLEMENTED, "Feature not supported"),
+            ErrorType::NotImplemented
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
+            ErrorType::Overload
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Overloaded"),
+            ErrorType::Overload
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::INTERNAL_SERVER_ERROR, "Panic"),
+            ErrorType::Internal
+        );
+    }
+
+    #[test]
+    fn test_classify_error_for_metrics_client_errors() {
+        // Other 4xx errors should be classified as validation
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::UNAUTHORIZED, "Unauthorized"),
+            ErrorType::Validation
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::FORBIDDEN, "Forbidden"),
+            ErrorType::Validation
+        );
+    }
+
+    #[test]
+    fn test_extract_error_type_from_response_validation() {
+        let response = ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "Validation: bad input".to_string(),
+        });
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Validation
+        );
+    }
+
+    #[test]
+    fn test_extract_error_type_from_response_not_found() {
+        let response = ErrorMessage::model_not_found();
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::NotFound
+        );
+    }
+
+    #[test]
+    fn test_extract_error_type_from_response_internal() {
+        let response = ErrorMessage::internal_server_error("Something went wrong");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Internal
+        );
+    }
+
+    #[test]
+    fn test_extract_error_type_from_response_not_implemented() {
+        let response = ErrorMessage::not_implemented_error("Feature not available");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::NotImplemented
+        );
     }
 }

@@ -117,6 +117,16 @@ jobs:
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
           go-version: '1.25'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python dependencies for operator codegen
+        shell: bash
+        working-directory: ./deploy/operator
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
       - name: Check for uncommitted changes
         shell: bash
         working-directory: ./deploy/operator
@@ -184,8 +194,10 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
       test_gpu_timeout_minutes: 35
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
     secrets: inherit
 
   # ============================================================================
@@ -204,7 +216,9 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
     secrets: inherit
 
   # ============================================================================
@@ -223,7 +237,9 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
     secrets: inherit
 
 
@@ -315,7 +331,9 @@ jobs:
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ steps.operator-tag.outputs.tag }} \
-          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+          --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.upgradeCRD=false \
+          --debug
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
     - name: 🔍 Report Unhealthy Pods

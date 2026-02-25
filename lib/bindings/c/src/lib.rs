@@ -212,12 +212,13 @@ fn kv_event_create_stored_block_from_parts(
     token_ids: *const u32,
     num_tokens: usize,
     kv_block_size: u32,
-    _lora_id: u64,
+    lora_name: Option<&str>,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(
         unsafe { std::slice::from_raw_parts(token_ids, num_tokens) },
         kv_block_size,
         None,
+        lora_name,
     )[0];
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash(block_hash),
@@ -264,7 +265,7 @@ fn kv_event_create_stored_from_parts(
             tokens,
             num_toks,
             kv_block_size,
-            kv_params.lora_id,
+            kv_params.lora_name.as_deref(),
         ));
     }
 
@@ -303,12 +304,13 @@ pub struct DynamoKvStoredEventParams {
     pub block_ids: *const u64,
     pub num_blocks: usize,
     pub parent_hash: Option<u64>,
-    pub lora_id: u64,
+    pub lora_name: Option<String>,
 }
 
 /// # Safety
 /// parent_hash is passed as pointer to indicate whether the blocks
-/// has a parent hash or not. nullptr is used to represent no parent hash
+/// has a parent hash or not. nullptr is used to represent no parent hash.
+/// lora_name is an optional null-terminated C string; pass nullptr for base model.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     event_id: u64,
@@ -317,13 +319,24 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     block_ids: *const u64,
     num_blocks: usize,
     parent_hash: *const u64,
-    lora_id: u64,
+    lora_name: *const c_char,
 ) -> DynamoLlmResult {
     let parent_hash = {
         if parent_hash.is_null() {
             None
         } else {
             Some(unsafe { *parent_hash })
+        }
+    };
+    let lora_name = if lora_name.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(lora_name) }.to_str() {
+            Ok(s) => Some(s.to_owned()),
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to convert C string to Rust string (lora_name)");
+                return DynamoLlmResult::ERR;
+            }
         }
     };
     let kv_params = DynamoKvStoredEventParams {
@@ -333,7 +346,7 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
         block_ids,
         num_blocks,
         parent_hash,
-        lora_id,
+        lora_name,
     };
     let publisher = KV_PUB.get().unwrap();
     let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
@@ -416,12 +429,19 @@ impl RouterHandles {
     async fn query_prefill_worker(
         &self,
         tokens: &[u32],
+        block_mm_infos: Option<&[Option<dynamo_llm::kv_router::protocols::BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
     ) -> Result<u64, QueryRouterResult> {
         self.prefill_router
-            .query_prefill_worker(tokens, update_states, lora_name, priority_jump)
+            .query_prefill_worker(
+                tokens,
+                block_mm_infos,
+                update_states,
+                lora_name,
+                priority_jump,
+            )
             .await
             .map(|(worker_id, _dp_rank)| worker_id)
             .map_err(|e| {
@@ -455,7 +475,15 @@ impl RouterHandles {
         };
 
         self.decode_router
-            .find_best_match(None, tokens, config_override.as_ref(), false, None, 0.0)
+            .find_best_match(
+                None,
+                tokens,
+                None,
+                config_override.as_ref(),
+                false,
+                None,
+                0.0,
+            )
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");
@@ -545,7 +573,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `enforce_disagg`: If true, disaggregated mode is required (fails if no prefill workers found)
+/// - `decode_fallback`: If true, allows falling back to decode-only mode when no prefill workers are found
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -555,7 +583,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 pub unsafe extern "C" fn create_routers(
     namespace: *const c_char,
     component: *const c_char,
-    enforce_disagg: bool,
+    decode_fallback: bool,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     if namespace.is_null() || out_handle.is_null() {
@@ -687,17 +715,20 @@ pub unsafe extern "C" fn create_routers(
                     RouterMode::KV,
                     block_size,
                     Some(prefill_config),
-                    enforce_disagg,
+                    decode_fallback,
                     model_name.clone(),
+                    namespace_str.clone(),
                 )
             }
-            None if enforce_disagg => {
-                tracing::error!("Prefill workers required (enforce_disagg=true) but none found");
+            None if !decode_fallback => {
+                tracing::error!(
+                    "Prefill workers required but none found and decode fallback is disabled"
+                );
                 return Err(QueryRouterResult::ErrDisaggEnforced);
             }
             None => {
                 tracing::info!("No prefill workers found, running in aggregated mode");
-                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, decode_fallback)
             }
         };
 
@@ -771,7 +802,10 @@ pub unsafe extern "C" fn add_request(
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
 
             // Compute overlap_blocks using the public method
-            let overlap_blocks = match decode_router.get_overlap_blocks(&tokens, worker).await {
+            let overlap_blocks = match decode_router
+                .get_overlap_blocks(&tokens, worker, None)
+                .await
+            {
                 Ok(overlap) => overlap,
                 Err(e) => {
                     tracing::warn!(error = ?e, "Failed to compute overlap, using 0");
@@ -1026,7 +1060,7 @@ pub unsafe extern "C" fn route_request(
     let result = handles.runtime.secondary().block_on(async {
         let prefill_worker_id = if is_disaggregated {
             handles
-                .query_prefill_worker(tokens, false, None, 0.0)
+                .query_prefill_worker(tokens, None, false, None, 0.0)
                 .await?
         } else {
             0

@@ -574,9 +574,9 @@ fn convert_event(
             parent_block_hash,
             token_ids,
             block_size,
-            lora_id,
+            lora_name,
             block_mm_infos,
-            ..
+            medium: _,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -614,7 +614,7 @@ fn convert_event(
                         &token_ids,
                         &num_block_tokens,
                         &block_hashes_u64,
-                        lora_id.unwrap_or(0),
+                        lora_name.as_deref(),
                         warning_count,
                         block_mm_infos.as_deref(),
                     ),
@@ -648,13 +648,16 @@ pub fn create_stored_block_from_parts(
     kv_block_size: u32,
     block_hash: u64,
     token_ids: &[u32],
-    _lora_id: u64,
+    lora_name: Option<&str>,
     mm_extra_info: Option<BlockExtraInfo>,
 ) -> KvCacheStoredBlockData {
-    // Compute tokens_hash including MM info if present
     let block_mm_infos = mm_extra_info.as_ref().map(|info| vec![Some(info.clone())]);
-    let tokens_hash =
-        compute_block_hash_for_seq(token_ids, kv_block_size, block_mm_infos.as_deref())[0];
+    let tokens_hash = compute_block_hash_for_seq(
+        token_ids,
+        kv_block_size,
+        block_mm_infos.as_deref(),
+        lora_name,
+    )[0];
 
     tracing::trace!(
         "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}, mm_extra_info={:?}",
@@ -676,7 +679,7 @@ pub fn create_stored_blocks(
     token_ids: &[u32],
     num_block_tokens: &[u64],
     block_hashes: &[u64],
-    lora_id: u64,
+    lora_name: Option<&str>,
     warning_count: &Arc<AtomicU32>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
 ) -> Vec<KvCacheStoredBlockData> {
@@ -706,7 +709,7 @@ pub fn create_stored_blocks(
             kv_block_size,
             *block_hash_it,
             tokens,
-            lora_id,
+            lora_name,
             mm_extra_info,
         ));
         token_offset += *num_tokens_it as usize;
@@ -768,11 +771,9 @@ enum RawKvEvent {
         parent_block_hash: Option<BlockHashValue>,
         token_ids: Vec<u32>,
         block_size: usize,
-        /// Deprecated in vLLM 0.14.0: use `lora_name` instead
-        lora_id: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
-        /// LoRA adapter name (added in vLLM 0.14.0, replaces lora_id)
+        /// LoRA adapter name for adapter-aware block hashing
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
         /// Multimodal extra info for each block (length should match block_hashes)
@@ -785,6 +786,58 @@ enum RawKvEvent {
         medium: Option<String>,
     },
     AllBlocksCleared,
+}
+
+/// Parse MM hash from extra_keys string:
+/// - Only accept canonical vLLM MM identifiers (64-char hex digest)
+/// - Convert by taking the first 16 hex chars as u64
+fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
+    // extra_keys mixes MM identifiers with LoRA/cache_salt/prompt-embed metadata.
+    // Only MM identifiers should be mapped into BlockExtraInfo.
+    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return u64::from_str_radix(&s[..16], 16).ok();
+    }
+    None
+}
+
+/// Convert vLLM BlockStored extra_keys to block-level MM infos.
+/// extra_keys is a list aligned with blocks:
+/// - None => no MM content in that block
+/// - ["hash1", "hash2", ...] => one or more MM objects in that block
+fn extra_keys_to_block_mm_infos(
+    extra_keys: Option<Vec<Option<Vec<String>>>>,
+) -> Option<Vec<Option<BlockExtraInfo>>> {
+    let extra_keys = extra_keys?;
+    if extra_keys.is_empty() {
+        return None;
+    }
+
+    let infos: Vec<Option<BlockExtraInfo>> = extra_keys
+        .into_iter()
+        .map(|block_keys| {
+            let mm_objects: Vec<BlockMmObjectInfo> = block_keys
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|key| parse_mm_hash_from_extra_key(key))
+                .map(|mm_hash| BlockMmObjectInfo {
+                    mm_hash,
+                    offsets: vec![], // extra_keys does not carry offsets today
+                })
+                .collect();
+
+            if mm_objects.is_empty() {
+                None
+            } else {
+                Some(BlockExtraInfo { mm_objects })
+            }
+        })
+        .collect();
+
+    if infos.iter().all(|i| i.is_none()) {
+        return None;
+    }
+
+    Some(infos)
 }
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
@@ -821,9 +874,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut parent_block_hash: Option<Option<BlockHashValue>> = None;
         let mut token_ids: Option<Vec<u32>> = None;
         let mut block_size: Option<usize> = None;
-        let mut lora_id: Option<Option<u64>> = None;
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
+        let mut extra_keys: Option<Option<Vec<Option<Vec<String>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
@@ -843,14 +896,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "block_size" => {
                     block_size = Some(map.next_value()?);
                 }
-                "lora_id" => {
-                    lora_id = Some(map.next_value()?);
-                }
                 "medium" => {
                     medium = Some(map.next_value()?);
                 }
                 "lora_name" => {
                     lora_name = Some(map.next_value()?);
+                }
+                "extra_keys" => {
+                    extra_keys = Some(map.next_value()?);
                 }
                 "block_mm_infos" => {
                     block_mm_infos = Some(map.next_value()?);
@@ -868,15 +921,17 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
+                let block_mm_infos = block_mm_infos
+                    .unwrap_or(None)
+                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys.unwrap_or(None)));
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
                     token_ids,
                     block_size,
-                    lora_id: lora_id.unwrap_or(None),
                     medium: medium.unwrap_or(None),
                     lora_name: lora_name.unwrap_or(None),
-                    block_mm_infos: block_mm_infos.unwrap_or(None),
+                    block_mm_infos,
                 })
             }
             Some("BlockRemoved") => {
@@ -920,20 +975,25 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_size: usize = seq
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
-                let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
+                // Position 5 was lora_id in older formats; consume and discard for compat
+                let _lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
                 let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
+                let extra_keys: Option<Vec<Option<Vec<String>>>> =
+                    seq.next_element()?.unwrap_or(None);
                 let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
                     seq.next_element()?.unwrap_or(None);
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+                let block_mm_infos =
+                    block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
 
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash,
                     token_ids,
                     block_size,
-                    lora_id,
                     medium,
                     lora_name,
                     block_mm_infos,
@@ -1108,10 +1168,11 @@ mod test_event_processing {
         let token_ids = vec![10, 20, 30, 40];
         let blk_hash = 0xdead_beef;
 
-        let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, 0, None);
+        let stored =
+            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
-        let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None)[0];
+        let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None, None)[0];
         assert_eq!(stored.tokens_hash, expected_hash);
         assert!(stored.mm_extra_info.is_none());
     }
@@ -1132,7 +1193,7 @@ mod test_event_processing {
             &token_ids,
             &num_block_tokens,
             &block_hashes,
-            /*lora_id=*/ 0,
+            None,
             &Arc::new(AtomicU32::new(0)),
             None,
         );
@@ -1145,7 +1206,6 @@ mod test_event_processing {
     #[test]
     fn test_create_stored_blocks_wrong_size_triggers_warning() {
         let kv_block_size = 4;
-        // second block is the wrong size
         let token_ids = vec![1, 2, 3, 4, 5, 6, 7];
         let num_block_tokens = vec![4_u64, 3_u64];
         let block_hashes = vec![111_u64, 222_u64];
@@ -1156,7 +1216,7 @@ mod test_event_processing {
             &token_ids,
             &num_block_tokens,
             &block_hashes,
-            /*lora_id=*/ 0,
+            None,
             &warning_count,
             None,
         );
@@ -1177,7 +1237,6 @@ mod test_event_processing {
             parent_block_hash: Some(BlockHashValue::Unsigned(99)),
             token_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
             block_size: 4,
-            lora_id: Some(0),
             medium: None,
             lora_name: None,
             block_mm_infos: None,
@@ -1185,6 +1244,146 @@ mod test_event_processing {
 
         let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Stored(_)));
+    }
+
+    #[test]
+    fn test_convert_event_with_lora_name() {
+        let kv_block_size = 4;
+        let token_ids = vec![1, 2, 3, 4];
+
+        let base_evt = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: token_ids.clone(),
+            block_size: 4,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+        };
+        let lora_evt = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: token_ids.clone(),
+            block_size: 4,
+            medium: None,
+            lora_name: Some("my-lora".to_string()),
+            block_mm_infos: None,
+        };
+
+        let wc = Arc::new(AtomicU32::new(0));
+        let base_out = convert_event(base_evt, 1, kv_block_size, 0, &wc);
+        let lora_out = convert_event(lora_evt, 2, kv_block_size, 0, &wc);
+
+        let base_hash = match &base_out.data {
+            KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
+            _ => panic!("expected Stored"),
+        };
+        let lora_hash = match &lora_out.data {
+            KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
+            _ => panic!("expected Stored"),
+        };
+        assert_ne!(
+            base_hash, lora_hash,
+            "LoRA blocks must produce distinct tokens_hash"
+        );
+    }
+
+    #[test]
+    fn test_convert_event_lora_name_none_is_base_model() {
+        let kv_block_size = 4;
+        let token_ids = vec![1, 2, 3, 4];
+        let wc = Arc::new(AtomicU32::new(0));
+
+        let evt1 = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: token_ids.clone(),
+            block_size: 4,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+        };
+        let evt2 = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10)],
+            parent_block_hash: None,
+            token_ids: token_ids.clone(),
+            block_size: 4,
+            medium: None,
+            lora_name: None,
+            block_mm_infos: None,
+        };
+
+        let out1 = convert_event(evt1, 1, kv_block_size, 0, &wc);
+        let out2 = convert_event(evt2, 2, kv_block_size, 0, &wc);
+
+        let hash1 = match &out1.data {
+            KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
+            _ => panic!("expected Stored"),
+        };
+        let hash2 = match &out2.data {
+            KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
+            _ => panic!("expected Stored"),
+        };
+        assert_eq!(
+            hash1, hash2,
+            "Two base-model events with same tokens should produce same hash"
+        );
+    }
+
+    #[test]
+    fn test_backward_compat_deserialize_map_with_lora_id_no_lora_name() {
+        #[derive(serde::Serialize)]
+        struct OldFormatEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            block_hashes: Vec<u64>,
+            parent_block_hash: Option<u64>,
+            token_ids: Vec<u32>,
+            block_size: usize,
+            lora_id: Option<u64>,
+        }
+
+        let payload = rmps::to_vec(&OldFormatEvent {
+            event_type: "BlockStored",
+            block_hashes: vec![42],
+            parent_block_hash: None,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: Some(5),
+        })
+        .unwrap();
+
+        let event: RawKvEvent = rmps::from_slice(&payload).unwrap();
+        let RawKvEvent::BlockStored { lora_name, .. } = event else {
+            panic!("expected BlockStored");
+        };
+        assert!(
+            lora_name.is_none(),
+            "old-format payloads with lora_id but no lora_name should deserialize with lora_name=None"
+        );
+    }
+
+    #[test]
+    fn test_backward_compat_deserialize_seq_with_lora_id_no_lora_name() {
+        let payload = rmps::to_vec(&(
+            "BlockStored",
+            vec![42_u64],
+            None::<u64>,
+            vec![1_u32, 2, 3, 4],
+            4_usize,
+            Some(5_u64), // lora_id at position 5
+                         // no medium, no lora_name — simulating an old producer
+        ))
+        .unwrap();
+
+        let event: RawKvEvent = rmps::from_slice(&payload).unwrap();
+        let RawKvEvent::BlockStored { lora_name, .. } = event else {
+            panic!("expected BlockStored");
+        };
+        assert!(
+            lora_name.is_none(),
+            "old seq-format payloads with lora_id should deserialize with lora_name=None"
+        );
     }
 
     #[test]
@@ -1205,6 +1404,114 @@ mod test_event_processing {
         let raw_evt = RawKvEvent::AllBlocksCleared;
         let out = convert_event(raw_evt, 1, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Cleared));
+    }
+
+    #[test]
+    fn test_parse_mm_hash_from_extra_key() {
+        assert_eq!(
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            ),
+            Some(0x0123_4567_89ab_cdef)
+        );
+        assert_eq!(parse_mm_hash_from_extra_key("123"), None);
+        assert_eq!(parse_mm_hash_from_extra_key("not_a_hash"), None);
+    }
+
+    #[test]
+    fn test_extra_keys_to_block_mm_infos() {
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+        let infos = extra_keys_to_block_mm_infos(Some(vec![
+            Some(vec![mm_hash.clone()]),
+            None,
+            Some(vec!["invalid".to_string(), mm_hash]),
+        ]))
+        .expect("expected parsed MM infos");
+
+        assert_eq!(infos.len(), 3);
+        assert_eq!(
+            infos[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+        assert!(infos[1].is_none());
+        assert_eq!(
+            infos[2].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+    }
+
+    #[test]
+    fn test_seq_block_stored_field8_supports_extra_keys() {
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+        let extra_keys_payload = rmps::to_vec(&(
+            "BlockStored",
+            vec![10_u64],
+            None::<u64>,
+            vec![1_u32, 2, 3, 4],
+            4_usize,
+            None::<u64>,
+            None::<String>,
+            None::<String>,
+            vec![Some(vec![mm_hash])],
+        ))
+        .unwrap();
+        let extra_keys_event: RawKvEvent = rmps::from_slice(&extra_keys_payload).unwrap();
+        let RawKvEvent::BlockStored {
+            lora_name,
+            block_mm_infos,
+            ..
+        } = extra_keys_event
+        else {
+            panic!("expected BlockStored");
+        };
+        assert!(lora_name.is_none());
+        assert_eq!(
+            block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+    }
+
+    #[test]
+    fn test_map_block_stored_supports_extra_keys() {
+        #[derive(serde::Serialize)]
+        struct MapBlockStoredEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            block_hashes: Vec<u64>,
+            parent_block_hash: Option<u64>,
+            token_ids: Vec<u32>,
+            block_size: usize,
+            lora_id: Option<u64>,
+            medium: Option<String>,
+            lora_name: Option<String>,
+            extra_keys: Option<Vec<Option<Vec<String>>>>,
+        }
+
+        let payload = rmps::to_vec(&MapBlockStoredEvent {
+            event_type: "BlockStored",
+            block_hashes: vec![10],
+            parent_block_hash: None,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: None,
+            medium: Some("GPU".to_string()),
+            lora_name: None,
+            extra_keys: Some(vec![Some(vec![
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string(),
+            ])]),
+        })
+        .unwrap();
+
+        let event: RawKvEvent = rmps::from_slice(&payload).unwrap();
+        let RawKvEvent::BlockStored { block_mm_infos, .. } = event else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
     }
 }
 
@@ -1623,7 +1930,6 @@ mod tests_startup_helpers {
             parent_block_hash: None,
             token_ids: vec![0, 1, 2, 3],
             block_size: 4,
-            lora_id: None,
             medium: None,
             lora_name: None,
             block_mm_infos: None,

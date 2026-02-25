@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use futures::StreamExt;
-use rand::Rng;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -21,7 +20,7 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
+    kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, protocols::BlockExtraInfo},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
     protocols::common::timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},
@@ -34,10 +33,13 @@ pub enum PrefillError {
     #[error("Prefill router not yet activated")]
     NotActivated,
 
-    /// Error during prefill execution
     /// TODO: Separate prefill worker error from prefill router error
+    /// Error during prefill execution
     #[error("Prefill execution failed: {0}")]
-    PrefillError(String),
+    PrefillError(
+        String,
+        #[source] Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    ),
 
     /// Disaggregated params not found in prefill response
     #[error("No disaggregated params in prefill response: {0}")]
@@ -97,9 +99,11 @@ pub struct PrefillRouter {
     endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
-    enforce_disagg: bool,
+    decode_fallback: bool,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
+    /// Namespace used to look up the correct WorkerSet's worker monitor
+    namespace: String,
 }
 
 impl PrefillRouter {
@@ -107,7 +111,7 @@ impl PrefillRouter {
     pub fn disabled(
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
-        enforce_disagg: bool,
+        decode_fallback: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
@@ -115,19 +119,22 @@ impl PrefillRouter {
             endpoint_id: OnceLock::new(),
             cancel_token: CancellationToken::new(),
             router_mode,
-            enforce_disagg,
+            decode_fallback,
             model_name: String::new(), // Not used for disabled router
+            namespace: String::new(),  // Not used for disabled router
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         activation_rx: oneshot::Receiver<Endpoint>,
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        enforce_disagg: bool,
+        decode_fallback: bool,
         model_name: String,
+        namespace: String,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -138,8 +145,9 @@ impl PrefillRouter {
             endpoint_id: OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
-            enforce_disagg,
+            decode_fallback,
             model_name,
+            namespace,
         });
 
         // Spawn background task to wait for activation
@@ -207,7 +215,9 @@ impl PrefillRouter {
             let client = kv_chooser.client().clone();
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 
@@ -227,7 +237,9 @@ impl PrefillRouter {
             let client = endpoint.client().await?;
 
             // Register prefill client with worker monitor for TTFT metric cleanup in disaggregated mode
-            if let Some(monitor) = model_manager.get_worker_monitor(&self.model_name) {
+            if let Some(monitor) =
+                model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
+            {
                 monitor.set_prefill_client(client.clone());
             }
 
@@ -285,8 +297,15 @@ impl PrefillRouter {
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
+            let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
             match self
-                .query_prefill_worker(&req.token_ids, false, lora_name, priority_jump)
+                .query_prefill_worker(
+                    routing_token_ids,
+                    block_mm_infos,
+                    false,
+                    lora_name,
+                    priority_jump,
+                )
                 .await
             {
                 Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
@@ -301,9 +320,9 @@ impl PrefillRouter {
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
-        let bootstrap_room: u64 = rand::rng().random();
+        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX as u64);
 
-        tracing::info!(
+        tracing::debug!(
             worker_id = worker_id,
             dp_rank = dp_rank,
             bootstrap_host = %host,
@@ -343,7 +362,12 @@ impl PrefillRouter {
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
-            .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
+            .map_err(|e| {
+                PrefillError::PrefillError(
+                    "failed to route to prefill worker".to_string(),
+                    Some(e.into()),
+                )
+            })?;
 
         // Drop phase permit now - routing is complete, record_worker_full was called in select_worker.
         // This unblocks set_phase(Decode) in the main task without waiting for prefill output.
@@ -352,6 +376,7 @@ impl PrefillRouter {
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
+                None,
             ));
         };
 
@@ -373,9 +398,10 @@ impl PrefillRouter {
         }
 
         if let Some(err) = first_output.err() {
-            return Err(PrefillError::PrefillError(format!(
-                "Prefill router returned error in output: {err:?}"
-            )));
+            return Err(PrefillError::PrefillError(
+                "Prefill router returned error in output".to_string(),
+                Some(Box::new(err)),
+            ));
         }
 
         let Some(output) = &first_output.data else {
@@ -475,6 +501,7 @@ impl PrefillRouter {
     pub async fn query_prefill_worker(
         &self,
         token_ids: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
@@ -491,6 +518,7 @@ impl PrefillRouter {
                     .find_best_match(
                         None,
                         token_ids,
+                        block_mm_infos,
                         None,
                         update_states,
                         lora_name,
@@ -546,11 +574,9 @@ impl
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // If prefill router is not activated, skip directly to decode
+        // If prefill router is not activated (no prefill workers discovered),
+        // this is aggregated mode — route directly to decode.
         if self.prefill_router.get().is_none() {
-            if self.enforce_disagg {
-                return Err(anyhow::anyhow!(PrefillError::NotActivated));
-            }
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -673,20 +699,20 @@ impl
                 next.generate(decode_request).await
             }
             Err(PrefillError::NotActivated) => {
-                if self.enforce_disagg {
+                if !self.decode_fallback {
                     tracing::error!(
-                        "Prefill router not activated, but disaggregated mode is enforced. Failing request."
+                        "No prefill workers discovered yet and decode fallback is disabled. Failing request."
                     );
                     return Err(anyhow::anyhow!(PrefillError::NotActivated));
                 }
-                tracing::debug!("Prefill router not activated, falling back to decode-only");
+                tracing::debug!("No prefill workers discovered yet, falling back to decode-only");
                 next.generate(context.map(|_| req)).await
             }
             Err(e) => {
-                if self.enforce_disagg {
+                if !self.decode_fallback {
                     tracing::error!(
                         error = %e,
-                        "Remote prefill failed, but disaggregated mode is enforced. Failing request."
+                        "Remote prefill failed and decode fallback is disabled. Failing request."
                     );
                     return Err(anyhow::anyhow!(e));
                 }

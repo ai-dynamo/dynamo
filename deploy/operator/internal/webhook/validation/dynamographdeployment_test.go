@@ -678,6 +678,79 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 		// Annotation validation test cases
 		{
+			name: "valid annotation vllm-distributed-executor-backend=mp",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid annotation vllm-distributed-executor-backend=ray",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid annotation vllm-distributed-executor-backend case insensitive MP",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "MP",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid annotation vllm-distributed-executor-backend",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  `annotation nvidia.com/vllm-distributed-executor-backend has invalid value "invalid": must be "mp" or "ray"`,
+		},
+		{
 			name: "no annotations is valid",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -764,6 +837,46 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  `annotation nvidia.com/dynamo-operator-origin-version has invalid value "not-a-version": must be valid semver`,
+		},
+		{
+			name: "both annotations valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoOperatorOriginVersion:    "1.0.0",
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "both annotations invalid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoOperatorOriginVersion:    "bad",
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "annotation nvidia.com/dynamo-operator-origin-version has invalid value \"bad\": must be valid semver\nannotation nvidia.com/vllm-distributed-executor-backend has invalid value \"invalid\": must be \"mp\" or \"ray\"",
+			errContains: true,
 		},
 	}
 
@@ -1295,6 +1408,162 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [gateway]",
+		},
+		{
+			name: "restart.id change while rolling update Pending - rejected",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "old-restart-id",
+					},
+				},
+				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
+					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
+						Phase: nvidiacomv1alpha1.RollingUpdatePhasePending,
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "new-restart-id",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.restart.id cannot be changed while a rolling update is Pending",
+		},
+		{
+			name: "restart.id change while rolling update InProgress - rejected",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "old-restart-id",
+					},
+				},
+				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
+					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
+						Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "new-restart-id",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.restart.id cannot be changed while a rolling update is InProgress",
+		},
+		{
+			name: "restart.id change while rolling update Completed - allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "old-restart-id",
+					},
+				},
+				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
+					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
+						Phase: nvidiacomv1alpha1.RollingUpdatePhaseCompleted,
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "new-restart-id",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "restart.id change with no rolling update - allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "old-restart-id",
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "new-restart-id",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "spec change without restart.id change during rolling update - allowed",
+			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							Replicas: func() *int32 { r := int32(1); return &r }(),
+						},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "same-restart-id",
+					},
+				},
+				Status: nvidiacomv1alpha1.DynamoGraphDeploymentStatus{
+					RollingUpdate: &nvidiacomv1alpha1.RollingUpdateStatus{
+						Phase: nvidiacomv1alpha1.RollingUpdatePhaseInProgress,
+					},
+				},
+			},
+			newDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							Replicas: func() *int32 { r := int32(3); return &r }(),
+						},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "same-restart-id",
+					},
+				},
+			},
+			wantErr: false,
 		},
 	}
 

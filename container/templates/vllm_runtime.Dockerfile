@@ -32,18 +32,15 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # This fixes NVML InvalidArgument errors when CUDA_VISIBLE_DEVICES is set
 ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
 
-# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
-COPY --from=dynamo_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
-COPY --from=dynamo_base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
-COPY --from=dynamo_base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
-COPY --from=dynamo_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+# Copy full CUDA toolkit directories from base devel image.
+# Avoids cherry-picking individual binaries/libs which breaks when new CUDA deps are introduced.
+COPY --from=dynamo_base /usr/local/cuda/bin/ /usr/local/cuda/bin/
+COPY --from=dynamo_base /usr/local/cuda/lib64/ /usr/local/cuda/lib64/
 COPY --from=dynamo_base /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=dynamo_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
-COPY --from=dynamo_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-COPY --from=dynamo_base /usr/local/cuda/lib64/stubs/ /usr/local/cuda/lib64/stubs/
+COPY --from=dynamo_base /usr/local/cuda/nvvm/ /usr/local/cuda/nvvm/
 RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
-    ln -s /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
-    ln -s /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
+    ln -sf /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
+    ln -sf /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
 
 # DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
 # is not properly set for complilation. Set CPATH to help nvcc find the headers.
@@ -106,6 +103,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR} && \
     rm -rf /var/lib/apt/lists/*
 
+{% if context.vllm.enable_media_ffmpeg == "true" %}
+# Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+{% endif %}
+
 USER dynamo
 ENV HOME=/home/dynamo
 # This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
@@ -129,6 +136,9 @@ COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/nvidia ${SIT
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_jit_cache ${SITE_PACKAGES}/flashinfer_jit_cache
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/torch ${SITE_PACKAGES}/torch
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm ${SITE_PACKAGES}/vllm
+{% if platform == "amd64" -%}
+COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm_omni ${SITE_PACKAGES}/vllm_omni
+{% endif -%}
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/triton ${SITE_PACKAGES}/triton
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_cubin ${SITE_PACKAGES}/flashinfer_cubin
 # Remaining packages and venv structure (bin/, include/, share/, etc.)
@@ -137,6 +147,9 @@ COPY --chmod=775 --chown=dynamo:0 --from=framework \
     --exclude=lib/python*/site-packages/flashinfer_jit_cache \
     --exclude=lib/python*/site-packages/torch \
     --exclude=lib/python*/site-packages/vllm \
+{%- if platform == "amd64" %}
+    --exclude=lib/python*/site-packages/vllm_omni \
+{%- endif %}
     --exclude=lib/python*/site-packages/triton \
     --exclude=lib/python*/site-packages/flashinfer_cubin \
     ${VIRTUAL_ENV} ${VIRTUAL_ENV}
@@ -158,14 +171,6 @@ COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libcrypto.so.1.1* /usr/loca
 COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/lib/
 
 ENV PATH=/usr/local/ucx/bin:$PATH
-
-# Copy ffmpeg
-RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
-    true # in case ffmpeg not enabled
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
@@ -213,6 +218,15 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     uv pip install . && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
+
+
+# Install ModelExpress for P2P weight transfer (optional)
+ARG ENABLE_MODELEXPRESS_P2P
+ARG MODELEXPRESS_REF
+RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
+        echo "Installing ModelExpress from ref: ${MODELEXPRESS_REF}" && \
+        uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
+    fi
 
 # Install common and test dependencies. Cache uv downloads; uv handles its own locking for this cache.
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \

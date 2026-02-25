@@ -43,6 +43,8 @@ spec:
           args:
           - --model
           - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - decode
           - --tensor-parallel-size
           - '2'
           - --disable-log-requests
@@ -95,7 +97,8 @@ spec:
           args:
           - --model
           - Qwen/Qwen3-32B
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           - --tensor-parallel-size
           - '2'
           - --disable-log-requests
@@ -108,6 +111,8 @@ spec:
           - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
           - --max-model-len
           - '131072'
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
           command:
           - python3
           - -m
