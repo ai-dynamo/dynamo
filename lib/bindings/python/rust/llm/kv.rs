@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
 use super::*;
-use crate::Component;
+use crate::Endpoint;
 use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
@@ -27,12 +27,33 @@ fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Blo
 }
 
 #[pyfunction]
-#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None))]
+#[pyo3(name = "start_kv_block_indexer", signature = (endpoint, block_size, kv_router_config))]
+pub fn start_kv_block_indexer_py<'p>(
+    py: Python<'p>,
+    endpoint: &Endpoint,
+    block_size: u32,
+    kv_router_config: &super::entrypoint::KvRouterConfig,
+) -> PyResult<Bound<'p, PyAny>> {
+    let component = endpoint.inner.component().clone();
+    let config = kv_router_config.inner();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        llm_rs::kv_router::indexer_standalone::start_kv_block_indexer(
+            &component, &config, block_size,
+        )
+        .await
+        .map_err(to_pyerr)?;
+        Ok(())
+    })
+}
+
+#[pyfunction]
+#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None))]
 pub fn compute_block_hash_for_seq_py(
     _py: Python,
     tokens: Vec<u32>,
     kv_block_size: usize,
     block_mm_infos: Option<Bound<PyAny>>,
+    lora_name: Option<String>,
 ) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -45,7 +66,12 @@ pub fn compute_block_hash_for_seq_py(
         .map(depythonize_block_mm_infos)
         .transpose()?;
 
-    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size as u32, mm_infos.as_deref());
+    let hashes = compute_block_hash_for_seq(
+        &tokens,
+        kv_block_size as u32,
+        mm_infos.as_deref(),
+        lora_name.as_deref(),
+    );
 
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }
@@ -66,14 +92,14 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (component))]
+    #[pyo3(signature = (endpoint))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
-        component: Component,
+        endpoint: Endpoint,
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
-        let rs_component = component.inner.clone();
+        let rs_component = endpoint.inner.component().clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             rs_publisher
                 .create_endpoint(rs_component)
@@ -107,9 +133,9 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None))]
+    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None))]
     fn new(
-        component: Component,
+        endpoint: Endpoint,
         worker_id: WorkerId,
         kv_block_size: usize,
         dp_rank: DpRank,
@@ -119,8 +145,8 @@ impl KvEventPublisher {
     ) -> PyResult<Self> {
         let _ = worker_id;
 
-        let source_config = zmq_endpoint.map(|endpoint| KvEventSourceConfig::Zmq {
-            endpoint,
+        let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
+            endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
         });
 
@@ -128,8 +154,11 @@ impl KvEventPublisher {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
+        // Extract component from endpoint
+        let component = endpoint.inner.component().clone();
+
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component.inner,
+            component,
             kv_block_size as u32,
             source_config,
             enable_local_indexer,
@@ -146,23 +175,22 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None, block_mm_infos=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None))]
     fn publish_stored(
         &self,
         py: Python,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
         block_hashes: Vec<i64>,
-        lora_id: u64,
         parent_hash: Option<i64>,
         block_mm_infos: Option<Bound<PyAny>>,
+        lora_name: Option<String>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
         let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
 
-        // Use shared monotonic event_id counter from the inner publisher
         let event_id = inner.next_event_id();
 
         let mm_infos = block_mm_infos
@@ -181,7 +209,7 @@ impl KvEventPublisher {
                         &token_ids,
                         &num_block_tokens,
                         &block_hashes_u64,
-                        lora_id,
+                        lora_name.as_deref(),
                         &warning_count,
                         mm_infos.as_deref(),
                     ),
@@ -856,7 +884,7 @@ impl KvRouter {
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None, lora_name=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -864,6 +892,7 @@ impl KvRouter {
         router_config_override: Option<PyObject>,
         request_id: Option<String>,
         block_mm_infos: Option<PyObject>,
+        lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: llm_rs::kv_router::RouterConfigOverride =
@@ -888,8 +917,9 @@ impl KvRouter {
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
-                    None, // lora_name not exposed in Python API yet
+                    lora_name,
                     0.0,
+                    None, // allowed_worker_ids not exposed in Python API yet
                 )
                 .await
                 .map_err(to_pyerr)?;
@@ -925,16 +955,18 @@ impl KvRouter {
         })
     }
 
+    #[pyo3(signature = (token_ids, lora_name=None))]
     fn get_potential_loads<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
+        lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
-                .get_potential_loads(&token_ids, None)
+                .get_potential_loads(&token_ids, None, lora_name.as_deref())
                 .await
                 .map_err(to_pyerr)?;
 

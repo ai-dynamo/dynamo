@@ -6,7 +6,7 @@ subtitle: Enable KV offloading using KV Block Manager (KVBM) for Dynamo deployme
 ---
 
 # KVBM Guide
-The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer for frameworks like vLLM and TensorRT-LLM.
+The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer and write-through cache for frameworks like vLLM and TensorRT-LLM.
 
 KVBM is modular and can be used standalone via `pip install kvbm` or as the memory management component in the full Dynamo stack. This guide covers installation, configuration, and deployment of the Dynamo KV Block Manager (KVBM) and other KV cache management systems.
 
@@ -204,30 +204,6 @@ cd $DYNAMO_HOME/examples/backends/vllm
 
 ### Disaggregated Serving with TRT-LLM
 
-> [!NOTE]
-> The latest TensorRT-LLM release (1.3.0rc1) is currently experiencing a request hang when running disaggregated serving with KVBM.
-> Please include the TensorRT-LLM commit id `18e611da773026a55d187870ebcfa95ff00c8482` when building the Dynamo TensorRT-LLM runtime image to test the KVBM + disaggregated serving feature.
-
-```bash
-# Build the Dynamo TensorRT-LLM container using commit ID 18e611da773026a55d187870ebcfa95ff00c8482. Note: This build can take a long time.
-./container/build.sh --framework trtllm --tensorrtllm-commit 18e611da773026a55d187870ebcfa95ff00c8482 --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git
-
-# Launch the container
-./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
-```
-> [!NOTE]
-> Important: After logging into the Dynamo TensorRT-LLM runtime container, copy the Triton kernels into the container's virtual environment as a separate Python module.
-
-```bash
-# Clone the TensorRT-LLM repo and copy the triton_kernels folder into the container as a Python module.
-git clone https://github.com/NVIDIA/TensorRT-LLM.git /tmp/TensorRT-LLM && \
-cd /tmp/TensorRT-LLM && \
-git checkout 18e611da773026a55d187870ebcfa95ff00c8482 && \
-cp -r triton_kernels /opt/dynamo/venv/lib/python3.12/site-packages/ && \
-cd /workspace && \
-rm -rf /tmp/TensorRT-LLM
-```
-
 ```bash
 # Launch prefill worker with KVBM
 python3 -m dynamo.trtllm \
@@ -261,6 +237,9 @@ You can also specify exact block counts instead of GB:
 - `DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS`
 - `DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS`
 
+> [!NOTE] KVBM is a write-through cache and it is possible to misconfigure. Each of the capacities should increase as you enable more tiers. As an example, if you configure your GPU device to have 100GB of memory dedicated for KV cache storage, then configure
+`DYN_KVBM_CPU_CACHE_GB >= 100`. The same goes for configuring the disk cache; `DYN_KVBM_DISK_CACHE_GB >= DYN_KVBM_CPU_CACHE_GB`. If the cpu cache is configured to be less than the device cache, then _there will be no benefit from KVBM_. In many cases you will see performance degradation as KVBM will churn by offloading blocks from the GPU to CPU after every forward pass. To know what your minimum value for `DYN_KVBM_CPU_CACHE_GB` should be for your setup, consult your llm engine's kv cache configuration.
+
 ### SSD Lifespan Protection
 
 When disk offloading is enabled, disk offload filtering is enabled by default to extend SSD lifespan. The current policy only offloads KV blocks from CPU to disk if the blocks have frequency ≥ 2. Frequency doubles on cache hit (initialized at 1) and decrements by 1 on each time decay step.
@@ -288,7 +267,7 @@ DYN_KVBM_CPU_CACHE_GB=20 \
 python -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
-    --connector kvbm
+    --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}'
 ```
 
 ### Enable Metrics for TensorRT-LLM
@@ -444,7 +423,7 @@ python -m dynamo.frontend &
 
 DYN_KVBM_CPU_CACHE_GB=10 \
 nsys profile -o /tmp/kvbm-nsys --trace-fork-before-exec=true --cuda-graph-trace=node --delay 30 --duration 60 \
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector kvbm
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}'
 ```
 
 ## See Also
