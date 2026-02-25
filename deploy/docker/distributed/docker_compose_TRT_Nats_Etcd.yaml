@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: dynamo-trt_nats_etcd
 networks:
   server:
@@ -13,7 +16,7 @@ services:
     command: [ "-c", "/etc/nats/nats-server.conf" ]
     volumes:
       - ./nats-server.conf:/etc/nats/nats-server.conf:ro
-      - nats-data:/data
+      - nats-data:/tmp/jetstream
     ports:
       - 4222:4222
       - 6222:6222
@@ -21,6 +24,8 @@ services:
     networks:
       - server
 
+  # Security note: etcd auth is disabled for local testing only.
+  # Bind published ports to localhost to avoid LAN exposure.
   etcd-server:
     image: bitnamilegacy/etcd:3.6.1
     environment:
@@ -29,8 +34,8 @@ services:
     volumes:
       - etcd-data:/etcd-data
     ports:
-      - 2379:2379
-      - 2380:2380
+      - 127.0.0.1:2379:2379
+      - 127.0.0.1:2380:2380
     networks:
       - server
 
@@ -82,4 +87,3 @@ services:
         condition: service_started
       dynamo-frontend:
         condition: service_started
-

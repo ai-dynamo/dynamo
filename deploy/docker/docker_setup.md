@@ -6,20 +6,15 @@ Complete guide for running Dynamo with SGLang, TensorRT-LLM, or vLLM backends us
 
 - **NVIDIA GPU** with NVIDIA Container Toolkit installed
 - **Docker** and **Docker Compose** installed
-- A **HuggingFace account** (only required for gated/private models — see [Environment Setup](#1-environment-setup))
+- A **HuggingFace account** (only required for gated/private models — see [Environment Setup](#environment-setup))
 
 ---
 
 ## One-Time Setup
 
-### 1. Environment Setup (only required for gated/private models )
+### Environment Setup
 
-Create a `.env` file in `deploy/docker/`:
-
-```bash
-cd deploy/docker
-cp env.example .env
-```
+Set `HF_TOKEN` in `deploy/docker/.env` only if you are using a gated/private model.
 
 > **For public models like `Qwen/Qwen3-0.6B`**: leave `HF_TOKEN` empty — no token required.
 > **For gated/private models** (e.g. `meta-llama/Llama-3.1-8B-Instruct`): set your token from [HuggingFace Settings](https://huggingface.co/settings/tokens).
@@ -43,7 +38,7 @@ For the frontend to route requests, both containers must share a **service disco
 
 ### The tmpfs Solution
 
-```
+```text
 ┌──────────────────┐     ┌───────────────────┐
 │  dynamo-frontend  │     │   dynamo-backend   │
 │                   │     │                    │
@@ -60,7 +55,7 @@ For the frontend to route requests, both containers must share a **service disco
 
 **Why tmpfs instead of a host directory:**
 
-Service discovery only needs to live as long as the containers are running — tmpfs was used for this. We can create also folder outside of docker and use it but then we need to give it proper permissions.
+Service discovery only needs to live as long as the containers are running, so tmpfs is a good fit. A host directory also works, but then you need to manage ownership/permissions yourself.
 
 ---
 
@@ -73,8 +68,8 @@ Every flag used in the compose files, explained in plain English.
 | Flag | Value | What it does |
 |------|-------|--------------|
 | `--http-port` | `8000` | Port the OpenAI-compatible HTTP API listens on |
-| `--store-kv` | `file` | Backend for service discovery. `file` = shared directory (local dev). `etcd` = distributed (production). `mem` = process-local only — **will not work across containers** |
-| `--request-plane` | `tcp` | Transport for requests between frontend and backend. `tcp` = direct socket, fastest. `nats` = message broker, required for KV-aware routing in production |
+| `--store-kv` | `file` (local) | Service discovery backend. Local compose explicitly uses `file`; distributed compose relies on etcd via `ETCD_ENDPOINTS`. `mem` is process-local and **will not work across containers** |
+| `--request-plane` | `tcp` (local) | Transport between frontend and backend. Local compose pins `tcp`; distributed compose provides NATS (`NATS_SERVER`) for distributed routing/events |
 
 ### Backend Flags
 
@@ -101,7 +96,7 @@ Every flag used in the compose files, explained in plain English.
 
 | Flag | Value | What it does |
 |------|-------|--------------|
-| `--model-path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path |
+| `--model` / `--model-path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path (compose variants use one or the other) |
 | `--store-kv` | `file` | Must match the frontend store |
 | `--free-gpu-memory-fraction` | `0.8` | Fraction of free GPU memory to use for inference |
 | `--max-seq-len` | `10000` | Maximum sequence length (prompt + output tokens) |
@@ -134,13 +129,14 @@ docker compose -f docker_compose_D_VLLM_Local_2.yaml up
 # SGLang
 docker compose -f docker_compose_D_SGLang_Local_2.yaml up
 
-# TensorRT-LLM  (note the space in the filename — use quotes)
-docker compose -f "docker_compose_ D_TRT_Local_2.yaml" up
+# TensorRT-LLM
+docker compose -f docker_compose_D_TRT_Local_2.yaml up
 ```
 
 ### Distributed Mode (Production)
 
 Adds NATS message broker + etcd for KV-aware routing and high availability.
+Current compose files bind etcd ports to `127.0.0.1` for safer local exposure.
 
 ```bash
 cd deploy/docker/distributed
@@ -154,7 +150,7 @@ docker compose -f docker_compose_VLLM_Nats_Etcd.yaml up
 
 ## Testing Your Deployment
 
-Wait for the backend `depends_on` healthcheck to pass, then:
+For local mode, wait for frontend healthcheck to pass. For distributed mode, wait until frontend/backend logs show startup completed.
 
 ### Non-Streaming
 
@@ -207,7 +203,7 @@ docker compose down -v
 |---------|----------------|-------|
 | **vLLM** | `--gpu-memory-utilization` | Needs `--kv-events-config '{"enable_kv_cache_events": false}'` in local mode |
 | **SGLang** | `--mem-fraction-static` | Needs `--attention-backend flashinfer` on H100/A100 |
-| **TensorRT-LLM** | `--free-gpu-memory-fraction` | Command must be prefixed with `trtllm-llmapi-launch` |
+| **TensorRT-LLM** | `--free-gpu-memory-fraction` | Local file uses `trtllm-llmapi-launch`; distributed file uses `python3 -m dynamo.trtllm` directly |
 
 ---
 
@@ -223,17 +219,27 @@ docker run --rm nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1 python3 -m dynamo.fr
 
 ### 404 on `/v1/chat/completions`
 
-The frontend started but cannot find the backend. Check that:
+The frontend started but cannot find the backend. Check mode-specific requirements:
 
-- Both services mount the same `discovery` volume at the same container path
-- Neither service uses `--store-kv mem` — that is process-local and **cannot be shared across containers**
-- Both services are on the same Docker network
+Local mode checks:
+- Frontend and backend mount the same `discovery` volume at `/tmp/dynamo_store_kv`
+- Neither service uses `--store-kv mem`
+
+Distributed mode checks:
+- `etcd-server` and `nats-server` are up
+- Frontend/backend use `ETCD_ENDPOINTS=...:2379` and `NATS_SERVER=nats://...:4222`
+- All services are on the same Docker network
 
 ### Check container logs
 
 ```bash
 docker compose logs -f dynamo-frontend
-docker compose logs -f dynamo-vllm-backend     # or dynamo-sglang-backend / dynamo-trtllm-backend
+docker compose logs -f dynamo-vllm-backend     # local vLLM
+docker compose logs -f dynamo-vllm             # distributed vLLM
+docker compose logs -f dynamo-sglang-backend   # local SGLang
+docker compose logs -f dynamo-sglang           # distributed SGLang
+docker compose logs -f dynamo-trtllm-backend   # local TRT-LLM
+docker compose logs -f dynamo-TensorRT-LLM     # distributed TRT-LLM
 ```
 
 ---
@@ -249,8 +255,11 @@ command: python3 -m dynamo.vllm --model your-org/your-model ...
 # SGLang
 command: python3 -m dynamo.sglang --model-path your-org/your-model ...
 
-# TensorRT-LLM
+# TensorRT-LLM (local file)
 command: trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path your-org/your-model ...
+
+# TensorRT-LLM (distributed file)
+command: python3 -m dynamo.trtllm --model your-org/your-model ...
 ```
 
 For gated models, add `HF_TOKEN` to `deploy/docker/.env`.
