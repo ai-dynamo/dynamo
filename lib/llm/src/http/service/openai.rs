@@ -1336,6 +1336,8 @@ async fn responses(
         reasoning: request.inner.reasoning.clone(),
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier,
+        include: request.inner.include.clone(),
+        truncation: request.inner.truncation,
     };
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
@@ -1545,11 +1547,6 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
         ));
     }
-    if inner.include.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`include` is not supported.",
-        ));
-    }
     if inner.previous_response_id.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
@@ -1563,11 +1560,6 @@ pub fn validate_response_unsupported_fields(
     if inner.store == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`store: true` is not supported.",
-        ));
-    }
-    if inner.truncation.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`truncation` is not supported.",
         ));
     }
     None
@@ -2037,10 +2029,7 @@ mod tests {
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
-    use dynamo_async_openai::types::responses::{
-        CreateResponse, IncludeEnum, Input, PromptConfig, ServiceTier, TextConfig,
-        TextResponseFormat, Truncation,
-    };
+    use dynamo_async_openai::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
@@ -2149,10 +2138,6 @@ mod tests {
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
             ("background", Box::new(|r| r.background = Some(true))),
             (
-                "include",
-                Box::new(|r| r.include = Some(vec![IncludeEnum::FileSearchCallResults])),
-            ),
-            (
                 "previous_response_id",
                 Box::new(|r| r.previous_response_id = Some("prev-id".into())),
             ),
@@ -2167,10 +2152,6 @@ mod tests {
                 }),
             ),
             ("store", Box::new(|r| r.store = Some(true))),
-            (
-                "truncation",
-                Box::new(|r| r.truncation = Some(Truncation::Auto)),
-            ),
         ];
 
         for (field, set_field) in unsupported_cases {
