@@ -58,19 +58,24 @@ AFD is a disaggregation architecture for LLM decode phase that separates statefu
 - [x] Create `init_afd.py` with initialization functions
 - [x] Update `main.py` to support AFD modes
 
-### Phase 3: Integration 🚧
+### Phase 3: Integration ✅
 
-- [ ] Implement NIXL-based zero-copy activation transfer
-- [ ] Add model partitioning support (split attention/FFN layers)
-- [ ] Integrate with SGLang scheduler
-- [ ] Add AFD-specific metrics and monitoring
+- [x] Implement NIXL-based zero-copy activation transfer (`afd_nixl_transfer.py`)
+- [x] Create `AFDActivationBuffer` for pre-registered GPU tensors
+- [x] Create `AFDNixlTransferManager` for RDMA transfers
+- [x] Add AFD metrics and monitoring (`afd_metrics.py`)
+- [x] Create `AFDWorkerMetrics` for per-worker tracking
+- [x] Create `AFDMetricsCollector` for aggregate metrics
+- [x] Create `AFDPerformanceAnalyzer` for optimization recommendations
+- [ ] Add model partitioning support (split attention/FFN layers) - **requires SGLang support**
+- [ ] Integrate with SGLang scheduler - **requires SGLang support**
 - [ ] End-to-end testing with sample models
 
 ### Phase 4: Optimization 🔜
 
-- [ ] Implement optimal A/F ratio calculation
+- [ ] Implement optimal A/F ratio auto-tuning
 - [ ] Add load balancing across Attention workers
-- [ ] Performance tuning and benchmarking
+- [ ] Performance benchmarking suite
 - [ ] Compare with baseline (aggregated) performance
 
 ## Usage
@@ -124,6 +129,28 @@ python -m dynamo.sglang \
 └─────────────────────────────────────────────────────┘
 ```
 
+## Metrics and Monitoring
+
+### Prometheus Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `afd_transfer_latency_seconds` | Histogram | Transfer latency between workers |
+| `afd_transfer_bytes_total` | Counter | Total bytes transferred |
+| `afd_queue_length` | Gauge | Current queue length |
+| `afd_compute_time_seconds` | Histogram | Time in computation |
+| `afd_active_requests` | Gauge | Active request count |
+| `afd_memory_usage_bytes` | Gauge | GPU memory usage |
+| `afd_attention_ratio` | Gauge | Configured attention ratio |
+| `afd_batch_size` | Histogram | Batch size distribution |
+
+### Performance Analysis
+
+The `AFDPerformanceAnalyzer` provides:
+- Bottleneck detection (attention vs FFN bound)
+- Optimal attention ratio calculation
+- Resource utilization analysis
+
 ## Related Files
 
 | File | Purpose |
@@ -134,6 +161,8 @@ python -m dynamo.sglang \
 | `sglang/init_afd.py` | AFD worker initialization |
 | `sglang/main.py` | Entry point with AFD mode support |
 | `sglang/afd_communication.py` | Communication protocol implementation |
+| `sglang/afd_nixl_transfer.py` | NIXL-based zero-copy transfer |
+| `sglang/afd_metrics.py` | Metrics and monitoring |
 | `sglang/request_handlers/llm/afd_attention_handler.py` | Attention worker handler |
 | `sglang/request_handlers/llm/afd_ffn_handler.py` | FFN worker handler |
 
@@ -168,3 +197,10 @@ Where:
 | 4:1 | High attention memory | High FFN compute | Large batch, short sequences |
 | 8:1 | Very high attention | Max FFN throughput | Long sequences, large batch |
 | 16:1 | Extreme memory | Extreme compute | Very long contexts |
+
+## Future Work
+
+1. **Model Partitioning**: Implement automatic splitting of model weights between attention and FFN workers
+2. **Dynamic Rebalancing**: Adjust attention ratio at runtime based on workload
+3. **Multi-Node Support**: Extend to cross-node AFD topologies
+4. **CUDA Graphs**: Optimize kernel launch overhead for small batches
