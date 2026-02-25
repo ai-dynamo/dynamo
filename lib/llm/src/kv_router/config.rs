@@ -8,6 +8,24 @@ use validator::{Validate, ValidationError};
 
 use crate::kv_router::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 
+/// How the router discovers its worker set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerDiscoveryMode {
+    /// Workers are discovered via the Dynamo runtime (Kubernetes / NATS).
+    /// The router blocks at startup until at least one worker appears.
+    Dynamo,
+
+    /// Workers are provided externally on each routing request (e.g. by the EPP).
+    /// The router starts immediately without waiting for discovery-based workers.
+    External,
+}
+
+impl Default for WorkerDiscoveryMode {
+    fn default() -> Self {
+        Self::Dynamo
+    }
+}
+
 /// Override configuration for router settings that can be specified per-request
 #[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
 pub struct RouterConfigOverride {
@@ -85,6 +103,12 @@ pub struct KvRouterConfig {
     /// single-threaded RadixTree. Default: 1.
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
+
+    /// How the router discovers workers.
+    /// `Dynamo` (default): waits for workers via Kubernetes / NATS discovery.
+    /// `External`: workers are provided per-request (e.g. by the EPP); the router
+    /// starts immediately without blocking on discovery.
+    pub worker_discovery_mode: WorkerDiscoveryMode,
 }
 
 impl Default for KvRouterConfig {
@@ -105,6 +129,7 @@ impl Default for KvRouterConfig {
             router_prune_target_ratio: 0.8,
             router_queue_threshold: None,
             router_event_threads: 1,
+            worker_discovery_mode: WorkerDiscoveryMode::default(),
         }
     }
 }

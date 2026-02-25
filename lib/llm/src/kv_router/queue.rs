@@ -218,18 +218,18 @@ impl SchedulerQueue {
 
 /// Build the effective worker map for a scheduling decision.
 ///
-/// When `epp_worker_ids` is `Some`, the EPP-provided pods define the worker set.
+/// When `provided_worker_ids` is `Some`, those IDs define the worker set.
 /// Configs are looked up from discovery; workers not yet discovered get a default config.
 ///
-/// When `epp_worker_ids` is `None`, the discovery worker map is used as-is.
+/// When `provided_worker_ids` is `None`, the discovery worker map is used as-is.
 fn build_effective_workers(
-    epp_worker_ids: &Option<std::collections::HashSet<WorkerId>>,
+    provided_worker_ids: &Option<std::collections::HashSet<WorkerId>>,
     discovery_workers: &HashMap<WorkerId, ModelRuntimeConfig>,
 ) -> HashMap<WorkerId, ModelRuntimeConfig> {
-    match epp_worker_ids {
-        Some(epp_ids) => {
-            let mut workers = HashMap::with_capacity(epp_ids.len());
-            for &id in epp_ids {
+    match provided_worker_ids {
+        Some(ids) => {
+            let mut workers = HashMap::with_capacity(ids.len());
+            for &id in ids {
                 let config = discovery_workers.get(&id).cloned().unwrap_or_default();
                 workers.insert(id, config);
             }

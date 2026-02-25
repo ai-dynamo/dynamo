@@ -19,7 +19,7 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::KvRouterConfig;
+use dynamo_llm::kv_router::{KvRouterConfig, WorkerDiscoveryMode};
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
 use dynamo_runtime::pipeline::RouterMode;
@@ -628,8 +628,10 @@ pub unsafe extern "C" fn create_routers(
             }
         };
 
-        // Wait for at least one worker to be discovered before proceeding
-        // This ensures the decode router can be created successfully
+        // Wait for at least one worker to be discovered before proceeding.
+        // In External mode (EPP provides workers per-request) we still need
+        // discovery for the model card / preprocessor, but we don't require
+        // worker endpoints to be present at startup.
         let instance_count = wait_for_discovery_sync(&drt).await;
         if instance_count == 0 {
             tracing::error!(
@@ -642,7 +644,8 @@ pub unsafe extern "C" fn create_routers(
             instance_count
         );
 
-        let kv_router_config = kv_router_config_from_env();
+        let mut kv_router_config = kv_router_config_from_env();
+        kv_router_config.worker_discovery_mode = WorkerDiscoveryMode::External;
 
         // Get component and endpoint
         let component_handle = match drt.namespace(&namespace_str) {
