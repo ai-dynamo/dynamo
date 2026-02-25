@@ -44,4 +44,3 @@ spec:
                   - round_robin
                   - --watchdog-timeout
                   - "3600"
-  autoApply: true

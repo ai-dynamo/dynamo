@@ -20,4 +20,3 @@ spec:
       mode: disagg
       backend: vllm
   searchStrategy: thorough
-  autoApply: true

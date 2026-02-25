@@ -14,5 +14,3 @@ spec:
     requestRate: 5.0
   sla:
     itl: 50.0
-  searchStrategy: rapid
-  autoApply: true

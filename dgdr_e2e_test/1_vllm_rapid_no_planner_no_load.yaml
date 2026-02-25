@@ -12,5 +12,3 @@ spec:
     numGpusPerNode: 8
   sla:
     itl: 50.0
-  searchStrategy: rapid
-  autoApply: true

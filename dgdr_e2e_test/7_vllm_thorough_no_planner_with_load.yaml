@@ -15,4 +15,3 @@ spec:
   sla:
     itl: 50.0
   searchStrategy: thorough
-  autoApply: true

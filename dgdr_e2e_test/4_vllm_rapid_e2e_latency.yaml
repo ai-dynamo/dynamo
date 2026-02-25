@@ -14,5 +14,3 @@ spec:
     requestRate: 5.0
   sla:
     e2eLatency: 35000.0
-  searchStrategy: rapid
-  autoApply: true

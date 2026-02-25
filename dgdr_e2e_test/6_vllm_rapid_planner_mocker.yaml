@@ -21,5 +21,3 @@ spec:
       backend: vllm
     mocker:
       enabled: true
-  searchStrategy: rapid
-  autoApply: true

@@ -19,5 +19,3 @@ spec:
       enable_load_scaling: false
       mode: disagg
       backend: vllm
-  searchStrategy: rapid
-  autoApply: true
