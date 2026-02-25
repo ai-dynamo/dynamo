@@ -1007,16 +1007,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		return nil
 	}
 
-	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
-	if err == nil {
-		// GPU discovery is available, validation passes
-		return nil
-	}
-
-	// Refine the logger message
-	reason := GetGPUDiscoveryFailureReason(err)
-	logger.Info("GPU discovery not available", "reason", reason, "error", err.Error())
-
 	isNamespaceScoped := r.Config.RestrictedNamespace != ""
 	if isNamespaceScoped {
 		tmpl := template.Must(template.New("nsGPUErr").Parse(
@@ -1040,10 +1030,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 			"MinGPUs":  ConfigKeyMinNumGpusPerEng,
 			"MaxGPUs":  ConfigKeyMaxNumGpusPerEng,
 		})
-		return ctrl.Result{}, fmt.Errorf("%s", buf.String())
+		return fmt.Errorf("%s", buf.String())
 	}
 
-	return ctrl.Result{}, fmt.Errorf("GPU hardware info required but auto-discovery failed. Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s",
+	_, err := gpu.DiscoverGPUsFromDCGM(ctx, r.Client, r.GPUDiscoveryCache)
+	if err == nil {
+		// GPU discovery is available, validation passes
+		return nil
+	}
+
+	// Refine the logger message
+	reason := GetGPUDiscoveryFailureReason(err)
+	logger.Info("GPU discovery not available", "reason", reason, "error", err.Error())
+
+	return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add hardware config to profilingConfig.config.%s (%s, %s, %s) or specify %s.%s and %s.%s",
 		ConfigKeyHardware, ConfigKeyNumGpusPerNode, ConfigKeyGPUModel, ConfigKeyGPUVramMib,
 		ConfigKeyEngine, ConfigKeyMinNumGpusPerEng, ConfigKeyEngine, ConfigKeyMaxNumGpusPerEng)
 }
