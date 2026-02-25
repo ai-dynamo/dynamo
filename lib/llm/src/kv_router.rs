@@ -63,6 +63,8 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
 };
 
+use std::collections::HashSet;
+
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 
@@ -351,7 +353,9 @@ impl KvRouter {
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
-    /// Now also takes optional context_id for request tracking
+    /// Now also takes optional context_id for request tracking.
+    ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
         &self,
@@ -362,6 +366,7 @@ impl KvRouter {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let start = Instant::now();
 
@@ -388,6 +393,7 @@ impl KvRouter {
             .await?;
         let find_matches_elapsed = start.elapsed();
 
+        // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
             self.kv_router_config.compute_seq_hashes_for_tracking(
                 tokens,
@@ -398,17 +404,18 @@ impl KvRouter {
         });
         let seq_hash_elapsed = start.elapsed();
 
-        let best_worker = self
+        let response = self
             .scheduler
             .schedule(
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
-                overlap_scores.clone(),
+                overlap_scores,
                 router_config_override,
                 update_states,
                 lora_name,
                 priority_jump,
+                allowed_worker_ids,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
@@ -434,15 +441,7 @@ impl KvRouter {
             "find_best_match completed"
         );
 
-        // Note: Routing decision recording (for approximate mode) is now handled
-        // by KvPushRouter::generate after select_worker returns.
-
-        let overlap_amount = overlap_scores
-            .scores
-            .get(&best_worker)
-            .copied()
-            .unwrap_or(0);
-        Ok((best_worker, overlap_amount))
+        Ok((response.best_worker, response.overlap_blocks))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -575,6 +574,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                         true,
                         None,
                         0.0,
+                        None,
                     )
                     .await?;
 

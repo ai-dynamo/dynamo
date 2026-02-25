@@ -130,6 +130,57 @@ impl Default for Glm47ParserConfig {
     }
 }
 
+/// Configuration for Kimi K2 tool call parser
+///
+/// Format:
+/// ```text
+/// <|tool_calls_section_begin|>
+/// <|tool_call_begin|>functions.{name}:{index}<|tool_call_argument_begin|>{json_args}<|tool_call_end|>
+/// <|tool_calls_section_end|>
+/// ```
+///
+/// The model may emit either plural or singular forms of section tokens
+/// (e.g., `<|tool_calls_section_begin|>` or `<|tool_call_section_begin|>`).
+/// Both forms are supported via the `section_start_variants` and `section_end_variants` fields.
+/// See vllm `kimi_k2_tool_parser.py` for reference.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct KimiK2ParserConfig {
+    /// Primary start token for the tool calls section
+    pub section_start: String,
+    /// Primary end token for the tool calls section
+    pub section_end: String,
+    /// All recognized start tokens for the tool calls section (includes singular variants)
+    pub section_start_variants: Vec<String>,
+    /// All recognized end tokens for the tool calls section (includes singular variants)
+    pub section_end_variants: Vec<String>,
+    /// Start token for an individual tool call (e.g., "<|tool_call_begin|>")
+    pub call_start: String,
+    /// End token for an individual tool call (e.g., "<|tool_call_end|>")
+    pub call_end: String,
+    /// Token separating function ID from JSON arguments (e.g., "<|tool_call_argument_begin|>")
+    pub argument_begin: String,
+}
+
+impl Default for KimiK2ParserConfig {
+    fn default() -> Self {
+        Self {
+            section_start: "<|tool_calls_section_begin|>".to_string(),
+            section_end: "<|tool_calls_section_end|>".to_string(),
+            section_start_variants: vec![
+                "<|tool_calls_section_begin|>".to_string(),
+                "<|tool_call_section_begin|>".to_string(),
+            ],
+            section_end_variants: vec![
+                "<|tool_calls_section_end|>".to_string(),
+                "<|tool_call_section_end|>".to_string(),
+            ],
+            call_start: "<|tool_call_begin|>".to_string(),
+            call_end: "<|tool_call_end|>".to_string(),
+            argument_begin: "<|tool_call_argument_begin|>".to_string(),
+        }
+    }
+}
+
 /// Parser-specific configuration
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -140,6 +191,7 @@ pub enum ParserConfig {
     Harmony(JsonParserConfig),
     Typescript,
     Dsml(DsmlParserConfig),
+    KimiK2(KimiK2ParserConfig),
     Glm47(Glm47ParserConfig),
 }
 
@@ -155,6 +207,7 @@ impl ParserConfig {
             ParserConfig::Typescript => vec![],
             ParserConfig::Dsml(config) => vec![config.function_calls_start.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
+            ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
         }
     }
 
@@ -169,6 +222,7 @@ impl ParserConfig {
             ParserConfig::Typescript => vec![],
             ParserConfig::Dsml(config) => vec![config.function_calls_end.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
+            ParserConfig::KimiK2(config) => config.section_end_variants.clone(),
         }
     }
 }
@@ -355,6 +409,17 @@ impl ToolCallConfig {
         // Reference: https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja
         Self {
             parser_config: ParserConfig::Glm47(Glm47ParserConfig::default()),
+        }
+    }
+
+    pub fn kimi_k2() -> Self {
+        // Kimi K2 format:
+        // <|tool_calls_section_begin|>
+        // <|tool_call_begin|>functions.{name}:{index}<|tool_call_argument_begin|>{json_args}<|tool_call_end|>
+        // <|tool_calls_section_end|>
+        // Reference: https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/tool_call_guidance.md
+        Self {
+            parser_config: ParserConfig::KimiK2(KimiK2ParserConfig::default()),
         }
     }
 }

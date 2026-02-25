@@ -18,9 +18,7 @@ use super::metrics;
 use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
-use crate::kv_router::metrics::{
-    RouterRequestMetrics, RoutingOverheadMetrics, register_worker_load_metrics,
-};
+use crate::kv_router::metrics::{RoutingOverheadMetrics, register_worker_load_metrics};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -430,9 +428,6 @@ impl HttpServiceConfigBuilder {
 
         if let Some(ref discovery) = config.drt_discovery {
             let instance_id = discovery.instance_id();
-            if let Err(e) = RouterRequestMetrics::register(&registry, instance_id) {
-                tracing::warn!("Failed to register router request metrics: {}", e);
-            }
             if let Err(e) = RoutingOverheadMetrics::register(&registry, instance_id) {
                 tracing::warn!("Failed to register routing overhead metrics: {}", e);
             }

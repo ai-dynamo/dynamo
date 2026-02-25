@@ -14,9 +14,9 @@ This document provides the support matrix for Dynamo, including hardware, softwa
 
 The following table shows the backend framework versions included with each Dynamo release:
 
-| **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **NIXL** |
+| **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.15.1` | `0.5.9` | `1.3.0rc3` | `0.9.0` |
+| **main (ToT)** | `0.15.1` | `0.5.9` | `1.3.0rc5` | `0.9.0` |
 | **v1.0.0** *(planned)* | `0.15.0` | *Latest as of 2/17* | *Latest as of 2/17* | `0.10.0` |
 | **v0.9.1** *(in progress)* | `0.14.1` | `0.5.8` | `1.3.0rc3` | `0.9.0` |
 | **v0.9.0** *(in progress)* | `0.14.1` | `0.5.8` | `1.3.0rc1` | `0.9.0` |
@@ -44,14 +44,14 @@ The following table shows the backend framework versions included with each Dyna
 
 ### CUDA Versions by Backend
 
-| **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **Notes** |
+| **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **Notes** |
 | :--- | :--- | :--- | :--- | :--- |
-| **v0.8.1** | `12.9`, `13.0` | `12.9`, `13.0` | `13.0` | Experimental vLLM/SGLang CUDA 13 support |
-| **v0.8.0** | `12.9`, `13.0` | `12.9`, `13.0` | `13.0` | Experimental vLLM/SGLang CUDA 13 support |
-| **v0.7.1** | `12.9` | `12.8` | `13.0` | |
-| **v0.7.0** | `12.8` | `12.9` | `13.0` | TensorRT-LLM CUDA 13 support - CUDA 12.9 deprecated |
-| **v0.6.1** | `12.8` | `12.9` | `12.9` | |
-| **v0.6.0** | `12.8` | `12.8` | `12.9` | |
+| **v0.8.1** | `12.9`, `13.0` | `13.0` | `12.9`, `13.0` | Experimental SGLang/vLLM CUDA 13 support |
+| **v0.8.0** | `12.9`, `13.0` | `13.0` | `12.9`, `13.0` | Experimental SGLang/vLLM CUDA 13 support |
+| **v0.7.1** | `12.8` | `13.0` | `12.9` | |
+| **v0.7.0** | `12.9` | `13.0` | `12.8` | TensorRT-LLM CUDA 13 support - CUDA 12.9 deprecated |
+| **v0.6.1** | `12.9` | `12.9` | `12.8` | |
+| **v0.6.0** | `12.8` | `12.9` | `12.8` | |
 
 Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
 
@@ -101,22 +101,22 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 
 | Dynamo Version | Backend | CUDA Toolkit | Min Driver (Linux) | Min Driver (Windows) | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **0.8.1** | **vLLM** | 12.9 | 575.xx+ | 576.xx+ | |
-| | | 13.0 | 580.xx+ | 581.xx+ | Experimental |
-| | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
+| **0.8.1** | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
 | | | 13.0 | 580.xx+ | 581.xx+ | Experimental |
 | | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
-| **0.8.0** | **vLLM** | 12.9 | 575.xx+ | 576.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | 576.xx+ | |
 | | | 13.0 | 580.xx+ | 581.xx+ | Experimental |
-| | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
+| **0.8.0** | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
 | | | 13.0 | 580.xx+ | 581.xx+ | Experimental |
 | | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
-| **0.7.1** | **vLLM** | 12.9 | 575.xx+ | 576.xx+ | |
-| | **SGLang** | 12.8 | 570.xx+ | 571.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | 576.xx+ | |
+| | | 13.0 | 580.xx+ | 581.xx+ | Experimental |
+| **0.7.1** | **SGLang** | 12.8 | 570.xx+ | 571.xx+ | |
 | | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
-| **0.7.0** | **vLLM** | 12.8 | 570.xx+ | 571.xx+ | |
-| | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | 576.xx+ | |
+| **0.7.0** | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
 | | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
+| | **vLLM** | 12.8 | 570.xx+ | 571.xx+ | |
 
 Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
 

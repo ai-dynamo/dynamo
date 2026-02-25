@@ -388,6 +388,26 @@ For 4 4xGB200 nodes (2 for prefill, 2 for decode):
 pkill srun
 ```
 
+## Embedding Cache
+
+Dynamo supports embedding cache in both aggregated and disaggregated settings for TRT-LLM:
+
+| Setting | Implementation | Launch Script | Status |
+|---------|---------------|---------------|--------|
+| **Disaggregated (E/PD)** | Dynamo-managed cache in the PD worker layer on top of TRT-LLM engine | `disagg_e_pd.sh` + `--multimodal-embedding-cache-capacity-gb` | Supported |
+| **Aggregated** | N/A | N/A | Not yet supported |
+
+The cache uses `MultimodalEmbeddingCacheManager` to maintain an LRU cache of encoder embeddings on CPU. When the same image is seen again, the cached embedding is reused instead of re-encoding.
+
+### Disaggregated (E/PD)
+
+The `disagg_e_pd.sh` script launches a separate encode worker and a PD worker. Extra arguments are forwarded to the PD worker. Enable embedding cache by passing `--multimodal-embedding-cache-capacity-gb`:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/trtllm
+./launch/disagg_e_pd.sh --multimodal-embedding-cache-capacity-gb 10
+```
+
 ## NIXL Usage
 
 | Use Case | Script | NIXL Used? | Data Transfer |
