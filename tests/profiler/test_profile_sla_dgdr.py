@@ -251,6 +251,25 @@ class TestGateChecks:
             asyncio.run(run_profile(dgdr, ops))
 
 
+class TestAutoBackend:
+    """Rapid strategy with auto backend resolution."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_no_planner_no_load(self, tmp_path):
+        """Case 11: auto backend, rapid, no planner, no target load."""
+        dgdr = _load_dgdr(CONFIGS_DIR / "11_auto_rapid_no_planner_no_load.yaml")
+        assert dgdr.backend == BackendType.Auto
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        config = yaml.safe_load(output.read_text())
+        assert config, "final_config.yaml should not be empty"
+        assert "spec" in config
+
+
 class TestThoroughEdgeCases:
     """Edge cases for thorough mode."""
 
