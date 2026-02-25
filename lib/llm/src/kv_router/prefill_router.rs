@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -20,6 +21,7 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::ModelManager,
+    kv_router::protocols::WorkerId,
     kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride, protocols::BlockExtraInfo},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
@@ -305,6 +307,7 @@ impl PrefillRouter {
                     false,
                     lora_name,
                     priority_jump,
+                    None,
                 )
                 .await
             {
@@ -505,6 +508,7 @@ impl PrefillRouter {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(u64, u32)> {
         let prefill_router = self
             .prefill_router
@@ -523,6 +527,7 @@ impl PrefillRouter {
                         update_states,
                         lora_name,
                         priority_jump,
+                        allowed_worker_ids,
                     )
                     .await?;
                 Ok((worker.worker_id, worker.dp_rank))
