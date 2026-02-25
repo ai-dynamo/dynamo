@@ -145,7 +145,7 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /validate-nvidia-com-v1alpha1-dynamographdeploymentrequest
+      path: /validate-nvidia-com-v1beta1-dynamographdeploymentrequest
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamographdeploymentrequest.kb.io
   {{- if .Values.webhook.namespaceSelector }}
@@ -160,7 +160,7 @@ webhooks:
   - apiGroups:
     - nvidia.com
     apiVersions:
-    - v1alpha1
+    - v1beta1
     operations:
     - CREATE
     - UPDATE
@@ -218,6 +218,39 @@ webhooks:
     - CREATE
     resources:
     - dynamographdeployments
+  sideEffects: None
+  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
+    {{- if .Values.webhook.caBundle }}
+    caBundle: {{ .Values.webhook.caBundle }}
+    {{- end }}
+    {{- end }}
+    service:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /mutate-nvidia-com-v1beta1-dynamographdeploymentrequest
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  name: mdynamographdeploymentrequestv1beta1.kb.io
+  {{- if .Values.webhook.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
+  {{- else if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  {{- end }}
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    resources:
+    - dynamographdeploymentrequests
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
 
