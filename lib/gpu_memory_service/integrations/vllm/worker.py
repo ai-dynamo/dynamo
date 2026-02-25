@@ -13,6 +13,8 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from contextlib import nullcontext
 from typing import List, Optional
 
@@ -21,22 +23,30 @@ from gpu_memory_service import (
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
 )
-from gpu_memory_service.common.types import RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
+from gpu_memory_service.common.utils import get_socket_path, get_weight_lock_type
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
-from gpu_memory_service.integrations.vllm.patches import patch_memory_snapshot
+from gpu_memory_service.integrations.vllm.patches import (
+    apply_shadow_mode_patches,
+    patch_memory_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
 # Trigger model loader registration and utility patches on import
 register_gms_loader()
+
+# Apply core utility patches (always needed for GMS)
 patch_empty_cache()
 patch_memory_snapshot()
 
-logger.info(
-    "[GMS] Worker module loaded - model loader registered, utility patches applied"
-)
+# Apply shadow mode patches (check SHADOW_SKIP_KV_CACHE at runtime)
+# These patches are safe to apply even for non-shadow engines because
+# they check the environment variable at runtime before modifying behavior.
+apply_shadow_mode_patches()
+
+logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
@@ -60,7 +70,7 @@ class GMSWorker(Worker):
         # Establish GMS connection (so MemorySnapshot can query committed bytes)
         socket_path = get_socket_path(device)
         get_or_create_gms_client_memory_manager(
-            socket_path, device, mode=RequestedLockType.RW_OR_RO, tag="weights"
+            socket_path, device, mode=get_weight_lock_type(), tag="weights"
         )
 
         # Parent will set device again (harmless) and do memory checks
@@ -72,8 +82,18 @@ class GMSWorker(Worker):
         After the parent loads the model, we correct the model_memory_usage
         to reflect the actual bytes imported from GMS (not the delta measured
         by vLLM's memory tracking).
+
+        For shadow mode, we also set _shadow_init_phase on model_runner to
+        signal that patches should no-op during initialization.
         """
         super().load_model(*args, **kwargs)
+
+        # Shadow mode: set init phase flag on model_runner
+        # This tells patches to no-op (e.g., skip KV cache allocation)
+        if os.environ.get("SHADOW_SKIP_KV_CACHE") == "1":
+            if hasattr(self, "model_runner") and self.model_runner is not None:
+                self.model_runner._shadow_init_phase = True
+                logger.info("[Shadow] Set _shadow_init_phase=True on model_runner")
 
         # Correct memory accounting for GMS-imported weights
         try:
@@ -104,6 +124,10 @@ class GMSWorker(Worker):
         NOTE: `level` is a no-op here: weights are only unmapped (but remain in GPU memory).
         NOTE: We do NOT call super().sleep() because it tries to copy GPU buffers to CPU,
               which segfaults on already-unmapped GMS memory.
+
+        Handles two cases for KV cache:
+        1. Normal: KV cache was allocated, sleep via CuMemAllocator
+        2. Shadow: KV cache was skipped at startup, nothing to do
         """
         from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -116,8 +140,13 @@ class GMSWorker(Worker):
         manager.unmap()
 
         # Sleep KV cache via CuMemAllocator (discard, no CPU backup)
-        allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=tuple())
+        # If KV cache was never allocated (shadow engine mode), this is a no-op
+        kv_caches = getattr(self.model_runner, "kv_caches", None)
+        if kv_caches:
+            allocator = CuMemAllocator.get_instance()
+            allocator.sleep(offload_tags=tuple())
+        else:
+            logger.info("[GMS] KV cache not allocated (shadow mode), skipping sleep")
 
         free_bytes_after, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after - free_bytes_before
@@ -129,8 +158,21 @@ class GMSWorker(Worker):
         )
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
-        """vLLM wake implementation with GMS integration."""
+        """vLLM wake implementation with GMS integration.
+
+        Handles two cases for KV cache:
+        1. Normal: KV cache was allocated at startup, reallocate via CuMemAllocator
+        2. Shadow: KV cache was skipped at startup, allocate via allocate_kv_cache_on_wake()
+        """
         from vllm.device_allocator.cumem import CuMemAllocator
+
+        # Clear shadow init phase flag FIRST
+        # This signals that patches should now work normally (e.g., allocate KV cache)
+        if getattr(self.model_runner, "_shadow_init_phase", False):
+            self.model_runner._shadow_init_phase = False
+            logger.info(
+                "[Shadow] Cleared _shadow_init_phase, patches will work normally"
+            )
 
         if tags is None:
             tags = ["weights", "kv_cache"]
@@ -139,11 +181,46 @@ class GMSWorker(Worker):
             manager = get_gms_client_memory_manager()
             assert manager is not None, "GMS client is not initialized"
             assert manager.is_unmapped, "GMS weights are not unmapped"
-            manager.remap()
+
+            try:
+                manager.remap(timeout_ms=30_000)
+            except TimeoutError:
+                logger.error(
+                    "Fatal: timed out waiting for GMS RO lock during remap "
+                    "(GMS may be down or RW lock held indefinitely)"
+                )
+                sys.exit(1)
+            except StaleMemoryLayoutError as e:
+                logger.error(
+                    "Fatal: weight layout changed while unmapped, cannot remap: %s", e
+                )
+                sys.exit(1)
+            except ConnectionError as e:
+                logger.error(
+                    "Fatal: cannot connect to GMS during remap: %s", e
+                )
+                sys.exit(1)
 
         if "kv_cache" in tags:
-            allocator = CuMemAllocator.get_instance()
-            allocator.wake_up(tags=["kv_cache"])
+            # Check if KV cache was skipped at startup (shadow engine mode)
+            kv_caches = getattr(self.model_runner, "kv_caches", None)
+            if not kv_caches:
+                # KV cache was not allocated at startup - allocate now.
+                # CUDA graphs are already captured during init (PIECEWISE mode
+                # doesn't capture KV ops), so no re-capture is needed.
+                if hasattr(self.model_runner, "allocate_kv_cache_on_wake"):
+                    logger.info("[GMS] KV cache not allocated - allocating on wake")
+                    self.model_runner.allocate_kv_cache_on_wake()
+                    logger.info("[GMS] Successfully allocated KV cache on wake")
+                else:
+                    logger.warning(
+                        "[GMS] KV cache empty but allocate_kv_cache_on_wake not available. "
+                        "Make sure vLLM has the shadow engine patch applied."
+                    )
+            else:
+                # Normal case: KV cache was allocated, reallocate via CuMemAllocator
+                allocator = CuMemAllocator.get_instance()
+                allocator.wake_up(tags=["kv_cache"])
 
             # Reinitialize FP8 KV scales if needed
             if self.cache_config.cache_dtype.startswith("fp8") and hasattr(

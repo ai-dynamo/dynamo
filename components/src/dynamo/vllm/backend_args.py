@@ -304,6 +304,22 @@ class DynamoVllmArgGroup(ArgGroup):
             "Required when using --load-format=mx-source or --load-format=mx-target.",
         )
 
+        # GMS (GPU Memory Service) mode
+        add_argument(
+            g,
+            flag_name="--gms-mode",
+            env_var="DYN_VLLM_GMS_MODE",
+            default="normal",
+            help=(
+                "GMS (GPU Memory Service) operation mode. "
+                "'normal': Standard engine with full KV cache allocation at startup. "
+                "'shadow': Shadow/standby engine that skips KV cache allocation at startup "
+                "and automatically sleeps after initialization. Shadow engines wake up on demand "
+                "and allocate KV cache when activated. Requires --load-format=gms."
+            ),
+            choices=["normal", "shadow"],
+        )
+
 
 # @dataclass()
 class DynamoVllmConfig(ConfigBase):
@@ -358,6 +374,9 @@ class DynamoVllmConfig(ConfigBase):
 
     # ModelExpress P2P
     model_express_url: Optional[str] = None
+
+    # GMS mode
+    gms_mode: str = "normal"
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
