@@ -7,6 +7,7 @@ import math
 import os
 import pickle
 import tempfile
+import time
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
@@ -290,7 +291,7 @@ class RingBuffer:
         self.allocated_buffer_id_to_range[buffer_id] = (start_idx, end_idx)
         self.free_start_idx = end_idx
 
-        return buffer_id, self.transfer_tensor[start_idx:end_idx]
+        return buffer_id, self.buffer_tensor[start_idx:end_idx]
 
     def release_buffer(self, buffer_id):
         start_end = self.allocated_buffer_id_to_range.pop(buffer_id, None)
@@ -352,59 +353,83 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
         transfer_handlers = {}
         transfer_task = None
         while True:
-            # Wait for transfer requests with timeout to allow periodic checks
-            if transfer_task is None:
-                transfer_task = await self.transfer_queue.get()
+            try:
+                # Wait for transfer requests with timeout to allow periodic checks
+                if transfer_task is None:
+                    transfer_task = await self.transfer_queue.get()
 
-            # check if write is requested, initiate the write
-            notifs = self.nixl_agent.get_new_notifs()
-            for remote_agent_id, notifs in notifs:
-                self.handshaked_receivers.add(remote_agent_id)
-                for notif in notifs:
-                    (
-                        tensor_id,
-                        (dest_buffer, dest_device_id, dest_mem_str),
-                        write_done_id,
-                    ) = pickle.loads(notif)
-                    transfer_info = self.transfer_tracker[tensor_id]
-                    remote_memory_info = [
-                        (dest_buffer, transfer_info[0].nbytes, dest_device_id),
-                    ]
-                    remote_desc = self.nixl_agent.get_xfer_descs(
-                        remote_memory_info, mem_type=dest_mem_str
-                    )
-                    xfer_handle = self.nixl_agent.initialize_xfer(
-                        "WRITE",
-                        transfer_info[1],
-                        remote_desc,
-                        remote_agent_id,
-                        str(write_done_id).encode(),
-                    )
-                    transfer_handlers[tensor_id] = xfer_handle
+                # check if write is requested, initiate the write
+                notifs = self.nixl_agent.get_new_notifs()
+                for remote_agent_id, notifs in notifs.items():
+                    self.handshaked_receivers.add(remote_agent_id)
+                    for notif in notifs:
+                        (
+                            tensor_id,
+                            (dest_buffer, dest_device_id, dest_mem_str),
+                            write_done_id,
+                        ) = pickle.loads(notif)
+                        transfer_info = self.transfer_tracker[tensor_id]
+                        remote_memory_info = [
+                            (dest_buffer, transfer_info[0].nbytes, dest_device_id),
+                        ]
+                        remote_desc = self.nixl_agent.get_xfer_descs(
+                            remote_memory_info, mem_type=dest_mem_str
+                        )
+                        done_signal = str(write_done_id).encode()
+                        xfer_handle = self.nixl_agent.initialize_xfer(
+                            "WRITE",
+                            transfer_info[1],
+                            remote_desc,
+                            remote_agent_id,
+                            done_signal,
+                        )
+                        self.nixl_agent.transfer(xfer_handle, done_signal)
+                        transfer_handlers[tensor_id] = (
+                            xfer_handle,
+                            remote_agent_id,
+                            done_signal,
+                            time.perf_counter(),
+                        )
 
-            # check inflight transfer state, if completed, get another task
-            for tensor_id, xfer_handle in list(transfer_handlers.items()):
-                state = self.nixl_agent.check_xfer_state(xfer_handle)
-                if state == "ERR":
-                    logger.error(f"Transfer failed for tensor_id {tensor_id}")
-                    transfer_handlers.pop(tensor_id)
-                    self.transfer_tracker.pop(tensor_id, None)
-                elif state == "DONE":
-                    logger.debug(f"Transfer completed for tensor_id {tensor_id}")
-                    transfer_handlers.pop(tensor_id)
-                    transfer_info = self.transfer_tracker.pop(tensor_id, None)
-                    if transfer_info is not None:
-                        # Clean up registered memory after transfer completion
-                        _, _, registered_desc, fut = transfer_info
-                        self.nixl_agent.deregister_memory(registered_desc)
-                        # Future can be done if the embeddings is not external
-                        if not fut.done():
-                            fut.set_result(None)
-                    transfer_task = None
-                    break  # break to consume 'transfer_queue' accordingly
+                # check inflight transfer state, if completed, get another task
+                done_id = []
+                for tensor_id, (
+                    xfer_handle,
+                    remote_agent_id,
+                    done_signal,
+                    start_time,
+                ) in list(transfer_handlers.items()):
+                    state = self.nixl_agent.check_xfer_state(xfer_handle)
+                    if state == "ERR":
+                        logger.error(f"Transfer failed for tensor_id {tensor_id}")
+                        transfer_handlers.pop(tensor_id)
+                        self.transfer_tracker.pop(tensor_id, None)
+                    elif state == "DONE":
+                        logger.debug(
+                            f"Send completed for tensor_id {tensor_id}, total wait time: {time.perf_counter() - start_time:.2f} seconds"
+                        )
+                        done_id.append(tensor_id)
+                        transfer_handlers.pop(tensor_id)
+                        transfer_info = self.transfer_tracker.pop(tensor_id, None)
+                        if transfer_info is not None:
+                            # Clean up registered memory after transfer completion
+                            _, _, registered_desc, fut = transfer_info
+                            self.nixl_agent.deregister_memory(registered_desc)
+                            # Future can be done if the embeddings is not external
+                            if not fut.done():
+                                fut.set_result(None)
+                        try:
+                            transfer_task = self.transfer_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            logger.info("No pending transfer task in the queue.")
+                            transfer_task = None
+                            break
 
-            # short pause to yield control and allow cancellation
-            await asyncio.sleep(0.001)
+                # short pause to yield control and allow cancellation
+                await asyncio.sleep(0.001)
+            except Exception as e:
+                logger.error(f"Error in state update loop: {e}")
+                await asyncio.sleep(1)  # Backoff on error to prevent tight error loop
 
     def __del__(self):
         self._state_update_task.cancel()
@@ -493,6 +518,9 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.id_counter = MonolithicCounter()
         self.to_buffer_id = {}
 
+    def get_agent_metadata(self):
+        return self.receiver_id, self.nixl_agent.get_agent_metadata()
+
     async def receive_embeddings(
         self, request: TransferRequest
     ) -> tuple[int, torch.Tensor]:
@@ -532,8 +560,9 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
             (
                 request.tensor_id,
                 (
-                    transfer_tensor._data_ref,
-                    transfer_tensor.device.index,
+                    transfer_tensor.data_ptr(),
+                    # torch returns -1 for CPU device, need to normalized there
+                    max(transfer_tensor.get_device(), 0),
                     "cuda" if str(transfer_tensor.device).startswith("cuda") else "cpu",
                 ),
                 tensor_id,
@@ -542,10 +571,31 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.nixl_agent.send_notif(request.sender_agent_id, notif_msg=notif_msg)
 
         # await for write notification
-        while not self.nixl_agent.check_remote_xfer_done(
-            request.sender_agent_id, str(tensor_id).encode()
-        ):
+        start = time.perf_counter()
+        logged = False
+        done_signal = str(tensor_id).encode()
+        # 'check_remote_xfer_done' will find occurence of the message in substring which is not
+        # what we want, we want exact match, need to parse by ourselves
+        found = False
+        while not found:
+            notifs = self.nixl_agent.update_notifs()
+            if request.sender_agent_id in notifs:
+                for notif in notifs[request.sender_agent_id]:
+                    if notif == done_signal:
+                        self.nixl_agent.notifs[request.sender_agent_id].remove(notif)
+                        found = True
+                        break
+
             await asyncio.sleep(0.001)
+            # Waited for too long without transfer completion, log for debugging
+            if (time.perf_counter() - start) > 1 and not logged:
+                logger.info(
+                    f"still waiting for transfer completion for tensor_id {tensor_id}"
+                )
+                logged = True
+        logger.debug(
+            f"Transfer completed for tensor_id {tensor_id}, total wait time: {time.perf_counter() - start:.2f} seconds"
+        )
 
         self.to_buffer_id[tensor_id] = buffer_id
         return tensor_id, embedding_tensor
