@@ -242,15 +242,6 @@ second request should typically be routed to the same backend and show higher
 cache reuse in scheduler logs (and possibly higher overlap in debug routing
 logs, if enabled).
 
-You can use the helper script:
-
-```bash
-./examples/backends/vllm/mm_router_worker/test_mm_request.sh
-./examples/backends/vllm/mm_router_worker/test_mm_request.sh
-```
-
-Or send the request manually:
-
 ```bash
 MODEL="$MODEL_NAME"
 IMAGE_URL="http://images.cocodataset.org/test2017/000000000001.jpg"
