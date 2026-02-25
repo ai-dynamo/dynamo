@@ -130,7 +130,7 @@ spec:
                         WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
                         This image is used for both temporary DGDs created during online profiling and the final DGD.
                         If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
                       type: string
                   type: object
                 enableGpuDiscovery:
@@ -205,7 +205,7 @@ spec:
                       description: |-
                         ProfilerImage specifies the container image to use for profiling jobs.
                         This image contains the profiler code and dependencies needed for SLA-based profiling.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
                       type: string
                     resources:
                       description: |-
@@ -563,33 +563,13 @@ spec:
                           type: boolean
                       type: object
                     planner:
-                      description: Planner configures the SLA planner for autoscaling in the generated DGD.
-                      properties:
-                        enabled:
-                          description: Enabled indicates whether the planner is enabled.
-                          type: boolean
-                        plannerArgsList:
-                          description: PlannerArgsList is a list of additional planner arguments.
-                          items:
-                            type: string
-                          type: array
-                        plannerPreDeploymentSweeping:
-                          allOf:
-                            - enum:
-                                - none
-                                - rapid
-                                - thorough
-                            - enum:
-                                - none
-                                - rapid
-                                - thorough
-                          description: |-
-                            PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling.
-                            "none" means no pre-deployment sweep (only load-based scaling).
-                            "rapid" uses AI Configurator to simulate engine performance.
-                            "thorough" uses real GPUs to measure engine performance (takes several hours).
-                          type: string
+                      description: |-
+                        Planner is the raw SLA planner configuration passed to the planner service.
+                        Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.
+                        Go treats this as opaque bytes; the Planner service validates it at startup.
+                        The presence of this field (non-null) enables the planner in the generated DGD.
                       type: object
+                      x-kubernetes-preserve-unknown-fields: true
                   type: object
                 hardware:
                   description: |-

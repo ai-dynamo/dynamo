@@ -63,6 +63,7 @@ ARG MAX_JOBS={{ context.vllm.max_jobs }}
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
 ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
 ARG LMCACHE_REF={{ context.vllm.lmcache_ref }}
+ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""

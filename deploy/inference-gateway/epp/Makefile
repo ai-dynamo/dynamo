@@ -25,6 +25,7 @@ endif
 MULTIARCH_PLATFORMS ?= linux/amd64,linux/arm64
 # Docker proxy for avoiding rate limits (e.g., ECR mirror)
 DOCKER_PROXY ?=
+EXTRA_BUILD_ARGS ?=
 
 DOCKER_BUILDX_CMD ?= docker buildx
 IMAGE_BUILD_CMD ?= $(DOCKER_BUILDX_CMD) build
@@ -89,7 +90,7 @@ image-build: ## Build the Docker image (self-contained, no host prerequisites)
 		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
 		--build-arg BUILD_REF=$(GIT_TAG) \
-		$(PUSH) $(LOAD) .
+		$(EXTRA_BUILD_ARGS) $(PUSH) $(LOAD) .
 
 .PHONY: image-push
 image-push: PUSH=--push ## Build and push the Docker image
@@ -115,7 +116,7 @@ image-multiarch: ## Build multi-arch image (requires --push ; --load not support
 		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
 		--build-arg BUILD_REF=$(GIT_TAG) \
-		$(PUSH) .
+		$(EXTRA_BUILD_ARGS) $(PUSH) .
 
 .PHONY: image-multiarch-push
 image-multiarch-push: PUSH=--push ## Build and push multi-arch image to registry

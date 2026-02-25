@@ -509,6 +509,22 @@ flowchart TD
    - Check Docker daemon is running with GPU support
    - Ensure sufficient disk space for model weights and container images
 
+5. **Token Repetition / Generation Won't Stop**
+   - When using `reasoning_effort: high`, the model may produce repeated tokens and fail to stop
+   - **Solution**: Set `top_p=1` in your request. These are the [recommended sampling parameters from OpenAI](https://huggingface.co/openai/gpt-oss-120b/discussions/21)
+   - Example request with recommended parameters:
+     ```bash
+     curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+       "model": "openai/gpt-oss-120b",
+       "messages": [{"role": "user", "content": "Hello"}],
+       "chat_template_args": {
+          "reasoning_effort": "high"
+        },
+       "top_p": 1,
+       "max_tokens": 300
+     }'
+     ```
+
 ## Next Steps
 
 - **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/README.md)

@@ -46,14 +46,22 @@ install_sccache() {
     # Auto-detect architecture via uname -m (returns x86_64 or aarch64)
     local arch_alt
     arch_alt=$(uname -m)
-    echo "Installing sccache ${SCCACHE_VERSION} for architecture ${arch_alt}..."
-    # Download and install sccache
-    wget --tries=3 --waitretry=5 \
-        "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl.tar.gz"
-    tar -xzf "sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl.tar.gz"
-    mv "sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl/sccache" /usr/local/bin/
-    # Cleanup
-    rm -rf sccache*
+    if command -v sccache >/dev/null 2>&1; then
+        echo "sccache already installed at $(command -v sccache), skipping download"
+    else
+        if [ -z "${ARCH_ALT:-}" ]; then
+            echo "Error: ARCH_ALT environment variable is required for sccache installation"
+            exit 1
+        fi
+        echo "Installing sccache ${SCCACHE_VERSION} for architecture ${arch_alt}..."
+        # Download and install sccache
+        wget --tries=3 --waitretry=5 \
+            "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl.tar.gz"
+        tar -xzf "sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl.tar.gz"
+        mv "sccache-${SCCACHE_VERSION}-${arch_alt}-unknown-linux-musl/sccache" /usr/local/bin/
+        # Cleanup
+        rm -rf sccache*
+    fi
 
     # Create compiler wrapper scripts for autotools/Meson compatibility.
     # Autoconf breaks with CC="sccache gcc" (multi-word value), so we provide
