@@ -1081,7 +1081,7 @@ jobs:
     needs: [unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, rust-tests]
     if: inputs.enable_coverage && always()
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1094,7 +1094,8 @@ jobs:
 
       - name: Install Coverage Tools
         run: |
-          pip install coverage[toml] pytest-cov
+          python -m pip install "coverage[toml]==7.13.1"
+          python -m coverage --version
           echo "✅ Coverage tools installed"
 
       - name: Download All Python Coverage Artifacts
@@ -1273,49 +1274,6 @@ jobs:
             coverage-summary.md
             .coverage
           retention-days: 30
-
-      - name: Store Daily Snapshot to Branch
-        if: false && github.event_name == 'schedule' # disable this for now, to enable, we also need to give nightly-ci write permissions.
-        run: |
-          set -x
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Fetch the coverage branch or create it
-          git fetch origin coverage-snapshots:coverage-snapshots || git checkout --orphan coverage-snapshots || true
-
-          # Switch to coverage branch
-          git checkout coverage-snapshots 2>/dev/null || git switch --orphan coverage-snapshots
-
-          # Clear working directory but keep our new files
-          git rm -rf . 2>/dev/null || true
-
-          # Create snapshot directory
-          DATE=$(date +"%Y-%m-%d")
-          mkdir -p snapshots/$DATE
-
-          # Copy coverage files to snapshot
-          cp coverage-merged.xml snapshots/$DATE/ 2>/dev/null || echo "No XML file"
-          cp coverage-report.txt snapshots/$DATE/ 2>/dev/null || echo "No report file"
-          cp coverage-summary.md snapshots/$DATE/ 2>/dev/null || echo "No summary file"
-
-          # Create simple index
-          cat > snapshots/INDEX.md << 'INDEXEOF'
-          # Coverage Snapshots
-
-          This branch contains daily coverage snapshots from nightly builds.
-
-          ## Available Snapshots
-          INDEXEOF
-
-          ls -1 snapshots/ | grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" | sort -r | head -30 | while read date; do
-            echo "- [$date](snapshots/$date/)" >> snapshots/INDEX.md
-          done
-
-          # Commit and push
-          git add snapshots/
-          git commit -m "Coverage snapshot: $DATE [run: ${{ github.run_id }}]" || echo "No changes to commit"
-          git push origin coverage-snapshots || git push --set-upstream origin coverage-snapshots
 
   ############################## RESULTS SUMMARY ##############################
   results-summary:
