@@ -472,7 +472,7 @@ impl ModelWatcher {
             };
 
             // This is expensive, we are loading ~10MiB JSON, so only do it once
-            let tokenizer_hf = card.tokenizer_hf().context("tokenizer_hf")?;
+            let tokenizer = card.tokenizer().context("tokenizer")?;
 
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
@@ -534,7 +534,7 @@ impl ModelWatcher {
                         self.router_config.router_mode,
                         worker_monitor.clone(),
                         kv_chooser.clone(),
-                        tokenizer_hf.clone(),
+                        tokenizer.clone(),
                         prefill_chooser.clone(),
                         self.router_config.decode_fallback,
                         self.migration_limit,
@@ -551,12 +551,9 @@ impl ModelWatcher {
             if card.model_type.supports_completions() {
                 let formatter = PromptFormatter::no_op();
                 let PromptFormatter::OAI(formatter) = formatter;
-                let preprocessor = OpenAIPreprocessor::new_with_parts(
-                    card.clone(),
-                    formatter,
-                    tokenizer_hf.clone(),
-                )
-                .context("OpenAIPreprocessor::new_with_parts")?;
+                let preprocessor =
+                    OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
+                        .context("OpenAIPreprocessor::new_with_parts")?;
                 let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
                     NvCreateCompletionRequest,
                     NvCreateCompletionResponse,
@@ -568,7 +565,7 @@ impl ModelWatcher {
                     worker_monitor,
                     kv_chooser,
                     preprocessor,
-                    tokenizer_hf,
+                    tokenizer,
                     prefill_chooser,
                     self.router_config.decode_fallback,
                     self.migration_limit,

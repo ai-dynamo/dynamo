@@ -4,9 +4,6 @@
 name: Nightly CI Pipeline
 
 on:
-  push:
-    branches:
-      - 'pvijayakrish/automate-dynamo-rcs'  # TEMPORARY: remove after testing
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
   workflow_dispatch:  # Allow manual triggering for testing
@@ -15,12 +12,118 @@ permissions:
   contents: read
 
 jobs:
-  ci-pipeline:
-    name: Nightly CI
-    uses: ./.github/workflows/ci-test-suite.yml
+  # ============================================================================
+  # FRAMEWORK PIPELINES (Build → Test → Copy)
+  # ============================================================================
+  # ============================================================================
+  # VLLM PIPELINE
+  # ============================================================================
+  vllm-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
-      pipeline_type: nightly
-      include_nightly_marks: true
-      image_prefix: test-nightly  # TEMPORARY: remove after testing (was: nightly)
-      enable_slack_notification: false  # TEMPORARY: disabled for testing
+      framework: vllm
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: 'nightly and vllm and gpu_0'
+      single_gpu_test_markers: 'nightly and vllm and gpu_1'
+      single_gpu_test_timeout_minutes: 35
+      multi_gpu_test_markers: 'nightly and vllm and (gpu_2 or gpu_4)'
     secrets: inherit
+
+  # ============================================================================
+  # SGLANG PIPELINE
+  # ============================================================================
+  sglang-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: sglang
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: 'nightly and sglang and gpu_0'
+      single_gpu_test_markers: 'nightly and sglang and gpu_1'
+      multi_gpu_test_markers: 'nightly and sglang and (gpu_2 or gpu_4)'
+    secrets: inherit
+
+  # ============================================================================
+  # TRTLLM PIPELINE
+  # ============================================================================
+  trtllm-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["13.1"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      cpu_only_test_markers: 'nightly and trtllm and gpu_0'
+      single_gpu_test_markers: 'nightly and trtllm and gpu_1'
+      multi_gpu_test_markers: 'nightly and trtllm and (gpu_2 or gpu_4)'
+    secrets: inherit
+
+  ############################## SLACK NOTIFICATION ##############################
+  notify-slack:
+    name: Notify Slack
+    runs-on: prod-builder-amd-v1
+    if: always() && failure()
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
+    permissions:
+      contents: read
+    steps:
+      - name: Get Failed jobs
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          JOBS_JSON=$(mktemp)
+          curl -sSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            >$JOBS_JSON
+
+          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | ":failed: " + (.name | split(" / ") | .[-1]) + "\\n"' "$JOBS_JSON")
+          echo $FAILED_JOBS
+          {
+            echo "FAILED_JOBS<<EOF"
+            echo "$FAILED_JOBS"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
+        with:
+          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            blocks:
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: ":alert: *Github Nightly Pipeline Failure*"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "<https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}|Workflow Summary>"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "${{ env.FAILED_JOBS }}"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "@ops-support Please investigate the failures above."

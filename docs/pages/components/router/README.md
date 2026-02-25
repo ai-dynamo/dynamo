@@ -88,7 +88,7 @@ For more configuration options and tuning guidelines, see the [Router Guide](rou
 - You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
 
 **Multimodal Support:**
-- **vLLM and TRT-LLM**: Multimodal routing supported for images via multimodal hashes
+- **TRT-LLM and vLLM**: Multimodal routing supported for images via multimodal hashes
 - **SGLang**: Image routing not yet supported
 - **Other modalities** (audio, video, etc.): Not yet supported
 
