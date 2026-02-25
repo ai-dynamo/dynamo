@@ -496,6 +496,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		logger.Info("DGD is Ready, transitioning to Deployed phase")
 		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 		setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseDeployed)
+		updateDeploymentInfo(dgdr, dgd)
 
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonDeploymentReady,
 			fmt.Sprintf(MessageDeploymentReady, dgd.Name))
@@ -539,6 +540,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 
 		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeploying
 		setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseDeploying)
+		updateDeploymentInfo(dgdr, dgd)
 
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonDeploymentDegraded,
 			fmt.Sprintf(MessageDeploymentDegraded, dgd.Name, string(dgd.Status.State)))
@@ -549,6 +551,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 			Reason:  nvidiacomv1beta1.EventReasonDeploymentDegraded,
 			Message: fmt.Sprintf("Deployment degraded to %s", string(dgd.Status.State)),
 		})
+	} else {
+		// DGD is healthy — update replica info
+		updateDeploymentInfo(dgdr, dgd)
 	}
 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
@@ -1365,8 +1370,20 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		}
 	}
 
-	// Serialize the DGD spec to an annotation so createDGD can retrieve it.
-	// DGDName is set only after createDGD() successfully creates the DGD object.
+	// Store the generated DGD name in status and cache the spec in an annotation for createDGD
+	dgdr.Status.DGDName = dgd.Name
+
+	// Store the generated DGD in ProfilingResults.SelectedConfig for status visibility
+	dgdJSON, err := json.Marshal(dgd)
+	if err != nil {
+		return fmt.Errorf("failed to marshal generated DGD to JSON: %w", err)
+	}
+	if dgdr.Status.ProfilingResults == nil {
+		dgdr.Status.ProfilingResults = &nvidiacomv1beta1.ProfilingResultsStatus{}
+	}
+	dgdr.Status.ProfilingResults.SelectedConfig = &runtime.RawExtension{Raw: dgdJSON}
+
+	// Serialize the DGD spec to an annotation so createDGD can retrieve it
 	dgdBytes, err := sigsyaml.Marshal(dgd)
 	if err != nil {
 		return fmt.Errorf("failed to marshal generated DGD: %w", err)
@@ -1464,6 +1481,21 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlCo
 func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent []byte) (*dgdv1alpha1.DynamoGraphDeployment, error) {
 	dgd, _, err := r.extractResourcesFromYAML(yamlContent)
 	return dgd, err
+}
+
+// updateDeploymentInfo populates status.deploymentInfo from DGD service replica counts.
+func updateDeploymentInfo(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, dgd *dgdv1alpha1.DynamoGraphDeployment) {
+	var totalReplicas, totalAvailable int32
+	for _, svc := range dgd.Status.Services {
+		totalReplicas += svc.Replicas
+		if svc.AvailableReplicas != nil {
+			totalAvailable += *svc.AvailableReplicas
+		}
+	}
+	dgdr.Status.DeploymentInfo = &nvidiacomv1beta1.DeploymentInfoStatus{
+		Replicas:          &totalReplicas,
+		AvailableReplicas: &totalAvailable,
+	}
 }
 
 // setSucceededCondition sets the aggregate Succeeded condition based on the current phase.

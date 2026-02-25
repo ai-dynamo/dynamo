@@ -339,6 +339,18 @@ type HardwareSpec struct {
 	// NumGPUsPerNode is the number of GPUs per node.
 	// +optional
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
+
+	// MinNumGpusPerEngine is the minimum number of GPUs per inference engine instance.
+	// Used to constrain the profiler's search space for tensor-parallel configurations.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MinNumGpusPerEngine *int32 `json:"minNumGpusPerEngine,omitempty"`
+
+	// MaxNumGpusPerEngine is the maximum number of GPUs per inference engine instance.
+	// Must be >= MinNumGpusPerEngine if both are specified.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxNumGpusPerEngine *int32 `json:"maxNumGpusPerEngine,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
