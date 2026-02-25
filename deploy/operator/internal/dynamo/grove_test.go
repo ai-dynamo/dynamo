@@ -112,7 +112,7 @@ func TestResolveKaiSchedulerQueue(t *testing.T) {
 func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 	tests := []struct {
 		name               string
-		controllerConfig   controller_common.Config
+		runtimeConfig      *controller_common.RuntimeConfig
 		validatedQueueName string
 		initialClique      *grovev1alpha1.PodCliqueTemplateSpec
 		expectedScheduler  string
@@ -121,9 +121,9 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 	}{
 		{
 			name: "grove disabled - no injection",
-			controllerConfig: controller_common.Config{
-				Grove:        controller_common.GroveConfig{Enabled: false},
-				KaiScheduler: controller_common.KaiSchedulerConfig{Enabled: true},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:        false,
+				KaiSchedulerEnabled: true,
 			},
 			validatedQueueName: "test-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -135,9 +135,9 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		},
 		{
 			name: "kai-scheduler disabled - no injection",
-			controllerConfig: controller_common.Config{
-				Grove:        controller_common.GroveConfig{Enabled: true},
-				KaiScheduler: controller_common.KaiSchedulerConfig{Enabled: false},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:        true,
+				KaiSchedulerEnabled: false,
 			},
 			validatedQueueName: "test-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -149,9 +149,9 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		},
 		{
 			name: "manual scheduler set - no injection",
-			controllerConfig: controller_common.Config{
-				Grove:        controller_common.GroveConfig{Enabled: true},
-				KaiScheduler: controller_common.KaiSchedulerConfig{Enabled: true},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:        true,
+				KaiSchedulerEnabled: true,
 			},
 			validatedQueueName: "test-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -165,9 +165,9 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		},
 		{
 			name: "both enabled, no manual scheduler - inject",
-			controllerConfig: controller_common.Config{
-				Grove:        controller_common.GroveConfig{Enabled: true},
-				KaiScheduler: controller_common.KaiSchedulerConfig{Enabled: true},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:        true,
+				KaiSchedulerEnabled: true,
 			},
 			validatedQueueName: "test-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -181,9 +181,9 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		},
 		{
 			name: "inject with existing labels",
-			controllerConfig: controller_common.Config{
-				Grove:        controller_common.GroveConfig{Enabled: true},
-				KaiScheduler: controller_common.KaiSchedulerConfig{Enabled: true},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:        true,
+				KaiSchedulerEnabled: true,
 			},
 			validatedQueueName: "custom-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -206,7 +206,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 			clique := tt.initialClique.DeepCopy()
 
 			// Call the function
-			injectKaiSchedulerIfEnabled(clique, tt.controllerConfig, tt.validatedQueueName)
+			injectKaiSchedulerIfEnabled(clique, tt.runtimeConfig, tt.validatedQueueName)
 
 			if tt.shouldInject {
 				// Verify scheduler name is injected

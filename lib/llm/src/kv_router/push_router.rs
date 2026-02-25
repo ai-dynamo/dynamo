@@ -50,7 +50,7 @@ struct RequestGuard {
     chooser: Arc<KvRouter>,
     context_id: String,
     tracker: Option<Arc<RequestTracker>>,
-    request_metrics: Arc<RouterRequestMetrics>,
+    request_metrics: Option<Arc<RouterRequestMetrics>>,
     cumulative_osl: usize,
     metrics_recorded: bool,
     freed: bool,
@@ -87,10 +87,8 @@ impl RequestGuard {
         if !self.first_token_recorded && new_tokens > 0 {
             if let Some(ref tracker) = self.tracker {
                 tracker.record_first_token();
-                if let Some(ttft) = tracker.ttft_ms() {
-                    self.request_metrics
-                        .time_to_first_token_seconds
-                        .observe(ttft / 1000.0);
+                if let (Some(m), Some(ttft)) = (&self.request_metrics, tracker.ttft_ms()) {
+                    m.time_to_first_token_seconds.observe(ttft / 1000.0);
                 }
             }
             self.first_token_recorded = true;
@@ -108,7 +106,6 @@ impl RequestGuard {
                 if let Err(e) = self
                     .chooser
                     .add_output_block(&self.context_id, decay_fraction)
-                    .await
                 {
                     tracing::warn!(
                         "Failed to add output block for request {}: {e}",
@@ -119,10 +116,9 @@ impl RequestGuard {
                 if let Some(ref tracker) = self.tracker {
                     tracker.record_osl(self.cumulative_osl);
                     tracker.record_finish();
-                    if let Some(avg_itl) = tracker.avg_itl_ms() {
-                        self.request_metrics
-                            .inter_token_latency_seconds
-                            .observe(avg_itl / 1000.0);
+                    if let (Some(m), Some(avg_itl)) = (&self.request_metrics, tracker.avg_itl_ms())
+                    {
+                        m.inter_token_latency_seconds.observe(avg_itl / 1000.0);
                     }
                 }
 
@@ -147,11 +143,11 @@ impl RequestGuard {
         if let Some(ref tracker) = self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
-            self.request_metrics
-                .output_sequence_tokens
-                .observe(self.cumulative_osl as f64);
         }
-        self.request_metrics.requests_total.inc();
+        if let Some(ref m) = self.request_metrics {
+            m.output_sequence_tokens.observe(self.cumulative_osl as f64);
+            m.requests_total.inc();
+        }
     }
 }
 
@@ -262,7 +258,7 @@ impl KvPushRouter {
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
-            .get_overlap_blocks(routing_token_ids, worker)
+            .get_overlap_blocks(routing_token_ids, worker, lora_name.as_deref())
             .await?;
 
         if !is_query_only {
@@ -369,8 +365,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         // Record routing metrics on tracker and observe ISL + prefill start.
-        let request_metrics =
-            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
+        let request_metrics = RouterRequestMetrics::get();
         if let Some(ref tracker) = request.tracker {
             let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);
@@ -380,13 +375,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 overlap_amount as usize * block_size,
             );
             tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
-            if let Some(hit_rate) = tracker.kv_hit_rate() {
-                request_metrics.kv_hit_rate.observe(hit_rate);
+            if let (Some(m), Some(hit_rate)) = (&request_metrics, tracker.kv_hit_rate()) {
+                m.kv_hit_rate.observe(hit_rate);
             }
         }
-        request_metrics
-            .input_sequence_tokens
-            .observe(request.token_ids.len() as f64);
+        if let Some(ref m) = request_metrics {
+            m.input_sequence_tokens
+                .observe(request.token_ids.len() as f64);
+        }
 
         // Handle query-only requests: early return with worker info
         if is_query_only {

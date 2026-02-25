@@ -63,7 +63,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.8",
+    "sglang[diffusion]==0.5.9",
     "nixl[cu12]<=0.9.0",
     "cupy-cuda12x>=13.0.0",
 ]
