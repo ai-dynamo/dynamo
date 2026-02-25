@@ -1187,11 +1187,28 @@ func GenerateBasePodSpec(
 
 	// Inject auto-generated frontend sidecar if configured
 	if component.FrontendSidecar != nil {
+		for _, c := range podSpec.Containers {
+			if c.Name == commonconsts.FrontendSidecarContainerName {
+				return nil, fmt.Errorf("cannot inject frontend sidecar: a container named %q already exists in the pod spec (check extraPodSpec.containers)", commonconsts.FrontendSidecarContainerName)
+			}
+		}
+
 		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
 		}
 		podSpec.Containers = append(podSpec.Containers, sidecar)
+
+		if !shouldDisableImagePullSecret && secretsRetriever != nil {
+			sidecarSecrets, err := secretsRetriever.GetSecrets(namespace, component.FrontendSidecar.Image)
+			if err == nil {
+				var refs []corev1.LocalObjectReference
+				for _, name := range sidecarSecrets {
+					refs = append(refs, corev1.LocalObjectReference{Name: name})
+				}
+				podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, refs)
+			}
+		}
 	}
 
 	return &podSpec, nil
