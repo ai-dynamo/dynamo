@@ -121,7 +121,8 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 
-	MainContainerName = "main"
+	MainContainerName             = "main"
+	FrontendSidecarContainerName  = "frontend"
 
 	RestartAnnotation = "nvidia.com/restartAt"
 

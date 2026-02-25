@@ -6966,3 +6966,186 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 	}
 	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
 }
+
+func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+
+	envFromSecret := "hf-token-secret"
+
+	tests := []struct {
+		name                   string
+		component              *v1alpha1.DynamoComponentDeploymentSharedSpec
+		parentDGDName          string
+		namespace              string
+		wantSidecarCount       int
+		wantSidecarName        string
+		wantSidecarImage       string
+		wantSidecarArgs        []string
+		wantSidecarEnvVars     map[string]string
+		wantSidecarEnvFrom     int
+		wantSidecarProbes      bool
+		wantSidecarPorts       bool
+		wantErr                bool
+	}{
+		{
+			name: "worker without frontendSidecar has no sidecar",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 1, // only main container
+		},
+		{
+			name: "worker with frontendSidecar gets auto-generated sidecar",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+					Args:  []string{"--router-mode", "direct"},
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarArgs:  []string{"-m", "dynamo.frontend", "--router-mode", "direct"},
+			wantSidecarEnvVars: map[string]string{
+				"DYN_NAMESPACE":          "test-ns-test-dgd",
+				"DYN_COMPONENT":          commonconsts.ComponentTypeFrontend,
+				"DYN_DISCOVERY_BACKEND":  "kubernetes",
+				"DYN_HTTP_PORT":          fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+				"DYN_PARENT_DGD_K8S_NAME":      "test-dgd",
+				"DYN_PARENT_DGD_K8S_NAMESPACE": "test-ns",
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar with envFromSecret",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image:         "my-frontend:latest",
+					EnvFromSecret: &envFromSecret,
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarArgs:  []string{"-m", "dynamo.frontend"},
+			wantSidecarEnvFrom: 1,
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar with custom env vars",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+					Envs: []corev1.EnvVar{
+						{Name: "CUSTOM_VAR", Value: "custom_value"},
+					},
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarEnvVars: map[string]string{
+				"CUSTOM_VAR": "custom_value",
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkVLLM,
+				secretsRetriever,
+				tt.parentDGDName,
+				tt.namespace,
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+				nil,
+			)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GenerateBasePodSpec() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+
+			assert.Equal(t, tt.wantSidecarCount, len(podSpec.Containers),
+				"expected %d containers, got %d", tt.wantSidecarCount, len(podSpec.Containers))
+
+			if tt.wantSidecarCount <= 1 {
+				return
+			}
+
+			// The frontend sidecar is the last container
+			sidecar := podSpec.Containers[len(podSpec.Containers)-1]
+
+			assert.Equal(t, tt.wantSidecarName, sidecar.Name, "sidecar container name")
+			assert.Equal(t, tt.wantSidecarImage, sidecar.Image, "sidecar container image")
+
+			if tt.wantSidecarArgs != nil {
+				assert.Equal(t, tt.wantSidecarArgs, sidecar.Args, "sidecar args")
+			}
+
+			assert.Equal(t, []string{"python3"}, sidecar.Command, "sidecar command should be python3")
+
+			if tt.wantSidecarEnvVars != nil {
+				envVars := make(map[string]string)
+				for _, env := range sidecar.Env {
+					envVars[env.Name] = env.Value
+				}
+				for k, v := range tt.wantSidecarEnvVars {
+					assert.Equal(t, v, envVars[k], "sidecar env var %s", k)
+				}
+			}
+
+			if tt.wantSidecarEnvFrom > 0 {
+				assert.Equal(t, tt.wantSidecarEnvFrom, len(sidecar.EnvFrom), "sidecar envFrom count")
+				assert.Equal(t, envFromSecret, sidecar.EnvFrom[0].SecretRef.Name, "sidecar envFromSecret name")
+			}
+
+			if tt.wantSidecarProbes {
+				assert.NotNil(t, sidecar.LivenessProbe, "sidecar should have liveness probe")
+				assert.NotNil(t, sidecar.ReadinessProbe, "sidecar should have readiness probe")
+				assert.Equal(t, "/live", sidecar.LivenessProbe.HTTPGet.Path)
+				assert.Equal(t, "/health", sidecar.ReadinessProbe.HTTPGet.Path)
+			}
+
+			if tt.wantSidecarPorts {
+				assert.NotEmpty(t, sidecar.Ports, "sidecar should have ports")
+				assert.Equal(t, int32(commonconsts.DynamoServicePort), sidecar.Ports[0].ContainerPort)
+			}
+
+			// Verify POD_NAME/POD_NAMESPACE/POD_UID are set via downward API
+			hasDownwardAPI := map[string]bool{"POD_NAME": false, "POD_NAMESPACE": false, "POD_UID": false}
+			for _, env := range sidecar.Env {
+				if _, ok := hasDownwardAPI[env.Name]; ok && env.ValueFrom != nil && env.ValueFrom.FieldRef != nil {
+					hasDownwardAPI[env.Name] = true
+				}
+			}
+			for name, found := range hasDownwardAPI {
+				assert.True(t, found, "sidecar should have downward API env var %s", name)
+			}
+		})
+	}
+}

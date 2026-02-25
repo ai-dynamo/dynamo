@@ -1185,6 +1185,15 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
 	}
 
+	// Inject auto-generated frontend sidecar if configured
+	if component.FrontendSidecar != nil {
+		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
+		}
+		podSpec.Containers = append(podSpec.Containers, sidecar)
+	}
+
 	return &podSpec, nil
 }
 
@@ -1218,6 +1227,54 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		WorkerHashSuffix:               workerHashSuffix,
 	}
 	return componentContext
+}
+
+// generateFrontendSidecar builds a fully configured frontend sidecar container
+// using the same FrontendDefaults logic as standalone frontend services.
+// This eliminates the need for users to manually specify Dynamo env vars, probes,
+// and ports when running the frontend as a sidecar (e.g., GAIE deployments).
+func generateFrontendSidecar(
+	spec *v1alpha1.FrontendSidecarSpec,
+	parentContext ComponentContext,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+) (corev1.Container, error) {
+	frontendContext := ComponentContext{
+		numberOfNodes:                  1,
+		ComponentType:                  commonconsts.ComponentTypeFrontend,
+		ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
+		ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
+		DiscoveryBackend:               parentContext.DiscoveryBackend,
+		DynamoNamespace:                parentContext.DynamoNamespace,
+	}
+
+	frontendDefaults := NewFrontendDefaults()
+	container, err := frontendDefaults.GetBaseContainer(frontendContext)
+	if err != nil {
+		return corev1.Container{}, fmt.Errorf("failed to get frontend base container: %w", err)
+	}
+
+	container.Name = commonconsts.FrontendSidecarContainerName
+	container.Image = spec.Image
+
+	if len(spec.Args) > 0 {
+		container.Args = append(container.Args, spec.Args...)
+	}
+
+	if spec.EnvFromSecret != nil {
+		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: *spec.EnvFromSecret},
+			},
+		})
+	}
+
+	if len(spec.Envs) > 0 {
+		container.Env = MergeEnvs(container.Env, spec.Envs)
+	}
+
+	addStandardEnvVars(&container, operatorConfig)
+
+	return container, nil
 }
 
 // GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
