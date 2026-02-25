@@ -125,18 +125,7 @@ const (
 	MessageProfilingCheckFailed      = "ProfilingCheckFailed"
 	MessageConfigMapNotFound         = "ConfigMap %s not found in namespace %s"
 	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
-	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
-
-	// Validation messages
-	ValidationErrorModelRequired  = "model is required"
-	ValidationErrorITLPositive    = "sla.itl must be positive"
-	ValidationErrorTTFTPositive   = "sla.ttft must be positive"
-	ValidationErrorInvalidBackend = "invalid backend: %s (must be vllm, sglang, or trtllm)"
-
-	// Valid backend values
-	BackendVLLM   = "vllm"
-	BackendSGLang = "sglang"
-	BackendTRTLLM = "trtllm"
+	MessageModelCachePVCNotFound = "model cache PVC %s not found in namespace %s"
 )
 
 // shell script template for the output copier sidecar
