@@ -83,7 +83,7 @@ const (
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
 
 	// Sidecar image
-	SidecarImage = "bitnami/kubectl:1.31"
+	SidecarImage = "bitnami/kubectl:latest"
 
 	// Volume names
 	VolumeNameProfilingOutput = "profiling-output"
