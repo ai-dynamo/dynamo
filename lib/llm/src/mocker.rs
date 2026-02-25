@@ -90,18 +90,20 @@ struct ZmqKvEventSink {
 }
 
 impl ZmqKvEventSink {
-    fn new(port: u16, dp_rank: u32, block_size: u32) -> Result<Self> {
+    async fn new(port: u16, dp_rank: u32, block_size: u32) -> Result<Self> {
         let (tx, mut rx) = mpsc::unbounded_channel::<ZmqKvEventMsg>();
 
-        tokio::spawn(async move {
-            let mut pub_socket = zeromq::PubSocket::new();
-            let endpoint = format!("tcp://0.0.0.0:{port}");
-            pub_socket
-                .bind(&endpoint)
-                .await
-                .unwrap_or_else(|e| panic!("ZMQ PUB bind to {endpoint} failed: {e}"));
-            tracing::info!("ZmqKvEventSink bound to {endpoint} for dp_rank {dp_rank}");
+        // Bind the PUB socket before returning so that any SUB connect()
+        // that follows is guaranteed to find the endpoint already listening.
+        let mut pub_socket = zeromq::PubSocket::new();
+        let endpoint = format!("tcp://0.0.0.0:{port}");
+        pub_socket
+            .bind(&endpoint)
+            .await
+            .map_err(|e| anyhow::anyhow!("ZMQ PUB bind to {endpoint} failed: {e}"))?;
+        tracing::info!("ZmqKvEventSink bound to {endpoint} for dp_rank {dp_rank}");
 
+        tokio::spawn(async move {
             let mut seq_num: u64 = 0;
 
             while let Some(msg) = rx.recv().await {
@@ -259,7 +261,9 @@ impl MockVllmEngine {
             None
         };
 
-        let schedulers = self.start_schedulers(kv_component, cancel_token.clone());
+        let schedulers = self
+            .start_schedulers(kv_component, cancel_token.clone())
+            .await;
 
         Self::start_metrics_publishing(&schedulers, component, cancel_token.clone()).await?;
 
@@ -290,7 +294,7 @@ impl MockVllmEngine {
     }
 
     /// Create schedulers and spawn their background tasks for distributing token notifications
-    fn start_schedulers(
+    async fn start_schedulers(
         &self,
         component: Option<&Component>,
         cancel_token: CancellationToken,
@@ -308,7 +312,7 @@ impl MockVllmEngine {
             ) = match component {
                 Some(comp) if args.zmq_kv_events_port.is_some() => {
                     let zmq_port = args.zmq_kv_events_port.unwrap() + dp_rank as u16;
-                    match ZmqKvEventSink::new(zmq_port, dp_rank, args.block_size as u32) {
+                    match ZmqKvEventSink::new(zmq_port, dp_rank, args.block_size as u32).await {
                         Ok(sink) => {
                             let source_config = Some(KvEventSourceConfig::Zmq {
                                 endpoint: format!("tcp://127.0.0.1:{zmq_port}"),
