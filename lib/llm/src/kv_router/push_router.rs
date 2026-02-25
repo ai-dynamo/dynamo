@@ -445,7 +445,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let tracker = request.tracker.clone();
 
         // Extract pin state: lazily init cache_control client on first PIN request
-        let pin_state: Option<PinState> = (|| async {
+        let pin_state: Option<PinState> = async {
             let ttl = request.routing.as_ref().and_then(|r| r.cache_control_ttl)?;
             let cell = self.cache_control_cell.as_ref()?;
             let component = self.chooser.client().endpoint.component().clone();
@@ -461,7 +461,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 instance_id,
                 ttl_seconds: ttl,
             })
-        })()
+        }
         .await;
 
         let (mut backend_input, context) = request.into_parts();
