@@ -971,9 +971,21 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            _ => true,
+            _ => false,
         }
     }
+
+    // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
+    // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
+    // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
+    pub fn parse_reasoning_content_from_stream<S>(
+        stream: S,
+        parser_name: String,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        // Initialize reasoning parser from parser_name
         let reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
             parser_name.as_ref(),
         )) as Box<dyn ReasoningParser>;
@@ -1367,6 +1379,19 @@ mod tests {
             m.insert("thinking".to_string(), serde_json::Value::Bool(false));
             m
         };
+        let enable_thinking_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+            m
+        };
+        let enable_thinking_false = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            m
+        };
         let empty_args = std::collections::HashMap::new();
 
         // (parser, args, expected_disabled, description)
@@ -1412,6 +1437,31 @@ mod tests {
                 Some(&thinking_false),
                 false,
                 "no parser → never disabled",
+            ),
+            // nemotron_nano uses "enable_thinking" key
+            (
+                Some("nemotron_nano"),
+                Some(&enable_thinking_false),
+                true,
+                "nemotron_nano + enable_thinking=false → disabled",
+            ),
+            (
+                Some("nemotron_nano"),
+                Some(&enable_thinking_true),
+                false,
+                "nemotron_nano + enable_thinking=true → enabled",
+            ),
+            (
+                Some("nemotron_nano"),
+                None,
+                false,
+                "nemotron_nano + no args → enabled",
+            ),
+            (
+                Some("nemotron_nano"),
+                Some(&empty_args),
+                false,
+                "nemotron_nano + empty args → enabled",
             ),
         ];
 
