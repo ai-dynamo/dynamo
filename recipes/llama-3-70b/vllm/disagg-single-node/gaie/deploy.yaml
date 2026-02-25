@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:align-interface-1
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
       eppConfig:
         config:
           plugins:
@@ -89,13 +89,13 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:align-interface-1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
         # Frontend sidecar: receives requests from kGateway on port 8000
         # and routes them to the vLLM worker in the same pod
         containers:
           - name: frontend
-            image: docker.io/lambda108/dynamo:align-interface-1
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
             command:
               - python3
             args:
@@ -190,13 +190,13 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:align-interface-1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
         # Frontend sidecar: receives requests from kGateway on port 8000
         # and routes them to the vLLM worker in the same pod
         containers:
           - name: frontend
-            image: docker.io/lambda108/dynamo:align-interface-1
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
             command:
               - python3
             args:

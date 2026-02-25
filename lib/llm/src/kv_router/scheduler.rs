@@ -434,7 +434,7 @@ impl WorkerSelector for DefaultWorkerSelector {
 
         for (worker_id, config) in workers
             .iter()
-            .filter(|(wid, _)| allowed_ids.map_or(true, |ids| ids.contains(wid)))
+            .filter(|(wid, _)| allowed_ids.is_none_or(|ids| ids.contains(wid)))
         {
             let data_parallel_size = config.data_parallel_size;
 
