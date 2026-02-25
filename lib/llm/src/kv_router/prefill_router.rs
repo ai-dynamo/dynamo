@@ -299,6 +299,10 @@ impl PrefillRouter {
                 .as_ref()
                 .and_then(|r| r.priority_jump)
                 .unwrap_or(0.0);
+            let allowed_worker_ids = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.allowed_worker_ids.clone());
             let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
             match self
                 .query_prefill_worker(
@@ -307,7 +311,7 @@ impl PrefillRouter {
                     false,
                     lora_name,
                     priority_jump,
-                    None,
+                    allowed_worker_ids,
                 )
                 .await
             {

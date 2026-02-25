@@ -193,6 +193,7 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
+        let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
@@ -217,7 +218,7 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
-                    None,
+                    allowed_worker_ids,
                 )
                 .await?;
 
