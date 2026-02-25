@@ -103,23 +103,20 @@ This hierarchical structure allows you to create metrics at the appropriate leve
 
 ### Backend Component Metrics
 
-**Backend workers** (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) expose `dynamo_component_*` metrics on port 8081 by default (configurable via `DYN_SYSTEM_PORT`).
+**Backend workers** (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) expose `dynamo_component_*` metrics on the system status port (configurable via `DYN_SYSTEM_PORT`, disabled by default). In Kubernetes the operator typically sets `DYN_SYSTEM_PORT=9090`; for local development you must set it explicitly (e.g. `DYN_SYSTEM_PORT=8081`).
 
-The core Dynamo backend system automatically exposes metrics on the system status port (default: 8081, configurable via `DYN_SYSTEM_PORT`) at the `/metrics` endpoint with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
+The core Dynamo backend system exposes metrics at the `/metrics` endpoint with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
 
 - `dynamo_component_inflight_requests`: Requests currently being processed (gauge)
 - `dynamo_component_request_bytes_total`: Total bytes received in requests (counter)
 - `dynamo_component_request_duration_seconds`: Request processing time (histogram)
 - `dynamo_component_requests_total`: Total requests processed (counter)
 - `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
-- `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge). Automatically updated before each Prometheus scrape on both the frontend (`/metrics` on port 8000) and system status server (`/metrics` on port 8081).
+- `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge). Automatically updated before each Prometheus scrape on both the frontend (`/metrics` on port 8000) and the system status server (`/metrics` on `DYN_SYSTEM_PORT` when set).
 
 **Access backend component metrics:**
 ```bash
-# Default port 8081
-curl http://localhost:8081/metrics
-
-# Or with custom port
+# Set DYN_SYSTEM_PORT to enable the system status server
 DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
 curl http://localhost:8081/metrics
 ```
@@ -225,7 +222,7 @@ For router configuration and tuning, see the [Router Guide](../components/router
 
 #### Router Request Metrics (`dynamo_component_router_*`)
 
-Histograms and counters for aggregate request-level statistics. Created on the first KV routing decision via `from_component()`, which registers them with the component's Prometheus registry. Exposed on the system status port (default 8081, configurable via `DYN_SYSTEM_PORT`) at `/metrics`. Only populated when `--router-mode kv` is active.
+Histograms and counters for aggregate request-level statistics. Eagerly registered via `from_component()` with the DRT `MetricsRegistry` hierarchy. On the frontend, exposed at `/metrics` on the HTTP port (default 8000) via the `drt_metrics` bridge. On the standalone router (`python -m dynamo.router`), exposed on `DYN_SYSTEM_PORT` when set. Populated per-request when `--router-mode kv` is active; registered with zero values in non-KV modes.
 
 All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`).
 

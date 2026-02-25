@@ -264,10 +264,10 @@ The `router_temperature` parameter controls routing randomness:
 
 ## Prometheus Metrics
 
-The router exposes Prometheus metrics at two ports:
+The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`:
 
-- **Router request metrics** (`dynamo_component_router_*`) are registered via the component's metrics hierarchy and served on the system status port (default 8081) at `/metrics`. They are populated when `--router-mode kv` is active.
-- **Routing overhead metrics** (`dynamo_router_overhead_*`) and **per-worker gauges** (`dynamo_frontend_worker_*`) are registered on the frontend's HTTP port (default 8000) at `/metrics`.
+- **Router request metrics** (`dynamo_component_router_*`): Registered via the component's metrics hierarchy and exposed on the frontend via the `drt_metrics` bridge. In KV mode (aggregated and disaggregated) they are populated per-request; in non-KV modes (direct/random/round-robin) they are registered with zero values. The standalone router (`python -m dynamo.router`) also registers these metrics, available on `DYN_SYSTEM_PORT` when set.
+- **Routing overhead metrics** (`dynamo_router_overhead_*`) and **per-worker gauges** (`dynamo_frontend_worker_*`): Registered on the frontend's own Prometheus registry. These are frontend-only and not available on the standalone router.
 
 For the full list of router metrics, see the [Metrics reference](../../observability/metrics.md#router-metrics).
 
