@@ -11,6 +11,11 @@ Handles the checkpoint job pod lifecycle:
 4. Wait for watcher signals from the DaemonSet
 5. Wake model after restore
 
+SGLang does not have a native sleep/wake API like vLLM.  Instead we use
+release_memory_occupation / resume_memory_occupation through the
+SGLangCheckpointAdapter, which presents the same sleep()/wake_up()
+interface that CheckpointConfig.run_lifecycle expects.
+
 Environment variables:
 - DYN_READY_FOR_CHECKPOINT_FILE: Path where this worker writes readiness marker
 - DYN_CHECKPOINT_STORAGE_TYPE: Storage backend (pvc, s3, oci) (optional, defaults to pvc)
@@ -29,7 +34,65 @@ import os
 import signal
 from typing import Optional
 
+import sglang as sgl
+
 logger = logging.getLogger(__name__)
+
+CHECKPOINT_SLEEP_MODE_LEVEL = 1
+
+# Memory tags to release/resume for CRIU checkpoint/restore.
+# All GPU resources must be released so CRIU can snapshot the process cleanly.
+CHECKPOINT_MEMORY_TAGS = ["kv_cache", "weights", "cuda_graph"]
+
+
+class SGLangCheckpointAdapter:
+    """Adapts an sgl.Engine to the sleep/wake_up interface expected by
+    CheckpointConfig.run_lifecycle (matching vLLM's AsyncLLM API).
+
+    sleep():   pause generation -> release GPU memory
+    wake_up(): resume GPU memory -> continue generation
+    """
+
+    def __init__(self, engine: sgl.Engine):
+        self._engine = engine
+
+    async def sleep(self, level: int = 1) -> None:
+        from sglang.srt.managers.io_struct import (
+            PauseGenerationReqInput,
+            ReleaseMemoryOccupationReqInput,
+        )
+
+        # Drain in-flight requests before touching GPU memory
+        await self._engine.tokenizer_manager.pause_generation(
+            PauseGenerationReqInput()
+        )
+        await self._engine.tokenizer_manager.release_memory_occupation(
+            ReleaseMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS), None
+        )
+
+    async def wake_up(self) -> None:
+        from sglang.srt.managers.io_struct import (
+            ContinueGenerationReqInput,
+            ResumeMemoryOccupationReqInput,
+        )
+
+        await self._engine.tokenizer_manager.resume_memory_occupation(
+            ResumeMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS), None
+        )
+        await self._engine.tokenizer_manager.continue_generation(
+            ContinueGenerationReqInput()
+        )
+
+
+def setup_engine_for_checkpoint(server_args) -> None:
+    """Configure server_args for checkpoint mode before engine creation.
+
+    Mirrors vLLM's ``config.engine_args.enable_sleep_mode = True``.
+    Enables torch_memory_saver with CPU backup so weights are offloaded
+    to CPU (preserved across CRIU) while KV cache is just freed.
+    """
+    server_args.enable_memory_saver = True
+    server_args.enable_weights_cpu_backup = True
 
 
 class CheckpointConfig:

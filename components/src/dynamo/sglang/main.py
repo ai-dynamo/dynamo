@@ -14,7 +14,12 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
-from dynamo.sglang.checkpoint_restore import get_checkpoint_config
+from dynamo.sglang.checkpoint_restore import (
+    CHECKPOINT_SLEEP_MODE_LEVEL,
+    SGLangCheckpointAdapter,
+    get_checkpoint_config,
+    setup_engine_for_checkpoint,
+)
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
@@ -31,53 +36,6 @@ from dynamo.sglang.init_multimodal import (
 from dynamo.sglang.shutdown import install_graceful_shutdown
 
 configure_dynamo_logging()
-
-# SGLang's sleep level is ignored; release_memory_occupation always releases
-# kv_cache + weights + cuda_graph.  The constant exists only so the caller
-# mirrors the vLLM integration pattern.
-CHECKPOINT_SLEEP_MODE_LEVEL = 1
-
-# Memory tags to release/resume for CRIU checkpoint/restore
-CHECKPOINT_MEMORY_TAGS = ["kv_cache", "weights", "cuda_graph"]
-
-
-class _SGLangCheckpointAdapter:
-    """Adapts an sgl.Engine to the sleep/wake_up interface expected by
-    CheckpointConfig.run_lifecycle (matching vLLM's AsyncLLM API).
-
-    sleep():   pause generation → release GPU memory
-    wake_up(): resume GPU memory → continue generation
-    """
-
-    def __init__(self, engine: sgl.Engine):
-        self._engine = engine
-
-    async def sleep(self, level: int = 1) -> None:
-        from sglang.srt.managers.io_struct import (
-            PauseGenerationReqInput,
-            ReleaseMemoryOccupationReqInput,
-        )
-
-        # Drain in-flight requests before touching GPU memory
-        await self._engine.tokenizer_manager.pause_generation(
-            PauseGenerationReqInput()
-        )
-        await self._engine.tokenizer_manager.release_memory_occupation(
-            ReleaseMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS), None
-        )
-
-    async def wake_up(self) -> None:
-        from sglang.srt.managers.io_struct import (
-            ContinueGenerationReqInput,
-            ResumeMemoryOccupationReqInput,
-        )
-
-        await self._engine.tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS), None
-        )
-        await self._engine.tokenizer_manager.continue_generation(
-            ContinueGenerationReqInput()
-        )
 
 
 async def worker():
@@ -100,18 +58,15 @@ async def worker():
     if checkpoint_cfg is not None:
         logging.info("Checkpoint mode enabled (watcher-driven signals)")
 
-        # Checkpoint mode requires memory saver with CPU backup for weights,
-        # mirroring vLLM's enable_sleep_mode. This ensures weights are offloaded
-        # to CPU (preserved) while KV cache is just freed.
-        config.server_args.enable_memory_saver = True
-        config.server_args.enable_weights_cpu_backup = True
+        # Checkpoint mode requires memory saver — enable before engine init
+        setup_engine_for_checkpoint(config.server_args)
 
         start_time = time.time()
         engine = sgl.Engine(server_args=config.server_args)
         load_time = time.time() - start_time
         logging.info(f"SGLang engine loaded in {load_time:.2f}s (checkpoint mode)")
 
-        engine_client = _SGLangCheckpointAdapter(engine)
+        engine_client = SGLangCheckpointAdapter(engine)
 
         if not await checkpoint_cfg.run_lifecycle(
             engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
