@@ -552,6 +552,7 @@ func main() {
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		Recorder:      mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,

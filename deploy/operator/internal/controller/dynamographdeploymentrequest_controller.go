@@ -243,6 +243,7 @@ echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
 	client.Client
+	APIReader     client.Reader
 	Recorder      record.EventRecorder
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
@@ -804,7 +805,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		return nil
 	}
 
-	_, err := gpu.DiscoverGPUs(ctx, r.Client)
+	_, err := gpu.DiscoverGPUs(ctx, r.APIReader)
 	if err == nil {
 		// GPU discovery is available, validation passes
 		return nil
@@ -1157,7 +1158,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		return nil // all fields already set by user
 	}
 
-	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.Client)
+	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.APIReader)
 	if err != nil {
 		return err
 	}
