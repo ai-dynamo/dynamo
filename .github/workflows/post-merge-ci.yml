@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - 'release/*.*.*'
+      - 'pvijayakrish/automate-dynamo-rcs'  # TEMPORARY: remove after testing
 
 permissions:
   contents: read
@@ -18,6 +19,6 @@ jobs:
     with:
       pipeline_type: post_merge
       include_nightly_marks: false
-      image_prefix: main
-      enable_slack_notification: true
+      image_prefix: test-main  # TEMPORARY: remove after testing (was: main)
+      enable_slack_notification: false  # TEMPORARY: disabled for testing
     secrets: inherit

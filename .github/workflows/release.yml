@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - 'release/*'
+      - 'pvijayakrish/automate-dynamo-rcs'  # TEMPORARY: remove after testing
   workflow_dispatch:
     inputs:
       rc_number:
@@ -44,6 +45,15 @@ jobs:
         run: |
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
           VERSION="${BRANCH_NAME#release/}"
+
+          # TEMPORARY: Use test version for non-release branches
+          if [[ ! "$BRANCH_NAME" =~ ^release/ ]]; then
+            VERSION="0.0.0-test1"
+            echo "Using test version: ${VERSION} (branch: ${BRANCH_NAME})"
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

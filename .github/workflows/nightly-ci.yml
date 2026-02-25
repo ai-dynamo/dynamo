@@ -4,6 +4,9 @@
 name: Nightly CI Pipeline
 
 on:
+  push:
+    branches:
+      - 'pvijayakrish/automate-dynamo-rcs'  # TEMPORARY: remove after testing
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
   workflow_dispatch:  # Allow manual triggering for testing
@@ -18,6 +21,6 @@ jobs:
     with:
       pipeline_type: nightly
       include_nightly_marks: true
-      image_prefix: nightly
-      enable_slack_notification: true
+      image_prefix: test-nightly  # TEMPORARY: remove after testing (was: nightly)
+      enable_slack_notification: false  # TEMPORARY: disabled for testing
     secrets: inherit
