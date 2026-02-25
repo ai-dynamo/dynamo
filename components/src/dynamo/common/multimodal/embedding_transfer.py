@@ -5,13 +5,15 @@ import asyncio
 import logging
 import math
 import os
+import pickle
 import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
+from nixl._api import nixl_agent, nixl_agent_config
 from pydantic import BaseModel
 from safetensors import torch as safetensors_torch
 
@@ -215,18 +217,215 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
             del self.received_tensors[tensor_id]
 
 
+class MonolithicCounter:
+    """
+    A simple counter implementation for generating unique IDs.
+    """
+
+    def __init__(self):
+        self.counter = 0
+
+    def get_next_id(self) -> int:
+        current_id = self.counter
+        self.counter += 1
+        return current_id
+
+
+class RingBuffer:
+    """
+    A ring buffer implementation for managing memory allocation.
+    Uses a circular buffer pattern to efficiently reuse memory without wrapped-around allocations.
+    When insufficient space remains at the end, allocation restarts from the beginning.
+    """
+
+    BufferId = int
+
+    def __init__(self, buffer_size):
+        self.buffer_tensor = torch.zeros(buffer_size, dtype=torch.int8)
+        # Index tracking for the ring buffer, when
+        # free_start_idx < allocated_start_idx, the allocation has been wrapped around,
+        # so the allocation request should be rejected if the requested size is larger
+        # than the remaining space before allocated_start_idx.
+        self.free_start_idx = 0
+        self.allocated_start_idx = 0
+        self.buffer_size = buffer_size
+        self.end_idx = buffer_size
+
+        # Track allocated buffers and their release state,
+        # keeping released range in 'freed_list' for simpler monotonical buffer release
+        self.freed_list = {}
+        self.allocated_buffer_id_to_range = {}
+        # For generate buffer IDs
+        self.id_counter = MonolithicCounter()
+
+    def _flush_freed_list(self):
+        allocated_end = self.freed_list.pop(self.allocated_start_idx, None)
+        while allocated_end is not None:
+            self.allocated_start_idx = allocated_end
+            if self.allocated_start_idx == self.end_idx:
+                self.allocated_start_idx = 0
+            allocated_end = self.freed_list.pop(self.allocated_start_idx, None)
+
+    def get_buffer(self, size):
+        # [gluo TODO] raise exception as there is no way to satisfy the request.
+        # Can not allocate for sure
+        if size > self.buffer_size:
+            return None
+        # If the allocation will go over end boundary, simply try allocate from the start
+        if self.free_start_idx + size > self.end_idx:
+            # add artificial entry to freed_list for moving ring buffer
+            self.freed_list[self.free_start_idx] = self.end_idx
+            self.free_start_idx = 0
+        start_idx = self.free_start_idx
+        end_idx = start_idx + size
+
+        # Check availability of the buffer, if the allocation overlaps with allocated buffer,
+        # return None for the caller to retry later after some buffers are released.
+        self._flush_freed_list()
+        if start_idx < self.allocated_start_idx and end_idx > self.allocated_start_idx:
+            return None
+
+        # bookkeep allocations
+        buffer_id = self.id_counter.get_next_id()
+        self.allocated_buffer_id_to_range[buffer_id] = (start_idx, end_idx)
+        self.free_start_idx = end_idx
+
+        return buffer_id, self.transfer_tensor[start_idx:end_idx]
+
+    def release_buffer(self, buffer_id):
+        start_end = self.allocated_buffer_id_to_range.pop(buffer_id, None)
+        if start_end is not None:
+            self.freed_list[start_end[0]] = start_end[1]
+            self._flush_freed_list()
+
+
+class NixlTransferRequest(TransferRequest):
+    """
+    A TransferRequest subclass that includes additional fields specific to NIXL-based embedding transfer.
+    """
+
+    sender_agent_id: str
+    # metadata of the given agent ID, can be None if
+    # sender determines that the receiver already connected to the sender.
+    agent_metadata: Optional[Any]
+    # The ID of the tensor to be written
+    tensor_id: int
+    tensor_size: int
+
+
 class NixlEmbeddingSender(AbstractEmbeddingSender):
     """
     The EmbeddingSender implementation of current usage of NIXL connect library,
     which creates a new NIXL connection for each send operation. Only implemented here
     for reference and should not be used due to overhead discovered in practice.
+
+    Note that the sender will initiate the transfer so the workflow is
+    1) (pre-request) Receiver sends its metadata to sender with agent metadata contains
+       the information of its registered memory buffer for transfer.
+    2) (request) Sender prepares embeddings for transfer and return TransferRequest regarding
+       where to send notification and the size of the embedding.
+    3) (request) Receiver send notification with buffer ID and destination address to sender
+    4) (request) Sender initiates the transfer after receiving the notification
+
     """
 
     def __init__(self):
-        self.connector = nixl_connect.Connector()
+        # NIXL agent setup
+        self.sender_id = f"sender_{str(uuid.uuid4())}"
+        self.nixl_agent = nixl_agent(
+            self.sender_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
+        )
+        self.remote_agents = {}
+        self.handshaked_receivers = set()
+        self.agent_metadata = self.nixl_agent.get_agent_metadata()
+        logger.info(f"length of agent_metadata: {len(self.agent_metadata)}")
+
+        self.transfer_tracker = {}
+
+        self.id_counter = MonolithicCounter()
+        # Create a queue for hinting if there is future transfer
+        self.transfer_queue = asyncio.Queue()
+        self._state_update_task = asyncio.create_task(self._state_update())
+
+    async def _state_update(self):
+        """Long-running async task that processes transfer requests."""
+        transfer_handlers = {}
+        transfer_task = None
+        while True:
+            # Wait for transfer requests with timeout to allow periodic checks
+            if transfer_task is None:
+                transfer_task = await self.transfer_queue.get()
+
+            # check if write is requested, initiate the write
+            notifs = self.nixl_agent.get_new_notifs()
+            for remote_agent_id, notifs in notifs:
+                self.handshaked_receivers.add(remote_agent_id)
+                for notif in notifs:
+                    (
+                        tensor_id,
+                        (dest_buffer, dest_device_id, dest_mem_str),
+                        write_done_id,
+                    ) = pickle.loads(notif)
+                    transfer_info = self.transfer_tracker[tensor_id]
+                    remote_memory_info = [
+                        (dest_buffer, transfer_info[0].nbytes, dest_device_id),
+                    ]
+                    remote_desc = self.nixl_agent.get_xfer_descs(
+                        remote_memory_info, mem_type=dest_mem_str
+                    )
+                    xfer_handle = self.nixl_agent.initialize_xfer(
+                        "WRITE",
+                        transfer_info[1],
+                        remote_desc,
+                        remote_agent_id,
+                        str(write_done_id).encode(),
+                    )
+                    transfer_handlers[tensor_id] = xfer_handle
+
+            # check inflight transfer state, if completed, get another task
+            for tensor_id, xfer_handle in list(transfer_handlers.items()):
+                state = self.nixl_agent.check_xfer_state(xfer_handle)
+                if state == "ERR":
+                    logger.error(f"Transfer failed for tensor_id {tensor_id}")
+                    transfer_handlers.pop(tensor_id)
+                    self.transfer_tracker.pop(tensor_id, None)
+                elif state == "DONE":
+                    logger.debug(f"Transfer completed for tensor_id {tensor_id}")
+                    transfer_handlers.pop(tensor_id)
+                    transfer_info = self.transfer_tracker.pop(tensor_id, None)
+                    if transfer_info is not None:
+                        # Clean up registered memory after transfer completion
+                        _, _, registered_desc, fut = transfer_info
+                        self.nixl_agent.deregister_memory(registered_desc)
+                        # Future can be done if the embeddings is not external
+                        if not fut.done():
+                            fut.set_result(None)
+                    transfer_task = None
+                    break  # break to consume 'transfer_queue' accordingly
+
+            # short pause to yield control and allow cancellation
+            await asyncio.sleep(0.001)
+
+    def __del__(self):
+        self._state_update_task.cancel()
+
+    async def add_agent(self, remote_agent_id, remote_agent_metadata):
+        """
+        Add a remote agent for transfer based on the metadata provided by the receiver.
+
+        Args:
+            remote_agent_metadata: The metadata of the remote agent to add.
+        """
+        if remote_agent_id not in self.remote_agents:
+            self.remote_agents[remote_agent_id] = self.nixl_agent.add_remote_agent(
+                remote_agent_metadata
+            )
 
     async def send_embeddings(
-        self, embeddings: torch.Tensor, stage_embeddings: bool = False
+        self,
+        embeddings: torch.Tensor,
+        stage_embeddings: bool = False,
+        remote_agent_id: Optional[str] = None,
     ) -> tuple[TransferRequest, asyncio.Future]:
         """
         Send precomputed embeddings.
@@ -238,16 +437,32 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
         Returns:
             A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
         """
+        tensor_id = self.id_counter.get_next_id()
+        fut = asyncio.get_event_loop().create_future()
+        if not stage_embeddings:
+            embeddings = embeddings.clone().detach()
+            fut.set_result(None)
 
-        descriptor = nixl_connect.Descriptor(embeddings.cpu())
-        readable_op = await self.connector.create_readable(descriptor)
+        # track the NIXL descriptors for future transfer
+        registered_desc = self.nixl_agent.register_memory(embeddings)
+        desc = self.nixl_agent.get_xfer_descs(embeddings)
+        self.transfer_tracker[tensor_id] = (embeddings, desc, registered_desc, fut)
+        self.transfer_queue.put_nowait("task_indicator")
 
-        request = TransferRequest(
+        request = NixlTransferRequest(
             embeddings_shape=list(embeddings.shape),
             embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
-            serialized_request=readable_op.metadata().model_dump(),
+            sender_agent_id=self.sender_id,
+            agent_metadata=self.agent_metadata
+            if remote_agent_id is None
+            and remote_agent_id not in self.handshaked_receivers
+            else None,
+            tensor_id=tensor_id,
+            tensor_size=embeddings.nbytes,
+            # Not passing metadata in serialized_request
+            serialized_request="",
         )
-        return request, readable_op.wait_for_completion()
+        return request, fut
 
 
 class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
@@ -257,10 +472,26 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
     for reference and should not be used due to overhead discovered in practice.
     """
 
-    def __init__(self):
-        super().__init__()
-        self.connector = nixl_connect.Connector()
-        self.tensor_id_counter = 0
+    def __init__(self, buffer_size=2 * 8 * 1024 * 1024 * 256):
+        # buffer_size is product of:
+        # 2 (typical dtype size float16)
+        # 8 * 1024 (typical embedding hidden size for Qwen-VL)
+        # 256 * 1024 (1024 count of 256 mm token item)
+        # 2 (extra copies) = 8 GB memory
+        # ring buffer imple without wrapped around allocation, i.e. will allocate from
+        # start if the last remaining buffer is not enough
+        self.ring_buffer = RingBuffer(buffer_size)
+        self.transfer_tensor = self.ring_buffer.buffer_tensor
+
+        self.receiver_id = f"receiver_{str(uuid.uuid4())}"
+        self.nixl_agent = nixl_agent(
+            self.receiver_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
+        )
+        self.remote_agents = {}
+        self.reg_descs = self.nixl_agent.register_memory(self.transfer_tensor)
+
+        self.id_counter = MonolithicCounter()
+        self.to_buffer_id = {}
 
     async def receive_embeddings(
         self, request: TransferRequest
@@ -275,29 +506,49 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
             A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
             Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
         """
+        if request.sender_agent_id not in self.remote_agents:
+            if request.agent_metadata is None:
+                raise ValueError(
+                    f"Missing agent metadata for new sender {request.sender_agent_id}"
+                )
+            self.remote_agents[
+                request.sender_agent_id
+            ] = self.nixl_agent.add_remote_agent(request.agent_metadata)
+
         # Extract dynamic shape, metadata, and auxiliary data
         embeddings_shape = request.embeddings_shape
         embeddings_dtype = torch_dtype_from_string(request.embedding_dtype_str)
-        readable_metadata = nixl_connect.RdmaMetadata.model_validate(
-            request.serialized_request
+        buffer_id, transfer_tensor = self.ring_buffer.get_buffer(request.tensor_size)
+        if transfer_tensor is None:
+            # [gluo TODO] not raise but retry or block on pending transfer
+            raise MemoryError("No available buffer for transfer, please retry later.")
+        embedding_tensor = transfer_tensor.view(dtype=embeddings_dtype).view(
+            embeddings_shape
         )
 
-        encodings_tensor = torch.zeros(*embeddings_shape, dtype=embeddings_dtype)
-
-        # Create descriptor for our allocated tensor
-        descriptor = nixl_connect.Descriptor(encodings_tensor)
-
-        # Create read operation to read from EncodeHandler
-        read_op = await self.connector.begin_read(readable_metadata, descriptor)
-        with read_op:
-            # Wait for the read operation to complete
-            await read_op.wait_for_completion()
-            logging.debug(
-                f"Successfully read embeddings via NIXL: {encodings_tensor.shape}"
+        # Request for transfer
+        tensor_id = self.id_counter.get_next_id()
+        notif_msg = pickle.dumps(
+            (
+                request.tensor_id,
+                (
+                    transfer_tensor._data_ref,
+                    transfer_tensor.device.index,
+                    "cuda" if str(transfer_tensor.device).startswith("cuda") else "cpu",
+                ),
+                tensor_id,
             )
-        tensor_id = self.tensor_id_counter
-        self.tensor_id_counter += 1
-        return tensor_id, encodings_tensor
+        )
+        self.nixl_agent.send_notif(request.sender_agent_id, notif_msg=notif_msg)
+
+        # await for write notification
+        while not self.nixl_agent.check_remote_xfer_done(
+            request.sender_agent_id, str(tensor_id).encode()
+        ):
+            await asyncio.sleep(0.001)
+
+        self.to_buffer_id[tensor_id] = buffer_id
+        return tensor_id, embedding_tensor
 
     def release_tensor(self, tensor_id: int):
         """
@@ -306,8 +557,8 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
         Args:
             tensor_id: The ID of the tensor to release.
         """
-        # receiver doesn't hold the embedding
-        pass
+        buffer_id = self.to_buffer_id.pop(tensor_id)
+        self.ring_buffer.release_buffer(buffer_id)
 
 
 class PersistentConnector(nixl_connect.Connector):
@@ -389,7 +640,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
     """
 
     def __init__(
-        self, embedding_hidden_size=8 * 1024, max_item_mm_token=1024, max_items=50
+        self, embedding_hidden_size=8 * 1024, max_item_mm_token=1024, max_items=1024
     ):
         super().__init__()
         self.connector = PersistentConnector()
@@ -440,6 +691,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             request.serialized_request
         )
 
+        original_descriptor_size = None
         if self.warmedup_descriptors.empty():
             logger.debug(
                 "No warmed up descriptors available, creating a temporary one for transfer."
@@ -450,7 +702,9 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
         else:
             descriptor = self.warmedup_descriptors.get()
             # Slide view of pre-allocated tensor
+            original_descriptor_size = descriptor._data_size
             tensor_size_bytes = embeddings_dtype.itemsize * math.prod(embeddings_shape)
+            descriptor._data_size = tensor_size_bytes
             encodings_tensor = (
                 descriptor._data_ref[:tensor_size_bytes]
                 .view(dtype=embeddings_dtype)
@@ -465,6 +719,8 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
         logging.debug(
             f"Successfully read embeddings via NIXL: {encodings_tensor.shape}"
         )
+        if original_descriptor_size is not None:
+            descriptor._data_size = original_descriptor_size
         tensor_id = self.tensor_id_counter
         self.tensor_id_counter += 1
         self.inuse_descriptors[tensor_id] = (descriptor, dynamic_descriptor)
