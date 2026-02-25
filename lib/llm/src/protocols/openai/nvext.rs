@@ -201,7 +201,7 @@ pub struct AgentHints {
 pub struct CacheControl {
     #[serde(rename = "type")]
     pub control_type: CacheControlType,
-    /// TTL string: "5m" or "1h". Default 300s (5m) when None.
+    /// TTL as seconds (integer) or shorthand ("5m", "1h"). Clamped to [300, 3600].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
 }
@@ -213,20 +213,29 @@ pub enum CacheControlType {
     Ephemeral,
 }
 
+const MIN_TTL_SECONDS: u64 = 300;
+const MAX_TTL_SECONDS: u64 = 3600;
+
 impl CacheControl {
-    /// Parse TTL string to seconds.
-    /// - None  -> 300 (5 minutes, Anthropic default)
-    /// - "5m"  -> 300
-    /// - "1h"  -> 3600
+    /// Parse TTL string to seconds, clamped to [300, 3600].
+    ///
+    /// Accepts integer seconds ("120", "600") or shorthand ("5m", "1h").
+    /// Values below 300 are clamped to 300; values above 3600 are clamped to 3600.
+    /// Unrecognized strings default to 300s.
     pub fn ttl_seconds(&self) -> u64 {
-        match self.ttl.as_deref() {
-            None | Some("5m") => 300,
+        let raw = match self.ttl.as_deref() {
+            None => return MIN_TTL_SECONDS,
+            Some("5m") => 300,
             Some("1h") => 3600,
-            Some(other) => {
-                tracing::warn!("Unrecognized TTL '{}', defaulting to 300s", other);
-                300
-            }
-        }
+            Some(other) => match other.parse::<u64>() {
+                Ok(secs) => secs,
+                Err(_) => {
+                    tracing::warn!("Unrecognized TTL '{}', defaulting to 300s", other);
+                    return MIN_TTL_SECONDS;
+                }
+            },
+        };
+        raw.clamp(MIN_TTL_SECONDS, MAX_TTL_SECONDS)
     }
 }
 
@@ -289,7 +298,7 @@ mod tests {
         assert_eq!(cc.ttl, None);
         assert_eq!(cc.ttl_seconds(), 300);
 
-        // With explicit TTL values
+        // Shorthand values
         let cc_5m = CacheControl {
             control_type: CacheControlType::Ephemeral,
             ttl: Some("5m".to_string()),
@@ -301,6 +310,34 @@ mod tests {
             ttl: Some("1h".to_string()),
         };
         assert_eq!(cc_1h.ttl_seconds(), 3600);
+
+        // Integer seconds -- within range
+        let cc_600 = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("600".to_string()),
+        };
+        assert_eq!(cc_600.ttl_seconds(), 600);
+
+        // Integer seconds -- clamped to min (300)
+        let cc_low = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("10".to_string()),
+        };
+        assert_eq!(cc_low.ttl_seconds(), 300);
+
+        // Integer seconds -- clamped to max (3600)
+        let cc_high = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("7200".to_string()),
+        };
+        assert_eq!(cc_high.ttl_seconds(), 3600);
+
+        // Unrecognized string defaults to 300
+        let cc_bad = CacheControl {
+            control_type: CacheControlType::Ephemeral,
+            ttl: Some("forever".to_string()),
+        };
+        assert_eq!(cc_bad.ttl_seconds(), 300);
 
         // Serde roundtrip
         let json = serde_json::to_string(&cc_5m).unwrap();
