@@ -56,6 +56,7 @@ python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --enforce-eager \
   --disaggregation-mode decode \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --gpu-memory-utilization ${GPU_MEM_FRACTION} &
 DECODE_PID=$!
 
@@ -76,6 +77,7 @@ python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --enforce-eager \
   --disaggregation-mode prefill \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --gpu-memory-utilization ${GPU_MEM_FRACTION} \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 
