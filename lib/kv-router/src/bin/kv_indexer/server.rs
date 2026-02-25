@@ -4,10 +4,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -21,9 +21,16 @@ pub struct AppState {
 }
 
 #[derive(Deserialize)]
-pub struct RegisterWorkerRequest {
+pub struct RegisterRequest {
     pub instance_id: WorkerId,
     pub endpoint: String,
+    #[serde(default)]
+    pub dp_rank: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct UnregisterRequest {
+    pub instance_id: WorkerId,
     #[serde(default)]
     pub dp_rank: Option<u32>,
 }
@@ -35,14 +42,14 @@ struct WorkerInfo {
 }
 
 #[derive(Deserialize)]
-pub struct ScoreRequest {
-    pub tokens: Vec<u32>,
+pub struct QueryRequest {
+    pub token_ids: Vec<u32>,
     #[serde(default)]
     pub lora_name: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct ScoreHashedRequest {
+pub struct QueryByHashRequest {
     pub block_hashes: Vec<i64>,
 }
 
@@ -53,9 +60,9 @@ struct ScoreResponse {
     tree_sizes: HashMap<String, HashMap<String, usize>>,
 }
 
-async fn register_worker(
+async fn register(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<RegisterWorkerRequest>,
+    Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     match state
         .registry
@@ -72,11 +79,20 @@ async fn register_worker(
     }
 }
 
-async fn deregister_worker(
+async fn unregister(
     State(state): State<Arc<AppState>>,
-    Path(instance_id): Path<WorkerId>,
+    Json(req): Json<UnregisterRequest>,
 ) -> impl IntoResponse {
-    match state.registry.deregister(instance_id).await {
+    let result = match req.dp_rank {
+        Some(dp_rank) => {
+            state
+                .registry
+                .deregister_dp_rank(req.instance_id, dp_rank)
+                .await
+        }
+        None => state.registry.deregister(req.instance_id).await,
+    };
+    match result {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         Err(e) => (
             StatusCode::NOT_FOUND,
@@ -120,12 +136,12 @@ fn build_score_response(overlap: dynamo_kv_router::protocols::OverlapScores) -> 
     }
 }
 
-async fn score(
+async fn query(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ScoreRequest>,
+    Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
     let block_hashes = compute_block_hash_for_seq(
-        &req.tokens,
+        &req.token_ids,
         state.block_size,
         None,
         req.lora_name.as_deref(),
@@ -142,9 +158,9 @@ async fn score(
     }
 }
 
-async fn score_hashed(
+async fn query_by_hash(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ScoreHashedRequest>,
+    Json(req): Json<QueryByHashRequest>,
 ) -> impl IntoResponse {
     let block_hashes: Vec<LocalBlockHash> = req
         .block_hashes
@@ -175,11 +191,11 @@ async fn dump_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/workers", post(register_worker))
+        .route("/register", post(register))
+        .route("/unregister", post(unregister))
         .route("/workers", get(list_workers))
-        .route("/workers/{instance_id}", delete(deregister_worker))
-        .route("/score", post(score))
-        .route("/score_hashed", post(score_hashed))
+        .route("/query", post(query))
+        .route("/query_by_hash", post(query_by_hash))
         .route("/dump", get(dump_events))
         .with_state(state)
 }

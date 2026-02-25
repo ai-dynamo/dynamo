@@ -2158,7 +2158,7 @@ def _test_router_decisions(
         f"worker_b {worker_b_key} has {worker_b_events} events"
     )
 
-    # Verify standalone indexer scores via HTTP POST /score
+    # Verify standalone indexer scores via HTTP POST /query
     if standalone_indexer_url:
         _dp_a = dp_rank_a if dp_rank_a is not None else 0
         _dp_b = dp_rank_b if dp_rank_b is not None else 0
@@ -2169,10 +2169,10 @@ def _test_router_decisions(
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{standalone_indexer_url}/score",
-                    json={"tokens": req4_tokens},
+                    f"{standalone_indexer_url}/query",
+                    json={"token_ids": req4_tokens},
                 ) as resp:
-                    assert resp.status == 200, f"POST /score failed: {resp.status}"
+                    assert resp.status == 200, f"POST /query failed: {resp.status}"
                     scores = (await resp.json())["scores"]
 
                     id_a = str(worker_a_id)
@@ -2183,7 +2183,7 @@ def _test_router_decisions(
                     score_b = scores[id_b][dp_b]
 
                     logger.info(
-                        f"Standalone indexer /score: {id_a}[{dp_a}]={score_a}, "
+                        f"Standalone indexer /query: {id_a}[{dp_a}]={score_a}, "
                         f"{id_b}[{dp_b}]={score_b}"
                     )
                     assert score_a > score_b, (

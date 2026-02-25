@@ -9,9 +9,11 @@ subtitle: Run the KV cache indexer as an independent HTTP service for querying b
 
 ## Overview
 
-The standalone KV indexer (`dynamo-kv-indexer`) is a lightweight HTTP binary that subscribes to ZMQ KV event streams from workers, maintains a radix tree of cached blocks, and exposes HTTP endpoints for scoring, querying, and managing workers.
+The standalone KV indexer (`dynamo-kv-indexer`) is a lightweight HTTP binary that subscribes to ZMQ KV event streams from workers, maintains a radix tree of cached blocks, and exposes HTTP endpoints for querying and managing workers.
 
 This is distinct from the [Standalone Router](../../../../components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
+
+The HTTP API follows the [Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403) conventions.
 
 ## Compatibility
 
@@ -43,30 +45,48 @@ dynamo-kv-indexer --block-size 16 --port 8090 [--threads 1] [--workers "1=tcp://
 | `--block-size` | (required) | KV cache block size (must match the engine's block size) |
 | `--port` | `8090` | HTTP server listen port |
 | `--threads` | `1` | Number of indexer threads (1 = single-threaded, >1 = thread pool) |
-| `--workers` | (none) | Initial workers as `worker_id=zmq_address,...` pairs |
+| `--workers` | (none) | Initial workers as `instance_id=zmq_address,...` pairs |
 
 ## HTTP API
 
-### `POST /workers` — Register an endpoint
+### `POST /register` — Register an endpoint
 
 Register a ZMQ endpoint for an instance. Call once per dp_rank for data-parallel workers:
 
 ```bash
 # Single dp_rank (dp_rank defaults to 0)
-curl -X POST http://localhost:8090/workers \
+curl -X POST http://localhost:8090/register \
   -H 'Content-Type: application/json' \
   -d '{"instance_id": 1, "endpoint": "tcp://127.0.0.1:5557"}'
 
 # Multiple dp_ranks — register each separately
-curl -X POST http://localhost:8090/workers \
+curl -X POST http://localhost:8090/register \
   -H 'Content-Type: application/json' \
   -d '{"instance_id": 1, "endpoint": "tcp://127.0.0.1:5557", "dp_rank": 0}'
-curl -X POST http://localhost:8090/workers \
+curl -X POST http://localhost:8090/register \
   -H 'Content-Type: application/json' \
   -d '{"instance_id": 1, "endpoint": "tcp://127.0.0.1:5558", "dp_rank": 1}'
 ```
 
 The indexer spawns a ZMQ SUB listener for each endpoint and begins consuming KV events.
+
+### `POST /unregister` — Deregister an instance
+
+Remove all dp_ranks for an instance, or a specific dp_rank:
+
+```bash
+# Remove all dp_ranks
+curl -X POST http://localhost:8090/unregister \
+  -H 'Content-Type: application/json' \
+  -d '{"instance_id": 1}'
+
+# Remove a specific dp_rank
+curl -X POST http://localhost:8090/unregister \
+  -H 'Content-Type: application/json' \
+  -d '{"instance_id": 1, "dp_rank": 0}'
+```
+
+Cancels ZMQ listeners and removes the instance's blocks from the radix tree.
 
 ### `GET /workers` — List registered instances
 
@@ -79,22 +99,14 @@ Returns:
 [{"instance_id": 1, "endpoints": {"0": "tcp://127.0.0.1:5557", "1": "tcp://127.0.0.1:5558"}}]
 ```
 
-### `DELETE /workers/{instance_id}` — Deregister an instance
+### `POST /query` — Query overlap for token IDs
+
+Given raw token IDs, compute block hashes and return per-instance overlap scores:
 
 ```bash
-curl -X DELETE http://localhost:8090/workers/1
-```
-
-Cancels all ZMQ listeners for the instance and removes its blocks from the radix tree.
-
-### `POST /score` — Score overlap for tokens
-
-Given raw tokens, compute block hashes and return per-worker overlap scores:
-
-```bash
-curl -X POST http://localhost:8090/score \
+curl -X POST http://localhost:8090/query \
   -H 'Content-Type: application/json' \
-  -d '{"tokens": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}'
+  -d '{"token_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}'
 ```
 
 Returns:
@@ -106,15 +118,17 @@ Returns:
 }
 ```
 
-Scores are nested by `instance_id` then `dp_rank`. Higher score means more cached prefix blocks on that worker.
+Scores are nested by `instance_id` then `dp_rank`. Higher score means more cached prefix blocks on that instance.
 
-### `POST /score_hashed` — Score overlap for pre-computed hashes
+### `POST /query_by_hash` — Query overlap for pre-computed hashes
 
 ```bash
-curl -X POST http://localhost:8090/score_hashed \
+curl -X POST http://localhost:8090/query_by_hash \
   -H 'Content-Type: application/json' \
   -d '{"block_hashes": [123456, 789012]}'
 ```
+
+Same response format as `/query`.
 
 ### `GET /dump` — Dump all radix tree events
 
@@ -142,17 +156,17 @@ graph TD
         REG[Worker Registry]
         ZMQ[ZMQ SUB Listeners]
         IDX[Indexer / Radix Tree]
-        HTTP[HTTP API<br/>/score /dump /workers]
+        HTTP[HTTP API<br/>/query /dump /register]
     end
 
     CLIENT[External Client]
 
     W1 -->|ZMQ events| ZMQ
     W2 -->|ZMQ events| ZMQ
-    CLIENT -->|POST /workers| REG
+    CLIENT -->|POST /register| REG
     REG -->|spawn listeners| ZMQ
     ZMQ -->|apply events| IDX
-    CLIENT -->|POST /score, GET /dump| HTTP
+    CLIENT -->|POST /query, GET /dump| HTTP
     HTTP -->|query| IDX
 
     style W1 fill:#f3e5f5,stroke:#333,color:#333

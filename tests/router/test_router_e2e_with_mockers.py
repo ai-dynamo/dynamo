@@ -375,7 +375,7 @@ class MockerProcess:
 
             # Register each dp_rank endpoint with the standalone indexer
             zmq_addresses = {}
-            register_url = f"{self.standalone_indexer_url}/workers"
+            register_url = f"{self.standalone_indexer_url}/register"
             async with aiohttp.ClientSession() as session:
                 for dp_rank in range(dp_size):
                     port = self._zmq_kv_events_ports[i * dp_size + dp_rank]

@@ -81,6 +81,24 @@ impl WorkerRegistry {
         Ok(())
     }
 
+    pub async fn deregister_dp_rank(&self, instance_id: WorkerId, dp_rank: u32) -> Result<()> {
+        let mut entry = self
+            .workers
+            .get_mut(&instance_id)
+            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+
+        if entry.endpoints.remove(&dp_rank).is_none() {
+            bail!("instance {instance_id} dp_rank {dp_rank} not found");
+        }
+
+        if entry.endpoints.is_empty() {
+            drop(entry);
+            return self.deregister(instance_id).await;
+        }
+
+        Ok(())
+    }
+
     pub fn list(&self) -> Vec<(WorkerId, HashMap<u32, String>)> {
         self.workers
             .iter()
