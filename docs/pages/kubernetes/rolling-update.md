@@ -169,7 +169,7 @@ The following diagram illustrates the rolling update of the decode worker in a G
 
 ### Implications for Disaggregated Deployments
 
-Because old and new workers share the same Dynamo namespace, they are visible to each other. In a disaggregated setup, this can lead to cross-generation communication — for example, a newly deployed prefill worker may discover and route requests to an old decode worker (or vice versa). If the old and new versions are incompatible, this can result in errors.
+Because old and new workers share the same Dynamo namespace, they are grouped together by the router. In a disaggregated setup, this can lead to cross-generation communication — for example, the router might send a request from a newly deployed prefill worker to an old decode worker (or vice versa). If the old and new versions are incompatible, this can result in errors.
 
 > [!WARNING]
 > For Grove and LWS deployments with disaggregated prefill/decode workers, be aware that during a rolling update, new workers may communicate with old workers. Ensure that your worker versions are backward-compatible, or consider using Deployment-backed DGDs which provide namespace isolation during updates.
