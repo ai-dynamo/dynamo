@@ -158,22 +158,10 @@ mod tests {
     use super::super::rdma::DataType;
     use super::*;
     use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
-    #[cfg(feature = "testing-cuda")]
-    use std::path::Path;
-
-    #[cfg(feature = "testing-cuda")]
-    fn is_gpu_environment() -> bool {
-        Path::new("/dev/nvidiactl").exists() || Path::new("/dev/nvgpu").exists()
-    }
 
     #[cfg(feature = "testing-cuda")]
     #[tokio::test]
     async fn test_fetch_and_decode() {
-        if !is_gpu_environment() {
-            println!("test test_fetch_and_decode ... ignored (CPU environment detected)");
-            return;
-        }
-
         let test_image_bytes =
             include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");
 
