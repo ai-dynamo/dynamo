@@ -27,7 +27,6 @@ use crate::{
         timing::{RequestPhase, RequestTracker},
     },
 };
-use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
@@ -369,26 +368,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         // Record routing metrics on tracker and observe ISL + prefill start.
-        //
-        // instance_id comes from Discovery::instance_id() — the *router process's* own
-        // identity, used as the `router_id` Prometheus label on all dynamo_router_* metrics.
-        // Source depends on the discovery backend:
-        //   etcd  -> lease ID assigned by the etcd server
-        //   NATS  -> server-assigned client_id
-        //   file  -> random u64 generated at startup
-        //   kube  -> deterministic hash of the pod name
-        //
-        // TODO: each router process gets a unique router_id label value, which can
-        // cause unbounded cardinality with short-lived or autoscaled frontends.
-        // Consider using stable replica indices instead of opaque u64 IDs.
-        let instance_id_for_metrics = self
-            .chooser
-            .client()
-            .endpoint
-            .drt()
-            .discovery()
-            .instance_id();
-        let request_metrics = RouterRequestMetrics::get_or_init(instance_id_for_metrics);
+        let request_metrics =
+            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
         if let Some(ref tracker) = request.tracker {
             let (routing_token_ids, _) = request.block_mm_routing_info();
             let isl_blocks = routing_token_ids.len().div_ceil(block_size);

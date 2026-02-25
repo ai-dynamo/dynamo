@@ -219,32 +219,28 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 
 ### Router Metrics
 
-The frontend exposes metrics for monitoring routing decisions and overhead. These metrics are registered whenever DRT discovery (etcd/NATS) is available, regardless of router mode. With `--router-mode kv`, the metrics will be actively populated as requests are routed; with other modes (`round-robin`, `random`, `direct`), they will appear on `/metrics` but remain at zero. Defined in `lib/llm/src/kv_router/metrics.rs`.
+The router exposes metrics for monitoring routing decisions and overhead. Defined in `lib/llm/src/kv_router/metrics.rs`.
 
 For router configuration and tuning, see the [Router Guide](../components/router/router-guide.md).
 
-#### Router Request Metrics (`dynamo_router_*`)
+#### Router Request Metrics (`dynamo_component_router_*`)
 
-Histograms and counters for aggregate request-level statistics. Registered when DRT discovery is available (etcd/NATS). Only populated when `--router-mode kv` is active; otherwise they exist with zero values. Exposed on the frontend port (default 8000) at `/metrics`.
+Histograms and counters for aggregate request-level statistics. Created on the first KV routing decision via `from_component()`, which registers them with the component's Prometheus registry. Exposed on the system status port (default 8081, configurable via `DYN_SYSTEM_PORT`) at `/metrics`. Only populated when `--router-mode kv` is active.
 
-All metrics carry a `router_id` constant label (the frontend's discovery instance ID). Filter in Prometheus with:
-
-```promql
-dynamo_router_requests_total{router_id="12345"}
-```
+All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`).
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dynamo_router_requests_total` | Counter | Total requests processed by the router |
-| `dynamo_router_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
-| `dynamo_router_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
-| `dynamo_router_input_sequence_tokens` | Histogram | Input sequence length (tokens) |
-| `dynamo_router_output_sequence_tokens` | Histogram | Output sequence length (tokens) |
-| `dynamo_router_kv_hit_rate` | Histogram | Predicted KV cache hit rate at routing time (0.0-1.0) |
+| `dynamo_component_router_requests_total` | Counter | Total requests processed by the router |
+| `dynamo_component_router_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
+| `dynamo_component_router_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
+| `dynamo_component_router_input_sequence_tokens` | Histogram | Input sequence length (tokens) |
+| `dynamo_component_router_output_sequence_tokens` | Histogram | Output sequence length (tokens) |
+| `dynamo_component_router_kv_hit_rate` | Histogram | Predicted KV cache hit rate at routing time (0.0-1.0) |
 
 #### Per-Request Routing Overhead (`dynamo_router_overhead_*`)
 
-Histograms (in milliseconds) tracking the time spent in each phase of the routing decision for every request. Created on first routing decision. Same `router_id` label as the request metrics above.
+Histograms (in milliseconds) tracking the time spent in each phase of the routing decision for every request. Registered on the frontend port (default 8000) at `/metrics` with a `router_id` label (the frontend's discovery instance ID).
 
 | Metric | Type | Description |
 |--------|------|-------------|

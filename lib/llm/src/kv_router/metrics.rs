@@ -13,10 +13,18 @@
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
+use dynamo_runtime::component::Component;
+use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
-    frontend_service, labels, name_prefix, routing_overhead,
+    frontend_service, labels, name_prefix, router_request, routing_overhead,
 };
-use prometheus::{HistogramOpts, IntCounter, IntGaugeVec, Opts};
+
+/// Build a router metric name: `"router_" + frontend_service_suffix`.
+fn router_metric(suffix: &str) -> String {
+    format!("{}{}", router_request::METRIC_PREFIX, suffix)
+}
+use dynamo_runtime::traits::DistributedRuntimeProvider;
+use prometheus::{IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
 
@@ -204,13 +212,22 @@ impl RoutingOverheadMetrics {
 }
 
 // ---------------------------------------------------------------------------
-// Router request metrics (dynamo_router_* with router_id label)
+// Router request metrics (dynamo_component_router_* via MetricsHierarchy)
 // ---------------------------------------------------------------------------
 
 /// Aggregate per-request metrics observed at the router level.
-/// Registered via `register()` with `dynamo_router_*` names and `router_id` label.
+/// Component-scoped via `from_component()` to get automatic `dynamo_component_` prefix,
+/// `dynamo_namespace`/`dynamo_component`/`dynamo_endpoint` labels, and registration
+/// with the component's prometheus registry (scrapeable at port 8081).
+///
+/// These metrics MUST be registered through the Component hierarchy (not a standalone
+/// registry). In hierarchical planner deployments, the frontend's router is the global
+/// entry point, but each worker pool has its own local router (e.g. prefill pool,
+/// decode pool). Component-scoped metrics let each local router emit metrics with
+/// distinct `dynamo_component` labels, so pools can be monitored and scaled
+/// independently.
 pub struct RouterRequestMetrics {
-    pub requests_total: IntCounter,
+    pub requests_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
     pub inter_token_latency_seconds: prometheus::Histogram,
     pub input_sequence_tokens: prometheus::Histogram,
@@ -221,83 +238,65 @@ pub struct RouterRequestMetrics {
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
 impl RouterRequestMetrics {
-    fn init(instance_id: u64) -> Arc<Self> {
+    /// Create from a Component, memoized in a static OnceLock.
+    /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
+    /// injects hierarchy labels, and registers with the component's registry.
+    /// Also adds `router_id` (discovery instance_id) to distinguish router instances.
+    pub fn from_component(component: &Component) -> Arc<Self> {
         ROUTER_REQUEST_METRICS
             .get_or_init(|| {
+                let instance_id = component.drt().discovery().instance_id();
                 let router_id = instance_id.to_string();
-                let requests_total = IntCounter::with_opts(
-                    Opts::new(
-                        format!(
-                            "{}_{}",
-                            name_prefix::ROUTER,
-                            frontend_service::REQUESTS_TOTAL
-                        ),
+                let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
+
+                let metrics = component.metrics();
+                let requests_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::REQUESTS_TOTAL),
                         "Total number of requests processed by the router",
+                        extra_labels,
                     )
-                    .const_label(labels::ROUTER_ID, &router_id),
-                )
-                .expect("dynamo_router_requests_total");
-                let time_to_first_token_seconds = prometheus::Histogram::with_opts(
-                    HistogramOpts::new(
-                        format!(
-                            "{}_{}",
-                            name_prefix::ROUTER,
-                            frontend_service::TIME_TO_FIRST_TOKEN_SECONDS
-                        ),
+                    .expect("failed to create router_requests_total");
+                let time_to_first_token_seconds = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
                         "Time to first token observed at the router",
+                        extra_labels,
+                        Some(generate_log_buckets(0.001, 480.0, 18)),
                     )
-                    .const_label(labels::ROUTER_ID, &router_id)
-                    .buckets(generate_log_buckets(0.001, 480.0, 18)),
-                )
-                .expect("dynamo_router_time_to_first_token_seconds");
-                let inter_token_latency_seconds = prometheus::Histogram::with_opts(
-                    HistogramOpts::new(
-                        format!(
-                            "{}_{}",
-                            name_prefix::ROUTER,
-                            frontend_service::INTER_TOKEN_LATENCY_SECONDS
-                        ),
+                    .expect("failed to create router_time_to_first_token_seconds");
+                let inter_token_latency_seconds = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
                         "Average inter-token latency observed at the router",
+                        extra_labels,
+                        Some(generate_log_buckets(0.001, 2.0, 13)),
                     )
-                    .const_label(labels::ROUTER_ID, &router_id)
-                    .buckets(generate_log_buckets(0.001, 2.0, 13)),
-                )
-                .expect("dynamo_router_inter_token_latency_seconds");
-                let input_sequence_tokens = prometheus::Histogram::with_opts(
-                    HistogramOpts::new(
-                        format!(
-                            "{}_{}",
-                            name_prefix::ROUTER,
-                            frontend_service::INPUT_SEQUENCE_TOKENS
-                        ),
+                    .expect("failed to create router_inter_token_latency_seconds");
+                let input_sequence_tokens = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
                         "Input sequence length in tokens observed at the router",
+                        extra_labels,
+                        Some(generate_log_buckets(50.0, 128000.0, 12)),
                     )
-                    .const_label(labels::ROUTER_ID, &router_id)
-                    .buckets(generate_log_buckets(50.0, 128000.0, 12)),
-                )
-                .expect("dynamo_router_input_sequence_tokens");
-                let output_sequence_tokens = prometheus::Histogram::with_opts(
-                    HistogramOpts::new(
-                        format!(
-                            "{}_{}",
-                            name_prefix::ROUTER,
-                            frontend_service::OUTPUT_SEQUENCE_TOKENS
-                        ),
+                    .expect("failed to create router_input_sequence_tokens");
+                let output_sequence_tokens = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
                         "Output sequence length in tokens observed at the router",
+                        extra_labels,
+                        Some(generate_log_buckets(50.0, 32000.0, 10)),
                     )
-                    .const_label(labels::ROUTER_ID, &router_id)
-                    .buckets(generate_log_buckets(50.0, 32000.0, 10)),
-                )
-                .expect("dynamo_router_output_sequence_tokens");
-                let kv_hit_rate = prometheus::Histogram::with_opts(
-                    HistogramOpts::new(
-                        format!("{}_{}", name_prefix::ROUTER, frontend_service::KV_HIT_RATE),
+                    .expect("failed to create router_output_sequence_tokens");
+                let kv_hit_rate = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::KV_HIT_RATE),
                         "Predicted KV cache hit rate at routing time (0.0-1.0)",
+                        extra_labels,
+                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
                     )
-                    .const_label(labels::ROUTER_ID, &router_id)
-                    .buckets(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-                )
-                .expect("dynamo_router_kv_hit_rate");
+                    .expect("failed to create router_kv_hit_rate");
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -308,29 +307,6 @@ impl RouterRequestMetrics {
                 })
             })
             .clone()
-    }
-
-    /// Register router request metrics with the given registry and store for later use.
-    /// Metric names: `dynamo_router_*` with const label `router_id=instance_id`.
-    /// Call once during HTTP service setup when `--router-mode kv` is used.
-    pub fn register(
-        registry: &prometheus::Registry,
-        instance_id: u64,
-    ) -> Result<(), prometheus::Error> {
-        let m = Self::init(instance_id);
-        registry.register(Box::new(m.requests_total.clone()))?;
-        registry.register(Box::new(m.time_to_first_token_seconds.clone()))?;
-        registry.register(Box::new(m.inter_token_latency_seconds.clone()))?;
-        registry.register(Box::new(m.input_sequence_tokens.clone()))?;
-        registry.register(Box::new(m.output_sequence_tokens.clone()))?;
-        registry.register(Box::new(m.kv_hit_rate.clone()))?;
-        Ok(())
-    }
-
-    /// Returns the metrics singleton, lazily initializing with the given `instance_id`
-    /// if `register()` was not called earlier.
-    pub fn get_or_init(instance_id: u64) -> Arc<Self> {
-        Self::init(instance_id)
     }
 }
 
