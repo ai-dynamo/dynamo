@@ -19,7 +19,6 @@ package controller
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -369,7 +368,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Model:     "test-model",
 					Backend:   "vllm",
 					Image:     "test-profiler:latest",
-					AutoApply: false,					Hardware: &nvidiacomv1beta1.HardwareSpec{
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),
@@ -655,7 +654,7 @@ spec:
 			Eventually(func() bool {
 				select {
 				case event := <-recorder.Events:
-					return strings.Contains(event, "SpecChangeRejected") && strings.Contains(event, "immutable")
+					return event == "Warning SpecChangeRejected Cannot modify spec in phase 'Profiling'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
 				default:
 					return false
 				}

@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -78,14 +79,6 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 // Returns an error at admission time if GPU discovery is disabled and no manual hardware config is provided.
 // Also validates consistency of GPU range fields.
 func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error {
-	// Validate min/max GPU range consistency.
-	if hw := v.request.Spec.Hardware; hw != nil &&
-		hw.MinNumGpusPerEngine != nil && hw.MaxNumGpusPerEngine != nil &&
-		*hw.MinNumGpusPerEngine > *hw.MaxNumGpusPerEngine {
-		return fmt.Errorf("invalid GPU range: spec.hardware.minNumGpusPerEngine (%d) > spec.hardware.maxNumGpusPerEngine (%d)",
-			*hw.MinNumGpusPerEngine, *hw.MaxNumGpusPerEngine)
-	}
-
 	// Check if manual hardware config is provided via typed spec.hardware fields.
 	var hasManualHardwareConfig bool
 	if hw := v.request.Spec.Hardware; hw != nil {
@@ -108,7 +101,34 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error 
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeploymentRequest.
 // Returns warnings and error.
 func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(old *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (admission.Warnings, error) {
-	// TODO: Add update validation logic for DynamoGraphDeploymentRequest
-	// Placeholder for future immutability checks
+	// Reject spec changes when the resource is in a non-editable lifecycle phase.
+	// During Profiling, Deploying, or Deployed the controller is actively reconciling
+	// the resource and spec mutations would conflict with in-flight operations.
+	phase := old.Status.Phase
+	immutablePhases := map[nvidiacomv1beta1.DGDRPhase]bool{
+		nvidiacomv1beta1.DGDRPhaseProfiling: true,
+		nvidiacomv1beta1.DGDRPhaseDeploying: true,
+		nvidiacomv1beta1.DGDRPhaseDeployed:  true,
+	}
+
+	if immutablePhases[phase] {
+		// Compare specs — if they differ, reject the update.
+		oldSpec := old.Spec
+		newSpec := v.request.Spec
+		if !specEqual(oldSpec, newSpec) {
+			return nil, fmt.Errorf("spec updates are forbidden while the resource is in phase %q; delete and recreate the resource to change its spec", phase)
+		}
+	}
+
 	return nil, nil
+}
+
+// specEqual performs a JSON-round-trip comparison of two DynamoGraphDeploymentRequestSpec values.
+func specEqual(a, b nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec) bool {
+	aj, err1 := json.Marshal(a)
+	bj, err2 := json.Marshal(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return string(aj) == string(bj)
 }
