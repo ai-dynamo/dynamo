@@ -11,7 +11,8 @@ export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/
 export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/encode.yaml"}
 export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0"}
 export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"1"}
-export ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES:-"2"}
+export ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES:-"0"}
+export ENCODE_CUDA_VISIBLE_DEVICES_2=${ENCODE_CUDA_VISIBLE_DEVICES_2:-"1"}
 export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.tensorrt_llm_encode.generate"}
 export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
@@ -32,8 +33,21 @@ trap cleanup EXIT INT TERM
 python3 -m dynamo.frontend --http-port 8000 &
 DYNAMO_PID=$!
 
+
 # run encode worker
 CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$ENCODE_ENGINE_ARGS" \
+  --modality "$MODALITY" \
+  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
+  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
+  --disaggregation-mode encode &
+ENCODE_PID=$!
+
+
+# run encode worker
+CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES_2 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$ENCODE_ENGINE_ARGS" \
