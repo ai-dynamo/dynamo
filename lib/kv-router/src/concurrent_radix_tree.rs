@@ -292,6 +292,13 @@ impl ConcurrentRadixTree {
             KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id),
             KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
+                // Ensure the worker is tracked in lookup before clearing,
+                // matching RadixTree behavior where `lookup.entry(worker).or_default()`
+                // fires before the match arm.
+                lookup.entry(worker).or_default();
+                self.tree_sizes
+                    .entry(worker)
+                    .or_insert_with(|| AtomicUsize::new(0));
                 self.clear_all_blocks(lookup, worker.worker_id);
                 Ok(())
             }
@@ -486,6 +493,15 @@ impl ConcurrentRadixTree {
 
                 if keep_worker {
                     lookup.insert(worker, FxHashMap::default());
+                    // Reset tree size to 0 but keep the entry so get_workers()
+                    // still returns this worker (matches RadixTree::clear_all_blocks behavior).
+                    if let Some(size) = self.tree_sizes.get(&worker) {
+                        size.store(0, Ordering::Relaxed);
+                    }
+                } else {
+                    // Fully remove the worker from tree_sizes so get_workers()
+                    // no longer returns it (matches RadixTree::remove_worker behavior).
+                    self.tree_sizes.remove(&worker);
                 }
             }
         }
@@ -503,7 +519,14 @@ impl ConcurrentRadixTree {
     /// Get all worker IDs currently tracked in the radix tree.
     /// Returns unique worker_ids (ignoring dp_rank differences).
     pub fn get_workers(&self) -> Vec<WorkerId> {
-        unimplemented!();
+        let mut worker_ids: Vec<WorkerId> = self
+            .tree_sizes
+            .iter()
+            .map(|entry| entry.key().worker_id)
+            .collect();
+        worker_ids.sort_unstable();
+        worker_ids.dedup();
+        worker_ids
     }
 
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
