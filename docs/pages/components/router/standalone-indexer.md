@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Standalone KV Indexer
-subtitle: Run the KV cache indexer as an independent service for querying block state
+subtitle: Run the KV cache indexer as an independent HTTP service for querying block state
 ---
 
 # Standalone KV Indexer
 
 ## Overview
 
-The standalone KV indexer runs the KV cache radix tree as an independent service, separate from the router. It subscribes to KV events from workers, maintains a radix tree of cached blocks, and exposes a query endpoint (`kv_indexer_query`) that external clients can use to inspect or query KV cache state.
+The standalone KV indexer (`dynamo-kv-indexer`) is a lightweight HTTP binary that subscribes to ZMQ KV event streams from workers, maintains a radix tree of cached blocks, and exposes HTTP endpoints for scoring, querying, and managing workers.
 
 This is distinct from the [Standalone Router](../../../../components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
 
@@ -20,62 +20,100 @@ This is distinct from the [Standalone Router](../../../../components/src/dynamo/
 - **Custom routing**: Build external routing logic that queries the indexer for overlap scores and makes its own worker selection decisions.
 - **Monitoring**: Observe KV cache distribution across workers without running a full router.
 
-## API
+## Building
 
-### Python
+The binary is a feature-gated target in the `dynamo-kv-router` crate:
 
-```python
-from dynamo._internal import start_kv_block_indexer
-from dynamo.llm import KvRouterConfig
-
-# Start the standalone indexer on a component's endpoint
-await start_kv_block_indexer(endpoint, block_size, kv_router_config)
+```bash
+cargo build -p dynamo-kv-router --features indexer-bin --bin dynamo-kv-indexer
 ```
 
-**Parameters:**
+## CLI
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `endpoint` | `Endpoint` | The Dynamo runtime endpoint on whose component the indexer will run |
-| `block_size` | `int` | KV cache block size (must match workers) |
-| `kv_router_config` | `KvRouterConfig` | Router configuration (controls event threading, TTL, etc.) |
-
-### Query Endpoint
-
-Once started, the indexer exposes a `kv_indexer_query` endpoint on the same component. Clients can send one of three request types:
-
-**`FindMatchesTokens`** — Given raw tokens, compute block hashes and return per-worker overlap scores:
-
-```python
-query_client = await query_endpoint.client()
-stream = await query_client.generate(
-    {"FindMatchesTokens": {"tokens": [1, 2, 3, ...], "block_mm_infos": None}},
-    annotated=False,
-)
-response = await stream.__anext__()
-# response == {"Matches": {"scores": {(worker_id, dp_rank): count, ...}, "frequencies": [...]}}
+```bash
+dynamo-kv-indexer --block-size 16 --port 8090 [--threads 1] [--workers "1=tcp://host:5557,2=tcp://host:5558"]
 ```
 
-**`FindMatchesHashed`** — Same as above but with pre-computed block hashes:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--block-size` | (required) | KV cache block size (must match the engine's block size) |
+| `--port` | `8090` | HTTP server listen port |
+| `--threads` | `1` | Number of indexer threads (1 = single-threaded, >1 = thread pool) |
+| `--workers` | (none) | Initial workers as `worker_id=zmq_address,...` pairs |
 
-```python
-stream = await query_client.generate(
-    {"FindMatchesHashed": {"block_hashes": [hash1, hash2, ...]}},
-    annotated=False,
-)
+## HTTP API
+
+### `POST /workers` — Register a worker
+
+Register a worker with its ZMQ addresses (one per dp_rank for data-parallel workers):
+
+```bash
+curl -X POST http://localhost:8090/workers \
+  -H 'Content-Type: application/json' \
+  -d '{"worker_id": 1, "zmq_addresses": {"0": "tcp://127.0.0.1:5557", "1": "tcp://127.0.0.1:5558"}}'
 ```
 
-**`DumpTree`** — Dump the full radix tree state as a list of router events:
+The indexer spawns a ZMQ SUB listener for each address and begins consuming KV events.
 
-```python
-stream = await query_client.generate("DumpTree", annotated=False)
-response = await stream.__anext__()
-events = response["TreeDump"]  # List of RouterEvent objects
+### `GET /workers` — List registered workers
+
+```bash
+curl http://localhost:8090/workers
+```
+
+Returns:
+```json
+[{"worker_id": 1, "zmq_addresses": {"0": "tcp://127.0.0.1:5557", "1": "tcp://127.0.0.1:5558"}}]
+```
+
+### `DELETE /workers/{worker_id}` — Deregister a worker
+
+```bash
+curl -X DELETE http://localhost:8090/workers/1
+```
+
+Cancels ZMQ listeners and removes the worker's blocks from the radix tree.
+
+### `POST /score` — Score overlap for tokens
+
+Given raw tokens, compute block hashes and return per-worker overlap scores:
+
+```bash
+curl -X POST http://localhost:8090/score \
+  -H 'Content-Type: application/json' \
+  -d '{"tokens": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]}'
+```
+
+Returns:
+```json
+{
+  "scores": {"1:0": 2, "2:1": 0},
+  "frequencies": [1, 1],
+  "tree_sizes": {"1:0": 5, "2:1": 3}
+}
+```
+
+Score keys are `worker_id:dp_rank`. Higher score means more cached prefix blocks on that worker.
+
+### `POST /score_hashed` — Score overlap for pre-computed hashes
+
+```bash
+curl -X POST http://localhost:8090/score_hashed \
+  -H 'Content-Type: application/json' \
+  -d '{"block_hashes": [123456, 789012]}'
+```
+
+### `GET /dump` — Dump all radix tree events
+
+Returns the full radix tree state as a JSON array of `RouterEvent` objects:
+
+```bash
+curl http://localhost:8090/dump
 ```
 
 ## Limitations
 
-- **JetStream not supported**: The standalone indexer does not support `durable_kv_events` (JetStream mode). It relies on NATS Core or ZMQ event plane with local indexer mode. Attempting to start with `durable_kv_events=True` will raise an error.
+- **ZMQ only**: Workers must publish KV events via ZMQ PUB sockets. The standalone indexer does not subscribe to NATS event streams.
 - **No routing logic**: The indexer only maintains the radix tree and answers queries. It does not track active blocks, manage request lifecycle, or perform worker selection.
 
 ## Architecture
@@ -83,43 +121,35 @@ events = response["TreeDump"]  # List of RouterEvent objects
 ```mermaid
 graph TD
     subgraph Workers
-        W1[Worker 1<br/>KvEventPublisher]
-        W2[Worker 2<br/>KvEventPublisher]
+        W1[Worker 1<br/>ZMQ PUB]
+        W2[Worker 2<br/>ZMQ PUB]
     end
 
-    subgraph "Event Plane (NATS Core / ZMQ)"
-        EP[KV Events]
-    end
-
-    subgraph "Standalone Indexer"
-        SUB[Subscriber]
+    subgraph "Standalone Indexer (HTTP)"
+        REG[Worker Registry]
+        ZMQ[ZMQ SUB Listeners]
         IDX[Indexer / Radix Tree]
-        QE[kv_indexer_query endpoint]
+        HTTP[HTTP API<br/>/score /dump /workers]
     end
 
     CLIENT[External Client]
 
-    W1 -->|publish events| EP
-    W2 -->|publish events| EP
-    EP -->|subscribe| SUB
-    SUB -->|apply events| IDX
-    CLIENT -->|FindMatches / DumpTree| QE
-    QE -->|query| IDX
+    W1 -->|ZMQ events| ZMQ
+    W2 -->|ZMQ events| ZMQ
+    CLIENT -->|POST /workers| REG
+    REG -->|spawn listeners| ZMQ
+    ZMQ -->|apply events| IDX
+    CLIENT -->|POST /score, GET /dump| HTTP
+    HTTP -->|query| IDX
 
-    style EP fill:#e1f5fe,stroke:#333,color:#333
     style W1 fill:#f3e5f5,stroke:#333,color:#333
     style W2 fill:#f3e5f5,stroke:#333,color:#333
     style IDX fill:#2e8b57,stroke:#333,color:#fff
-    style SUB fill:#2e8b57,stroke:#333,color:#fff
-    style QE fill:#2e8b57,stroke:#333,color:#fff
+    style ZMQ fill:#2e8b57,stroke:#333,color:#fff
+    style REG fill:#2e8b57,stroke:#333,color:#fff
+    style HTTP fill:#2e8b57,stroke:#333,color:#fff
     style CLIENT fill:#fff3e0,stroke:#333,color:#333
 ```
-
-The standalone indexer internally:
-
-1. Creates an `Indexer` instance with the given config and block size.
-2. Starts a subscriber that listens for KV events from workers via the event plane. On worker discovery, it queries the worker's local indexer to bootstrap state.
-3. Registers a `kv_indexer_query` endpoint that accepts `FindMatchesHashed`, `FindMatchesTokens`, and `DumpTree` requests.
 
 ## See Also
 
