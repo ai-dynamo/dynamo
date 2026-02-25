@@ -34,7 +34,7 @@ The Dynamo Operator watches for DGDRs and automatically:
 |---------|-------------|------------|
 | vLLM | ✅ | 🚧 |
 | SGLang | ✅ | ✅ |
-| TensorRT-LLM | ✅ | 🚧 |
+| TensorRT-LLM | ✅ | ✅ |
 
 The profiler sweeps over the following parallelization mappings for prefill and decode:
 

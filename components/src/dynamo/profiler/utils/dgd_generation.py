@@ -207,18 +207,16 @@ def generate_prefill_decode_services_config_preview(
         best_decode_mapping=best_decode_mapping,
         num_gpus_per_node=num_gpus_per_node,
     )
-    prefill_service_name = _find_service_name_for_subcomponent(
-        config, SubComponentType.PREFILL
-    )
-    decode_service_name = _find_service_name_for_subcomponent(
-        config, SubComponentType.DECODE
-    )
     config_dict = config.model_dump(exclude_unset=False)
-    services = {
-        prefill_service_name: config_dict["spec"]["services"][prefill_service_name],
-        decode_service_name: config_dict["spec"]["services"][decode_service_name],
+    config_modifier.normalize_output_service_names(config_dict)
+    # Service names may have been renamed; select workers by subComponentType.
+    services = config_dict["spec"]["services"]
+    worker_sub_types = (SubComponentType.PREFILL, SubComponentType.DECODE)
+    return {
+        svc_name: svc_val
+        for svc_name, svc_val in services.items()
+        if svc_val.get("subComponentType") in worker_sub_types
     }
-    return services
 
 
 def generate_dgd_config_with_planner(
@@ -272,37 +270,32 @@ def generate_dgd_config_with_planner(
     # and planner-specific args (with planner_ prefix)
     planner_args = build_planner_args_from_namespace(args, prefix="planner_")
 
-    # Override profiling-specific arguments with results from profiling
-    # Remove and re-add to ensure correct values from profiling context
-    planner_args = [
-        arg
-        for arg in planner_args
-        if not any(
-            arg.startswith(f"--{key}=")
-            for key in [
-                "namespace",
-                "prefill-engine-num-gpu",
-                "decode-engine-num-gpu",
-                "profile-results-dir",
-            ]
-        )
-    ]
+    # Merge profiling-determined values into the --config JSON.
+    # build_planner_args_from_namespace returns ["--config", "<json>"], so we
+    # parse the JSON once, apply all mutations, and re-serialize at the end.
+    config_idx = planner_args.index("--config")
+    planner_config_dict = json.loads(planner_args[config_idx + 1])
 
-    # Add arguments determined by profiling results
-    cm_mount_path = f"{get_workspace_dir()}/profiling_results"
     if best_prefill_mapping is not None:
-        planner_args.append(
-            f"--prefill-engine-num-gpu={best_prefill_mapping.get_num_gpus()}"
-        )
+        planner_config_dict[
+            "prefill_engine_num_gpu"
+        ] = best_prefill_mapping.get_num_gpus()
     if best_decode_mapping is not None:
-        planner_args.append(
-            f"--decode-engine-num-gpu={best_decode_mapping.get_num_gpus()}"
-        )
+        planner_config_dict[
+            "decode_engine_num_gpu"
+        ] = best_decode_mapping.get_num_gpus()
+
+    cm_mount_path = f"{get_workspace_dir()}/profiling_results"
 
     # Work with plain dicts for PodSpec/Container extras (e.g. volumes, volumeMounts)
     # because those fields are stored as "extra" and aren't exposed as pydantic attributes.
     planner_dict = planner_config.model_dump(exclude_unset=False)
     config_dict = config.model_dump(exclude_unset=False)
+
+    # Rename service names for deployability: Grove's 45-char limit for multinode services
+    # is len(DGD) + 2*len(service) + 4 <= 45. Long backend-specific names (e.g.,
+    # TRTLLMDecodeWorker, 18 chars) leave only 5 chars for the DGD name.
+    config_modifier.normalize_output_service_names(config_dict)
 
     config_map_obj: Optional[dict] = None
     prefill_json = None
@@ -351,7 +344,7 @@ def generate_dgd_config_with_planner(
 
     if prefill_json is not None and decode_json is not None:
         # Only override planner profile directory when we actually have data to mount.
-        planner_args.append(f"--profile-results-dir={cm_mount_path}")
+        planner_config_dict["profile_results_dir"] = cm_mount_path
 
         config_map_obj = {
             "apiVersion": "v1",
@@ -384,6 +377,9 @@ def generate_dgd_config_with_planner(
                 "readOnly": True,
             }
         )
+
+    # Serialize the --config JSON once after all mutations
+    planner_args[config_idx + 1] = json.dumps(planner_config_dict)
 
     # Attach planner args (always)
     mc_dict = planner_dict.setdefault("extraPodSpec", {}).setdefault(
@@ -508,17 +504,19 @@ def _generate_mocker_config_with_planner(
     # Add planner service (reuse the same planner config but with mocker backend)
     mocker_planner_dict = copy.deepcopy(planner_dict)
 
-    # Planner args use --key=value format, so we need to find and replace
+    # Planner args are ["--config", "<json>"] — parse the JSON, swap backend, re-serialise
     planner_main_container = mocker_planner_dict.get("extraPodSpec", {}).get(
         "mainContainer", {}
     )
     planner_args = planner_main_container.get("args", [])
-    updated_planner_args = []
-    for arg in planner_args:
-        if arg.startswith("--backend="):
-            updated_planner_args.append("--backend=mocker")
-        else:
-            updated_planner_args.append(arg)
+    updated_planner_args = list(planner_args)
+    try:
+        config_idx = updated_planner_args.index("--config")
+        config_dict = json.loads(updated_planner_args[config_idx + 1])
+        config_dict["backend"] = "mocker"
+        updated_planner_args[config_idx + 1] = json.dumps(config_dict)
+    except (ValueError, IndexError, json.JSONDecodeError):
+        pass
     planner_main_container["args"] = updated_planner_args
 
     mocker_config["spec"]["services"]["Planner"] = mocker_planner_dict
