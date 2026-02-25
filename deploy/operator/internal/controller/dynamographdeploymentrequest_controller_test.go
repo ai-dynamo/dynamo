@@ -368,7 +368,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Model:     "test-model",
 					Backend:   "vllm",
 					Image:     "test-profiler:latest",
-					AutoApply: false,					Hardware: &nvidiacomv1beta1.HardwareSpec{
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
 						VRAMMB:         ptr.To(81920.0),

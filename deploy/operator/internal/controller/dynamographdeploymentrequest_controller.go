@@ -82,7 +82,7 @@ const (
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
 
 	// Sidecar image
-	SidecarImage = "bitnami/kubectl:latest"
+	SidecarImage = "bitnami/kubectl:1.31"
 
 	// Volume names
 	VolumeNameProfilingOutput = "profiling-output"
@@ -1097,7 +1097,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				podSpec.NodeSelector = overridePodSpec.NodeSelector
 			}
 			if len(overridePodSpec.ImagePullSecrets) > 0 {
-				podSpec.ImagePullSecrets = overridePodSpec.ImagePullSecrets
+				// Merge override secrets with existing ones (deduplicate by name)
+				seen := make(map[string]bool)
+				for _, s := range podSpec.ImagePullSecrets {
+					seen[s.Name] = true
+				}
+				for _, s := range overridePodSpec.ImagePullSecrets {
+					if !seen[s.Name] {
+						podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, s)
+						seen[s.Name] = true
+					}
+				}
 			}
 			if overridePodSpec.ServiceAccountName != "" {
 				podSpec.ServiceAccountName = overridePodSpec.ServiceAccountName
@@ -1534,7 +1544,9 @@ func setSucceededCondition(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, 
 }
 
 // updatePhaseAndRequeue updates the DGDR phase and requeues
-func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseAndRequeue(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, phase nvidiacomv1beta1.DGDRPhase, _ string) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseAndRequeue(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, phase nvidiacomv1beta1.DGDRPhase, message string) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("Updating DGDR phase", "name", dgdr.Name, "phase", phase, "message", message)
 	dgdr.Status.Phase = phase
 	setSucceededCondition(dgdr, phase)
 	if err := r.Status().Update(ctx, dgdr); err != nil {
