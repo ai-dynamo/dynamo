@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_coverage:
+        description: 'Enable test coverage collection and reporting'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -409,6 +414,7 @@ jobs:
           platform_arch: ${{ matrix.arch.arch }}
           cpu_limit: '8'
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
@@ -543,6 +549,7 @@ jobs:
           test_type: integration
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
@@ -679,6 +686,7 @@ jobs:
           test_type: e2e-single-gpu
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
@@ -815,6 +823,7 @@ jobs:
           test_type: e2e-multi-gpu
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: 'true'
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   ############################## FAULT TOLERANCE TESTS ##############################
   fault-tolerance-tests:
@@ -997,6 +1006,274 @@ jobs:
           echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
           kubectl delete namespace $NAMESPACE || true
           echo "Namespace $NAMESPACE completed."
+
+  ############################## RUST TESTS ###################################
+  rust-tests:
+    name: rust-${{ matrix.dir == '.' && 'root' || matrix.dir }}-coverage
+    runs-on:
+      group: Fastchecker
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm']
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      with:
+        lfs: true
+    - name: Set up system dependencies
+      run: |
+        # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
+        PB_REL="https://github.com/protocolbuffers/protobuf/releases"
+        PROTOC_VER="30.2"
+        PROTOC_ZIP="protoc-${PROTOC_VER}-linux-x86_64.zip"
+        PROTOC_SHA256="327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f"
+        curl -fsSLO "$PB_REL/download/v${PROTOC_VER}/${PROTOC_ZIP}"
+        echo "${PROTOC_SHA256}  ${PROTOC_ZIP}" | sha256sum -c -
+        unzip "${PROTOC_ZIP}" -d $HOME/.local
+        rm "${PROTOC_ZIP}"
+        export PATH="$PATH:$HOME/.local/bin"
+        protoc --version
+    - name: Cache cargo artifacts
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+    - name: Set up Rust Toolchain Components
+      run: rustup component add llvm-tools-preview
+    - name: Install cargo-llvm-cov
+      run: cargo-llvm-cov --version 2>/dev/null || cargo install cargo-llvm-cov --locked
+    # Have an explicit step to build tests first to separate time spent on build vs execution.
+    - name: Compile Tests
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked --no-run
+    - name: Run Unit Tests with Coverage
+      working-directory: ${{ matrix.dir }}
+      # NOTE: --all-targets doesn't run doc tests.
+      # cargo llvm-cov is a drop-in for cargo test; --no-report defers output
+      # so we can generate multiple formats without re-running the tests.
+      run: |
+        cargo llvm-cov --locked --all-targets --no-report
+        cargo llvm-cov report --output-path coverage-rust.txt
+        cargo llvm-cov report --lcov --output-path coverage-rust.lcov
+        echo "Coverage summary:"
+        grep "^TOTAL" coverage-rust.txt || tail -3 coverage-rust.txt
+        SAFE_DIR=$(echo "${{ matrix.dir }}" | sed 's|^\.$|root|' | tr '/' '-')
+        echo "RUST_COV_ARTIFACT_NAME=coverage-rust-${SAFE_DIR}-${{ github.run_id }}" >> $GITHUB_ENV
+    - name: Upload Rust Coverage Data
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ${{ env.RUST_COV_ARTIFACT_NAME }}
+        path: |
+          ${{ matrix.dir }}/coverage-rust.txt
+          ${{ matrix.dir }}/coverage-rust.lcov
+        retention-days: 7
+
+  ############################## COVERAGE REPORT ##############################
+  coverage-report:
+    name: Generate Coverage Report
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, rust-tests]
+    if: inputs.enable_coverage && always()
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Coverage Tools
+        run: |
+          python -m pip install "coverage[toml]==7.13.1"
+          python -m coverage --version
+          echo "✅ Coverage tools installed"
+
+      - name: Download All Python Coverage Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-python-*
+          path: coverage-artifacts/
+          merge-multiple: false
+
+      - name: Download All Rust Coverage Artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: coverage-rust-*
+          path: coverage-rust-artifacts/
+          merge-multiple: false
+
+      - name: List Downloaded Artifacts
+        run: |
+          echo "📦 Downloaded coverage artifacts:"
+          echo "==== Directory structure (including hidden files) ===="
+          ls -Ra coverage-artifacts/
+
+          echo ""
+          echo "==== Coverage files found ===="
+          find coverage-artifacts/ -type f \( -name "*.xml" -o -name ".coverage*" \) | sort
+          echo ""
+          echo "==== Specifically looking for .coverage files ===="
+          find coverage-artifacts/ -name ".coverage" -type f
+          echo ""
+
+      - name: Merge All Coverage Data
+        run: |
+          set -x
+          echo "📊 Merging all test coverage..."
+
+          # Expand $GITHUB_WORKSPACE in the config
+          sed -i "s|\$GITHUB_WORKSPACE|${GITHUB_WORKSPACE}|g" .coveragerc
+
+          echo "Updated .coveragerc with path remapping:"
+          cat .coveragerc
+
+          # Find all .coverage files and copy them with unique names
+          mkdir -p coverage-combined
+          find coverage-artifacts/ -name ".coverage*" 2>/dev/null | while read -r file; do
+            unique_name=$(echo "$file" | tr '/' '_' | sed 's/coverage-artifacts_//')
+            cp "$file" "coverage-combined/.coverage.${unique_name}"
+            echo "Copied: $file -> coverage-combined/.coverage.${unique_name}"
+          done
+
+          # Check if we have any coverage files
+          if ls coverage-combined/.coverage* 1> /dev/null 2>&1; then
+            echo "✅ Found coverage files to merge"
+            echo "Files to merge:"
+            ls -lh coverage-combined/
+
+            # Combine all coverage data from the workspace root so that the
+            # relative canonical path "components/src/dynamo" in .coveragerc
+            # resolves to $GITHUB_WORKSPACE/components/src/dynamo (where the
+            # source actually lives) rather than to the non-existent
+            # coverage-combined/components/src/dynamo subdirectory.
+            echo "Running coverage combine with path remapping..."
+            set +e  # Don't exit on error
+            COVERAGE_RCFILE=.coveragerc coverage combine --keep coverage-combined/.coverage* 2>&1 | tee combine.log
+            set -e
+
+            if [ -f .coverage ]; then
+              echo "✅ Combined .coverage file created"
+
+              # Generate reports (continue even if some fail)
+              echo "📊 Generating coverage reports..."
+              set +e
+              COVERAGE_RCFILE=.coveragerc coverage report --show-missing --data-file=.coverage 2>&1 | tee coverage-report.txt
+              TOTAL_COVERAGE=$(awk '/^TOTAL/ {print $NF}' coverage-report.txt | tail -1)
+              echo "TOTAL_COVERAGE=${TOTAL_COVERAGE:-0%}" >> $GITHUB_ENV
+              COVERAGE_RCFILE=.coveragerc coverage html --data-file=.coverage -d coverage-html/ 2>&1 || echo "HTML generation failed"
+              COVERAGE_RCFILE=.coveragerc coverage xml --data-file=.coverage -o coverage-merged.xml 2>&1 || echo "XML generation failed"
+              set -e
+
+            else
+              echo "❌ Failed to create combined .coverage file"
+              echo "No coverage data available" > coverage-report.txt
+              echo "TOTAL_COVERAGE=0%" >> $GITHUB_ENV
+            fi
+          else
+            echo "⚠️  No coverage data found"
+            echo "No coverage data available" > coverage-report.txt
+            echo "TOTAL_COVERAGE=0%" >> $GITHUB_ENV
+          fi
+
+
+      - name: Process Rust Coverage
+        run: |
+          RUST_TOTAL_COVERAGE="N/A"
+          echo "No Rust coverage data available yet." > coverage-rust-report.txt
+
+          if find coverage-rust-artifacts/ -name "coverage-rust.txt" -type f 2>/dev/null | grep -q .; then
+            echo "📊 Processing Rust coverage reports..."
+            # Concatenate full per-file coverage from every workspace dir
+            > coverage-rust-report.txt
+            find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | while read -r f; do
+              DIR_NAME=$(basename $(dirname "$f"))
+              echo "=== ${DIR_NAME} ===" >> coverage-rust-report.txt
+              cat "$f" >> coverage-rust-report.txt
+              echo "" >> coverage-rust-report.txt
+            done
+
+            # Extract line coverage % (3rd percentage on TOTAL line: Region%, Func%, Line%, Branch%)
+            FIRST=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | head -1)
+            RUST_TOTAL_COVERAGE=$(grep "^TOTAL" "$FIRST" | grep -oE '[0-9]+\.[0-9]+%' | sed -n '3p' || true)
+            RUST_TOTAL_COVERAGE="${RUST_TOTAL_COVERAGE:-N/A}"
+            echo "Rust line coverage: ${RUST_TOTAL_COVERAGE}"
+          else
+            echo "ℹ️  No Rust coverage artifacts found"
+          fi
+
+          echo "RUST_TOTAL_COVERAGE=${RUST_TOTAL_COVERAGE}" >> $GITHUB_ENV
+
+      - name: Create Coverage Summary
+        run: |
+          DATE=$(date +"%Y-%m-%d %H:%M:%S UTC")
+          cat > coverage-summary.md << EOF
+          # 📊 Test Coverage Report
+
+          **Date:** ${DATE}
+          **Run ID:** ${{ github.run_id }}
+          **Workflow:** ${{ github.workflow }}
+
+          | Language | Total Coverage |
+          |----------|---------------|
+          | Python   | ${TOTAL_COVERAGE} |
+          | Rust     | ${RUST_TOTAL_COVERAGE} |
+
+          ---
+
+          ## Python Coverage Details
+
+          \`\`\`
+          $(cat coverage-report.txt 2>/dev/null || echo "No Python coverage data available")
+          \`\`\`
+
+          ---
+
+          ## Rust Coverage Details
+
+          \`\`\`
+          $(cat coverage-rust-report.txt 2>/dev/null || echo "No Rust coverage data available")
+          \`\`\`
+
+          ---
+
+          ## 📁 Artifacts
+          - Full HTML Report: Download \`coverage-reports-${{ github.run_id }}\` artifact
+          - Python Coverage XML: \`coverage-merged.xml\`
+          - Rust Coverage LCov: \`coverage-rust.lcov\` (per workspace dir)
+
+          EOF
+
+          echo "📄 Coverage summary generated"
+          cat coverage-summary.md
+
+      - name: Post to Workflow Summary
+        run: cat coverage-summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Coverage Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-reports-${{ github.run_id }}
+          path: |
+            coverage-html/
+            coverage-merged.xml
+            coverage-report.txt
+            coverage-rust-report.txt
+            coverage-rust-artifacts/
+            coverage-summary.md
+            .coverage
+          retention-days: 30
 
   ############################## RESULTS SUMMARY ##############################
   results-summary:

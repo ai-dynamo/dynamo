@@ -97,7 +97,9 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-
     - name: Set up Rust Toolchain Components
-      run: rustup component add rustfmt
+      run: rustup component add rustfmt llvm-tools-preview
+    - name: Install cargo-llvm-cov
+      run: cargo-llvm-cov --version 2>/dev/null || cargo install cargo-llvm-cov --locked
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
@@ -113,10 +115,28 @@ jobs:
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
-    - name: Run Unit Tests
+    - name: Run Unit Tests with Coverage
       working-directory: ${{ matrix.dir }}
-      # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets
+      # NOTE: --all-targets doesn't run doc tests.
+      # cargo llvm-cov is a drop-in for cargo test; --no-report defers output
+      # so we can generate multiple formats without re-running the tests.
+      run: |
+        cargo llvm-cov --locked --all-targets --no-report
+        cargo llvm-cov report --output-path coverage-rust.txt
+        cargo llvm-cov report --lcov --output-path coverage-rust.lcov
+        echo "Coverage summary:"
+        grep "^TOTAL" coverage-rust.txt || tail -3 coverage-rust.txt
+        SAFE_DIR=$(echo "${{ matrix.dir }}" | sed 's|^\.$|root|' | tr '/' '-')
+        echo "RUST_COV_ARTIFACT_NAME=coverage-rust-${SAFE_DIR}-${{ github.run_id }}" >> $GITHUB_ENV
+    - name: Upload Rust Coverage Data
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ${{ env.RUST_COV_ARTIFACT_NAME }}
+        path: |
+          ${{ matrix.dir }}/coverage-rust.txt
+          ${{ matrix.dir }}/coverage-rust.lcov
+        retention-days: 7
 
   rust-clippy:
     needs: changed-files
