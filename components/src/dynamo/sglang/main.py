@@ -41,7 +41,9 @@ async def worker():
         config.server_args.load_format = setup_gms(config.server_args)
 
     # Checkpoint mode: engine must be created BEFORE runtime (no NATS/etcd during CRIU)
-    should_exit, pre_created_engine = await handle_checkpoint_mode(config.server_args)
+    should_exit, checkpoint_restore_engine = await handle_checkpoint_mode(
+        config.server_args
+    )
     if should_exit:
         return
 
@@ -127,7 +129,7 @@ async def worker():
             shutdown_event,
             shutdown_endpoints,
             run_deferred_handlers,
-            pre_created_engine=pre_created_engine,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
     else:
         await init_prefill(
@@ -136,7 +138,7 @@ async def worker():
             shutdown_event,
             shutdown_endpoints,
             run_deferred_handlers,
-            pre_created_engine=pre_created_engine,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
 
 

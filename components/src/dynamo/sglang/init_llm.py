@@ -61,7 +61,7 @@ async def init_decode(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-    pre_created_engine: Optional[sgl.Engine] = None,
+    checkpoint_restore_engine: Optional[sgl.Engine] = None,
 ):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -69,8 +69,8 @@ async def init_decode(
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
     # Use pre-created engine if provided (checkpoint/restore mode)
-    if pre_created_engine is not None:
-        engine = pre_created_engine
+    if checkpoint_restore_engine is not None:
+        engine = checkpoint_restore_engine
         load_time = 0.0
     else:
         start_time = time.time()
@@ -151,7 +151,7 @@ async def init_prefill(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-    pre_created_engine: Optional[sgl.Engine] = None,
+    checkpoint_restore_engine: Optional[sgl.Engine] = None,
 ):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -159,8 +159,8 @@ async def init_prefill(
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
     # Use pre-created engine if provided (checkpoint/restore mode)
-    if pre_created_engine is not None:
-        engine = pre_created_engine
+    if checkpoint_restore_engine is not None:
+        engine = checkpoint_restore_engine
     else:
         engine = sgl.Engine(server_args=server_args)
 
