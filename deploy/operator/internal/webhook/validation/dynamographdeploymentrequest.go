@@ -76,16 +76,7 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 
 // validateGPUHardwareInfo ensures GPU hardware information will be available for profiling.
 // Returns an error at admission time if GPU discovery is disabled and no manual hardware config is provided.
-// Also validates consistency of GPU range fields.
 func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error {
-	// Validate min/max GPU range consistency.
-	if hw := v.request.Spec.Hardware; hw != nil &&
-		hw.MinNumGpusPerEngine != nil && hw.MaxNumGpusPerEngine != nil &&
-		*hw.MinNumGpusPerEngine > *hw.MaxNumGpusPerEngine {
-		return fmt.Errorf("invalid GPU range: spec.hardware.minNumGpusPerEngine (%d) > spec.hardware.maxNumGpusPerEngine (%d)",
-			*hw.MinNumGpusPerEngine, *hw.MaxNumGpusPerEngine)
-	}
-
 	// Check if manual hardware config is provided via typed spec.hardware fields.
 	var hasManualHardwareConfig bool
 	if hw := v.request.Spec.Hardware; hw != nil {
