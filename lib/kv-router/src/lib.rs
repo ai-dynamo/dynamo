@@ -16,6 +16,7 @@ pub mod naive_indexers;
 pub mod nested_map;
 pub mod protocols;
 pub mod radix_tree;
+pub mod sequence;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -31,3 +32,4 @@ pub use protocols::{
     compute_block_hash_for_seq,
 };
 pub use radix_tree::RadixTree;
+pub use sequence::{ActiveSequences, RequestId};
