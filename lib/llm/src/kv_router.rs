@@ -30,6 +30,7 @@ pub use dynamo_kv_router::protocols;
 
 pub mod config;
 pub mod indexer_standalone;
+mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
@@ -413,12 +414,14 @@ impl KvRouter {
             .await?;
         let total_elapsed = start.elapsed();
 
-        metrics::ROUTING_OVERHEAD_METRICS.observe(
-            hash_elapsed,
-            find_matches_elapsed,
-            seq_hash_elapsed,
-            total_elapsed,
-        );
+        if let Some(m) = metrics::RoutingOverheadMetrics::get() {
+            m.observe(
+                hash_elapsed,
+                find_matches_elapsed,
+                seq_hash_elapsed,
+                total_elapsed,
+            );
+        }
 
         #[cfg(feature = "bench")]
         tracing::info!(
@@ -493,14 +496,12 @@ impl KvRouter {
         self.scheduler.worker_type()
     }
 
-    pub async fn add_output_block(
+    pub fn add_output_block(
         &self,
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
-        self.scheduler
-            .add_output_block(request_id, decay_fraction)
-            .await
+        self.scheduler.add_output_block(request_id, decay_fraction)
     }
 
     pub fn block_size(&self) -> u32 {
@@ -540,8 +541,7 @@ impl KvRouter {
 
         Ok(self
             .scheduler
-            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores)
-            .await)
+            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores))
     }
 
     /// Dump all events from the indexer
