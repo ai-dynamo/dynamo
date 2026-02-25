@@ -63,7 +63,9 @@ dynamo-operator:
 
 ### 2. Configure Your DGD
 
-Add checkpoint configuration to your service. The examples below use vLLM, but SGLang is also supported — set `backendFramework: "sglang"` and use `python3 -m dynamo.sglang` with SGLang-specific flags (`--context-length`, `--mem-fraction-static`):
+Add checkpoint configuration to your worker service. Both vLLM and SGLang are supported — use the appropriate `backendFramework`, command, and CLI flags.
+
+#### vLLM Example
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -72,27 +74,104 @@ metadata:
   name: my-llm
 spec:
   services:
-    VllmWorker:
+    worker:
       replicas: 1
       extraPodSpec:
+        runtimeClassName: nvidia
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm:latest
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm-placeholder:latest
+          command: ["python3"]
           args:
-            - python3 -m dynamo.vllm --model meta-llama/Llama-3-8B
+            - "-m"
+            - "dynamo.vllm"
+            - "--model"
+            - "meta-llama/Llama-3-8B"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--connector"
+            - "none"
+            - "--max-model-len"
+            - "4096"
+            - "--gpu-memory-utilization"
+            - "0.90"
+          env:
+            - name: GLOO_SOCKET_IFNAME
+              value: "lo"
+            - name: NCCL_SOCKET_IFNAME
+              value: "lo"
       resources:
         limits:
           nvidia.com/gpu: "1"
-
-      # Checkpoint configuration
       checkpoint:
         enabled: true
-        mode: auto  # Automatically create checkpoint if not found
+        mode: auto
         identity:
           model: "meta-llama/Llama-3-8B"
           backendFramework: "vllm"
           tensorParallelSize: 1
           dtype: "bfloat16"
+          maxModelLen: 4096
 ```
+
+#### SGLang Example
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-sglang-llm
+spec:
+  services:
+    worker:
+      replicas: 1
+      extraPodSpec:
+        runtimeClassName: nvidia
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sglang-placeholder:latest
+          command: ["python3"]
+          args:
+            - "-m"
+            - "dynamo.sglang"
+            - "--model"
+            - "meta-llama/Llama-3-8B"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--connector"
+            - "none"
+            - "--context-length"
+            - "4096"
+            - "--mem-fraction-static"
+            - "0.90"
+          env:
+            - name: GLOO_SOCKET_IFNAME
+              value: "lo"
+            - name: NCCL_SOCKET_IFNAME
+              value: "lo"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+      checkpoint:
+        enabled: true
+        mode: auto
+        identity:
+          model: "meta-llama/Llama-3-8B"
+          backendFramework: "sglang"
+          tensorParallelSize: 1
+          dtype: "bfloat16"
+          maxModelLen: 4096
+```
+
+**Key differences between backends:**
+
+| Setting | vLLM | SGLang |
+|---------|------|--------|
+| Module | `dynamo.vllm` | `dynamo.sglang` |
+| Max context | `--max-model-len` | `--context-length` |
+| GPU memory | `--gpu-memory-utilization` | `--mem-fraction-static` |
+| Placeholder image | `dynamo-vllm-placeholder` | `dynamo-sglang-placeholder` |
+| Identity `backendFramework` | `"vllm"` | `"sglang"` |
+
+> **Note:** Do **not** set `DYN_READY_FOR_CHECKPOINT_FILE` or `DYN_CHECKPOINT_READY_FILE` in the DGD worker env vars. These are injected automatically by the operator's checkpoint controller into checkpoint job pods only. Setting them on worker pods causes all workers to enter checkpoint mode instead of cold-starting normally.
 
 ### 3. Deploy
 
@@ -172,8 +251,10 @@ checkpoint:
   mode: auto
   identity:
     model: "meta-llama/Llama-3-8B"
-    backendFramework: "vllm"
+    backendFramework: "vllm"  # or "sglang"
     tensorParallelSize: 1
+    dtype: "bfloat16"
+    maxModelLen: 4096
 ```
 
 ### Reference Mode
@@ -457,23 +538,34 @@ spec:
     backoffLimit: 3
     podTemplateSpec:
       spec:
+        runtimeClassName: nvidia
         containers:
           - name: main
-            image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm:latest
-            command: ["python3", "-m", "dynamo.vllm"]
+            image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm-placeholder:latest
+            command: ["python3"]
             args:
+              - "-m"
+              - "dynamo.vllm"
               - "--model"
               - "meta-llama/Meta-Llama-3-8B-Instruct"
               - "--tensor-parallel-size"
               - "1"
-              - "--dtype"
-              - "bfloat16"
+              - "--connector"
+              - "none"
+              - "--max-model-len"
+              - "4096"
+              - "--gpu-memory-utilization"
+              - "0.90"
             env:
               - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
                     name: hf-token-secret
                     key: HF_TOKEN
+              - name: GLOO_SOCKET_IFNAME
+                value: "lo"
+              - name: NCCL_SOCKET_IFNAME
+                value: "lo"
             resources:
               limits:
                 nvidia.com/gpu: "1"
@@ -489,11 +581,31 @@ metadata:
   namespace: dynamo-system
 spec:
   services:
-    VllmWorker:
+    worker:
       replicas: 2
       extraPodSpec:
+        runtimeClassName: nvidia
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm:latest
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm-placeholder:latest
+          command: ["python3"]
+          args:
+            - "-m"
+            - "dynamo.vllm"
+            - "--model"
+            - "meta-llama/Meta-Llama-3-8B-Instruct"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--connector"
+            - "none"
+            - "--max-model-len"
+            - "4096"
+            - "--gpu-memory-utilization"
+            - "0.90"
+          env:
+            - name: GLOO_SOCKET_IFNAME
+              value: "lo"
+            - name: NCCL_SOCKET_IFNAME
+              value: "lo"
       resources:
         limits:
           nvidia.com/gpu: "1"

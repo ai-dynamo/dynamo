@@ -304,6 +304,11 @@ spec:
           value: "/checkpoints/abc123def456"
         - name: DYN_CHECKPOINT_STORAGE_TYPE
           value: "pvc"
+        # Required for PyTorch distributed (even with TP=1)
+        - name: GLOO_SOCKET_IFNAME
+          value: "lo"
+        - name: NCCL_SOCKET_IFNAME
+          value: "lo"
 
         # GPU request
         resources:
