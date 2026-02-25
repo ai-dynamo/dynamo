@@ -143,11 +143,12 @@ runs:
             # Only collect coverage during test run (don't generate reports yet)
             # The COVERAGE_FILE env var controls where the data file is saved
             # We'll generate XML report from the .coverage file in a separate step
-            COVERAGE_FLAGS="--cov=components/src/dynamo --cov-report=term --cov-report="
+            COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report=term --cov-report="
             # PYTHONPATH forces Python to import dynamo from the workspace source tree
             # rather than the non-editable site-packages install, so coverage records
-            # hits at /workspace/components/src/dynamo/... paths that .coveragerc can remap.
-            COVERAGE_ENV="--env COVERAGE_FILE=/workspace/test-results/.coverage --env PYTHONPATH=/workspace/components/src"
+            # hits at paths that .coveragerc can remap. Both paths are needed because
+            # dynamo is a namespace package split across two directories.
+            COVERAGE_ENV="--env COVERAGE_FILE=/workspace/test-results/.coverage --env PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src"
           fi
 
           PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=20 ${MYPY_FLAG} ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
