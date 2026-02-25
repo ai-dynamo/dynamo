@@ -17,7 +17,7 @@ Events are published over the **Dynamo event plane**, a transport-agnostic pub/s
 `KvEventPublisher` supports two publishing modes:
 
 1. **Direct publishing** — Your engine calls `publish_stored()` / `publish_removed()` to push events directly over the event plane. Simplest approach for custom engines.
-2. **ZMQ relay** — For engines that emit raw KV events over a ZMQ socket (like vLLM and SGLang). The publisher subscribes to the ZMQ endpoint and relays events to the event plane automatically.
+2. **ZMQ relay** — For engines that emit raw KV events over a ZMQ socket (like SGLang and vLLM). The publisher subscribes to the ZMQ endpoint and relays events to the event plane automatically.
 
 ## Event Types
 
@@ -137,11 +137,11 @@ async def main():
 
 ## ZMQ Relay (For Engines with Raw KV Events)
 
-For engines that already publish raw KV events over a ZMQ socket (like vLLM and SGLang), use the same `KvEventPublisher` with a `zmq_endpoint`. The publisher subscribes to the ZMQ socket and relays events to the event plane automatically.
+For engines that already publish raw KV events over a ZMQ socket (like SGLang and vLLM), use the same `KvEventPublisher` with a `zmq_endpoint`. The publisher subscribes to the ZMQ socket and relays events to the event plane automatically.
 
 ```mermaid
 flowchart LR
-    subgraph Engine["Custom Engine / vLLM / SGLang"]
+    subgraph Engine["Custom Engine / SGLang / vLLM"]
         cache["KV Cache Manager"]
         zmq_pub["ZMQ Publisher"]
     end
@@ -170,7 +170,7 @@ flowchart LR
 ```
 
 **When to use:**
-- Your engine already publishes KV events via ZMQ (like vLLM or SGLang)
+- Your engine already publishes KV events via ZMQ (like SGLang or vLLM)
 - You want to decouple event publishing from your engine's main loop
 
 ### Setup
@@ -192,7 +192,7 @@ No further calls to `publish_stored()` / `publish_removed()` are needed — the 
 
 ### ZMQ Wire Format
 
-The ZMQ message format (compatible with vLLM / SGLang):
+The ZMQ message format (compatible with SGLang / vLLM):
 
 | Frame | Description |
 |-------|-------------|

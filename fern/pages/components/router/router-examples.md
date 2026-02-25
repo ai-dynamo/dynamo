@@ -280,7 +280,7 @@ See [Router Design](../../design-docs/router-design.md) for architecture details
 For full documentation on implementing KV event publishing for custom inference engines, see the dedicated [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md) guide. It covers:
 
 - **Direct publishing**: Call `publish_stored()` / `publish_removed()` to push events over the Dynamo event plane
-- **ZMQ relay**: For engines that emit raw KV events over ZMQ (like vLLM and SGLang), the same `KvEventPublisher` subscribes to the ZMQ socket and relays events automatically
+- **ZMQ relay**: For engines that emit raw KV events over ZMQ (like SGLang and vLLM), the same `KvEventPublisher` subscribes to the ZMQ socket and relays events automatically
 - API reference, event structure, ZMQ wire format, and best practices
 
 ## Global Router (Hierarchical Routing)

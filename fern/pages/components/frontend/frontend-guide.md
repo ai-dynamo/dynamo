@@ -60,7 +60,7 @@ Tune these values based on your workload. Connection window should accommodate `
 Similar to HTTP frontend, the registered backend will be auto-discovered and added to the frontend list of serving model. To register a backend, the same `register_model()` API will be used. Currently the frontend support serving of the following model type and model input combination:
 
 * `ModelType::Completions` and `ModelInput::Text`: Combination for LLM backend that uses custom preprocessor
-* `ModelType::Completions` and `ModelInput::Token`: Combination for LLM backend that uses Dynamo preprocessor (i.e. Dynamo vLLM / SGLang / TRTLLM backend)
+* `ModelType::Completions` and `ModelInput::Token`: Combination for LLM backend that uses Dynamo preprocessor (i.e. Dynamo SGLang / TRTLLM / vLLM backend)
 * `ModelType::TensorBased` and `ModelInput::Tensor`: Combination for backend that is used for generic tensor-based inference
 
 The first two combinations are backed by OpenAI Completions API, see [OpenAI Completions section](#openai-completions) for more detail. Whereas the last combination is most aligned with KServe API and the users can replace existing deployment with Dynamo once their backends implements adaptor for `NvCreateTensorRequest/NvCreateTensorResponse`, see [Tensor section](#tensor) for more detail:

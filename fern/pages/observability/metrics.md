@@ -194,7 +194,7 @@ curl -s localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
 **Timeline:**
 ```
 Timeline:    0, 1, ...
-Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (vLLM, SGLang, TRT)
+Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (SGLang, TRT, vLLM)
              │request start                     │received                              │
              |                                  |                                      |
              │                                  ├──> start prefill ──> first token ──> |last token

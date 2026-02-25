@@ -40,10 +40,10 @@ This prevents unintended processing of multimodal data from untrusted sources.
 
 ### Input Format Support
 
-| Format | vLLM | TRT-LLM | SGLang |
-|--------|------|---------|--------|
+| Format | SGLang | TRT-LLM | vLLM |
+|--------|--------|---------|------|
 | HTTP/HTTPS URL | ✅ | ✅ | ✅ |
-| Data URL (Base64) | ✅ | ❌ | ❌ |
+| Data URL (Base64) | ❌ | ❌ | ✅ |
 | Pre-computed Embeddings (.pt) | ❌ | ✅ | ❌ |
 
 ## Architecture Patterns
