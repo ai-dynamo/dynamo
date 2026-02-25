@@ -63,7 +63,7 @@ dynamo-operator:
 
 ### 2. Configure Your DGD
 
-Add checkpoint configuration to your service:
+Add checkpoint configuration to your service. The examples below use vLLM, but SGLang is also supported — set `backendFramework: "sglang"` and use `python3 -m dynamo.sglang` with SGLang-specific flags (`--context-length`, `--mem-fraction-static`):
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -355,7 +355,7 @@ Or use `auto` mode and the operator will find/create it automatically.
 - The privileged DaemonSet has elevated host access, which may violate security policies in many production environments
 
 ### Technical Limitations
-- **vLLM backend only**: Currently only the vLLM backend supports checkpoint/restore. SGLang and TensorRT-LLM support is planned.
+- **vLLM and SGLang backends only**: TensorRT-LLM support is planned.
 - **Single-node only**: Checkpoints must be created and restored on the same node
 - **Single-GPU only**: Multi-GPU configurations are not yet supported
 - **Network state**: Active TCP connections are closed during restore (handled with `tcp-close` CRIU option)

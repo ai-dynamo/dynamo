@@ -133,7 +133,7 @@ The following environment variables are normally injected by the operator. They 
 ### Technical Limitations
 
 ⚠️ **Current Restrictions:**
-- **vLLM backend only**: Currently only the vLLM backend supports checkpoint/restore. SGLang and TensorRT-LLM support is planned.
+- **vLLM and SGLang backends only**: TensorRT-LLM support is planned.
 - **Single-node only**: Checkpoints must be created and restored on the same node
 - **Single-GPU only**: Multi-GPU configurations are not yet supported
 - **Network state**: Active TCP connections are closed during restore
@@ -329,7 +329,7 @@ Your application must implement the checkpoint flow. The DaemonSet communicates 
 - **`SIGCONT`**: Restore completed — your process should wake up and continue
 - **`SIGKILL`**: Checkpoint failed — process is terminated immediately (unhandleable)
 
-Here's the pattern used by Dynamo vLLM (see `components/src/dynamo/vllm/checkpoint_restore.py`):
+Here's the pattern used by both Dynamo vLLM and SGLang (see `components/src/dynamo/vllm/checkpoint_restore.py` and `components/src/dynamo/sglang/checkpoint_restore.py`):
 
 ```python
 import asyncio
@@ -387,6 +387,17 @@ async def main():
         # SIGUSR1: Checkpoint complete, exit
         print("Checkpoint complete, exiting")
 ```
+
+**Framework-Specific Sleep/Wake:**
+
+The `model.sleep()` / `model.wake_up()` calls are framework-specific:
+
+| Framework | Sleep (CRIU-friendly state) | Wake (restore) | Config flags |
+|-----------|---------------------------|----------------|--------------|
+| **vLLM** | `engine.sleep(level=1)` | `engine.wake_up()` | `enable_sleep_mode = True` |
+| **SGLang** | `pause_generation()` + `release_memory_occupation(tags)` | `resume_memory_occupation(tags)` + `continue_generation()` | `enable_memory_saver = True`, `enable_weights_cpu_backup = True` |
+
+For SGLang, the `SGLangCheckpointAdapter` in `components/src/dynamo/sglang/checkpoint_restore.py` bridges this to the standard `sleep()`/`wake_up()` interface. The memory tags released are `["kv_cache", "weights", "cuda_graph"]` — KV cache is freed (not offloaded), weights are offloaded to CPU (preserved across CRIU), and CUDA graphs are freed.
 
 **Important Notes:**
 

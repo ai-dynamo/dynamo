@@ -72,7 +72,7 @@ helm install chrek nvidia/chrek \
 ## Key Features
 
 ### ✅ Currently Supported
-- ✅ **vLLM backend only** (SGLang and TensorRT-LLM planned)
+- ✅ **vLLM and SGLang backends** (TensorRT-LLM planned)
 - ✅ Single-node, single-GPU checkpoints
 - ✅ PVC storage backend (RWX for multi-node)
 - ✅ CUDA checkpoint/restore
@@ -82,7 +82,6 @@ helm install chrek nvidia/chrek \
 - ✅ Automatic signal-based checkpoint coordination
 
 ### 🚧 Planned Features
-- 🚧 SGLang backend support
 - 🚧 TensorRT-LLM backend support
 - 🚧 S3/MinIO storage backend
 - 🚧 OCI registry storage backend
@@ -101,7 +100,7 @@ helm install chrek nvidia/chrek \
   - Potentially compromise node security if exploited
 
 ### Technical Limitations
-- **vLLM backend only**: Currently only the vLLM backend supports checkpoint/restore. SGLang and TensorRT-LLM support is planned.
+- **vLLM and SGLang backends only**: TensorRT-LLM support is planned.
 - **Single-node only**: Checkpoints must be created and restored on the same node
 - **Single-GPU only**: Multi-GPU configurations not yet supported
 - **Network state limitations**: Active TCP connections are closed during restore (use `tcp-close` CRIU option)
