@@ -160,7 +160,7 @@ The `cache_control` object enables explicit KV cache pinning with a TTL. When se
 }
 ```
 
-Requires `--enable-cache-control` and `--router-mode=kv` on the frontend. See [SGLang for Agentic Workloads](../backends/sglang/agents.md#cache-pinning-experimental) for full setup and usage details.
+Requires `--enable-cache-control` and `--router-mode=kv` on the frontend. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md#cache-pinning-experimental) for full setup and usage details.
 
 ## Response Extensions
 
