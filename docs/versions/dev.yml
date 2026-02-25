@@ -148,8 +148,8 @@ navigation:
                 path: ../pages/backends/sglang/sglang-disaggregation.md
               - page: Diffusion
                 path: ../pages/backends/sglang/sglang-diffusion.md
-              - page: Prometheus
-                path: ../pages/backends/sglang/sglang-prometheus.md
+              - page: Observability
+                path: ../pages/backends/sglang/sglang-observability.md
           - page: TensorRT-LLM
             path: ../pages/backends/trtllm/README.md
       - section: Frontend

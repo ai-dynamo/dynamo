@@ -118,7 +118,8 @@ def create_temp_engine_args_file(args) -> Path:
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
         "enable_local_indexer": not getattr(args, "durable_kv_events", False),
-        # Note: bootstrap_port is NOT included here - it's set per-worker in launch_workers()
+        # Note: bootstrap_port and zmq_kv_events_port are NOT included here
+        # — they are per-worker and set in launch_workers()
     }
 
     # Parse --reasoning JSON string into a nested object
@@ -368,6 +369,15 @@ def parse_args():
         help="[Deprecated] Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
     )
     parser.add_argument(
+        "--zmq-kv-events-ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of ZMQ PUB base ports for KV event publishing "
+        "in vLLM native wire format. One port per worker (must match --num-workers). "
+        "Each worker's DP ranks bind on base_port + dp_rank. A KvEventPublisher relay "
+        "subscribes and forwards events to NATS. (default: None, disabled)",
+    )
+    parser.add_argument(
         "--bootstrap-ports",
         type=str,
         default=None,
@@ -416,6 +426,15 @@ def parse_args():
             raise ValueError(
                 f"--bootstrap-ports must have exactly --num-workers ({args.num_workers}) ports, "
                 f"got {len(args.bootstrap_ports_list)}: {args.bootstrap_ports_list}"
+            )
+
+    # Parse and validate zmq_kv_events_ports (same comma-separated format as bootstrap_ports)
+    args.zmq_kv_events_ports_list = parse_bootstrap_ports(args.zmq_kv_events_ports)
+    if args.zmq_kv_events_ports_list:
+        if len(args.zmq_kv_events_ports_list) != args.num_workers:
+            raise ValueError(
+                f"--zmq-kv-events-ports must have exactly --num-workers ({args.num_workers}) ports, "
+                f"got {len(args.zmq_kv_events_ports_list)}: {args.zmq_kv_events_ports_list}"
             )
 
     # Set endpoint default based on worker type if not explicitly provided

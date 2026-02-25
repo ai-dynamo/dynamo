@@ -24,14 +24,16 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
-    --disaggregation-mode decode &
+    --disaggregation-mode decode \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
-    --disaggregation-mode decode &
+    --disaggregation-mode decode \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # two prefill workers
 # When registered with --disaggregation-mode prefill, these workers are automatically detected
@@ -42,6 +44,7 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
     --disaggregation-mode prefill \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082","enable_kv_cache_events":true}'&
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
@@ -50,4 +53,5 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
     --disaggregation-mode prefill \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20083","enable_kv_cache_events":true}'

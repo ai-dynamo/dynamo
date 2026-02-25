@@ -35,6 +35,8 @@ spec:
             - Qwen/Qwen3-8B
             - --disaggregation-mode
             - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
             - --gpu-memory-utilization
             - "0.23"
             - --max-model-len
