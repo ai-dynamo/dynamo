@@ -45,6 +45,45 @@ class LogHandler(logging.Handler):
         )
 
 
+class VllmColorFormatter(logging.Formatter):
+    """Formatter that matches Rust tracing's compact colored output style.
+
+    Used for vLLM logs routed through a StreamHandler (bypassing the Rust
+    bridge) so that VLLM_LOGGING_LEVEL is respected independently of DYN_LOG
+    while still producing visually consistent colored output.
+    """
+
+    # ANSI color codes matching Rust tracing's defaults
+    _COLORS = {
+        "DEBUG": "\033[2m",  # dim
+        "INFO": "\033[32m",  # green
+        "WARNING": "\033[33m",  # yellow
+        "ERROR": "\033[31m",  # red
+    }
+    _DIM = "\033[2m"
+    _RESET = "\033[0m"
+
+    def format(self, record):
+        from datetime import datetime, timezone
+
+        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        level = record.levelname
+        color = self._COLORS.get(level, "")
+        if record.funcName and record.funcName != "<module>":
+            target = f"{record.module}.{record.funcName}"
+        else:
+            target = record.module
+        msg = record.getMessage()
+        return (
+            f"{self._DIM}{ts}{self._RESET} "
+            f"{color}{level:>5}{self._RESET} "
+            f"{self._DIM}{target}{self._RESET}{self._DIM}:{self._RESET} "
+            f"{msg}"
+        )
+
+
 # Configure the Python logger to use the NimLogHandler
 def configure_logger(service_name: str | None, worker_id: int | None):
     """
@@ -184,26 +223,53 @@ def configure_vllm_logging(dyn_level: int):
     # DYN_LOG controls dynamo logging only — it does not affect vLLM.
     vllm_level = os.environ.get("VLLM_LOGGING_LEVEL", "INFO").upper()
 
-    # Main process only: replace vLLM's StreamHandler with dynamo's LogHandler
-    # so vllm logs in the main process flow through the Rust logging bridge.
-    # Subprocesses (EngineCore, workers) use vLLM's DEFAULT_LOGGING_CONFIG
-    # (StreamHandler to stderr) since the Rust runtime is not available there.
+    # Route vLLM logs through dynamo's LogHandler (Rust bridge) for consistent
+    # colored output.  The Rust env_filter (DYN_LOG) also filters messages, so
+    # when VLLM_LOGGING_LEVEL is more verbose than DYN_LOG we must widen the
+    # Rust filter for vLLM targets.  Python-side logger level still controls
+    # what reaches the handler.
+    #
+    # The LogHandler sets Rust target to "<module>.<funcName>", so vLLM log
+    # records have targets like "loggers.log", "async_llm.check_health", etc.
+    # We add a blanket "vllm=" directive isn't possible since targets don't
+    # start with "vllm".  Instead, we use a StreamHandler that writes directly
+    # to stderr, bypassing the Rust filter, but formatted to match Rust output.
     main_config = {
-        "formatters": {"simple": {"format": "%(message)s"}},
+        "formatters": {
+            "vllm": {
+                "()": "dynamo.runtime.logging.VllmColorFormatter",
+            }
+        },
         "handlers": {
-            "dynamo": {
-                "class": "dynamo.runtime.logging.LogHandler",
-                "formatter": "simple",
-                "level": vllm_level,
+            "vllm_stderr": {
+                "class": "logging.StreamHandler",
+                "formatter": "vllm",
+                "stream": "ext://sys.stderr",
             }
         },
         "loggers": {
-            "vllm": {"handlers": ["dynamo"], "level": vllm_level, "propagate": False}
+            "vllm": {
+                "handlers": ["vllm_stderr"],
+                "level": vllm_level,
+                "propagate": False,
+            }
         },
         "version": 1,
         "disable_existing_loggers": False,
     }
     logging.config.dictConfig(main_config)
+
+    # Suppress noisy "Called check_health" debug spam from vLLM's AsyncLLM.
+    # Dynamo's VllmEngineMonitor calls check_health every 2s which floods
+    # the logs at DEBUG level.  vLLM's own server doesn't have this issue
+    # because it doesn't run a periodic health check loop.
+    class _HealthCheckFilter(logging.Filter):
+        def filter(self, record):
+            return not (
+                record.funcName == "check_health" and record.levelno <= logging.DEBUG
+            )
+
+    logging.getLogger("vllm.v1.engine.async_llm").addFilter(_HealthCheckFilter())
 
 
 def map_dyn_log_to_tllm_level(dyn_log_value: str) -> str:
