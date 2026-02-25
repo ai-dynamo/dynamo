@@ -18,6 +18,7 @@ import logging
 import logging.config
 import os
 import tempfile
+from datetime import datetime, timezone
 
 from dynamo._core import log_message
 
@@ -78,8 +79,6 @@ class VllmColorFormatter(logging.Formatter):
     _RESET = "\033[0m"
 
     def format(self, record):
-        from datetime import datetime, timezone
-
         ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
