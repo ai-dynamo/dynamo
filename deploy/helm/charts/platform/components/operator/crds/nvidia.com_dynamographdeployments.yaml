@@ -1173,8 +1173,7 @@ spec:
                                         Parameters are the set of parameters to be passed to the plugin's
                                         factory function. The factory function is responsible
                                         to parse the parameters.
-                                      format: byte
-                                      type: string
+                                      x-kubernetes-preserve-unknown-fields: true
                                     type:
                                       description: Type specifies the plugin type to be instantiated.
                                       type: string
