@@ -66,7 +66,7 @@ fi
 # Multimodal data (images) are decoded in the backend worker using ImageLoader
 # --enforce-eager: Quick deployment (remove for production)
 # Extra args from command line come last to allow overrides
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
 

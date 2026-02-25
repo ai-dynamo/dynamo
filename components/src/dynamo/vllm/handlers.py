@@ -927,19 +927,26 @@ class BaseWorkerHandler(ABC):
                     self._nixl_connector = nixl_connect.Connector()
                     await self._nixl_connector.initialize()
 
-        # Process image_url entries
+        image_items = mm_map.get(IMAGE_URL_KEY, [])
+        n_images = len(image_items)
+
+        t0 = time.monotonic()
         images = await self.image_loader.load_image_batch(
-            mm_map.get(IMAGE_URL_KEY, []),
+            image_items,
             enable_frontend_decoding=self.enable_frontend_decoding,
             nixl_connector=self._nixl_connector,
         )
+        t_load = time.monotonic() - t0
 
         if images:
-            # vLLM expects single image or list
             vllm_mm_data["image"] = images[0] if len(images) == 1 else images
-            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
+            logger.info(
+                "[TIMER] mm_load: %d image(s) in %.3fs (%.1f ms/img)",
+                n_images,
+                t_load,
+                t_load / max(n_images, 1) * 1000,
+            )
 
-        # Handle video_url entries (future expansion)
         if VIDEO_URL_KEY in mm_map:
             logger.warning("Video multimodal data not yet supported in standard worker")
 
@@ -995,7 +1002,11 @@ class BaseWorkerHandler(ABC):
                     },
                 )
         # Normal path: use token IDs
+        t0 = time.monotonic()
         mm_uuids = _compute_mm_uuids(multi_modal_data)
+        t_uuids = time.monotonic() - t0
+        if t_uuids > 0.01:
+            logger.info("[TIMER] mm_uuids=%.3fs", t_uuids)
         prompt_kwargs = dict[str, Any](
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,
@@ -1270,18 +1281,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
-        # Extract and decode multimodal data if present
-        multi_modal_data = await self._extract_multimodal_data(request)
+        t_start = time.monotonic()
 
-        # Build prompt from request (handles both prompt_embeds and token_ids)
+        t0 = time.monotonic()
+        multi_modal_data = await self._extract_multimodal_data(request)
+        t_mm = time.monotonic() - t0
+
+        t0 = time.monotonic()
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
             request, request_id, multi_modal_data
         )
+        t_prompt = time.monotonic() - t0
+
         if error is not None:
             yield error
             return
 
-        # Build sampling params from request
         sampling_params = build_sampling_params(
             request, self.default_sampling_params, self.model_max_len
         )
@@ -1305,7 +1320,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
 
-        # Extract LoRA request if present
         model_name = request.get("model")
         lora_request = self._resolve_lora_request(model_name)
         if lora_request:
@@ -1322,6 +1336,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = build_trace_headers(context)
 
+        first_token_logged = False
         async with self._abort_monitor(context, request_id):
             try:
                 async for tok in self.generate_tokens(
@@ -1334,6 +1349,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     trace_headers=trace_headers,
                     priority=priority,
                 ):
+                    if not first_token_logged:
+                        t_first_token = time.monotonic() - t_start
+                        logger.info(
+                            "[TIMER] req=%s mm_extract=%.3fs prompt_build=%.3fs "
+                            "first_token=%.3fs",
+                            request_id,
+                            t_mm,
+                            t_prompt,
+                            t_first_token,
+                        )
+                        first_token_logged = True
                     if prefill_result is not None and "completion_usage" in tok:
                         tok["completion_usage"][
                             "prompt_tokens_details"
@@ -1344,6 +1370,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 logger.warning("Initiating Dynamo Runtime shutdown.")
                 self.runtime.shutdown()
                 os._exit(1)
+
+        t_total = time.monotonic() - t_start
+        logger.info(
+            "[TIMER] req=%s worker_e2e=%.3fs",
+            request_id,
+            t_total,
+        )
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
