@@ -234,6 +234,7 @@ class MultimodalRequestProcessor:
         multi_modal_data = request.get("multi_modal_data")
         if multi_modal_data and isinstance(multi_modal_data, dict):
             processed_mm_data = {}
+            loaded_embeddings = []
 
             # Process images and embedding paths from image_url field
             image_items = multi_modal_data.get("image_url", [])
@@ -286,7 +287,7 @@ class MultimodalRequestProcessor:
                         return None
 
                 # Load embedding files (.pt, .pth, .bin) for PD flow
-                # These are pre-computed vision encoder outputs
+                # These are pre-computed vision encoder outputs.
                 if embedding_paths:
                     try:
                         loaded_embeddings = [
@@ -294,7 +295,6 @@ class MultimodalRequestProcessor:
                             for path in embedding_paths
                         ]
                         if loaded_embeddings:
-                            processed_mm_data["embedding"] = loaded_embeddings
                             logging.info(
                                 f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
                             )
@@ -306,6 +306,14 @@ class MultimodalRequestProcessor:
 
             if processed_mm_data:
                 processed_inputs["multi_modal_data"] = processed_mm_data
+            if loaded_embeddings:
+                # For TRT-LLM MM embeddings, the currently
+                # supported modality is "image".
+                processed_inputs["multi_modal_embeddings"] = {
+                    "image": loaded_embeddings
+                }
+                if not processed_mm_data:
+                    processed_inputs["multi_modal_data"] = {}
 
         return processed_inputs
 
