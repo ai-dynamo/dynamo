@@ -2177,8 +2177,8 @@ def _test_router_decisions(
 
                     key_a = f"{worker_a_id}:{_dp_a}"
                     key_b = f"{worker_b_id}:{_dp_b}"
-                    score_a = scores.get(key_a, 0)
-                    score_b = scores.get(key_b, 0)
+                    score_a = scores[key_a]
+                    score_b = scores[key_b]
 
                     logger.info(
                         f"Standalone indexer /score: {key_a}={score_a}, {key_b}={score_b}"
