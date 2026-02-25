@@ -90,6 +90,12 @@ spec:
       nvidia.com/dynamo-component-type: planner
       nvidia.com/metrics-enabled: "true"
 ---
+# TODO: Once a first-class 'router' componentType is added to the dynamo operator,
+#       replace this PodMonitor with one that selects on
+#       nvidia.com/dynamo-component-type: router instead of 'default'.
+#       That would also eliminate the port-override relabeling below, since router
+#       pods could declare containerPort: 9090 (DYN_SYSTEM_PORT) explicitly and
+#       the standard targetPort selector would work without the address rewrite hack.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

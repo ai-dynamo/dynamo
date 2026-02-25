@@ -137,6 +137,8 @@ def test_frontend_metric_with_partial_data():
 
 def test_get_average_metric_none_result():
     """Test _get_average_metric when prometheus returns None"""
+    # TODO: Replace hardcoded port with allocate_port() from tests.utils.port_utils
+    #       for xdist-safe parallel execution.
     client = PrometheusAPIClient("http://localhost:9090", "test_namespace")
 
     with patch.object(client.prom, "custom_query") as mock_query:
@@ -267,6 +269,8 @@ def test_get_average_metric_multiple_matching_containers(mock_prometheus_result)
 @pytest.fixture
 def router_client():
     """PrometheusAPIClient configured with metrics_source='router'."""
+    # TODO: Replace hardcoded port with allocate_port() from tests.utils.port_utils
+    #       for xdist-safe parallel execution.
     client = PrometheusAPIClient(
         "http://localhost:9090", "test-fe-namespace", metrics_source="router"
     )
