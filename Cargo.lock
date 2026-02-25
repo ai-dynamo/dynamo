@@ -221,40 +221,6 @@ dependencies = [
 
 [[package]]
 name = "async-nats"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd3bdd6ea595b2ea504500a3566071beb81125fc15d40a6f6bffa43575f64152"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures",
- "memchr",
- "nkeys",
- "nuid",
- "once_cell",
- "portable-atomic",
- "rand 0.8.5",
- "regex",
- "ring",
- "rustls-native-certs 0.7.3",
- "rustls-pemfile",
- "rustls-webpki 0.102.8",
- "serde",
- "serde_json",
- "serde_nanos",
- "serde_repr",
- "thiserror 1.0.69",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
- "tryhard",
- "url",
-]
-
-[[package]]
-name = "async-nats"
 version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86dde77d8a733a9dbaf865a9eb65c72e09c88f3d14d3dd0d2aecf511920ee4fe"
@@ -2000,7 +1966,7 @@ dependencies = [
  "anyhow",
  "approx",
  "assert_matches",
- "async-nats 0.45.0",
+ "async-nats",
  "async-stream",
  "async-trait",
  "axum 0.8.4",
@@ -2157,7 +2123,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "arc-swap",
- "async-nats 0.45.0",
+ "async-nats",
  "async-once-cell",
  "async-stream",
  "async-trait",
@@ -6764,7 +6730,6 @@ version = "0.102.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
 dependencies = [
- "ring",
  "rustls-pki-types",
  "untrusted",
 ]
@@ -8722,7 +8687,7 @@ name = "velo-backend"
 version = "0.9.0"
 dependencies = [
  "anyhow",
- "async-nats 0.37.0",
+ "async-nats",
  "async-ucx",
  "axum 0.8.4",
  "bs58",

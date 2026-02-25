@@ -162,13 +162,7 @@ impl TcpTransport {
 
         let cancel = self.cancel_token.clone();
         let conns = Arc::clone(&self.connections);
-        rt.spawn(connection_writer_task(
-            addr,
-            instance_id,
-            rx,
-            conns,
-            cancel,
-        ));
+        rt.spawn(connection_writer_task(addr, instance_id, rx, conns, cancel));
 
         debug!("Created new connection to {} ({})", instance_id, addr);
         Ok(handle)
@@ -658,10 +652,7 @@ mod tests {
 
     /// Insert a stale `ConnectionHandle` into the transport's connections map.
     /// A "stale" handle is one whose receiver has been dropped.
-    fn insert_stale_handle(
-        transport: &TcpTransport,
-        instance_id: crate::InstanceId,
-    ) {
+    fn insert_stale_handle(transport: &TcpTransport, instance_id: crate::InstanceId) {
         let (tx, _rx) = flume::bounded::<SendTask>(1);
         // Drop _rx immediately so tx.is_disconnected() == true
         transport
@@ -763,7 +754,14 @@ mod tests {
 
         // Insert a stale handle
         insert_stale_handle(&transport, iid);
-        assert!(transport.connections.get(&iid).unwrap().tx.is_disconnected());
+        assert!(
+            transport
+                .connections
+                .get(&iid)
+                .unwrap()
+                .tx
+                .is_disconnected()
+        );
 
         // get_or_create_connection should replace the stale handle with a live one
         let handle = transport.get_or_create_connection(iid).unwrap();
@@ -779,9 +777,7 @@ mod tests {
         let (transport, _our_addr) = make_transport();
 
         // Start a listener so the peer is "reachable"
-        let peer_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let peer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = peer_listener.local_addr().unwrap();
 
         let peer = make_tcp_peer(peer_addr);
@@ -793,9 +789,7 @@ mod tests {
         assert!(transport.connections.contains_key(&iid));
 
         // check_health should remove the stale entry and verify the peer is reachable
-        let result = transport
-            .check_health(iid, Duration::from_secs(2))
-            .await;
+        let result = transport.check_health(iid, Duration::from_secs(2)).await;
 
         // Stale entry should be gone
         assert!(!transport.connections.contains_key(&iid));
@@ -808,9 +802,7 @@ mod tests {
     #[tokio::test]
     async fn test_writer_task_cleans_up_on_write_error() {
         // Bind a listener, accept once, then drop everything to cause a write error
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let iid = crate::InstanceId::new_v4();
@@ -824,9 +816,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // Spawn the writer task
-        let writer = tokio::spawn(connection_writer_task(
-            addr, iid, rx, conns, cancel,
-        ));
+        let writer = tokio::spawn(connection_writer_task(addr, iid, rx, conns, cancel));
 
         // Accept the connection, then immediately drop it + the listener
         let (stream, _) = listener.accept().await.unwrap();
@@ -857,9 +847,7 @@ mod tests {
         let (transport, _our_addr) = make_transport();
 
         // Start a listener that accepts connections (simulates a healthy peer)
-        let peer_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let peer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = peer_listener.local_addr().unwrap();
 
         let peer = make_tcp_peer(peer_addr);

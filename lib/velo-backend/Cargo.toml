@@ -52,7 +52,7 @@ nix = { version = "0.30", features = ["sched"] }
 async-ucx = { git = "https://github.com/ryanolson/async-ucx.git", branch = "ryan/ucx", optional = true, features = ["am", "event"] }
 axum = { version = "0.8", optional = true }
 reqwest = { workspace = true , optional = true }
-async-nats = { version = "0.37", optional = true }
+async-nats = { workspace = true, optional = true }
 bs58 = { version = "0.5", optional = true }
 prost = { version = "0.13", optional = true }
 tonic = { version = "0.13.1", optional = true }

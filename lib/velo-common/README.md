@@ -1,10 +1,10 @@
-# dynamo-nova-common
+# velo-common
 
-Common types for the Nova distributed systems stack.
+Common types for the Velo distributed systems stack.
 
 ## Overview
 
-This crate provides the foundational types used across Nova for identity and addressing. The design prioritizes:
+This crate provides the foundational types used across Velo for identity and addressing. The design prioritizes:
 
 - **Compact representations** for embedding in fixed-size handles
 - **Transport-agnostic addressing** without enumerating all possible transports
@@ -14,7 +14,7 @@ This crate provides the foundational types used across Nova for identity and add
 
 ### InstanceId
 
-`InstanceId` is a UUID-based identifier that serves as the **source of truth** for identifying a running Nova instance. It is used for:
+`InstanceId` is a UUID-based identifier that serves as the **source of truth** for identifying a running Velo instance. It is used for:
 
 - Transport-level routing
 - Discovery registration
@@ -68,7 +68,7 @@ The derivation is always consistent—calling `worker_id()` multiple times retur
 use velo_common::WorkerAddress;
 use std::collections::HashMap;
 
-// Addresses are typically constructed by nova-backend transport builders,
+// Addresses are typically constructed by velo-backend transport builders,
 // but here we demonstrate the consumer API:
 let mut map = HashMap::new();
 map.insert("tcp".to_string(), b"tcp://127.0.0.1:5555".to_vec());
@@ -117,7 +117,7 @@ assert_eq!(peer_info.instance_id(), instance_id);
 
 ## Address Construction
 
-`WorkerAddress` instances are constructed by transport builders in `nova-backend`. Each transport (TCP, gRPC, NATS, UCX, etc.) contributes its endpoint data:
+`WorkerAddress` instances are constructed by transport builders in `velo-backend`. Each transport (TCP, gRPC, NATS, UCX, etc.) contributes its endpoint data:
 
 ```text
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
@@ -140,7 +140,7 @@ assert_eq!(peer_info.instance_id(), instance_id);
                     └────────────────────────┘
 ```
 
-When a Nova client receives a `PeerInfo`, it can:
+When a Velo client receives a `PeerInfo`, it can:
 1. Check `available_transports()` to see what's supported
 2. Extract the relevant endpoint via `get_entry(key)`
 3. Register the peer with its own transports
