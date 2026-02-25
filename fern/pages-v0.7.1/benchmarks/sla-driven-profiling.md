@@ -5,7 +5,7 @@ title: "SLA-Driven Profiling with DynamoGraphDeploymentRequest"
 ---
 
 <Tip>
-**New to DGDR and SLA-Driven Profiling?** Start with the [SLA-Driven Profiling and Planner Deployment Quick Start Guide](/docs/planner/sla-planner-quickstart.md)) for step-by-step instructions. This document provides deeper technical details about the profiling process.
+**New to DGDR and SLA-Driven Profiling?** Start with the [SLA-Driven Profiling and Planner Deployment Quick Start Guide](/docs/planner/sla-planner-quickstart.md) for step-by-step instructions. This document provides deeper technical details about the profiling process.
 </Tip>
 ## Overview
 
@@ -51,7 +51,7 @@ The Dynamo Operator automatically:
 3. Generates optimal DGD configuration with SLA planner
 4. Deploys the DGD to your cluster
 
-See the [Quick Start Guide](/docs/planner/sla-planner-quickstart.md)) for prerequisites and detailed instructions.
+See the [Quick Start Guide](/docs/planner/sla-planner-quickstart.md) for prerequisites and detailed instructions.
 
 ## Hardware Configuration
 
@@ -92,12 +92,12 @@ This feature is only available with cluster-scoped operators (`namespaceRestrict
    - **Prefill**:
      - TP/TEP: We measure TTFT with batch size = 1 (assuming ISL is long enough to saturate compute) without KV reuse.
      - DEP: Attention uses data parallelism. We send a single burst with total concurrency `attention_dp_size × attn_dp_num_req_ratio` (defaults to 4) and compute the reported TTFT as `time_to_first_token.max / attn_dp_num_req_ratio` from the AIPerf summary of that burst. This stabilizes measurements when the first batch may launch before all requests arrive.
-   ![Prefill Performance](../../assets/img/h100-prefill-performance.png))
+   ![Prefill Performance](../../assets/img/h100-prefill-performance.png)
    - **Decode**: Since the ITL (or iteration time) is relevant with how many requests are in-flight, we measure the ITL under different number of in-flight requests. The range of the number of in-flight requests is from 1 to the maximum number of requests that the kv cache of the engine can hold. To measure the ITL without being affected by piggy-backed prefill requests, the script will enable kv-reuse and warm up the engine by issuing the same prompts before measuring the ITL. Since the kv cache is sufficient for all the requests, it can hold the kv cache of the pre-computed prompts and skip the prefill phase when measuring the ITL. However, for MoE models, this is not guaranteed because the kv cache in different attention DP ranks is different. We are working on framework-side change to fix this issue. For example, the below plot shows the decode parallelization mapping sweep results for H100 for deepseek-ai/DeepSeek-R1-Distill-Llama-8B.
-   ![Decode Performance](../../assets/img/h100-decode-performance.png))
+   ![Decode Performance](../../assets/img/h100-decode-performance.png)
 4. **Recommendation**: Selects optimal parallelization mapping for prefill and decode that achieves the highest per GPU throughput while adhering the SLA on TTFT and ITL. Specifically, the profiler will choose the point (or a point on the curve for decode) that is left to the vertical red dashed line that represents the SLAs while has the highest y coordinate (throughput per GPU).
 5. **In-Depth Profiling on the Recommended P/D Engine**: After finding the best TP size for prefill and decode, the script will then interpolate the TTFT with ISL and ITL with active KV cache and decode context length. This is to provide a more accurate estimation of the performance when ISL and OSL changes and will be used in the sla-planner.
-![ITL Interpolation](../../assets/img/pd-interpolation.png))
+![ITL Interpolation](../../assets/img/pd-interpolation.png)
    - **Prefill**: Measures TTFT and throughput per GPU across different input lengths with batch size=1.
    - **Decode**: Measures ITL and throughput per GPU under various KV cache loads and decode context lengths. The active kv usage determines the complexity of the memory-bounded attention kernel while the active kv usage divided the average context length determines the complexity of the computation bound MLP kernel. For example, the below figure shows the ITL of DS-Distilled Llama 8b model on H100 TP4. The ITL grows near-linearly with active kv usage under a fixed context length. And the slope increases as the context length decreases.
 
@@ -146,7 +146,7 @@ profilingConfig:
 
 **Supported Configurations:**
 
-For the current list of supported models, systems, and backend versions, see the [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#supported-features)).
+For the current list of supported models, systems, and backend versions, see the [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#supported-features).
 
 To check from the command line: `aiconfigurator cli --help`
 
@@ -272,7 +272,7 @@ profilingConfig:
 
 **When to use:**
 - **min_num_gpus_per_engine**: Skip small TP sizes if your model is large
-- **max_num_gpus_per_engine**: Limit search space or work around constraints (e.g., [AIC attention heads](#ai-configurator-attention-head-constraint-error))
+- **max_num_gpus_per_engine**: Limit search space or work around constraints (e.g., [AIC attention heads](#ai-configurator-attention-head-constraint-error)
 - **num_gpus_per_node**: Required for MoE models with TEP/DEP sizing
 - **gpu_type**: Informational, auto-detected by controller
 
@@ -311,7 +311,7 @@ profilingConfig:
       aic_backend_version: "0.20.0"     # TensorRT-LLM version: 0.20.0, 1.0.0rc3
 ```
 
-**Supported configurations:** See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#supported-features))
+**Supported configurations:** See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#supported-features)
 
 ### Planner Configuration (Optional)
 
@@ -545,14 +545,14 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 
 ## Next Steps
 
-- **Deploy with DGDR**: See [Quick Start Guide](/docs/planner/sla-planner-quickstart.md))
-- **Understand SLA Planner**: Read [SLA Planner Deep Dive](/docs/planner/sla-planner.md))
-- **Monitor Deployments**: Set up [Observability](/docs/kubernetes/observability/metrics.md))
-- **Optimize Performance**: See [Performance Tuning](/docs/performance/tuning.md))
+- **Deploy with DGDR**: See [Quick Start Guide](/docs/planner/sla-planner-quickstart.md)
+- **Understand SLA Planner**: Read [SLA Planner Deep Dive](/docs/planner/sla-planner.md)
+- **Monitor Deployments**: Set up [Observability](/docs/kubernetes/observability/metrics.md)
+- **Optimize Performance**: See [Performance Tuning](/docs/performance/tuning.md)
 
 ## Related Documentation
 
-- [DGDR API Reference](/docs/kubernetes/api-reference.md))
-- [SLA Planner Quick Start](/docs/planner/sla-planner-quickstart.md))
-- [SLA Planner Architecture](/docs/planner/sla-planner.md))
-- [Profiler Arguments Reference](/benchmarks/profiler/utils/profiler-argparse.py))
+- [DGDR API Reference](/docs/kubernetes/api-reference.md)
+- [SLA Planner Quick Start](/docs/planner/sla-planner-quickstart.md)
+- [SLA Planner Architecture](/docs/planner/sla-planner.md)
+- [Profiler Arguments Reference](/benchmarks/profiler/utils/profiler-argparse.py)

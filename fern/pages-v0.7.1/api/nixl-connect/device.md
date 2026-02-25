@@ -24,9 +24,9 @@ def id(self) -> int:
 
 Gets the identity, or ordinal, of the device.
 
-When the device is the [`HOST`](device-kind.md#host)), this value is always `0`.
+When the device is the [`HOST`](device-kind.md#host), this value is always `0`.
 
-When the device is a [`GPU`](device-kind.md#cuda)), this value identifies a specific GPU.
+When the device is a [`GPU`](device-kind.md#cuda), this value identifies a specific GPU.
 
 ### `kind`
 
@@ -35,16 +35,16 @@ When the device is a [`GPU`](device-kind.md#cuda)), this value identifies a spec
 def kind(self) -> DeviceKind:
 ```
 
-Gets the [`DeviceKind`](device-kind.md)) of device the instance references.
+Gets the [`DeviceKind`](device-kind.md) of device the instance references.
 
 
 ## Related Classes
 
-  - [Connector](connector.md))
-  - [Descriptor](descriptor.md))
-  - [OperationStatus](operation-status.md))
-  - [ReadOperation](read-operation.md))
-  - [ReadableOperation](readable-operation.md))
-  - [RdmaMetadata](rdma-metadata.md))
-  - [WritableOperation](writable-operation.md))
-  - [WriteOperation](write-operation.md))
+  - [Connector](connector.md)
+  - [Descriptor](descriptor.md)
+  - [OperationStatus](operation-status.md)
+  - [ReadOperation](read-operation.md)
+  - [ReadableOperation](readable-operation.md)
+  - [RdmaMetadata](rdma-metadata.md)
+  - [WritableOperation](writable-operation.md)
+  - [WriteOperation](write-operation.md)

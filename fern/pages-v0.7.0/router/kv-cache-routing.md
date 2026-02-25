@@ -41,14 +41,14 @@ The main KV-aware routing arguments:
 ## Prerequisites and Limitations
 
 >[!Note]
-> **KV Router Requirements**: The KV router currently works only with **dynamic endpoints** that are registered via [`register_llm()`](../development/backend-guide.md#writing-python-workers-in-dynamo)) with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
+> **KV Router Requirements**: The KV router currently works only with **dynamic endpoints** that are registered via [`register_llm()`](../development/backend-guide.md#writing-python-workers-in-dynamo) with `model_input=ModelInput.Tokens`. Your backend handler receives pre-tokenized requests with `token_ids` instead of raw text.
 
 **Current Limitations (WIP):**
 - **Static endpoints**: Not yet supported. The KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states.
 - **Multimodal models**: Not yet supported. The KV router currently tracks token-based blocks only.
 
 **What this means for your setup:**
-1. Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../development/backend-guide.md)) or [example implementations](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/examples/hello-world)))
+1. Backend workers must call `register_llm()` with `model_input=ModelInput.Tokens` (see [Backend Guide](../development/backend-guide.md) or [example implementations](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/examples/hello-world))
 2. Your handler receives requests with pre-tokenized `token_ids`, not raw text or multimodal inputs
 3. You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
 
@@ -56,7 +56,7 @@ For basic model registration without KV routing, you can use `--router-mode roun
 
 ## Disaggregated Serving (Prefill and Decode)
 
-Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../development/backend-guide.md#model-types))), the frontend automatically detects them and activates an internal prefill router.
+Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../development/backend-guide.md#model-types)), the frontend automatically detects them and activates an internal prefill router.
 
 ### Automatic Prefill Router Activation
 
@@ -94,7 +94,7 @@ await register_llm(
 ```
 
 > [!Note]
-> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg-router.sh)).
+> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg-router.sh).
 
 ## Overview
 
@@ -214,7 +214,7 @@ For improved fault tolerance, you can launch multiple frontend + router replicas
 
 ### Router State Management
 
-The KV Router tracks two types of state (see [KV Router Architecture](../router/README.md)) for details):
+The KV Router tracks two types of state (see [KV Router Architecture](../router/README.md) for details):
 
 1. **Prefix blocks (cached KV blocks)**: Maintained in a radix tree, tracking which blocks are cached on each worker. This state is **persistent** - backed by NATS JetStream events and object store snapshots. New router replicas automatically sync this state on startup, ensuring consistent cache awareness across restarts.
 
@@ -252,16 +252,16 @@ python -m dynamo.frontend --router-mode kv --port 8002 --router-replica-sync
 
 >[!Note]
 > If you need to start with a fresh state, you have two options:
-> 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](/docs/design-docs/distributed-runtime.md))) which will start a new stream and NATS object store path
+> 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](/docs/design-docs/distributed-runtime.md)) which will start a new stream and NATS object store path
 > 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
 
 ## Understanding KV Cache
-The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://proceedings.neurips.cc/paper-files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf)). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching)).
+The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://proceedings.neurips.cc/paper-files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
 
 ### KV Cache Optimizations
-Every inference framework will have a KV Cache for each worker. A popular inference framework library is [vLLM](https://github.com/vllm-project/vllm)) where a key contribution was [PagedAttention](https://arxiv.org/abs/2309.06180)), which allowed them to manage KV Cache in an efficient way by chunking requests into blocks.
+Every inference framework will have a KV Cache for each worker. A popular inference framework library is [vLLM](https://github.com/vllm-project/vllm) where a key contribution was [PagedAttention](https://arxiv.org/abs/2309.06180), which allowed them to manage KV Cache in an efficient way by chunking requests into blocks.
 
-Another popular inference framework, [SGLang](https://github.com/sgl-project/sglang)), contributed [RadixAttention](https://arxiv.org/abs/2312.07104)) which introduced a
+Another popular inference framework, [SGLang](https://github.com/sgl-project/sglang), contributed [RadixAttention](https://arxiv.org/abs/2312.07104) which introduced a
 prefix tree which allows for efficient matching, inserting and eviction of KV Cache blocks. The prefix tree structure popularized KV Cache reuse.
 
 In Dynamo, we introduce a KVPublisher which emits KV Cache events that occur at each worker and a KVIndexer which keeps track of these events globally.
@@ -288,7 +288,7 @@ To get a feel for how KV Cache management works on a single worker with KV Cache
     - These tensors are stored in the newly allocated cache blocks
     - **KVPublisher emits a kv stored event notifying KVIndexer about newly stored blocks**.
 
-Further details can be found for: [TRT-LLM](https://developer.nvidia.com/blog/introducing-new-kv-cache-reuse-optimizations-in-nvidia-tensorrt-llm/)), [vLLM](https://docs.vllm.ai/en/latest/design/automatic-prefix-caching.html#design-automatic-prefix-caching)) and [SGLang](https://lmsys.org/blog/2024-01-17-sglang/)).
+Further details can be found for: [TRT-LLM](https://developer.nvidia.com/blog/introducing-new-kv-cache-reuse-optimizations-in-nvidia-tensorrt-llm/), [vLLM](https://docs.vllm.ai/en/latest/design/automatic-prefix-caching.html#design-automatic-prefix-caching) and [SGLang](https://lmsys.org/blog/2024-01-17-sglang/).
 
 ## KV Cache Routing and Load Balancing
 ```text
@@ -573,4 +573,4 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Maximize cache reuse**: Use `best_worker_id()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
-See [KV Router Architecture](../router/README.md)) for performance tuning details.
+See [KV Router Architecture](../router/README.md) for performance tuning details.

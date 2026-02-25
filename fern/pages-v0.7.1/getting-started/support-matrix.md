@@ -81,34 +81,34 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Amazon Linux**          | 2023        | x86_64           | Supported¹ |
 
 > [!Caution]
-> There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609)) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
+> There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
 
 ## Build Support
 
 **Dynamo** currently provides build support in the following ways:
 
 - **Wheels**: We distribute Python wheels of Dynamo and KV Block Manager:
-  - [ai-dynamo](https://pypi.org/project/ai-dynamo/))
-  - [ai-dynamo-runtime](https://pypi.org/project/ai-dynamo-runtime/))
-  - **New as of Dynamo v0.7.0:** [kvbm](https://pypi.org/project/kvbm/)) as a standalone implementation.
+  - [ai-dynamo](https://pypi.org/project/ai-dynamo/)
+  - [ai-dynamo-runtime](https://pypi.org/project/ai-dynamo-runtime/)
+  - **New as of Dynamo v0.7.0:** [kvbm](https://pypi.org/project/kvbm/) as a standalone implementation.
 
-- **Dynamo Runtime Images**: We distribute multi-arch images (x86 & ARM64 compatible) of the Dynamo Runtime for each of the LLM inference frameworks on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)):
-  - [SGLang](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime))
-  - [TensorRT-LLM](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime))
-  - [vLLM](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime))
+- **Dynamo Runtime Images**: We distribute multi-arch images (x86 & ARM64 compatible) of the Dynamo Runtime for each of the LLM inference frameworks on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
+  - [SGLang](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime)
+  - [TensorRT-LLM](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime)
+  - [vLLM](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime)
 
-- **Dynamo Kubernetes Operator Images**: We distribute multi-arch images (x86 & ARM64 compatible) of the Dynamo Operator on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)):
-  - [kubernetes-operator](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator)) to simplify deployments of Dynamo Graphs.
+- **Dynamo Kubernetes Operator Images**: We distribute multi-arch images (x86 & ARM64 compatible) of the Dynamo Operator on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
+  - [kubernetes-operator](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator) to simplify deployments of Dynamo Graphs.
 
-- **Helm Charts**: [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)) hosts the helm charts supporting Kubernetes deployments of Dynamo:
-  - [Dynamo CRDs](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-crds))
-  - [Dynamo Platform](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform))
-  - [Dynamo Graph](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-graph))
+- **Helm Charts**: [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) hosts the helm charts supporting Kubernetes deployments of Dynamo:
+  - [Dynamo CRDs](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-crds)
+  - [Dynamo Platform](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform)
+  - [Dynamo Graph](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-graph)
 
 - **Rust Crates**:
-  - [dynamo-runtime](https://crates.io/crates/dynamo-runtime/))
-  - [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai/))
-  - [dynamo-parsers](https://crates.io/crates/dynamo-parsers/))
-  - [dynamo-llm](https://crates.io/crates/dynamo-llm/))
+  - [dynamo-runtime](https://crates.io/crates/dynamo-runtime/)
+  - [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai/)
+  - [dynamo-parsers](https://crates.io/crates/dynamo-parsers/)
+  - [dynamo-llm](https://crates.io/crates/dynamo-llm/)
 
-Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the instructions in the [Quick Start Guide](https://github.com/ai-dynamo/dynamo/blob/main/README.md#installation)).
+Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the instructions in the [Quick Start Guide](https://github.com/ai-dynamo/dynamo/blob/main/README.md#installation).

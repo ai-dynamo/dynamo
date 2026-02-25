@@ -4,12 +4,12 @@
 title: "GitOps Deployment with FluxCD"
 ---
 
-This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](../backends/vllm/README.md)) to demonstrate the workflow.
+This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](../backends/vllm/README.md) to demonstrate the workflow.
 
 ## Prerequisites
 
-- A Kubernetes cluster with [Dynamo Cloud](./installation-guide.md)) installed
-- [FluxCD](https://fluxcd.io/flux/installation/)) installed in your cluster
+- A Kubernetes cluster with [Dynamo Cloud](./installation-guide.md) installed
+- [FluxCD](https://fluxcd.io/flux/installation/) installed in your cluster
 - A Git repository to store your deployment configurations
 
 ## Workflow Overview
@@ -22,7 +22,7 @@ The GitOps workflow for Dynamo deployments consists of three main steps:
 
 ## Step 1: Build and Push Dynamo Cloud Operator
 
-First, follow to [See Install Dynamo Cloud](./installation-guide.md)).
+First, follow to [See Install Dynamo Cloud](./installation-guide.md).
 
 ## Step 2: Create Initial Deployment
 

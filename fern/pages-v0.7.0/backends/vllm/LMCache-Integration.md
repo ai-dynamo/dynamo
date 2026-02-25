@@ -6,7 +6,7 @@ title: "LMCache Integration in Dynamo"
 
 ## Introduction
 
-LMCache is a high-performance KV cache layer that supercharges LLM serving by enabling **prefill-once, reuse-everywhere** semantics. As described in the [official documentation](https://docs.lmcache.ai/index.html)), LMCache lets LLMs prefill each text only once by storing the KV caches of all reusable texts, allowing reuse of KV caches for any reused text (not necessarily prefix) across any serving engine instance.
+LMCache is a high-performance KV cache layer that supercharges LLM serving by enabling **prefill-once, reuse-everywhere** semantics. As described in the [official documentation](https://docs.lmcache.ai/index.html), LMCache lets LLMs prefill each text only once by storing the KV caches of all reusable texts, allowing reuse of KV caches for any reused text (not necessarily prefix) across any serving engine instance.
 
 This document describes how LMCache is integrated into Dynamo's vLLM backend to provide enhanced performance and memory efficiency.
 
@@ -35,7 +35,7 @@ Additional LMCache configuration can be customized via environment variables:
 - `LMCACHE_LOCAL_CPU=True` - Enable CPU memory backend for offloading
 - `LMCACHE_MAX_LOCAL_CPU_SIZE=20` - CPU memory limit in GB (user can adjust based on available RAM to a fixed value)
 
-For advanced configurations, LMCache supports multiple [storage backends](https://docs.lmcache.ai/index.html)):
+For advanced configurations, LMCache supports multiple [storage backends](https://docs.lmcache.ai/index.html):
 - **CPU RAM**: Fast local memory offloading
 - **Local Storage**: Disk-based persistence
 - **Redis**: Distributed cache sharing
@@ -173,6 +173,6 @@ lmcache_config = {
 
 ## References and Additional Resources
 
-- [LMCache Documentation](https://docs.lmcache.ai/index.html)) - Comprehensive guide and API reference
-- [Configuration Reference](https://docs.lmcache.ai/api-reference/configurations.html)) - Detailed configuration options
+- [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference
+- [Configuration Reference](https://docs.lmcache.ai/api-reference/configurations.html) - Detailed configuration options
 

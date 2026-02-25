@@ -4,7 +4,7 @@
 title: "dynamo.nixl_connect.DeviceKind(IntEnum)"
 ---
 
-Represents the kind of device a [`Device`](device.md)) object represents.
+Represents the kind of device a [`Device`](device.md) object represents.
 
 
 ## Values
@@ -20,11 +20,11 @@ System (CPU) memory.
 
 ## Related Classes
 
-  - [Connector](connector.md))
-  - [Descriptor](descriptor.md))
-  - [Device](device.md))
-  - [OperationStatus](operation-status.md))
-  - [RdmaMetadata](rdma-metadata.md))
-  - [ReadOperation](read-operation.md))
-  - [WritableOperation](writable-operation.md))
-  - [WriteOperation](write-operation.md))
+  - [Connector](connector.md)
+  - [Descriptor](descriptor.md)
+  - [Device](device.md)
+  - [OperationStatus](operation-status.md)
+  - [RdmaMetadata](rdma-metadata.md)
+  - [ReadOperation](read-operation.md)
+  - [WritableOperation](writable-operation.md)
+  - [WriteOperation](write-operation.md)

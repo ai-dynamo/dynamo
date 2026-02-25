@@ -80,7 +80,7 @@ For a large model like `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, a multi-
 
 In general, disaggregated serving can run on a single node, provided the model fits on the GPU. The multi-node requirement in this example is specific to the size and configuration of the `meta-llama/Llama-4-Maverick-17B-128E-Instruct` model.
 
-To deploy `Llama-4-Maverick-17B-128E-Instruct` in disaggregated mode, you will need to follow the multi-node setup instructions, which can be found [here](./multinode/multinode-multimodal-example.md)).
+To deploy `Llama-4-Maverick-17B-128E-Instruct` in disaggregated mode, you will need to follow the multi-node setup instructions, which can be found [here](./multinode/multinode-multimodal-example.md).
 
 ## Using Pre-computed Embeddings (Experimental)
 
@@ -126,8 +126,8 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
 ```
 ## Encode-Prefill-Decode (EPD) Flow with NIXL
 
-Dynamo with the TensorRT-LLM backend supports multimodal models in Encode -> Decode -> Prefill fashion, enabling you to process embeddings seperately in a seperate worker. For detailed setup instructions, example requests, and best practices, see the [Multimodal EPD Support Guide](./multimodal-epd.md)).
+Dynamo with the TensorRT-LLM backend supports multimodal models in Encode -> Decode -> Prefill fashion, enabling you to process embeddings seperately in a seperate worker. For detailed setup instructions, example requests, and best practices, see the [Multimodal EPD Support Guide](./multimodal-epd.md).
 
 ## Supported Multimodal Models
 
-Multimodel models listed [here](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt-llm/inputs/utils.py#L221)) are supported by dynamo.
+Multimodel models listed [here](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt-llm/inputs/utils.py#L221) are supported by dynamo.

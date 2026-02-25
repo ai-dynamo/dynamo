@@ -4,7 +4,7 @@
 title: "Multimodal Support"
 ---
 
-Dynamo supports multimodal models with vLLM v1. In general, multimodal models can be served using the aggregated serving setup with [`agg_multimodal.sh`](../../../examples/backends/vllm/launch/agg-multimodal.sh)).
+Dynamo supports multimodal models with vLLM v1. In general, multimodal models can be served using the aggregated serving setup with [`agg_multimodal.sh`](../../../examples/backends/vllm/launch/agg-multimodal.sh).
 
 <Warning>
 **LLaVA Model Limitation**: Do not use LLaVA models (e.g., `llava-hf/llava-1.5-7b-hf`) with the standard aggregated serving setup, as they contain keywords that Dynamo cannot yet parse. LLaVA models can still be used with the EPD (Encode-Prefill-Decode) setup described below.
@@ -24,9 +24,9 @@ This section provides example workflows and reference implementations for deploy
 
 We recommend using the latest stable release of dynamo to avoid breaking changes:
 
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo))](https://github.com/ai-dynamo/dynamo/releases/latest)
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
-You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest)) and check out the corresponding branch with:
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
 
 ```bash
 git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
@@ -36,7 +36,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Components
 
-- workers: For aggregated serving, we have two workers, [EncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/encode-worker-handler.py)) for encoding and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)) for prefilling and decoding.
+- workers: For aggregated serving, we have two workers, [EncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/encode-worker-handler.py) for encoding and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py) for prefilling and decoding.
 - processor: Tokenizes the prompt and passes it to the EncodeWorkerHandler.
 - frontend: HTTP endpoint to handle incoming requests.
 
@@ -44,7 +44,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 The EncodeWorkerHandler is responsible for encoding the image and passing the embeddings to the MultimodalPDWorkerHandler via a combination of NATS and RDMA.
 The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
-Its MultimodalPDWorkerHandler then prefills and decodes the prompt, just like the [LLM aggregated serving](README.md)) example.
+Its MultimodalPDWorkerHandler then prefills and decodes the prompt, just like the [LLM aggregated serving](README.md) example.
 By separating the encode from the prefill and decode stages, we can have a more flexible deployment and scale the
 MultimodalPDWorkerHandler independently from the prefill and decode workers if needed.
 
@@ -111,18 +111,18 @@ You should see a response similar to this:
 
 ### Components
 
-- workers: For disaggregated serving, we have three workers, [EncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/encode-worker-handler.py)) for encoding, [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)) for decoding, and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)) for prefilling.
+- workers: For disaggregated serving, we have three workers, [EncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/encode-worker-handler.py) for encoding, [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py) for decoding, and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py) for prefilling.
 - processor: Tokenizes the prompt and passes it to the EncodeWorkerHandler.
 - frontend: HTTP endpoint to handle incoming requests.
 
 ### Workflow
 
-In this workflow, we have three workers, [EncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/encode-worker-handler.py)), [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)), and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)).
+In this workflow, we have three workers, [EncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/encode-worker-handler.py), [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py), and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py).
 For the LLaVA model, embeddings are only required during the prefill stage. As such, the EncodeWorkerHandler is connected directly to the prefill worker.
 The EncodeWorkerHandler is responsible for encoding the image and passing the embeddings to the prefill worker via a combination of NATS and RDMA.
 Its work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
 The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
-For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](README.md)) example.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](README.md) example.
 
 This figure illustrates the workflow:
 ```mermaid
@@ -184,7 +184,7 @@ You should see a response similar to this:
 
 The family of Llama 4 models is natively multimodal, however, different
 from Llava, they do not directly consume image embedding as input
-(see the [support metrics](https://docs.vllm.ai/en/latest/models/supported-models.html#text-generation_1))
+(see the [support metrics](https://docs.vllm.ai/en/latest/models/supported-models.html#text-generation_1)
 from vLLM for the types of multi-modal inputs supported by the model).
 Therefore, encoder worker will not be used in the following example and the
 encoding will be done along side with prefill.
@@ -197,13 +197,13 @@ of the model per node.
 
 #### Components
 
-- workers: For aggregated serving, we have one worker, [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)) for prefilling and decoding.
+- workers: For aggregated serving, we have one worker, [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py) for prefilling and decoding.
 - processor: Tokenizes the prompt and passes it to the MultimodalPDWorkerHandler.
 - frontend: HTTP endpoint to handle incoming requests.
 
 #### Workflow
 
-In this workflow, we have [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](README.md)) example.
+In this workflow, we have [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](README.md) example.
 
 This figure illustrates the workflow:
 ```mermaid
@@ -259,15 +259,15 @@ You should see a response similar to this:
 
 #### Components
 
-- workers: For disaggregated serving, we have two workers, [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)) for decoding, and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)) for encoding and prefilling.
+- workers: For disaggregated serving, we have two workers, [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py) for decoding, and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py) for encoding and prefilling.
 - processor: Tokenizes the prompt and passes it to the MultimodalPDWorkerHandler.
 - frontend: HTTP endpoint to handle incoming requests.
 
 #### Workflow
 
-In this workflow, we have two workers, [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)), and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)).
+In this workflow, we have two workers, [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py), and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py).
 The prefill worker performs the encoding and prefilling steps and forwards the KV cache to the decode worker for decoding.
-For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](README.md)) example.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](README.md) example.
 
 This figure illustrates the workflow:
 ```mermaid
@@ -333,16 +333,16 @@ This example demonstrates deploying an aggregated multimodal model that can proc
 
 ### Components
 
-- workers: For video serving, we use the [VideoEncodeWorker](../../../examples/multimodal/components/video-encode-worker.py)) for decoding video into frames, and send the frames to [VllmPDWorker](../../../examples/multimodal/components/worker.py)) for prefilling and decoding.
+- workers: For video serving, we use the [VideoEncodeWorker](../../../examples/multimodal/components/video-encode-worker.py) for decoding video into frames, and send the frames to [VllmPDWorker](../../../examples/multimodal/components/worker.py) for prefilling and decoding.
 - processor: Tokenizes the prompt and passes it to the VideoEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
 ### Workflow
 
-In this workflow, we have two workers, [VideoEncodeWorker](../../../examples/multimodal/components/video-encode-worker.py)) and [VllmPDWorker](../../../examples/multimodal/components/worker.py)).
+In this workflow, we have two workers, [VideoEncodeWorker](../../../examples/multimodal/components/video-encode-worker.py) and [VllmPDWorker](../../../examples/multimodal/components/worker.py).
 The VideoEncodeWorker is responsible for decoding the video into a series of frames. Unlike the image pipeline which generates embeddings,
 this pipeline passes the raw frames directly to the VllmPDWorker via a combination of NATS and RDMA.
-Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](README.md)) example.
+Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](README.md) example.
 By separating the video processing from the prefill and decode stages, we can have a more flexible deployment and scale the
 VideoEncodeWorker independently from the prefill and decode workers if needed.
 
@@ -420,18 +420,18 @@ This example demonstrates deploying a disaggregated multimodal model that can pr
 
 ### Components
 
-- workers: For disaggregated video serving, we have three workers, [VideoEncodeWorker](../../../examples/multimodal/components/video-encode-worker.py)) for decoding video into frames,
-[VllmDecodeWorker](../../../examples/multimodal/components/worker.py)) for decoding, and [VllmPDWorker](../../../examples/multimodal/components/worker.py)) for prefilling.
+- workers: For disaggregated video serving, we have three workers, [VideoEncodeWorker](../../../examples/multimodal/components/video-encode-worker.py) for decoding video into frames,
+[VllmDecodeWorker](../../../examples/multimodal/components/worker.py) for decoding, and [VllmPDWorker](../../../examples/multimodal/components/worker.py) for prefilling.
 - processor: Tokenizes the prompt and passes it to the VideoEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
 ### Workflow
 
-In this workflow, we have three workers, [VideoEncodeWorker](../../../examples/multimodal/components/video-encode-worker.py)), [VllmDecodeWorker](../../../examples/multimodal/components/worker.py)), and [VllmPDWorker](../../../examples/multimodal/components/worker.py)).
+In this workflow, we have three workers, [VideoEncodeWorker](../../../examples/multimodal/components/video-encode-worker.py), [VllmDecodeWorker](../../../examples/multimodal/components/worker.py), and [VllmPDWorker](../../../examples/multimodal/components/worker.py).
 For the LLaVA-NeXT-Video-7B model, frames are only required during the prefill stage. As such, the VideoEncodeWorker is connected directly to the prefill worker.
 The VideoEncodeWorker is responsible for decoding the video into a series of frames and passing them to the prefill worker via RDMA.
 The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
-For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](README.md)) example.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](README.md) example.
 
 This figure illustrates the workflow:
 ```mermaid

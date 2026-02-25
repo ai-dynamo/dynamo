@@ -19,7 +19,7 @@ Determine your cluster environment:
 - Can use cluster-wide operator (default)
 
 **Local Development** (Minikube, testing):
-- See [Minikube Setup](deployment/minikube.md)) first, then follow installation steps below
+- See [Minikube Setup](deployment/minikube.md) first, then follow installation steps below
 
 To check if CRDs already exist:
 ```bash
@@ -29,7 +29,7 @@ kubectl get crd | grep dynamo
 
 ## Installation Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/cloud/helm/platform/README.md)).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/cloud/helm/platform/README.md).
 
 **Path A: Pre-built Artifacts**
 - Use case: Production deployment, shared or dedicated clusters
@@ -80,11 +80,11 @@ docker version           # Running daemon (for Path D only)
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 ```
 
-> No cluster? See [Minikube Setup](deployment/minikube.md)) for local development.
+> No cluster? See [Minikube Setup](deployment/minikube.md) for local development.
 
 ## Path A: Production Install
 
-Install from [NGC published artifacts](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts)).
+Install from [NGC published artifacts](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts).
 
 ```bash
 # 1. Set environment
@@ -131,11 +131,11 @@ For multinode deployments, you need to install multinode orchestration component
 
 **Option 2: LeaderWorkerSet (LWS) + Volcano**
 - If using LWS for multinode deployments, you must also install Volcano (required dependency):
-  - [LWS Installation](https://github.com/kubernetes-sigs/lws#installation))
-  - [Volcano Installation](https://volcano.sh/en/docs/installation/)) (required for gang scheduling with LWS)
+  - [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
+  - [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
 - These must be installed manually before deploying multinode workloads with LWS.
 
-See the [Multinode Deployment Guide](./deployment/multinode-deployment.md)) for details on orchestrator selection.
+See the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for details on orchestrator selection.
 </Tip>
 <Tip>
 By default, Model Express Server is not used.
@@ -238,13 +238,13 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](../../examples/backends/vllm/deploy/README.md))
-   - [SGLang Deployments](../../examples/backends/sglang/deploy/README.md))
-   - [TensorRT-LLM Deployments](../../examples/backends/trtllm/deploy/README.md))
+   - [vLLM Deployments](../../examples/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](../../examples/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](../../examples/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
-   - [Set up Prometheus & Grafana](./observability/metrics.md))
-   - [SLA Planner Quickstart Guide](../planner/sla-planner-quickstart.md)) (for SLA-aware scheduling and autoscaling)
+   - [Set up Prometheus & Grafana](./observability/metrics.md)
+   - [SLA Planner Quickstart Guide](../planner/sla-planner-quickstart.md) (for SLA-aware scheduling and autoscaling)
 
 ## Troubleshooting
 
@@ -293,7 +293,7 @@ kubectl create secret generic hf-token-secret \
 ```bash
 ERROR: Original containers have been substituted for unrecognized ones. Deploying this chart with non-standard containers is likely to cause degraded security and performance, broken chart features, and missing environment variables.
 ```
-This error that you might encounter during helm install is due to bitnami changing their docker repository to a [secure one](https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog)).
+This error that you might encounter during helm install is due to bitnami changing their docker repository to a [secure one](https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog).
 
 just add the following to the helm install command:
 ```bash
@@ -307,7 +307,7 @@ just add the following to the helm install command:
 
 ## Advanced Options
 
-- [Helm Chart Configuration](../../deploy/cloud/helm/platform/README.md))
-- [Create custom deployments](./deployment/create-deployment.md))
-- [Dynamo Operator details](./dynamo-operator.md))
-- [Model Express Server details](https://github.com/ai-dynamo/modelexpress))
+- [Helm Chart Configuration](../../deploy/cloud/helm/platform/README.md)
+- [Create custom deployments](./deployment/create-deployment.md)
+- [Dynamo Operator details](./dynamo-operator.md)
+- [Model Express Server details](https://github.com/ai-dynamo/modelexpress)

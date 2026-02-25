@@ -214,6 +214,6 @@ date: Wed, 03 Sep 2025 13:42:45 GMT
 
 ## Related Documentation
 
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md))
-- [Dynamo Architecture Overview](../design-docs/architecture.md))
-- [Backend Guide](../development/backend-guide.md))
+- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
+- [Dynamo Architecture Overview](../design-docs/architecture.md)
+- [Backend Guide](../development/backend-guide.md)

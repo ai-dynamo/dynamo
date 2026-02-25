@@ -27,7 +27,7 @@ distributed tracing.
 
 ### Start Observability Stack
 
-For collecting and visualizing logs with Grafana Loki (Kubernetes), or viewing trace context in logs alongside Grafana Tempo, start the observability stack. See [Observability Getting Started](README.md#getting-started-quickly)) for instructions.
+For collecting and visualizing logs with Grafana Loki (Kubernetes), or viewing trace context in logs alongside Grafana Tempo, start the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
 
 ### Enable Structured Logging
 
@@ -98,7 +98,7 @@ When `DYN_LOGGING_JSONL` is enabled, all logs include `trace_id` and `span_id` f
 
 The trace and span information uses the OpenTelemetry format and libraries, which means the IDs are compatible with OpenTelemetry-based tracing backends like Tempo or Jaeger if you later choose to enable trace export.
 
-**Note:** This section has overlap with [Distributed Tracing with Tempo](tracing.md)). For trace visualization in Grafana Tempo and persistent trace analysis, see [Distributed Tracing with Tempo](tracing.md)).
+**Note:** This section has overlap with [Distributed Tracing with Tempo](tracing.md). For trace visualization in Grafana Tempo and persistent trace analysis, see [Distributed Tracing with Tempo](tracing.md).
 
 ### Configuration for Logging
 
@@ -142,7 +142,7 @@ This section shows how trace and span information appears in JSONL logs. These l
 
 When viewing the corresponding trace in Grafana, you should be able to see something like the following:
 
-![Disaggregated Trace Example](grafana-disagg-trace.png))
+![Disaggregated Trace Example](grafana-disagg-trace.png)
 
 ### Trace Overview
 
@@ -254,7 +254,7 @@ Notice how the `x_request_id` field appears in all log entries, alongside the `t
 
 ## Related Documentation
 
-- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md))
-- [Dynamo Architecture Overview](../design-docs/architecture.md))
-- [Backend Guide](../development/backend-guide.md))
-- [Log Aggregation in Kubernetes](../kubernetes/observability/logging.md))
+- [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
+- [Dynamo Architecture Overview](../design-docs/architecture.md)
+- [Backend Guide](../development/backend-guide.md)
+- [Log Aggregation in Kubernetes](../kubernetes/observability/logging.md)

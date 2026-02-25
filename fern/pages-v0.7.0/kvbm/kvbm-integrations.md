@@ -11,20 +11,20 @@ There are two components of the interface, Scheduler and Worker. Scheduler(leade
 
 The following figure shows the typical integration of KVBM with inference frameworks (vLLM used as an example)
 
-![vLLM KVBM Integration ](../../assets/img/kvbm-integrations.png))
+![vLLM KVBM Integration ](../../assets/img/kvbm-integrations.png)
 **vLLM KVBM Integration**
 
 
 ## How to run KVBM with Frameworks
-* Instructions to [run KVBM in vLLM](vllm-setup.md))
-* Instructions to [run KVBM with TRTLLM](trtllm-setup.md))
+* Instructions to [run KVBM in vLLM](vllm-setup.md)
+* Instructions to [run KVBM with TRTLLM](trtllm-setup.md)
 
 ## Onboarding
-![Onboarding blocks from Host to Device](../../assets/img/kvbm-onboard-host2device.png))
+![Onboarding blocks from Host to Device](../../assets/img/kvbm-onboard-host2device.png)
 **Onboarding blocks from Host to Device**
-![Onboarding blocks from Disk to Device](../../assets/img/kvbm-onboard-disk2device.png))
+![Onboarding blocks from Disk to Device](../../assets/img/kvbm-onboard-disk2device.png)
 **Onboarding blocks from Disk to Device**
 
 ## Offloading
-![Offloading blocks from Device to Host&Disk](../../assets/img/kvbm-offload.png))
+![Offloading blocks from Device to Host&Disk](../../assets/img/kvbm-offload.png)
 **Offloading blocks from Device to Host&Disk**

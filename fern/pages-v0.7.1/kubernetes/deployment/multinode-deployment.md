@@ -28,8 +28,8 @@ Dynamo supports multinode deployments through the `multinode` section in resourc
 
 For sophisticated multinode deployments, Dynamo integrates with advanced Kubernetes orchestration systems:
 
-- **[Grove](https://github.com/NVIDIA/grove))**: Network topology-aware gang scheduling and auto-scaling for AI workloads
-- **[KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler))**: Kubernetes native scheduler optimized for AI workloads at scale
+- **[Grove](https://github.com/NVIDIA/grove)**: Network topology-aware gang scheduling and auto-scaling for AI workloads
+- **[KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler)**: Kubernetes native scheduler optimized for AI workloads at scale
 
 These systems provide enhanced scheduling capabilities including topology-aware placement, gang scheduling, and coordinated auto-scaling across multiple nodes.
 
@@ -40,7 +40,7 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 - Resource-aware rolling updates
 
 
-[KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler)) is a Kubernetes native scheduler optimized for AI workloads at large scale.
+[KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is a Kubernetes native scheduler optimized for AI workloads at large scale.
 
 **Features Enabled with KAI-Scheduler:**
 - Gang scheduling
@@ -54,8 +54,8 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 
 ##### Prerequisites
 
-- [Grove](https://github.com/NVIDIA/grove/blob/main/docs/installation.md)) installed on the cluster
-- (Optional) [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler)) installed on the cluster with the default queue name `dynamo` created. If no queue annotation is specified on the DGD resource, the operator uses the `dynamo` queue by default. Custom queue names can be specified via the `nvidia.com/kai-scheduler-queue` annotation, but the queue must exist in the cluster before deployment.
+- [Grove](https://github.com/NVIDIA/grove/blob/main/docs/installation.md) installed on the cluster
+- (Optional) [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) installed on the cluster with the default queue name `dynamo` created. If no queue annotation is specified on the DGD resource, the operator uses the `dynamo` queue by default. Custom queue names can be specified via the `nvidia.com/kai-scheduler-queue` annotation, but the queue must exist in the cluster before deployment.
 
 KAI-Scheduler is optional but recommended for advanced scheduling capabilities.
 
@@ -63,8 +63,8 @@ KAI-Scheduler is optional but recommended for advanced scheduling capabilities.
 
 LWS is a simple multinode deployment mechanism that allows you to deploy a workload across multiple nodes.
 
-- **LWS**: [LWS Installation](https://github.com/kubernetes-sigs/lws#installation))
-- **Volcano**: [Volcano Installation](https://volcano.sh/en/docs/installation/))
+- **LWS**: [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
+- **Volcano**: [Volcano Installation](https://volcano.sh/en/docs/installation/)
 
 Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It is used in conjunction with LWS to provide gang scheduling support.
 
@@ -83,7 +83,7 @@ Dynamo automatically selects the best available orchestrator for multinode deplo
 - The installed orchestrator (Grove or LWS) is automatically selected
 
 #### Scheduler Integration:
-- **With Grove**: Automatically integrates with [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler)) when available, providing:
+- **With Grove**: Automatically integrates with [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) when available, providing:
   - Advanced queue management via `nvidia.com/kai-scheduler-queue` annotation
   - AI-optimized scheduling policies
   - Resource-aware workload placement
@@ -287,8 +287,8 @@ To enable compilation cache, add a volume mount with `useAsCompilationCache: tru
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [examples/backends/sglang/deploy/](../../../examples/backends/sglang/deploy/))
-- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](../../../examples/backends/trtllm/deploy/))
-- **vLLM**: [examples/backends/vllm/deploy/](../../../examples/backends/vllm/deploy/))
+- **SGLang**: [examples/backends/sglang/deploy/](../../../examples/backends/sglang/deploy/)
+- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](../../../examples/backends/trtllm/deploy/)
+- **vLLM**: [examples/backends/vllm/deploy/](../../../examples/backends/vllm/deploy/)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.

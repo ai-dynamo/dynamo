@@ -4,12 +4,6 @@
 title: "KV Block Manager"
 ---
 
----
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-title: "KV Block Manager"
----
-
 The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer for frameworks like vLLM, SGLang, and TRT-LLM.
 
 It offers:
@@ -22,12 +16,12 @@ The Dynamo KV Block Manager serves as a reference implementation that emphasizes
 
 ## Feature Support Matrix
 
-| - | Feature |
-|-------|-------|
+| Category | Status | Feature |
+|----------|--------|---------|
 | **Backend** | ✅ | Local |
-| ✅ | Kubernetes |
+| | ✅ | Kubernetes |
 | **LLM Framework** | ✅ | vLLM |
-| ✅ | TensorRT-LLM |
-| ❌ | SGLang |
+| | ✅ | TensorRT-LLM |
+| | ❌ | SGLang |
 | **Serving Type** | ✅ | Aggregated |
-| ✅ | Disaggregated |
+| | ✅ | Disaggregated |

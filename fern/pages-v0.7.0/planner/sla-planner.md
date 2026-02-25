@@ -5,7 +5,7 @@ title: "SLA-based Planner"
 ---
 
 <Tip>
-**New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Profiling + Planner Quick Start Guide](/docs/planner/sla-planner-quickstart.md)).
+**New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Profiling + Planner Quick Start Guide](/docs/planner/sla-planner-quickstart.md).
 </Tip>
 This document covers information regarding the SLA-based planner in `examples/common/utils/planner_core.py`.
 
@@ -25,7 +25,7 @@ Bare metal deployment with local connector is deprecated. Please deploy the SLA 
 - **Planner**: Queries Prometheus and adjusts worker scaling every adjustment interval
 - **Workers**: prefill and backend workers handle inference
 
-The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found in this [file](/components/src/dynamo/planner/defaults.py)).
+The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found in this [file](/components/src/dynamo/planner/defaults.py).
 
 ```mermaid
 flowchart LR
@@ -55,7 +55,7 @@ The SLA planner consists of several key components:
 
 **Prerequisite**: SLA-based planner requires pre-deployment profiling to be completed before deployment. The profiling process analyzes your model's performance characteristics to determine optimal tensor parallelism configurations and scaling parameters that the planner will use during operation.
 
-See [Pre-Deployment Profiling](../benchmarks/sla-driven-profiling.md)) for detailed instructions on running the profiling process.
+See [Pre-Deployment Profiling](../benchmarks/sla-driven-profiling.md) for detailed instructions on running the profiling process.
 
 ## Load Prediction
 
@@ -73,7 +73,7 @@ The SLA planner use load predictor to predict the number of requests, ISL, and O
 
 ### Prophet Predictor
 - **Use case**: Complex seasonal patterns and trend changes
-- **Behavior**: Facebook's [Prophet](https://facebook.github.io/prophet/)) model for time-series forecasting
+- **Behavior**: Facebook's [Prophet](https://facebook.github.io/prophet/) model for time-series forecasting
 - **Configuration**: `load-predictor: "prophet"`
 
 ## Scaling Algorithm
@@ -133,7 +133,7 @@ SLA-planner scales up/down the P/D engines non-blockingly. If `adjustment-interv
 </Note>
 ## Deploying
 
-For complete deployment instructions, see the [SLA Planner Quick Start Guide](/docs/planner/sla-planner-quickstart.md)).
+For complete deployment instructions, see the [SLA Planner Quick Start Guide](/docs/planner/sla-planner-quickstart.md).
 
 <Note>
 The SLA planner requires a frontend that reports metrics at the `/metrics` HTTP endpoint with the number of requests, ISL, OSL, TTFT, and ITL in the correct format. The dynamo frontend provides these metrics automatically.

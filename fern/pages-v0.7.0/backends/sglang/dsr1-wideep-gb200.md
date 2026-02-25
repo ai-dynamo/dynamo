@@ -4,7 +4,7 @@
 title: "Running DeepSeek-R1 Disaggregated with WideEP on GB200s"
 ---
 
-Dynamo supports SGLang's GB200 implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://lmsys.org/blog/2025-06-16-gb200-part-1/)) for more details. We provide a sample configuration that demonstrates WideEP and P/D  disaggregation. To run the exact configuration shown in the blog post, you can view the commands created by the SGLang team [here](https://github.com/sgl-project/sglang/issues/7227)). In this example, we will run 1 prefill worker on 2 GB200 nodes (4 GPUs each) and 1 decode worker on 2 GB200 nodes (total 8 GPUs).
+Dynamo supports SGLang's GB200 implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://lmsys.org/blog/2025-06-16-gb200-part-1/) for more details. We provide a sample configuration that demonstrates WideEP and P/D  disaggregation. To run the exact configuration shown in the blog post, you can view the commands created by the SGLang team [here](https://github.com/sgl-project/sglang/issues/7227). In this example, we will run 1 prefill worker on 2 GB200 nodes (4 GPUs each) and 1 decode worker on 2 GB200 nodes (total 8 GPUs).
 
 ## Instructions
 
@@ -24,7 +24,7 @@ cd $DYNAMO_ROOT
 2. You can run this container on each 4xGB200 node using the following command.
 
 <Warning>
-We recommend downloading DeepSeek-R1 and then mounting it to the container. You can find the model [here](https://huggingface.co/deepseek-ai/DeepSeek-R1))
+We recommend downloading DeepSeek-R1 and then mounting it to the container. You can find the model [here](https://huggingface.co/deepseek-ai/DeepSeek-R1)
 </Warning>
 ```bash
 docker run \

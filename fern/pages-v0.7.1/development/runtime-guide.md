@@ -6,13 +6,13 @@ title: "Dynamo Runtime"
 
 **A Datacenter Scale Distributed Inference Serving Framework**
 
-[![License](https://img.shields.io/badge/License-Apache-2.0-blue.svg))](https://opensource.org/licenses/Apache-2.0)
+[![License](https://img.shields.io/badge/License-Apache-2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 Rust implementation of the Dynamo runtime system, enabling distributed computing capabilities for machine learning workloads.
 
 ## Prerequisites
 
-### Install Rust and Cargo using [rustup](https://rustup.rs/)):
+### Install Rust and Cargo using [rustup](https://rustup.rs/):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -30,15 +30,15 @@ cargo test
 #### Docker Compose
 
 The simplest way to deploy the pre-requisite services is using
-[docker-compose](https://docs.docker.com/compose/install/linux/)),
-defined in [deploy/docker-compose.yml](../../deploy/docker-compose.yml)).
+[docker-compose](https://docs.docker.com/compose/install/linux/),
+defined in [deploy/docker-compose.yml](../../deploy/docker-compose.yml).
 
 ```
 # At the root of the repository:
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-This will deploy a [NATS.io](https://nats.io/)) server and an [etcd](https://etcd.io/))
+This will deploy a [NATS.io](https://nats.io/) server and an [etcd](https://etcd.io/)
 server used to communicate between and discover components at runtime.
 
 
@@ -47,10 +47,10 @@ server used to communicate between and discover components at runtime.
 To deploy the pre-requisite services locally instead of using `docker-compose`
 above, you can manually launch each:
 
-- [NATS.io](https://docs.nats.io/running-a-nats-service/introduction/installation)) server with [Jetstream](https://docs.nats.io/nats-concepts/jetstream))
+- [NATS.io](https://docs.nats.io/running-a-nats-service/introduction/installation) server with [Jetstream](https://docs.nats.io/nats-concepts/jetstream)
     - example: `nats-server -js --trace`
-- [etcd](https://etcd.io)) server
-    - follow instructions in [etcd installation](https://etcd.io/docs/v3.5/install/)) to start an `etcd-server` locally
+- [etcd](https://etcd.io) server
+    - follow instructions in [etcd installation](https://etcd.io/docs/v3.5/install/) to start an `etcd-server` locally
 
 
 ### Run Examples
@@ -97,7 +97,7 @@ Annotated { data: Some("d"), id: None, event: None, comment: None }
 
 #### Python
 
-See the [README.md](../../lib/runtime/lib/bindings/python/README.md)) for details
+See the [README.md](../../lib/runtime/lib/bindings/python/README.md) for details
 
 The Python and Rust `hello_world` client and server examples are interchangeable,
 so you can start the Python `server.py` and talk to it from the Rust `client`.

@@ -6,7 +6,7 @@ title: "KVBM Architecture"
 
 The KVBM serves as a critical infrastructure component for scaling LLM inference workloads efficiently. By cleanly separating runtime logic from memory management, and by enabling distributed block sharing, KVBM lays the foundation for high-throughput, multi-node, and memory-disaggregated AI systems.
 
-![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../../assets/img/kvbm-architecture.png))
+![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../../assets/img/kvbm-architecture.png)
 **High level layered architecture view of Dynamo KV Block manager and how it interfaces with different components of LLM inference ecosystem**
 
 The KVBM has three primary logical layers. The top layer-the LLM inference runtimes (TRTLLM, vLLM and SGLang)-integrates through a dedicated connector module to the Dynamo KVBM module. These connectors act as translation layers, mapping runtime-specific operations and events into the KVBM’s block-oriented memory interface. This decouples memory management from the inference runtime, enabling backend portability and providing memory tiering.
@@ -23,4 +23,4 @@ NIXL integrates with several backends:
 - Object stores (for example, S3-compatible)
 - Cloud storage (for example, blob storage APIs)
 
-**[NIXL](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md))** abstracts away the registration and integration complexity for each backends via custom optimizable plugin architecture and enables memory blocks to be published, serialized, and accessed remotely, allowing the disaggregation of compute and memory across nodes. Combined with the Dynamo KV Block Manager (KVBM), storage providers no longer need to retrofit or optimize individual LLM inference engines. Instead, they can focus on tuning their own stack, providing optimized endpoints, knowing that integration is smooth, standardized, and efficient. And for those who *do* want to go further, Dynamo KVBM offers a clean separation of concerns, making custom optimization not only possible, but simple.
+**[NIXL](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)** abstracts away the registration and integration complexity for each backends via custom optimizable plugin architecture and enables memory blocks to be published, serialized, and accessed remotely, allowing the disaggregation of compute and memory across nodes. Combined with the Dynamo KV Block Manager (KVBM), storage providers no longer need to retrofit or optimize individual LLM inference engines. Instead, they can focus on tuning their own stack, providing optimized endpoints, knowing that integration is smooth, standardized, and efficient. And for those who *do* want to go further, Dynamo KVBM offers a clean separation of concerns, making custom optimization not only possible, but simple.

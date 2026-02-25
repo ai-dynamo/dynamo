@@ -4,7 +4,7 @@
 title: "dynamo.nixl_connect.RdmaMetadata"
 ---
 
-A Pydantic type intended to provide JSON serialized NIXL metadata about a [`ReadableOperation`](readable-operation.md)) or [`WritableOperation`](writable-operation.md)) object.
+A Pydantic type intended to provide JSON serialized NIXL metadata about a [`ReadableOperation`](readable-operation.md) or [`WritableOperation`](writable-operation.md) object.
 NIXL metadata contains detailed information about a worker process and how to access memory regions registered with the corresponding agent.
 This data is required to perform data transfers using the NIXL-based I/O subsystem.
 
@@ -16,18 +16,18 @@ Use the respective class's `.metadata()` method to generate an `RdmaMetadata` ob
 
 > [!Tip]
 > Classes using `RdmaMetadata` objects must be paired correctly.
-> [`ReadableOperation`](readable-operation.md)) with [`ReadOperation`](read-operation.md)), and
-> [`WritableOperation`](write-operation.md)) with [`WriteOperation`](write-operation.md)).
+> [`ReadableOperation`](readable-operation.md) with [`ReadOperation`](read-operation.md), and
+> [`WritableOperation`](write-operation.md) with [`WriteOperation`](write-operation.md).
 > Incorrect pairing will result in an error being raised.
 
 
 ## Related Classes
 
-  - [Connector](connector.md))
-  - [Descriptor](descriptor.md))
-  - [Device](device.md))
-  - [OperationStatus](operation-status.md))
-  - [ReadOperation](read-operation.md))
-  - [ReadableOperation](readable-operation.md))
-  - [WritableOperation](writable-operation.md))
-  - [WriteOperation](write-operation.md))
+  - [Connector](connector.md)
+  - [Descriptor](descriptor.md)
+  - [Device](device.md)
+  - [OperationStatus](operation-status.md)
+  - [ReadOperation](read-operation.md)
+  - [ReadableOperation](readable-operation.md)
+  - [WritableOperation](writable-operation.md)
+  - [WriteOperation](write-operation.md)

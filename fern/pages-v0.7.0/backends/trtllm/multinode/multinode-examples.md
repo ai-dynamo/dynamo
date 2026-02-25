@@ -4,7 +4,7 @@
 title: "Example: Multi-node TRTLLM Workers with Dynamo on Slurm"
 ---
 
-> **Note:** The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/)).
+> **Note:** The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
 
 To run a single Dynamo+TRTLLM Worker that spans multiple nodes (ex: TP16),
 the set of nodes need to be launched together in the same MPI world, such as
@@ -30,14 +30,14 @@ For simplicity of the example, we will make some assumptions about your slurm cl
    available. For functional testing, most setups should be fine. For performance
    testing, you should aim to allocate groups of nodes that are performantly
    inter-connected, such as those in an NVL72 setup.
-2. Second, we assume this slurm cluster has the [Pyxis](https://github.com/NVIDIA/pyxis))
+2. Second, we assume this slurm cluster has the [Pyxis](https://github.com/NVIDIA/pyxis)
    SPANK plugin setup. In particular, the `srun_aggregated.sh` script in this
    example will use `srun` arguments like `--container-image`,
    `--container-mounts`, and `--container-env` that are added to `srun` by Pyxis.
    If your cluster supports similar container based plugins, you may be able to
    modify the script to use that instead.
 3. Third, we assume you have already built a recent Dynamo+TRTLLM container image as
-   described [here](https://github.com/ai-dynamo/dynamo/tree/main/docs/backends/trtllm/README.md#build-container)).
+   described [here](https://github.com/ai-dynamo/dynamo/tree/main/docs/backends/trtllm/README.md#build-container).
    This is the image that can be set to the `IMAGE` environment variable in later steps.
 4. Fourth, we assume you pre-allocate a group of nodes using `salloc`. We
    will allocate 8 nodes below as a reference command to have enough capacity
@@ -275,4 +275,4 @@ pkill srun
       to check on this behavior. If you don't free the GPU memory before the
       next deployment, you may get a CUDA OOM error while loading the model.
     - There is mention of this issue in the relevant TRT-LLM blog
-      [here](https://github.com/NVIDIA/TensorRT-LLM/blob/6021a439ab9c29f4c46f721eeb59f6b992c425ea/docs/source/blogs/tech-blog/blog4-Scaling-Expert-Parallelism-in-TensorRT-LLM.md#miscellaneous)).
+      [here](https://github.com/NVIDIA/TensorRT-LLM/blob/6021a439ab9c29f4c46f721eeb59f6b992c425ea/docs/source/blogs/tech-blog/blog4-Scaling-Expert-Parallelism-in-TensorRT-LLM.md#miscellaneous).

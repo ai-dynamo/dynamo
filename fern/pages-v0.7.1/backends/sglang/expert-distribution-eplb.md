@@ -56,5 +56,5 @@ While SGLang can start with a simple default layout and learn a better one over 
 
 ### References and further reading
 
-- [SGLang Large Scale P/D + WideEP Deployment](https://lmsys.org/blog/2025-05-05-large-scale-ep/#expert-parallelism-load-balancer))
-- [Deepseek's EPLB repository](https://github.com/deepseek-ai/EPLB))
+- [SGLang Large Scale P/D + WideEP Deployment](https://lmsys.org/blog/2025-05-05-large-scale-ep/#expert-parallelism-load-balancer)
+- [Deepseek's EPLB repository](https://github.com/deepseek-ai/EPLB)

@@ -113,11 +113,11 @@ Dynamo provides the following Custom Resources:
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-**📖 [Dynamo CRD API Reference](./api-reference.md))**
+**📖 [Dynamo CRD API Reference](./api-reference.md)**
 
 For a user-focused guide on deploying and managing models with DynamoModel, see:
 
-**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md))**
+**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 
 ## Installation
 
@@ -161,7 +161,7 @@ helm install dynamo-platform ./platform/ \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}"
 ```
 
-For detailed installation options, see the [Installation Guide](./installation-guide.md))
+For detailed installation options, see the [Installation Guide](./installation-guide.md)
 
 
 ## Development
@@ -177,7 +177,7 @@ The operator is built using Kubebuilder and the operator-sdk, with the following
 
 ## References
 
-- [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/))
-- [Custom Resource Definitions](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/))
-- [Operator SDK](https://sdk.operatorframework.io/))
-- [Helm Best Practices for CRDs](https://helm.sh/docs/chart-best-practices/custom-resource-definitions/))
+- [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
+- [Custom Resource Definitions](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
+- [Operator SDK](https://sdk.operatorframework.io/)
+- [Helm Best Practices for CRDs](https://helm.sh/docs/chart-best-practices/custom-resource-definitions/)

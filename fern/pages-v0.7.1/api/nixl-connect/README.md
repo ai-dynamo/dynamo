@@ -19,13 +19,13 @@ The `dynamo.nixl_connect` library can be imported by any Dynamo container hosted
 > - Network that supports InfiniBand or RoCE
 >
 > With any of the above not satisfied, GPU Direct RDMA will not be available to the graph's workers, and less-optimal methods will be utilized to ensure basic functionality.
-> For additional information, please read this [GPUDirect RDMA](https://docs.nvidia.com/cuda/pdf/GPUDirect-RDMA.pdf)) document.
+> For additional information, please read this [GPUDirect RDMA](https://docs.nvidia.com/cuda/pdf/GPUDirect-RDMA.pdf) document.
 
 ```python
 import dynamo.nixl_connect
 ```
 
-All operations using the NIXL Connect library begin with the [`Connector`](connector.md)) class and the type of operation required.
+All operations using the NIXL Connect library begin with the [`Connector`](connector.md) class and the type of operation required.
 There are four types of supported operations:
 
  1. **Register local readable memory**:
@@ -68,9 +68,9 @@ sequenceDiagram
 
 ### Generic Example
 
-In the diagram below, Local creates a [`WritableOperation`](writable-operation.md)) intended to receive data from Remote.
+In the diagram below, Local creates a [`WritableOperation`](writable-operation.md) intended to receive data from Remote.
 Local then sends metadata about the requested operation to Remote.
-Remote then uses the metadata to create a [`WriteOperation`](write-operation.md)) which will perform the GPU Direct RDMA memory transfer, when available, from Remote's GPU memory to Local's GPU memory.
+Remote then uses the metadata to create a [`WriteOperation`](write-operation.md) which will perform the GPU Direct RDMA memory transfer, when available, from Remote's GPU memory to Local's GPU memory.
 
 ```mermaid
 ---
@@ -90,7 +90,7 @@ flowchart LR
 
 ### Multimodal Example
 
-In the case of the [Dynamo Multimodal Disaggregated Example](../../backends/vllm/multimodal.md)):
+In the case of the [Dynamo Multimodal Disaggregated Example](../../backends/vllm/multimodal.md):
 
  1. The HTTP frontend accepts a text prompt and a URL to an image.
 
@@ -140,30 +140,30 @@ flowchart LR
 
 #### Code Examples
 
-See [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)) or [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py)) from our Multimodal example,
-for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](writable-operation.md)),
+See [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py) or [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/worker-handler.py) from our Multimodal example,
+for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](writable-operation.md),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
-See [MultimodalEncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/encode-worker-handler.py)) from our Multimodal example,
-for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.md)),
-a [`WriteOperation`](write-operation.md)) is created using the metadata provided by the requesting worker,
+See [MultimodalEncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal-handlers/encode-worker-handler.py) from our Multimodal example,
+for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.md),
+a [`WriteOperation`](write-operation.md) is created using the metadata provided by the requesting worker,
 and the worker awaits for the data transfer to complete for yielding a response.
 
 
 ## Python Classes
 
-  - [Connector](connector.md))
-  - [Descriptor](descriptor.md))
-  - [Device](device.md))
-  - [ReadOperation](read-operation.md))
-  - [ReadableOperation](readable-operation.md))
-  - [WritableOperation](writable-operation.md))
-  - [WriteOperation](write-operation.md))
+  - [Connector](connector.md)
+  - [Descriptor](descriptor.md)
+  - [Device](device.md)
+  - [ReadOperation](read-operation.md)
+  - [ReadableOperation](readable-operation.md)
+  - [WritableOperation](writable-operation.md)
+  - [WriteOperation](write-operation.md)
 
 
 ## References
 
-  - [NVIDIA Dynamo](https://developer.nvidia.com/dynamo)) @ [GitHub](https://github.com/ai-dynamo/dynamo))
-  - [NVIDIA Inference Transfer Library (NIXL)](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/#nvidia_inference_transfer_library_nixl_low-latency_hardware-agnostic_communication%C2%A0)) @ [GitHub](https://github.com/ai-dynamo/nixl))
-  - [Dynamo Multimodal Example](../../..//examples/multimodal))
-  - [NVIDIA GPU Direct](https://developer.nvidia.com/gpudirect))
+  - [NVIDIA Dynamo](https://developer.nvidia.com/dynamo) @ [GitHub](https://github.com/ai-dynamo/dynamo)
+  - [NVIDIA Inference Transfer Library (NIXL)](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/#nvidia_inference_transfer_library_nixl_low-latency_hardware-agnostic_communication%C2%A0) @ [GitHub](https://github.com/ai-dynamo/nixl)
+  - [Dynamo Multimodal Example](../../..//examples/multimodal)
+  - [NVIDIA GPU Direct](https://developer.nvidia.com/gpudirect)

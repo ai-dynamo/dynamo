@@ -29,12 +29,12 @@ helm repo add fluid https://fluid-cloudnative.github.io/charts
 helm repo update
 helm install fluid fluid/fluid -n fluid-system
 ```
-For advanced configuration, see the [Fluid Installation Guide](https://fluid-cloudnative.github.io/docs/get-started/installation)).
+For advanced configuration, see the [Fluid Installation Guide](https://fluid-cloudnative.github.io/docs/get-started/installation).
 
 ## Pre-deployment Steps
 
-1. Install Fluid (see [Installation](#installation)).
-2. Create a Dataset and Runtime (see [the following example](#webufs-example)).
+1. Install Fluid (see [Installation](#installation).
+2. Create a Dataset and Runtime (see [the following example](#webufs-example).
 3. Mount the resulting PVC in your workload.
 
 
@@ -324,9 +324,9 @@ spec:
 
 ## Resources
 
-- [Fluid Documentation](https://fluid-cloudnative.github.io/))
-- [Alluxio Documentation](https://docs.alluxio.io/))
-- [MinIO Documentation](https://docs.min.io/))
-- [Hugging Face Hub](https://huggingface.co/docs/hub/index))
-- [Dynamo README](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md))
-- [Dynamo Documentation](https://docs.nvidia.com/dynamo/latest/index.html))
+- [Fluid Documentation](https://fluid-cloudnative.github.io/)
+- [Alluxio Documentation](https://docs.alluxio.io/)
+- [MinIO Documentation](https://docs.min.io/)
+- [Hugging Face Hub](https://huggingface.co/docs/hub/index)
+- [Dynamo README](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md)
+- [Dynamo Documentation](https://docs.nvidia.com/dynamo/latest/index.html)

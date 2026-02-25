@@ -12,8 +12,8 @@ This is an example to get started quickly on a single machine.
 
 Install these on your machine:
 
-- [Docker](https://docs.docker.com/get-docker/))
-- [Docker Compose](https://docs.docker.com/compose/install/))
+- [Docker](https://docs.docker.com/get-docker/)
+- [Docker Compose](https://docs.docker.com/compose/install/)
 
 ### Starting the Observability Stack
 
@@ -29,16 +29,16 @@ docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-observability.yml up -d
 ```
 
-For detailed setup instructions and configuration, see [Prometheus + Grafana Setup](prometheus-grafana.md)).
+For detailed setup instructions and configuration, see [Prometheus + Grafana Setup](prometheus-grafana.md).
 
 ## Observability Documentations
 
 | Guide | Description | Environment Variables to Control |
 |-------|-------------|----------------------------------|
-| [Metrics](metrics.md)) | Available metrics reference | `DYN_SYSTEM_PORT`† |
-| [Health Checks](health-checks.md)) | Component health monitoring and readiness probes | `DYN_SYSTEM_PORT`†, `DYN_SYSTEM_STARTING_HEALTH_STATUS`, `DYN_SYSTEM_HEALTH_PATH`, `DYN_SYSTEM_LIVE_PATH`, `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` |
-| [Tracing](tracing.md)) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
-| [Logging](logging.md)) | Structured logging configuration | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`† |
+| [Metrics](metrics.md) | Available metrics reference | `DYN_SYSTEM_PORT`† |
+| [Health Checks](health-checks.md) | Component health monitoring and readiness probes | `DYN_SYSTEM_PORT`†, `DYN_SYSTEM_STARTING_HEALTH_STATUS`, `DYN_SYSTEM_HEALTH_PATH`, `DYN_SYSTEM_LIVE_PATH`, `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` |
+| [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
+| [Logging](logging.md) | Structured logging configuration | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`† |
 
 **Variables marked with † are shared across multiple observability systems.**
 
@@ -46,11 +46,11 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 
 | Guide | Description | Environment Variables to Control |
 |-------|-------------|----------------------------------|
-| [Metrics Developer Guide](metrics-developer-guide.md)) | Creating custom metrics in Rust and Python | `DYN_SYSTEM_PORT`† |
+| [Metrics Developer Guide](metrics-developer-guide.md) | Creating custom metrics in Rust and Python | `DYN_SYSTEM_PORT`† |
 
 ## Kubernetes
 
-For Kubernetes-specific setup and configuration, see [docs/kubernetes/observability/](../kubernetes/observability/)).
+For Kubernetes-specific setup and configuration, see [docs/kubernetes/observability/](../kubernetes/observability/).
 
 ---
 
@@ -84,12 +84,12 @@ The dcgm-exporter service in the Docker Compose network is configured to use por
 ### Configuration Files
 
 The following configuration files are located in the `deploy/observability/` directory:
-- [docker-compose.yml](../../deploy/docker-compose.yml)): Defines NATS and etcd services
-- [docker-observability.yml](../../deploy/docker-observability.yml)): Defines Prometheus, Grafana, Tempo, and exporters
-- [prometheus.yml](../../deploy/observability/prometheus.yml)): Contains Prometheus scraping configuration
-- [grafana-datasources.yml](../../deploy/observability/grafana-datasources.yml)): Contains Grafana datasource configuration
-- [grafana_dashboards/dashboard-providers.yml](../../deploy/observability/grafana-dashboards/dashboard-providers.yml)): Contains Grafana dashboard provider configuration
-- [grafana_dashboards/dynamo.json](../../deploy/observability/grafana-dashboards/dynamo.json)): A general Dynamo Dashboard for both SW and HW metrics
-- [grafana_dashboards/dcgm-metrics.json](../../deploy/observability/grafana-dashboards/dcgm-metrics.json)): Contains Grafana dashboard configuration for DCGM GPU metrics
-- [grafana_dashboards/kvbm.json](../../deploy/observability/grafana-dashboards/kvbm.json)): Contains Grafana dashboard configuration for KVBM metrics
+- [docker-compose.yml](../../deploy/docker-compose.yml): Defines NATS and etcd services
+- [docker-observability.yml](../../deploy/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
+- [prometheus.yml](../../deploy/observability/prometheus.yml): Contains Prometheus scraping configuration
+- [grafana-datasources.yml](../../deploy/observability/grafana-datasources.yml): Contains Grafana datasource configuration
+- [grafana_dashboards/dashboard-providers.yml](../../deploy/observability/grafana-dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/dynamo.json](../../deploy/observability/grafana-dashboards/dynamo.json): A general Dynamo Dashboard for both SW and HW metrics
+- [grafana_dashboards/dcgm-metrics.json](../../deploy/observability/grafana-dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/kvbm.json](../../deploy/observability/grafana-dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics
 

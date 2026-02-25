@@ -17,7 +17,7 @@ cd $DYNAMO_ROOT
   --tag dynamo-wideep:latest \
 ```
 
-You can use a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags)) by adding `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
+You can use a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags) by adding `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
 
 **Step 1**: Ensure that your configuration file has the required arguments. Here's an example configuration that runs prefill and the model in TP16:
 

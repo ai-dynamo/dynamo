@@ -4,16 +4,25 @@
 title: "Dynamo Examples"
 ---
 
-Dynamo includes practical examples demonstrating how to deploy and use the platform for distributed LLM inference.
+The examples below assume you build the latest image yourself from source.
+If using a prebuilt image follow the examples from the corresponding branch.
 
-## Backend Examples
+<CardGroup cols={2}>
 
-- [vLLM Examples](../backends/vllm/README.md) - Deploy LLMs with vLLM backend
-- [SGLang Examples](../backends/sglang/README.md) - Deploy LLMs with SGLang backend
-- [TensorRT-LLM Examples](../backends/trtllm/README.md) - Deploy LLMs with TensorRT-LLM backend
+<Card title="Hello World" href="https://github.com/ai-dynamo/dynamo/blob/v0.7.1/examples/runtime/hello_world/README.md">
+  Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph
+</Card>
 
-## Getting Started
+<Card title="vLLM" href="../backends/vllm/README.md">
+  Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with vLLM.
+</Card>
 
-For a quick introduction to Dynamo concepts, see the [Quickstart](quickstart.md) guide.
+<Card title="SGLang" href="../backends/sglang/README.md">
+  Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with SGLang.
+</Card>
 
-For the full set of examples, visit the [examples directory on GitHub](https://github.com/ai-dynamo/dynamo/tree/v0.7.1/examples).
+<Card title="TensorRT-LLM" href="../backends/trtllm/README.md">
+  Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with TensorRT-LLM.
+</Card>
+
+</CardGroup>

@@ -10,9 +10,9 @@ This directory contains reference implementations for deploying Large Language M
 
 We recommend using the latest stable release of Dynamo to avoid breaking changes:
 
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo))](https://github.com/ai-dynamo/dynamo/releases/latest)
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
-You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest)) and check out the corresponding branch with:
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
 
 ```bash
 git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
@@ -34,13 +34,13 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | vLLM | Notes |
 |---------|------|-------|
-| [**Disaggregated Serving**](../../../docs/design-docs/disagg-serving.md)) | ✅ |  |
-| [**Conditional Disaggregation**](../../../docs/design-docs/disagg-serving.md#conditional-disaggregation)) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../../docs/router/kv-cache-routing.md)) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/planner/sla-planner.md)) | ✅ |  |
-| [**Load Based Planner**](../../../docs/planner/load-planner.md)) | 🚧 | WIP |
-| [**KVBM**](../../../docs/kvbm/kvbm-architecture.md)) | ✅ |  |
-| [**LMCache**](./LMCache-Integration.md)) | ✅ |  |
+| [**Disaggregated Serving**](../../../docs/design-docs/disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP |
+| [**KV-Aware Routing**](../../../docs/router/kv-cache-routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/planner/sla-planner.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/planner/load-planner.md) | 🚧 | WIP |
+| [**KVBM**](../../../docs/kvbm/kvbm-architecture.md) | ✅ |  |
+| [**LMCache**](./LMCache-Integration.md) | ✅ |  |
 
 ### Large Scale P/D and WideEP Features
 
@@ -56,7 +56,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start NATS and ETCD in the background
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml))
+Start using [Docker Compose](../../../deploy/docker-compose.yml)
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -64,7 +64,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ### Pull or build container
 
-We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts)). If you'd like to build your own container from source:
+We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd like to build your own container from source:
 
 ```bash
 ./container/build.sh --framework VLLM
@@ -76,7 +76,7 @@ We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/
 ./container/run.sh -it --framework VLLM [--mount-workspace]
 ```
 
-This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790)) which enables support for external control of the DP ranks.
+This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790) which enables support for external control of the DP ranks.
 
 ## Run Single Node Examples
 
@@ -152,7 +152,7 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README.md))
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README.md)
 
 ## Configuration
 
@@ -165,7 +165,7 @@ vLLM workers are configured through command-line arguments. Key parameters inclu
 
 See `args.py` for the full list of configuration options and their defaults.
 
-The [documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve-args.html?h=serve+arg)) for the vLLM CLI args points to running 'vllm serve --help' to see what CLI args can be added. We use the same argument parser as vLLM.
+The [documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve-args.html?h=serve+arg) for the vLLM CLI args points to running 'vllm serve --help' to see what CLI args can be added. We use the same argument parser as vLLM.
 
 ### Hashing Consistency for KV Events
 
@@ -177,17 +177,17 @@ When using KV-aware routing, ensure deterministic hashing across processes to av
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-See the high-level notes in [KV Cache Routing](../../../docs/router/kv-cache-routing.md)) on deterministic event IDs.
+See the high-level notes in [KV Cache Routing](../../../docs/router/kv-cache-routing.md) on deterministic event IDs.
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/fault-tolerance/request-migration.md)) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+You can enable [request migration](../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
 python3 -m dynamo.vllm ... --migration-limit=3
 ```
 
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/fault-tolerance/request-migration.md)) documentation for details on how this works.
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/fault-tolerance/request-migration.md) documentation for details on how this works.
 
 ## Request Cancellation
 
@@ -200,4 +200,4 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | **Aggregated** | ✅ | ✅ |
 | **Disaggregated** | ✅ | ✅ |
 
-For more details, see the [Request Cancellation Architecture](../../../docs/fault-tolerance/request-cancellation.md)) documentation.
+For more details, see the [Request Cancellation Architecture](../../../docs/fault-tolerance/request-cancellation.md) documentation.

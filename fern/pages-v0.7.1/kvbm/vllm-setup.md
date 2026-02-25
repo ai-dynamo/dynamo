@@ -6,7 +6,7 @@ title: "Running KVBM in vLLM"
 
 This guide explains how to leverage KVBM (KV Block Manager) to manage KV cache and do KV offloading in vLLM.
 
-To learn what KVBM is, please check [here](kvbm-architecture.md))
+To learn what KVBM is, please check [here](kvbm-architecture.md)
 
 ## Quick Start
 
@@ -148,7 +148,7 @@ cd LMBenchmark/synthetic-multi-round-qa
 
 # Average TTFT and other perf numbers would be in the output from above cmd
 ```
-More details about how to use LMBenchmark could be found [here](https://github.com/LMCache/LMBenchmark)).
+More details about how to use LMBenchmark could be found [here](https://github.com/LMCache/LMBenchmark).
 
 `NOTE`: if metrics are enabled as mentioned in the above section, you can observe KV offloading, and KV onboarding in the grafana dashboard.
 

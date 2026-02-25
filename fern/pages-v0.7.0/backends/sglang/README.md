@@ -8,9 +8,9 @@ title: "Running SGLang with Dynamo"
 
 We recommend using the latest stable release of dynamo to avoid breaking changes:
 
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo))](https://github.com/ai-dynamo/dynamo/releases/latest)
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
-You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest)) and check out the corresponding branch with:
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
 
 ```bash
 git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
@@ -33,12 +33,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | SGLang | Notes |
 |---------|--------|-------|
-| [**Disaggregated Serving**](../../design-docs/disagg-serving.md)) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation)) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730)) |
-| [**KV-Aware Routing**](../../router/kv-cache-routing.md)) | ✅ |  |
-| [**SLA-Based Planner**](../../planner/sla-planner.md)) | ✅ |  |
-| [**Multimodal EPD Disaggregation**](multimodal-epd.md)) | ✅ |  |
-| [**KVBM**](../../kvbm/kvbm-architecture.md)) | ❌ | Planned |
+| [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**KV-Aware Routing**](../../router/kv-cache-routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../planner/sla-planner.md) | ✅ |  |
+| [**Multimodal EPD Disaggregation**](multimodal-epd.md) | ✅ |  |
+| [**KVBM**](../../kvbm/kvbm-architecture.md) | ❌ | Planned |
 
 
 ## Dynamo SGLang Integration
@@ -54,7 +54,7 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 | Argument | Description | Default | SGLang Equivalent |
 |----------|-------------|---------|-------------------|
 | `--endpoint` | Dynamo endpoint in `dyn://namespace.component.endpoint` format | Auto-generated based on mode | N/A |
-| `--migration-limit` | Max times a request can migrate between workers for fault tolerance. See [Request Migration Architecture](../../fault-tolerance/request-migration.md)). | `0` (disabled) | N/A |
+| `--migration-limit` | Max times a request can migrate between workers for fault tolerance. See [Request Migration Architecture](../../fault-tolerance/request-migration.md). | `0` (disabled) | N/A |
 | `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
 | `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
 | `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
@@ -82,7 +82,7 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 <Warning>
 ⚠️ SGLang backend currently does not support cancellation during remote prefill phase in disaggregated mode.
 </Warning>
-For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md)) documentation.
+For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.
 
 ## Installation
 
@@ -158,7 +158,7 @@ Below we provide a guide that lets you run all of our common deployment patterns
 
 ### Start NATS and ETCD in the background
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml))
+Start using [Docker Compose](../../../deploy/docker-compose.yml)
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -186,7 +186,7 @@ cd $DYNAMO_HOME/examples/backends/sglang
 
 ### Aggregated Serving for Embedding Models
 
-Here's an example that uses the [Qwen/Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B)) model.
+Here's an example that uses the [Qwen/Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B) model.
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/sglang
@@ -207,7 +207,7 @@ curl localhost:8000/v1/embeddings \
 
 ### Disaggregated serving
 
-See [SGLang Disaggregation](sglang-disaggregation.md)) to learn more about how sglang and dynamo handle disaggregated serving.
+See [SGLang Disaggregation](sglang-disaggregation.md) to learn more about how sglang and dynamo handle disaggregated serving.
 
 
 ```bash
@@ -257,24 +257,24 @@ curl localhost:8000/v1/chat/completions \
 Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
 
 ### Run a multi-node sized model
-- **[Run a multi-node model](multinode-examples.md))**
+- **[Run a multi-node model](multinode-examples.md)**
 
 ### Large scale P/D disaggregation with WideEP
-- **[Run DeepSeek-R1-FP8 on H100s](dsr1-wideep-h100.md))**
-- **[Run DeepSeek-R1-FP8 on GB200s](dsr1-wideep-gb200.md))**
+- **[Run DeepSeek-R1-FP8 on H100s](dsr1-wideep-h100.md)**
+- **[Run DeepSeek-R1-FP8 on GB200s](dsr1-wideep-gb200.md)**
 
 ### Hierarchical Cache (HiCache)
-- **[Enable SGLang Hierarchical Cache (HiCache)](sgl-hicache-example.md))**
+- **[Enable SGLang Hierarchical Cache (HiCache)](sgl-hicache-example.md)**
 
 ### Multimodal Encode-Prefill-Decode (EPD) Disaggregation with NIXL
-- **[Run a multimodal model with EPD Disaggregation](multimodal-epd.md))**
+- **[Run a multimodal model with EPD Disaggregation](multimodal-epd.md)**
 
 ## Deployment
 
 We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes](../../../examples/backends/sglang/deploy/README.md))**
+- **[Deploying Dynamo with SGLang on Kubernetes](../../../examples/backends/sglang/deploy/README.md)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](../../../examples/backends/sglang/slurm-jobs/README.md))**
+- **[Deploying Dynamo with SGLang on SLURM](../../../examples/backends/sglang/slurm-jobs/README.md)**

@@ -4,7 +4,7 @@
 title: "vLLM Prometheus Metrics"
 ---
 
-**📚 Official Documentation**: [vLLM Metrics Design](https://docs.vllm.ai/en/latest/design/metrics.html))
+**📚 Official Documentation**: [vLLM Metrics Design](https://docs.vllm.ai/en/latest/design/metrics.html)
 
 This document describes how vLLM Prometheus metrics are exposed in Dynamo.
 
@@ -14,7 +14,7 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 
 For the complete and authoritative list of all vLLM metrics, always refer to the official documentation linked above.
 
-Dynamo runtime metrics are documented in [docs/observability/metrics.md](../../observability/metrics.md)).
+Dynamo runtime metrics are documented in [docs/observability/metrics.md](../../observability/metrics.md).
 
 ## Metric Reference
 
@@ -35,7 +35,7 @@ vLLM provides metrics in the following categories (all prefixed with `vllm:`):
 - Scheduler metrics
 - Disaggregation metrics (when enabled)
 
-**Note:** Specific metrics are subject to change between vLLM versions. Always refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html)) or inspect the `/metrics` endpoint for your vLLM version.
+**Note:** Specific metrics are subject to change between vLLM versions. Always refer to the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) or inspect the `/metrics` endpoint for your vLLM version.
 
 ## Enabling Metrics in Dynamo
 
@@ -90,17 +90,17 @@ vllm:time_to_first_token_seconds_sum{model_name="meta-llama/Llama-3.1-8B"} 89.38
 - Metrics are filtered by the `vllm:` and `lmcache:` prefixes before being exposed (when LMCache is enabled)
 - The integration uses Dynamo's `register_engine_metrics_callback()` function with the global `REGISTRY`
 - Metrics appear after vLLM engine initialization completes
-- vLLM v1 metrics are different from v0 - see the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html)) for migration details
+- vLLM v1 metrics are different from v0 - see the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) for migration details
 
 ## See Also
 
 ### vLLM Metrics
-- [Official vLLM Metrics Design Documentation](https://docs.vllm.ai/en/latest/design/metrics.html))
-- [vLLM Production Metrics User Guide](https://docs.vllm.ai/en/latest/usage/metrics.html))
-- [vLLM GitHub - Metrics Implementation](https://github.com/vllm-project/vllm/tree/main/vllm/v1/metrics))
+- [Official vLLM Metrics Design Documentation](https://docs.vllm.ai/en/latest/design/metrics.html)
+- [vLLM Production Metrics User Guide](https://docs.vllm.ai/en/latest/usage/metrics.html)
+- [vLLM GitHub - Metrics Implementation](https://github.com/vllm-project/vllm/tree/main/vllm/v1/metrics)
 
 ### Dynamo Metrics
-- **Dynamo Metrics Guide**: See [docs/observability/metrics.md](../../observability/metrics.md)) for complete documentation on Dynamo runtime metrics
+- **Dynamo Metrics Guide**: See [docs/observability/metrics.md](../../observability/metrics.md) for complete documentation on Dynamo runtime metrics
 - **Dynamo Runtime Metrics**: Metrics prefixed with `dynamo_*` for runtime, components, endpoints, and namespaces
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)

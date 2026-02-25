@@ -32,7 +32,7 @@ helm install prometheus -n monitoring --create-namespace prometheus-community/ku
 > The commands enumerated below assume you have installed the kube-prometheus-stack with the installation method listed above. Depending on your installation configuration of the monitoring stack, you may need to modify the `kubectl` commands that follow in this document accordingly (e.g modifying Namespace or Service names accordingly).
 
 ### Install Dynamo Operator
-Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../installation-guide.md)) for detailed instructions on deploying the Dynamo operator.
+Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../installation-guide.md) for detailed instructions on deploying the Dynamo operator.
 Make sure to set the `prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
 
 ```bash
@@ -43,7 +43,7 @@ helm install dynamo-platform ...
 
 ### Node Exporter for CPU/Memory Metrics
 
-The Dynamo Grafana dashboard includes panels for node-level CPU utilization, system load, and container resource usage. These metrics are collected and exported to Prometheus via [node-exporter](https://github.com/prometheus/node-exporter)), which exposes hardware and OS metrics from Linux systems.
+The Dynamo Grafana dashboard includes panels for node-level CPU utilization, system load, and container resource usage. These metrics are collected and exported to Prometheus via [node-exporter](https://github.com/prometheus/node-exporter), which exposes hardware and OS metrics from Linux systems.
 
 > [!Note]
 > The kube-prometheus-stack installation described above includes node-exporter by default. If you're using a custom Prometheus setup, you'll need to ensure node-exporter is deployed as a DaemonSet on your cluster nodes.
@@ -54,7 +54,7 @@ To verify node-exporter is running:
 kubectl get daemonset -A | grep node-exporter
 ```
 
-If node-exporter is not running, you can install it via the kube-prometheus-stack or deploy it separately. For more information, see the [node-exporter documentation](https://github.com/prometheus/node-exporter)).
+If node-exporter is not running, you can install it via the kube-prometheus-stack or deploy it separately. For more information, see the [node-exporter documentation](https://github.com/prometheus/node-exporter).
 
 ### DCGM Metrics Collection (Optional)
 
@@ -64,7 +64,7 @@ GPU utilization metrics are collected and exported to Prometheus via dcgm-export
 kubectl get daemonset -A | grep dcgm-exporter
 ```
 
-If the output is empty, you need to install the dcgm-exporter. For more information, please consult the official [dcgm-exporter documentation](https://docs.nvidia.com/datacenter/cloud-native/gpu-telemetry/latest/dcgm-exporter.html)).
+If the output is empty, you need to install the dcgm-exporter. For more information, please consult the official [dcgm-exporter documentation](https://docs.nvidia.com/datacenter/cloud-native/gpu-telemetry/latest/dcgm-exporter.html).
 
 
 ## Deploy a DynamoGraphDeployment
@@ -83,8 +83,8 @@ This will create two components:
 - A Worker component exposing metrics on its system port
 
 Both components expose a `/metrics` endpoint following the OpenMetrics format, but with different metrics appropriate to their roles. For details about:
-- Deployment configuration: See the [vLLM README](../../backends/vllm/README.md))
-- Available metrics: See the [metrics guide](../../observability/metrics.md))
+- Deployment configuration: See the [vLLM README](../../backends/vllm/README.md)
+- Available metrics: See the [metrics guide](../../observability/metrics.md)
 
 ### Validate the Deployment
 
@@ -106,7 +106,7 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-For more information about validating the deployment, see the [vLLM README](../../backends/vllm/README.md)).
+For more information about validating the deployment, see the [vLLM README](../../backends/vllm/README.md).
 
 ## Set Up Metrics Collection
 
@@ -157,7 +157,7 @@ Visit http://localhost:9090 and try these example queries:
 - `dynamo_frontend_requests_total`
 - `dynamo_frontend_time_to_first_token_seconds_bucket`
 
-![Prometheus UI showing Dynamo metrics](../../../assets/img/prometheus-k8s.png))
+![Prometheus UI showing Dynamo metrics](../../../assets/img/prometheus-k8s.png)
 
 ### In Grafana
 ```bash
@@ -175,4 +175,4 @@ Visit http://localhost:3000 and log in with the credentials captured above.
 
 Once logged in, find the Dynamo dashboard under General.
 
-![Grafana dashboard showing Dynamo metrics](../../../assets/img/grafana-k8s.png))
+![Grafana dashboard showing Dynamo metrics](../../../assets/img/grafana-k8s.png)

@@ -11,21 +11,21 @@ This guide demonstrates how to set up logging for Dynamo in Kubernetes using Gra
 
 ## Components Overview
 
-- **[Grafana Loki](https://grafana.com/oss/loki/))**: Fast and cost-effective Kubernetes-native log aggregation system.
+- **[Grafana Loki](https://grafana.com/oss/loki/)**: Fast and cost-effective Kubernetes-native log aggregation system.
 
-- **[Grafana Alloy](https://grafana.com/oss/alloy/))**: OpenTelemetry collector that replaces Promtail, gathering logs, metrics and traces from Kubernetes pods.
+- **[Grafana Alloy](https://grafana.com/oss/alloy/)**: OpenTelemetry collector that replaces Promtail, gathering logs, metrics and traces from Kubernetes pods.
 
-- **[Grafana](https://grafana.com/grafana/))**: Visualization platform for querying and exploring logs.
+- **[Grafana](https://grafana.com/grafana/)**: Visualization platform for querying and exploring logs.
 
 ## Prerequisites
 
 ### 1. Dynamo Cloud Kubernetes Operator
 
-This guide assumes you have installed Dynamo Cloud Kubernetes Operator. For more information, see [Dynamo Cloud Operator](../README.md)).
+This guide assumes you have installed Dynamo Cloud Kubernetes Operator. For more information, see [Dynamo Cloud Operator](../README.md).
 
 ### 2. Kube-prometheus
 
-While this guide does not use Prometheus, it assumes Grafana is pre-installed with the kube-prometheus. For more information, see [kube-prometheus](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack)).
+While this guide does not use Prometheus, it assumes Grafana is pre-installed with the kube-prometheus. For more information, see [kube-prometheus](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack).
 
 ### 3. Environment Variables
 

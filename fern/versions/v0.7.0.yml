@@ -66,12 +66,12 @@ navigation:
         path: ../pages-v0.7.0/multimodal/multimodal-intro.md
       - page: Finding Best Initial Configs
         path: ../pages-v0.7.0/performance/aiconfigurator.md
-      - page: Dynamo Benchmarking Guide
+      - page: Benchmarking
         path: ../pages-v0.7.0/benchmarks/benchmarking.md
       - page: Tuning Disaggregated Performance
         path: ../pages-v0.7.0/performance/tuning.md
       - page: Writing Python Workers in Dynamo
-        path: ../pages-v0.7.0/development/runtime-guide.md
+        path: ../pages-v0.7.0/development/backend-guide.md
       - section: Observability (Local)
         contents:
           - page: Overview

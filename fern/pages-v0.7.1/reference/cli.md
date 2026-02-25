@@ -81,7 +81,7 @@ curl -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 2049, "messages":
 
 You can run the ingress side (HTTP server and pre-processing) on one machine, for example a CPU node, and the worker on a different machine (a GPU node).
 
-You will need [etcd](https://etcd.io/)) and [nats](https://nats.io)) with jetstream installed and accessible from both nodes. For development I run NATS like this: `nats-server -js --trace --store_dir $(mktemp -d)`.
+You will need [etcd](https://etcd.io/) and [nats](https://nats.io) with jetstream installed and accessible from both nodes. For development I run NATS like this: `nats-server -js --trace --store_dir $(mktemp -d)`.
 
 **Node 1:** OpenAI compliant HTTP server, optional pre-processing, worker discovery:
 
@@ -156,19 +156,19 @@ The KV-aware routing arguments:
 
 ### Request Migration
 
-In a [Distributed System](#distributed-system), you can enable [request migration](../fault-tolerance/request-migration.md)) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+In a [Distributed System](#distributed-system), you can enable [request migration](../fault-tolerance/request-migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
 dynamo-run in=dyn://... out=<engine> ... --migration-limit=3
 ```
 
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../fault-tolerance/request-migration.md)) documentation for details on how this works.
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../fault-tolerance/request-migration.md) documentation for details on how this works.
 
 ### Request Cancellation
 
 When using the HTTP interface (`in=http`), if the HTTP request connection is dropped by the client, Dynamo automatically cancels the downstream request to the worker. This ensures that computational resources are not wasted on generating responses that are no longer needed.
 
-For detailed information about how request cancellation works across the system, see the [Request Cancellation Architecture](../fault-tolerance/request-cancellation.md)) documentation.
+For detailed information about how request cancellation works across the system, see the [Request Cancellation Architecture](../fault-tolerance/request-cancellation.md) documentation.
 
 ## Development
 
@@ -181,12 +181,12 @@ sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-d
 ```
 
 **macOS:**
-- [Homebrew](https://brew.sh/))
+- [Homebrew](https://brew.sh/)
 ```
 # if brew is not installed on your system, install it
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
-- [Xcode](https://developer.apple.com/xcode/))
+- [Xcode](https://developer.apple.com/xcode/)
 
 ```
 brew install cmake protobuf
@@ -240,7 +240,7 @@ The input defaults to `in=text`. The output defaults to `out=mistralrs` engine, 
 
 ### mistralrs
 
-[mistral.rs](https://github.com/EricLBuehler/mistral.rs)) is a pure Rust engine that is fast to run and fast to load, and runs well on CPU as well as GPU. For those reasons it is the default engine.
+[mistral.rs](https://github.com/EricLBuehler/mistral.rs) is a pure Rust engine that is fast to run and fast to load, and runs well on CPU as well as GPU. For those reasons it is the default engine.
 
 ```
 dynamo-run Qwen/Qwen3-4B
@@ -324,7 +324,7 @@ The output looks like this:
 
 ## Writing your own engine in Python
 
-The [dynamo](https://pypi.org/project/ai-dynamo/)) Python library allows you to build your own engine and attach it to Dynamo. All of the main backend components in `examples/backends/` work like this.
+The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo. All of the main backend components in `examples/backends/` work like this.
 
 The Python file must do three things:
 1. Decorate a function to get the runtime
@@ -383,8 +383,8 @@ The `model_input` can be:
 - ModelInput.Text. Your engine expects raw text input and handles its own tokenization and pre-processing.
 
 The `model_type` can be:
-- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat)).
-- ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions)).
+- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat).
+- ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions).
 
 `register_llm` can also take the following kwargs:
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name, or the folder name.
@@ -395,16 +395,16 @@ The `model_type` can be:
 Here are some example engines:
 
 - Backend:
-    * [vllm](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello-world/server-vllm.py))
-    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello-world/server-sglang.py))
+    * [vllm](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello-world/server-vllm.py)
+    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello-world/server-sglang.py)
 - Chat:
-    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello-world/server-sglang-tok.py))
+    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello-world/server-sglang-tok.py)
 
 More fully-featured Python engines are in `examples/backends`.
 
 ## Debugging
 
-`dynamo-run` and `dynamo-runtime` support [tokio-console](https://github.com/tokio-rs/console)). Build with the feature to enable:
+`dynamo-run` and `dynamo-runtime` support [tokio-console](https://github.com/tokio-rs/console). Build with the feature to enable:
 ```
 cargo build --features cuda,tokio-console -p dynamo-run
 ```

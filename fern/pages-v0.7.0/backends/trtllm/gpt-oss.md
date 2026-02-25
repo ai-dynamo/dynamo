@@ -19,10 +19,10 @@ The disaggregated approach optimizes for both low-latency (maximizing tokens per
 
 - 1x NVIDIA B200 node with 8 GPUs (this guide focuses on single-node B200 deployment)
 - CUDA Toolkit 12.8 or later
-- Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)) installed
+- Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed
 - Fast SSD storage for model weights (~240GB required)
-- HuggingFace account and [access token](https://huggingface.co/settings/tokens))
-- [HuggingFace CLI](https://huggingface.co/docs/huggingface-hub/en/guides/cli))
+- HuggingFace account and [access token](https://huggingface.co/settings/tokens)
+- [HuggingFace CLI](https://huggingface.co/docs/huggingface-hub/en/guides/cli)
 
 
 Ensure that the `etcd` and `nats` services are running with the following command:
@@ -80,7 +80,7 @@ This command:
 - Sets up shared memory and stack limits for optimal performance
 - Mounts your model directory into the container at `/model`
 - Mounts the current Dynamo workspace into the container at `/workspace/dynamo`
-- Enables [PDL](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization)) and disables parallel weight loading
+- Enables [PDL](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization) and disables parallel weight loading
 - Sets HuggingFace token as environment variable in the container
 
 ### 3. Understanding the Configuration
@@ -399,7 +399,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ### Performance Testing with AIPerf
 
-The Dynamo container includes [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main?tab=readme-ov-file#aiperf)), NVIDIA's tool for benchmarking generative AI models. This tool helps measure throughput, latency, and other performance metrics for your deployment.
+The Dynamo container includes [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main?tab=readme-ov-file#aiperf), NVIDIA's tool for benchmarking generative AI models. This tool helps measure throughput, latency, and other performance metrics for your deployment.
 
 **Run the following benchmark from inside the container** (after completing the deployment steps above):
 
@@ -510,7 +510,7 @@ flowchart TD
 
 ## Next Steps
 
-- **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../../examples/basics/multinode/README.md))
+- **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../../examples/basics/multinode/README.md)
 - **Advanced Configuration**: Explore TensorRT-LLM engine building options for further optimization
 - **Monitoring**: Set up Prometheus and Grafana for production monitoring
 - **Performance Benchmarking**: Use AIPerf to measure and optimize your deployment performance

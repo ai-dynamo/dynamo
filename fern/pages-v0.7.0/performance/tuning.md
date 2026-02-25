@@ -43,11 +43,11 @@ Typically, the number of GPUs vs the performance follows the following pattern:
 |       2 |                269 |                   135 |                        1.19x |
 |       4 |                578 |                   144 |                        1.28x |
 
-The best number of GPUs to use in the prefill and decode engines can be determined by running a few fixed ISL/OSL/concurrency test using [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main)) and compare with the SLA.
+The best number of GPUs to use in the prefill and decode engines can be determined by running a few fixed ISL/OSL/concurrency test using [AIPerf](https://github.com/ai-dynamo/aiperf/tree/main) and compare with the SLA.
 AIPerf is pre-installed in the dynamo container.
 
 > [!Tip]
-> If you are unfamiliar with AIPerf, please see this helpful [tutorial](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorial.md)) to get you started.
+> If you are unfamiliar with AIPerf, please see this helpful [tutorial](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorial.md) to get you started.
 
 Besides the parallelization mapping, other common knobs to tune are maximum batch size, maximum number of tokens, and block size.
 For prefill engines, usually a small batch size and large `max_num_token` is preferred.
@@ -76,7 +76,7 @@ For most frameworks, when chunked prefill is enabled and one forward iteration g
 In the prefill engine, the best strategy is to operate at the smallest batch size that saturates the GPUs so that the average time to first token (TTFT) is minimized.
 For example, for Llama3.3-70b NVFP4 quantization on B200 TP1 in vLLM, the below figure shows the prefill time with different isl (prefix caching is turned off):
 
-![Combined bar and line chart showing "Prefill Time". Bar chart represents TTFT (Time To First Token) in milliseconds against ISL (Input Sequence Length). The line chart shows TTFT/ISL (milliseconds per token) against ISL.](../../assets/img/prefill-time.png))
+![Combined bar and line chart showing "Prefill Time". Bar chart represents TTFT (Time To First Token) in milliseconds against ISL (Input Sequence Length). The line chart shows TTFT/ISL (milliseconds per token) against ISL.](../../assets/img/prefill-time.png)
 
 For isl less than 1000, the prefill efficiency is low because the GPU is not fully saturated.
 For isl larger than 4000, the prefill time per token increases because the attention takes longer to compute with a longer history.
@@ -88,7 +88,7 @@ To make sure prefill engine is saturated, users can set `max-local-prefill-lengt
 
 In the decode engine, maximum batch size and maximum number of tokens affects the size of intermediate tensors.
 With a larger batch size and number of tokens, the size of intermediate tensors increases and the size of KV cache decreases.
-TensorRT-LLM (TRTLLM) has a good [summary](https://nvidia.github.io/TensorRT-LLM/reference/memory.html)) on the memory footprint where similar ideas also applies to other LLM frameworks.
+TensorRT-LLM (TRTLLM) has a good [summary](https://nvidia.github.io/TensorRT-LLM/reference/memory.html) on the memory footprint where similar ideas also applies to other LLM frameworks.
 
 With chunked prefill enabled, the maximum number of tokens controls the longest prefill that can be piggybacked to decode and control the inter-token latency (ITL).
 For the same prefill requests, a large maximum number of tokens leads to fewer but longer stalls in the generation, while a small maximum number of tokens leads to more but shorter stalls in the generation.

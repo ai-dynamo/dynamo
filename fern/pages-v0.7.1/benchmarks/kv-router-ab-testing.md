@@ -98,7 +98,7 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform (Per-Namespace)
 
-If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md)) to install the platform in both namespaces:
+If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in both namespaces:
 
 - `router-off-test`
 - `router-on-test`
@@ -361,7 +361,7 @@ kubectl get pods -n router-on-test -l nvidia.com/dynamo-component-type=worker
 
 ### Understanding the Mooncake Trace Dataset
 
-For this A/B comparison, we use the **Mooncake Trace Dataset**, published by [Mooncake AI](https://github.com/kvcache-ai/Mooncake)). This is a privacy-preserving dataset of real-world LLM inference traffic from production arxiv workloads.
+For this A/B comparison, we use the **Mooncake Trace Dataset**, published by [Mooncake AI](https://github.com/kvcache-ai/Mooncake). This is a privacy-preserving dataset of real-world LLM inference traffic from production arxiv workloads.
 
 **What's in the dataset?** Each trace entry contains:
 - **Timestamp:** When the request arrived (for realistic request timing)
@@ -411,7 +411,7 @@ When requests share the same hash IDs (e.g., blocks 46-61), it means they share 
 
 **Key Dataset Properties:**
 - ✅ **Realistic timing:** Request arrival patterns from production workloads
-- ✅ **Real prefix patterns:** Up to 50% cache hit ratio ([Mooncake technical report](https://github.com/kvcache-ai/Mooncake)))
+- ✅ **Real prefix patterns:** Up to 50% cache hit ratio ([Mooncake technical report](https://github.com/kvcache-ai/Mooncake))
 - ✅ **Privacy-preserving:** No actual text - only hash-based cache block identifiers
 - ✅ **Reproducible:** Public dataset enables fair comparisons across different systems
 
@@ -785,7 +785,7 @@ VllmPrefillWorker:
 
 This guide provides a complete methodology for A/B testing Dynamo's KV Smart Router. The KV router's effectiveness depends heavily on workload characteristics—datasets with high prefix overlap will show the most benefit.
 
-For questions or issues, consult the [Dynamo documentation](https://github.com/ai-dynamo/dynamo)) or open an issue on GitHub.
+For questions or issues, consult the [Dynamo documentation](https://github.com/ai-dynamo/dynamo) or open an issue on GitHub.
 
 ---
 
@@ -797,5 +797,5 @@ For questions or issues, consult the [Dynamo documentation](https://github.com/a
 - `prepare-dataset.sh`: Dataset preparation script
 - Results CSVs: Detailed metrics from AIPerf
 
-**Repository:** [https://github.com/ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo))
+**Repository:** [https://github.com/ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo)
 

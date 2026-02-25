@@ -28,7 +28,7 @@ There are two additional rules set by planner to prevent over-compensation:
 
 ## SLA-based Scaling Up/Down Prefill/Decode Workers
 
-See [SLA-Driven Profiling](../benchmarks/sla-driven-profiling.md)) for more details.
+See [SLA-Driven Profiling](../benchmarks/sla-driven-profiling.md) for more details.
 
 ## Usage
 

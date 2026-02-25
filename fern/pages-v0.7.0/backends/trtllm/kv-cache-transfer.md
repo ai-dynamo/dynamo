@@ -10,7 +10,7 @@ In disaggregated serving architectures, KV cache must be transferred between pre
 By default, TensorRT-LLM uses UCX (Unified Communication X) for KV cache transfer between prefill and decode workers. UCX provides high-performance communication optimized for GPU-to-GPU transfers.
 
 ## Beta Method: NIXL
-TensorRT-LLM also supports using **NIXL** (NVIDIA Inference Xfer Library) for KV cache transfer. [NIXL](https://github.com/ai-dynamo/nixl)) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
+TensorRT-LLM also supports using **NIXL** (NVIDIA Inference Xfer Library) for KV cache transfer. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
 
 **Note:** NIXL support in TensorRT-LLM is currently beta and may have some sharp edges.
 
@@ -27,7 +27,7 @@ To enable NIXL for KV cache transfer in disaggregated serving:
    ```
 
 2. **Run the containerized environment:**
-   See [run container](./README.md#run-container)) section to learn how to start the container image built in previous step.
+   See [run container](./README.md#run-container) section to learn how to start the container image built in previous step.
 
    Within container, unset `TRTLLM_USE_UCX_KVCACHE` variable so NIXL can be used instead of UCX.
 
@@ -36,9 +36,9 @@ To enable NIXL for KV cache transfer in disaggregated serving:
     ```
 
 3. **Start the disaggregated service:**
-   See [disaggregated serving](./README.md#disaggregated-serving)) to see how to start the deployment.
+   See [disaggregated serving](./README.md#disaggregated-serving) to see how to start the deployment.
 
 4. **Send the request:**
-   See [client](./README.md#client)) section to learn how to send the request to deployment.
+   See [client](./README.md#client) section to learn how to send the request to deployment.
 
 **Important:** Ensure that ETCD and NATS services are running before starting the service.

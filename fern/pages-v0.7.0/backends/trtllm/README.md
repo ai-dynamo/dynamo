@@ -10,9 +10,9 @@ This directory contains examples and reference implementations for deploying Lar
 
 We recommend using the latest stable release of dynamo to avoid breaking changes:
 
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo))](https://github.com/ai-dynamo/dynamo/releases/latest)
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
-You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest)) and check out the corresponding branch with:
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
 
 ```bash
 git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
@@ -38,12 +38,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
-| [**Disaggregated Serving**](../../../docs/design-docs/disagg-serving.md)) | ✅ |  |
-| [**Conditional Disaggregation**](../../../docs/design-docs/disagg-serving.md#conditional-disaggregation)) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../../docs/router/kv-cache-routing.md)) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/planner/sla-planner.md)) | ✅ |  |
-| [**Load Based Planner**](../../../docs/planner/load-planner.md)) | 🚧 | Planned |
-| [**KVBM**](../../../docs/kvbm/kvbm-architecture.md)) | ✅ | |
+| [**Disaggregated Serving**](../../../docs/design-docs/disagg-serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/design-docs/disagg-serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
+| [**KV-Aware Routing**](../../../docs/router/kv-cache-routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/planner/sla-planner.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/planner/load-planner.md) | 🚧 | Planned |
+| [**KVBM**](../../../docs/kvbm/kvbm-architecture.md) | ✅ | |
 
 ### Large Scale P/D and WideEP Features
 
@@ -59,7 +59,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start NATS and ETCD in the background
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml))
+Start using [Docker Compose](../../../deploy/docker-compose.yml)
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -162,34 +162,34 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Multinode Deployment
 
-For comprehensive instructions on multinode serving, see the [multinode-examples.md](./multinode/multinode-examples.md)) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](./llama4-plus-eagle.md)) guide to learn how to use these scripts when a single worker fits on the single node.
+For comprehensive instructions on multinode serving, see the [multinode-examples.md](./multinode/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](./llama4-plus-eagle.md) guide to learn how to use these scripts when a single worker fits on the single node.
 
 ### Speculative Decoding
-- **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4-plus-eagle.md))**
+- **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4-plus-eagle.md)**
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../examples/backends/trtllm/deploy/README.md)).
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../examples/backends/trtllm/deploy/README.md).
 
 ### Client
 
-See [client](../../../docs/backends/sglang/README.md#testing-the-deployment)) section to learn how to send request to the deployment.
+See [client](../../../docs/backends/sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
 
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
 ### Benchmarking
 
 To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh))
+`model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
 ## KV Cache Transfer in Disaggregated Serving
 
-Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-transfer.md)).
+Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-transfer.md).
 
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/fault-tolerance/request-migration.md)) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+You can enable [request migration](../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
 # For decode and aggregated workers
@@ -199,7 +199,7 @@ python3 -m dynamo.trtllm ... --migration-limit=3
 <Warning>
 **Prefill workers do not support request migration** and must use `--migration-limit=0` (the default). Prefill workers only process prompts and return KV cache state - they don't maintain long-running generation requests that would benefit from migration.
 </Warning>
-See the [Request Migration Architecture](../../../docs/fault-tolerance/request-migration.md)) documentation for details on how this works.
+See the [Request Migration Architecture](../../../docs/fault-tolerance/request-migration.md) documentation for details on how this works.
 
 ## Request Cancellation
 
@@ -212,22 +212,22 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | **Aggregated** | ✅ | ✅ |
 | **Disaggregated** | ✅ | ✅ |
 
-For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md)) documentation.
+For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.
 
 ## Client
 
-See [client](../../../docs/backends/sglang/README.md#testing-the-deployment)) section to learn how to send request to the deployment.
+See [client](../../../docs/backends/sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
 
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
 ## Benchmarking
 
 To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh))
+`model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
 ## Multimodal support
 
-Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [Multimodal Support Guide](./multimodal-support.md)).
+Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [Multimodal Support Guide](./multimodal-support.md).
 
 ## Logits Processing
 
@@ -236,7 +236,7 @@ Logits processors let you modify the next-token logits at every decoding step (e
 ### How it works
 - **Interface**: Implement `dynamo.logits_processing.BaseLogitsProcessor` which defines `__call__(input_ids, logits)` and modifies `logits` in-place.
 - **TRT-LLM adapter**: Use `dynamo.trtllm.logits_processing.adapter.create_trtllm_adapters(...)` to convert Dynamo processors into TRT-LLM-compatible processors and assign them to `SamplingParams.logits_processor`.
-- **Examples**: See example processors in `lib/bindings/python/src/dynamo/logits_processing/examples/` ([temperature](../../../lib/bindings/python/src/dynamo/logits-processing/examples/temperature.py)), [hello_world](../../../lib/bindings/python/src/dynamo/logits-processing/examples/hello-world.py))).
+- **Examples**: See example processors in `lib/bindings/python/src/dynamo/logits_processing/examples/` ([temperature](../../../lib/bindings/python/src/dynamo/logits-processing/examples/temperature.py), [hello_world](../../../lib/bindings/python/src/dynamo/logits-processing/examples/hello-world.py)).
 
 ### Quick test: HelloWorld processor
 You can enable a test-only processor that forces the model to respond with "Hello world!". This is useful to verify the wiring without modifying your model or engine code.
@@ -288,10 +288,10 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](../../../examples/backends/trtllm/performance-sweeps/README.md)). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](../../../examples/backends/trtllm/performance-sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 
 Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
 
-Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/kvbm/trtllm-setup.md)) .
+Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/kvbm/trtllm-setup.md) .

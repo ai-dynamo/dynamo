@@ -4,7 +4,7 @@
 title: "Finding Best Initial Configs using AIConfigurator"
 ---
 
-[AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/tree/main)) is a performance optimization tool that helps you find the optimal configuration for deploying LLMs with Dynamo. It automatically determines the best number of prefill and decode workers, parallelism settings, and deployment parameters to meet your SLA targets while maximizing throughput.
+[AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/tree/main) is a performance optimization tool that helps you find the optimal configuration for deploying LLMs with Dynamo. It automatically determines the best number of prefill and decode workers, parallelism settings, and deployment parameters to meet your SLA targets while maximizing throughput.
 
 ## Why Use AIConfigurator?
 
@@ -149,6 +149,6 @@ docker run -it --rm nvcr.io/nvidia/aiconfigurator:latest \
 
 ## Learn More
 
-- [Dynamo Installation Guide](/docs/kubernetes/installation-guide.md))
-- [SLA Planner Quick Start Guide](/docs/planner/sla-planner-quickstart.md))
-- [Benchmarking Guide](/docs/benchmarks/benchmarking.md))
+- [Dynamo Installation Guide](/docs/kubernetes/installation-guide.md)
+- [SLA Planner Quick Start Guide](/docs/planner/sla-planner-quickstart.md)
+- [Benchmarking Guide](/docs/benchmarks/benchmarking.md)

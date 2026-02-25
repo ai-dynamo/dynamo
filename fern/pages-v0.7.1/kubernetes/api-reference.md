@@ -46,8 +46,8 @@ _Appears in:_
 | `enabled` _boolean_ |  |  |  |
 | `minReplicas` _integer_ |  |  |  |
 | `maxReplicas` _integer_ |  |  |  |
-| `behavior` _[HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling))_ |  |  |  |
-| `metrics` _[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling)) array_ |  |  |  |
+| `behavior` _[HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling)_ |  |  |  |
+| `metrics` _[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling) array_ |  |  |  |
 
 
 
@@ -125,7 +125,7 @@ DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoComponentDeployment` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta))_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)_ | Spec defines the desired state for this Dynamo component deployment. |  |  |
 
 
@@ -152,7 +152,7 @@ _Appears in:_
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
-| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core)) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
@@ -160,8 +160,8 @@ _Appears in:_
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
-| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core))_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
-| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core))_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
+| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
+| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component when autoscaling is not used. |  |  |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 
@@ -189,7 +189,7 @@ _Appears in:_
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
-| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core)) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
@@ -197,8 +197,8 @@ _Appears in:_
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
-| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core))_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
-| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core))_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
+| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
+| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component when autoscaling is not used. |  |  |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 
@@ -217,7 +217,7 @@ DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoGraphDeployment` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta))_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[DynamoGraphDeploymentSpec](#dynamographdeploymentspec)_ | Spec defines the desired state for this graph deployment. |  |  |
 | `status` _[DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)_ | Status reflects the current observed state of this graph deployment. |  |  |
 
@@ -249,7 +249,7 @@ the DGDR to modify configuration after this point.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta))_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  |  |
 | `status` _[DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)_ | Status reflects the current observed state of this deployment request. |  |  |
 
@@ -294,9 +294,9 @@ _Appears in:_
 | `state` _string_ | State is a high-level textual status of the deployment request lifecycle.<br />Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"<br />Empty string ("") represents the initial state before initialization. |  |  |
 | `backend` _string_ | Backend is extracted from profilingConfig.config.engine.backend for display purposes.<br />This field is populated by the controller and shown in kubectl output. |  | Optional: \{\} <br /> |
 | `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta)) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
 | `profilingResults` _string_ | ProfilingResults contains a reference to the ConfigMap holding profiling data.<br />Format: "configmap/\<name\>" |  | Optional: \{\} <br /> |
-| `generatedDeployment` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg))_ | GeneratedDeployment contains the full generated DynamoGraphDeployment specification<br />including metadata, based on profiling results. Users can extract this to create<br />a DGD manually, or it's used automatically when autoApply is true.<br />Stored as RawExtension to preserve all fields including metadata. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+| `generatedDeployment` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment specification<br />including metadata, based on profiling results. Users can extract this to create<br />a DGD manually, or it's used automatically when autoApply is true.<br />Stored as RawExtension to preserve all fields including metadata. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 | `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD when AutoApply is true.<br />Contains name, namespace, state, and creation status of the managed DGD. |  | Optional: \{\} <br /> |
 
 
@@ -314,8 +314,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `pvcs` _[PVC](#pvc) array_ | PVCs defines a list of persistent volume claims that can be referenced by components.<br />Each PVC must have a unique name that can be referenced in component specifications. |  | MaxItems: 100 <br />Optional: \{\} <br /> |
-| `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
-| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core)) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
+| `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 
 
@@ -333,7 +333,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta)) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 
 
 #### DynamoModel
@@ -350,7 +350,7 @@ DynamoModel is the Schema for the dynamo models API
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoModel` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta))_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[DynamoModelSpec](#dynamomodelspec)_ |  |  |  |
 | `status` _[DynamoModelStatus](#dynamomodelstatus)_ |  |  |  |
 
@@ -390,7 +390,7 @@ _Appears in:_
 | `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  |  |
 | `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
 | `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta)) array_ | Conditions represents the latest available observations of the model's state |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  |  |
 
 
 #### EndpointInfo
@@ -520,8 +520,8 @@ _Appears in:_
 | `create` _boolean_ | Create indicates to create a new PVC |  |  |
 | `name` _string_ | Name is the name of the PVC |  | Required: \{\} <br /> |
 | `storageClass` _string_ | StorageClass to be used for PVC creation. Required when create is true. |  |  |
-| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api))_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
-| `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core))_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  |  |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
+| `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  |  |
 
 
 #### ProfilingConfigSpec
@@ -539,7 +539,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io))_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
+| `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
 | `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
 | `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1" |  | Required: \{\} <br /> |
 
@@ -559,7 +559,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `disabled` _boolean_ |  |  |  |
-| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api))_ |  |  |  |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  |  |
 
 
 #### VolumeMount
@@ -844,17 +844,17 @@ Default container ports are configured based on component type:
 
 For users who want to understand the implementation details or contribute to the operator, the default values described in this document are set in the following source files:
 
-- **Health Probes, Security Context & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go)) - Contains the main logic for applying default probes, security context, environment variables, shared memory, and pod configurations
+- **Health Probes, Security Context & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, security context, environment variables, shared memory, and pod configurations
 - **Component-Specific Defaults**:
-  - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component-frontend.go))
-  - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component-worker.go))
-  - [`internal/dynamo/component_planner.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component-planner.go))
-- **Image Pull Secrets**: [`internal/secrets/docker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/secrets/docker.go)) - Implements the docker secret indexer and automatic discovery
+  - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component-frontend.go)
+  - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component-worker.go)
+  - [`internal/dynamo/component_planner.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component-planner.go)
+- **Image Pull Secrets**: [`internal/secrets/docker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/secrets/docker.go) - Implements the docker secret indexer and automatic discovery
 - **Backend-Specific Behavior**:
-  - [`internal/dynamo/backend_vllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend-vllm.go))
-  - [`internal/dynamo/backend_sglang.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend-sglang.go))
-  - [`internal/dynamo/backend_trtllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend-trtllm.go))
-- **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/consts/consts.go)) - Defines annotation keys and other constants
+  - [`internal/dynamo/backend_vllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend-vllm.go)
+  - [`internal/dynamo/backend_sglang.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend-sglang.go)
+  - [`internal/dynamo/backend_trtllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend-trtllm.go)
+- **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes
 

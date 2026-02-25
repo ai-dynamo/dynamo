@@ -7,7 +7,7 @@ title: "SLA-Driven Profiling and Planner Deployment Quick Start Guide"
 Complete workflow to deploy SLA-optimized Dynamo models using DynamoGraphDeploymentRequests (DGDR). This guide shows how to automatically profile models and deploy them with optimal configurations that meet your Service Level Agreements (SLAs).
 
 <Warning>
-**Prerequisites**: This guide assumes you have a Kubernetes cluster with GPU nodes and have completed the [Dynamo Platform installation](/docs/kubernetes/installation-guide.md)).
+**Prerequisites**: This guide assumes you have a Kubernetes cluster with GPU nodes and have completed the [Dynamo Platform installation](/docs/kubernetes/installation-guide.md).
 </Warning>
 ## Overview
 
@@ -60,8 +60,8 @@ The Dynamo Operator watches for DGDRs and automatically:
 ## Prerequisites
 
 Before creating a DGDR, ensure:
-- **Dynamo platform installed** with the operator running (see [Installation Guide](/docs/kubernetes/installation-guide.md)))
-- **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md)) installed and running** (required for SLA planner)
+- **Dynamo platform installed** with the operator running (see [Installation Guide](/docs/kubernetes/installation-guide.md))
+- **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md) installed and running** (required for SLA planner)
 - **Image pull secrets configured** if using private registries (typically `nvcr-imagepullsecret` for NVIDIA images)
 - **Sufficient GPU resources** available in your cluster for profiling
 - **Runtime images available** that contain both profiler and runtime components
@@ -130,7 +130,7 @@ spec:
 ```
 
 <Tip>
-For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](/docs/benchmarks/sla-driven-profiling.md#dgdr-configuration-reference)).
+For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](/docs/benchmarks/sla-driven-profiling.md#dgdr-configuration-reference).
 </Tip>
 ### Step 2: Apply the DGDR
 
@@ -238,11 +238,11 @@ sweep:
 ```
 
 <Note>
-For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla-driven-profiling.md#profiling-methods)).
+For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla-driven-profiling.md#profiling-methods).
 </Note>
 ### Hardware Configuration
 
-For details on hardware configuration and GPU discovery options, see [Hardware Configuration in SLA-Driven Profiling](/docs/benchmarks/sla-driven-profiling.md#hardware-configuration)).
+For details on hardware configuration and GPU discovery options, see [Hardware Configuration in SLA-Driven Profiling](/docs/benchmarks/sla-driven-profiling.md#hardware-configuration).
 
 ### Advanced Configuration
 
@@ -336,7 +336,7 @@ profilingConfig:
 
 ## Understanding Profiling Results
 
-For details about the profiling process, performance plots, and interpolation data, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla-driven-profiling.md#profiling-process-details)).
+For details about the profiling process, performance plots, and interpolation data, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla-driven-profiling.md#profiling-process-details).
 
 ## Advanced Topics
 
@@ -444,11 +444,11 @@ kubectl logs -l job-name=profile-sla-aic -n $NAMESPACE
 | **DGD not deployed** | Verify `autoApply: true` in DGDR spec |
 
 <Note>
-For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](/docs/benchmarks/sla-driven-profiling.md#troubleshooting)).
+For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](/docs/benchmarks/sla-driven-profiling.md#troubleshooting).
 </Note>
 ## Configuration Reference
 
-For comprehensive documentation of all DGDR configuration options, see the [DGDR Configuration Reference](/docs/benchmarks/sla-driven-profiling.md#dgdr-configuration-reference)).
+For comprehensive documentation of all DGDR configuration options, see the [DGDR Configuration Reference](/docs/benchmarks/sla-driven-profiling.md#dgdr-configuration-reference).
 
 This includes detailed explanations of:
 - **SLA Configuration**: ISL, OSL, TTFT, ITL with use cases and trade-offs
@@ -460,7 +460,7 @@ This includes detailed explanations of:
 
 ## Related Documentation
 
-- [DGDR API Reference](/docs/kubernetes/api-reference.md))
-- [Pre-Deployment Profiling Details](/docs/benchmarks/sla-driven-profiling.md))
-- [SLA Planner Architecture](/docs/planner/sla-planner.md))
-- [Dynamo Operator Guide](/docs/kubernetes/dynamo-operator.md))
+- [DGDR API Reference](/docs/kubernetes/api-reference.md)
+- [Pre-Deployment Profiling Details](/docs/benchmarks/sla-driven-profiling.md)
+- [SLA Planner Architecture](/docs/planner/sla-planner.md)
+- [Dynamo Operator Guide](/docs/kubernetes/dynamo-operator.md)

@@ -6,8 +6,8 @@ title: "dynamo.nixl_connect.ReadOperation"
 
 An operation which transfers data from a remote worker to the local worker.
 
-To create the operation, NIXL metadata ([RdmaMetadata](rdma-metadata.md))) from a remote worker's [`ReadableOperation`](readable-operation.md))
-along with a matching set of local [`Descriptor`](descriptor.md)) objects which reference memory intended to receive data from the remote worker must be provided.
+To create the operation, NIXL metadata ([RdmaMetadata](rdma-metadata.md)) from a remote worker's [`ReadableOperation`](readable-operation.md)
+along with a matching set of local [`Descriptor`](descriptor.md) objects which reference memory intended to receive data from the remote worker must be provided.
 The NIXL metadata must be transferred from the remote to the local worker via a secondary channel, most likely HTTP or TCP+NATS.
 
 Once created, data transfer will begin immediately.
@@ -60,16 +60,16 @@ Blocks the caller until the memory from the remote worker has been transferred t
 def status(self) -> OperationStatus:
 ```
 
-Returns [`OperationStatus`](operation-status.md)) which provides the current state (aka. status) of the operation.
+Returns [`OperationStatus`](operation-status.md) which provides the current state (aka. status) of the operation.
 
 
 ## Related Classes
 
-  - [Connector](connector.md))
-  - [Descriptor](descriptor.md))
-  - [Device](device.md))
-  - [OperationStatus](operation-status.md))
-  - [RdmaMetadata](rdma-metadata.md))
-  - [ReadableOperation](readable-operation.md))
-  - [WritableOperation](writable-operation.md))
-  - [WriteOperation](write-operation.md))
+  - [Connector](connector.md)
+  - [Descriptor](descriptor.md)
+  - [Device](device.md)
+  - [OperationStatus](operation-status.md)
+  - [RdmaMetadata](rdma-metadata.md)
+  - [ReadableOperation](readable-operation.md)
+  - [WritableOperation](writable-operation.md)
+  - [WriteOperation](write-operation.md)

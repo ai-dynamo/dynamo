@@ -15,8 +15,9 @@ source venv/bin/activate
 
 # Install Dynamo from PyPI (choose one backend extra)
 uv pip install "ai-dynamo[sglang]==0.7.0"  # or [vllm], [trtllm]
-```Pip from source
----------------
+```
+
+## Pip from source
 
 Install directly from a local checkout for development.
 
@@ -29,8 +30,9 @@ cd dynamo
 uv venv venv
 source venv/bin/activate
 uv pip install ".[sglang]"  # or [vllm], [trtllm]
-```Docker
-------
+```
+
+## Docker
 
 Pull and run prebuilt images from NVIDIA NGC (`nvcr.io`).
 

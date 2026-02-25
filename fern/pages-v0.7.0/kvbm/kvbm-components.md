@@ -4,9 +4,9 @@
 title: "Understanding KVBM components"
 ---
 
-KVBM design takes inspiration from the KV block managers used in vLLM and SGLang, with an added influence from historical memory tiering strategies common in general GPU programming. For more details, [See KVBM Reading](kvbm-reading.md)). The figure below illustrates the internal components of KVBM.
+KVBM design takes inspiration from the KV block managers used in vLLM and SGLang, with an added influence from historical memory tiering strategies common in general GPU programming. For more details, [See KVBM Reading](kvbm-reading.md). The figure below illustrates the internal components of KVBM.
 
-![Internal Components of Dynamo KVBM. ](../../assets/img/kvbm-components.png))
+![Internal Components of Dynamo KVBM. ](../../assets/img/kvbm-components.png)
 **Internal Components of Dynamo KVBM**
 
 ## KVBM Components
@@ -30,7 +30,7 @@ KVBM design takes inspiration from the KV block managers used in vLLM and SGLang
 - **Disk Pool(G3)**: Local SSD NVMe-backed KV block pool. Receives Host offloads (Host→Disk) and provides blocks for onboarding to Device (Disk→Device). NIXL descriptors expose file offsets/regions for zero-copy I/O and optional GDS.
 
 ## KVBM DataFlows
-![KVBM Data Flows. ](../../assets/img/kvbm-data-flows.png))
+![KVBM Data Flows. ](../../assets/img/kvbm-data-flows.png)
 **KVBM Data Flows from device to other memory hierarchies**
 
 **Device → Host (Offload)**
