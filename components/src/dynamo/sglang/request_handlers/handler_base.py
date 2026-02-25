@@ -342,7 +342,7 @@ class BaseWorkerHandler(BaseGenerativeHandler):
             )
             return {
                 "status": "ok" if result.success else "error",
-                "pinned_count": result.pinned_count,
+                "nodes_pinned": result.nodes_pinned,
                 "message": result.message,
             }
         except Exception as e:
