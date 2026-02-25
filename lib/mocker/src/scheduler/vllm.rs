@@ -551,6 +551,7 @@ fn try_schedule(
                 direct_request.max_output_tokens,
                 Some(args.block_size),
                 args.enable_prefix_caching,
+                args.zmq_kv_events_port.is_some(),
             ),
         };
 
@@ -614,7 +615,7 @@ fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
         }
 
         // Check we have a Use signal with blocks
-        let MoveBlock::Use(blocks, _hashes) = signal else {
+        let MoveBlock::Use(blocks, _hashes, ..) = signal else {
             panic!(
                 "Failed signal is Invalid. Has to fail on generation signal, but failed on {signal:?}"
             );
