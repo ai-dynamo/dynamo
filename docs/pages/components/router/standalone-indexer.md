@@ -13,6 +13,10 @@ The standalone KV indexer (`dynamo-kv-indexer`) is a lightweight HTTP binary tha
 
 This is distinct from the [Standalone Router](../../../../components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
 
+## Compatibility
+
+The standalone indexer works with any engine that publishes KV cache events over ZMQ in the expected msgpack format. This includes bare vLLM and SGLang engines, which emit ZMQ KV events natively — no Dynamo-specific wrapper is required.
+
 ## Use Cases
 
 - **Debugging**: Inspect the radix tree state to verify which blocks are cached on which workers.
