@@ -71,7 +71,7 @@ A **DGDR** is a Kubernetes Custom Resource that serves as the primary interface 
 - **What** model to deploy (`model`)
 - **How** it should perform (SLA targets: `ttft`, `itl`)
 - **Where** it should run (optional GPU preferences)
-- **Which** backend to use (`backend`: vllm, sglang, or trtllm)
+- **Which** backend to use (`backend`: sglang, trtllm, or vllm)
 - **Which** images to use (`profilingConfig.profilerImage`, `deploymentOverrides.workersImage`)
 
 The Dynamo Operator watches for DGDRs and automatically:
@@ -161,7 +161,7 @@ metadata:
 | Field | Type | Description |
 |-------|------|-------------|
 | `spec.model` | string | Model identifier (e.g., `meta-llama/Llama-3-70b`) |
-| `spec.backend` | enum | Inference backend: `vllm`, `sglang`, or `trtllm` |
+| `spec.backend` | enum | Inference backend: `sglang`, `trtllm`, or `vllm` |
 | `spec.profilingConfig.profilerImage` | string | Container image for profiling job |
 | `spec.profilingConfig.config.sla` | object | SLA targets (isl, osl, ttft, itl) |
 

@@ -36,6 +36,7 @@ use crate::common::protocols::{
 };
 use crate::common::running_mean::RunningMean;
 use crate::common::sequence::ActiveSequence;
+use crate::common::utils::sleep_until_precise;
 use crate::kv_manager::KvManager;
 use dynamo_kv_router::protocols::DpRank;
 use dynamo_tokens::blocks::UniqueBlock;
@@ -44,8 +45,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
-#[cfg(target_os = "linux")]
-use tokio_timerfd::Delay;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use validator::Validate;
@@ -420,16 +419,7 @@ async fn simulate_prefill(
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         let deadline = start_time + sleep_duration;
 
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(delay) = Delay::new(deadline) {
-                let _ = delay.await;
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        }
+        sleep_until_precise(deadline).await;
     }
 
     total_time
@@ -514,16 +504,7 @@ async fn simulate_decode(
         let sleep_duration = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         let deadline = start_time + sleep_duration;
 
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(delay) = Delay::new(deadline) {
-                let _ = delay.await;
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        }
+        sleep_until_precise(deadline).await;
     }
 
     total_time

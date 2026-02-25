@@ -11,6 +11,7 @@ from pathlib import Path
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
+from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
 from .utils.planner_profiler_perf_data_converter import (
     convert_profile_results_to_npz,
     is_mocker_format_npz,
@@ -119,7 +120,11 @@ def create_temp_engine_args_file(args) -> Path:
         "is_decode": getattr(args, "is_decode_worker", None),
         "enable_local_indexer": not getattr(args, "durable_kv_events", False),
         # Note: bootstrap_port and zmq_kv_events_port are NOT included here
-        # — they are per-worker and set in launch_workers()
+        # - they are per-worker and set in launch_workers()
+        # Note: kv_bytes_per_token and kv_cache_dtype are NOT included here
+        # - kv_bytes_per_token is auto-computed in main.py after model prefetch,
+        # - kv_cache_dtype is only used Python-side for the auto-computation.
+        "kv_transfer_bandwidth": getattr(args, "kv_transfer_bandwidth", None),
     }
 
     # Parse --reasoning JSON string into a nested object
@@ -386,6 +391,40 @@ def parse_args():
         "Prefill workers listen on these ports; decode workers connect to them. "
         "If not specified, bootstrap rendezvous is disabled.",
     )
+
+    # KV cache transfer latency simulation
+    parser.add_argument(
+        "--kv-transfer-bandwidth",
+        type=float,
+        default=DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS,
+        help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
+        "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
+        "For intra-node NVLink, typical value is ~450.",
+    )
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        default="auto",
+        choices=[
+            "auto",
+            "bfloat16",
+            "fp8",
+            "fp8_ds_mla",
+            "fp8_e4m3",
+            "fp8_e5m2",
+            "fp8_inc",
+        ],
+        help="Data type for KV cache, used to compute kv_bytes_per_token. "
+        "'auto' uses the model's dtype (default).",
+    )
+    parser.add_argument(
+        "--kv-bytes-per-token",
+        type=int,
+        default=None,
+        help="KV cache bytes per token. If not specified, auto-computed from model config "
+        "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
+    )
+
     parser.add_argument(
         "--stagger-delay",
         type=float,

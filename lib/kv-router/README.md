@@ -38,7 +38,7 @@ block2 in B: seq_hash = hash(hash(hash(block0') || block1') || block2) = 0x2222
 
 > **Important: Engine-Provided Hashes**
 >
-> In practice, the `ExternalSequenceBlockHash` may come directly from the inference engine (e.g., vLLM, TensorRT-LLM) using a rolling hash algorithm that we don't know or control. The engine computes these hashes internally and reports them via KV cache events.
+> In practice, the `ExternalSequenceBlockHash` may come directly from the inference engine (e.g., TensorRT-LLM, vLLM) using a rolling hash algorithm that we don't know or control. The engine computes these hashes internally and reports them via KV cache events.
 >
 > **LoRA identity**: The engine is responsible for incorporating the LoRA adapter identity into the `ExternalSequenceBlockHash` before emitting KV events. Dynamo does not add LoRA information at the router layer. For example, vLLM does this via `_gen_lora_extra_hash_keys`, which appends the LoRA ID as extra keys when calling `hash_block_tokens(..., extra_keys)`. Any engine integrating with the KV router must follow the same convention to ensure correct cache isolation between LoRA adapters.
 >

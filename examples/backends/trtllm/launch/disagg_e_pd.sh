@@ -17,8 +17,10 @@ export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.tensorrt_llm_encode.gene
 export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
 export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
-export DYN_ENCODER_CACHE_CAPACITY_GB=${DYN_ENCODER_CACHE_CAPACITY_GB:-4}
 export CUSTOM_TEMPLATE=${CUSTOM_TEMPLATE:-"$DYNAMO_HOME/examples/backends/trtllm/templates/llava_multimodal.jinja"}
+
+# Extra arguments forwarded to the PD worker (e.g. --multimodal-embedding-cache-capacity-gb 10)
+EXTRA_PD_ARGS=("$@")
 
 # Setup cleanup trap
 cleanup() {
@@ -54,7 +56,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
   --custom-jinja-template "$CUSTOM_TEMPLATE" \
   --encode-endpoint "$ENCODE_ENDPOINT" \
   --disaggregation-mode prefill_and_decode \
-  --dyn-encoder-cache-capacity-gb "$DYN_ENCODER_CACHE_CAPACITY_GB" &
+  "${EXTRA_PD_ARGS[@]}" &
 PD_PID_1=$!
 
 wait $DYNAMO_PID
