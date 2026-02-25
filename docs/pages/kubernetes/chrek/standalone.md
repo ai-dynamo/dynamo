@@ -134,6 +134,7 @@ The following environment variables are normally injected by the operator. They 
 
 ⚠️ **Current Restrictions:**
 - **vLLM and SGLang backends only**: TensorRT-LLM support is planned.
+- **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
 - **Single-node only**: Checkpoints must be created and restored on the same node
 - **Single-GPU only**: Multi-GPU configurations are not yet supported
 - **Network state**: Active TCP connections are closed during restore

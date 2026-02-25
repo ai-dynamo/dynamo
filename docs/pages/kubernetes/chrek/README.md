@@ -73,6 +73,7 @@ helm install chrek nvidia/chrek \
 
 ### ✅ Currently Supported
 - ✅ **vLLM and SGLang backends** (TensorRT-LLM planned)
+- ✅ **LLM decode/prefill workers only** (multimodal, embedding, and diffusion workers are not supported)
 - ✅ Single-node, single-GPU checkpoints
 - ✅ PVC storage backend (RWX for multi-node)
 - ✅ CUDA checkpoint/restore
@@ -101,6 +102,7 @@ helm install chrek nvidia/chrek \
 
 ### Technical Limitations
 - **vLLM and SGLang backends only**: TensorRT-LLM support is planned.
+- **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
 - **Single-node only**: Checkpoints must be created and restored on the same node
 - **Single-GPU only**: Multi-GPU configurations not yet supported
 - **Network state limitations**: Active TCP connections are closed during restore (use `tcp-close` CRIU option)
