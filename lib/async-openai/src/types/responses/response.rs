@@ -1473,6 +1473,8 @@ pub struct ResponseLogProb {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct OutputTextContent {
     /// The annotations of the text output.
+    /// Defaults to empty when not provided (e.g., replaying assistant turns as input).
+    #[serde(default)]
     pub annotations: Vec<Annotation>,
     pub logprobs: Option<Vec<LogProb>>,
     /// The text output from the model.
@@ -2905,8 +2907,8 @@ mod tests {
             "id": "rs_1",
             "summary": [{"text": "thinking", "type": "summary_text"}]
         }"#;
-        let item: InputItem =
-            serde_json::from_str(json).expect("reasoning item should deserialize");
+        let item: InputItem = serde_json::from_str(json)
+            .expect("reasoning item should deserialize");
         match &item {
             InputItem::Item(Item::Reasoning(r)) => {
                 assert_eq!(r.id, "rs_1");
