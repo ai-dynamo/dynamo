@@ -80,30 +80,25 @@ jobs:
           echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
 
-  release-gate:
-    name: Release Gate
+  # ============================================================================
+  # FRAMEWORK PIPELINES (Build -> Test -> Copy to ACR for ALL platforms)
+  # Uses build-test-distribute-flavor-matrix.yml directly (same engine as
+  # nightly and post-merge). Release copies both amd64+arm64 to ACR.
+  #
+  # NOTE: Each job directly depends on [prepare-release, manual-approval] with
+  # always() instead of going through an intermediate gate job. This avoids a
+  # GitHub Actions quirk where a skipped ancestor (manual-approval on push
+  # events) taints the entire dependency chain, causing downstream jobs to skip
+  # even when the intermediate gate succeeds.
+  # ============================================================================
+
+  vllm-pipeline:
+    name: vllm builds
     needs: [prepare-release, manual-approval]
     if: |
       always() &&
       needs.prepare-release.result == 'success' &&
       (github.event_name == 'push' || needs.manual-approval.result == 'success')
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ needs.prepare-release.outputs.version }}
-      image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
-    steps:
-      - run: echo "Release gate passed - version=${{ needs.prepare-release.outputs.version }}"
-
-  # ============================================================================
-  # FRAMEWORK PIPELINES (Build -> Test -> Copy to ACR for ALL platforms)
-  # Uses build-test-distribute-flavor-matrix.yml directly (same engine as
-  # nightly and post-merge). Release copies both amd64+arm64 to ACR.
-  # ============================================================================
-
-  vllm-pipeline:
-    name: vllm builds
-    needs: [release-gate]
-    if: needs.release-gate.result == 'success'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -111,7 +106,7 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ needs.release-gate.outputs.image_prefix }}-vllm
+        ${{ needs.prepare-release.outputs.image_prefix }}-vllm
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
@@ -124,8 +119,11 @@ jobs:
 
   sglang-pipeline:
     name: sglang builds
-    needs: [release-gate]
-    if: needs.release-gate.result == 'success'
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -133,7 +131,7 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
-        ${{ needs.release-gate.outputs.image_prefix }}-sglang
+        ${{ needs.prepare-release.outputs.image_prefix }}-sglang
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
@@ -146,8 +144,11 @@ jobs:
 
   trtllm-pipeline:
     name: trtllm builds
-    needs: [release-gate]
-    if: needs.release-gate.result == 'success'
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -155,7 +156,7 @@ jobs:
       platforms: '["amd64", "arm64"]'
       cuda_versions: '["13.1"]'
       extra_tags: |
-        ${{ needs.release-gate.outputs.image_prefix }}-trtllm
+        ${{ needs.prepare-release.outputs.image_prefix }}-trtllm
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
@@ -172,8 +173,11 @@ jobs:
 
   operator-build:
     name: Build Operator Image
-    needs: [release-gate]
-    if: needs.release-gate.result == 'success'
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
     runs-on: prod-default-v2
     env:
       IMAGE_REGISTRY: ai-dynamo
@@ -210,7 +214,7 @@ jobs:
           ECR_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           ACR_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           SHA_TAG="${{ github.sha }}-operator"
-          PREFIX_TAG="${{ needs.release-gate.outputs.image_prefix }}-operator"
+          PREFIX_TAG="${{ needs.prepare-release.outputs.image_prefix }}-operator"
           IMAGE_URIS=(
             "${ECR_BASE}:${SHA_TAG}"
             "${ECR_BASE}:${PREFIX_TAG}"
@@ -225,12 +229,15 @@ jobs:
 
   frontend-build:
     name: Build Frontend Images
-    needs: [release-gate]
-    if: needs.release-gate.result == 'success'
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
     uses: ./.github/workflows/build-frontend-image.yaml
     with:
       skip_change_detection: true
-      image_prefix: ${{ needs.release-gate.outputs.image_prefix }}
+      image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
     secrets: inherit
 
   # ============================================================================
@@ -261,7 +268,7 @@ jobs:
   deploy-operator:
     name: Deploy Operator
     runs-on: prod-default-small-v2
-    needs: [release-gate, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build]
+    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build]
     if: |
       always() &&
       needs.operator-build.result == 'success'
@@ -302,7 +309,7 @@ jobs:
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.release-gate.outputs.image_prefix }}-operator \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.prepare-release.outputs.image_prefix }}-operator \
           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
           --set dynamo-operator.gpuDiscovery.enabled=false \
           --set dynamo-operator.upgradeCRD=false \
@@ -409,16 +416,16 @@ jobs:
 
   release-publish:
     name: Tag RC & Publish to NGC
-    needs: [release-gate, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build, frontend-build]
+    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build, frontend-build]
     if: |
       always() && !cancelled() &&
-      needs.release-gate.result == 'success' &&
+      needs.prepare-release.result == 'success' &&
       (needs.vllm-pipeline.result == 'success' || needs.sglang-pipeline.result == 'success' || needs.trtllm-pipeline.result == 'success')
     runs-on: cpu-amd-m5-4xlarge
     environment: automated-release
     env:
-      VERSION: ${{ needs.release-gate.outputs.version }}
-      IMAGE_PREFIX: ${{ needs.release-gate.outputs.image_prefix }}
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+      IMAGE_PREFIX: ${{ needs.prepare-release.outputs.image_prefix }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
