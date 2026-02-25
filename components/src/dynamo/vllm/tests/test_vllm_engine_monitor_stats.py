@@ -10,6 +10,12 @@ import pytest
 
 from dynamo.vllm.engine_monitor import VllmEngineMonitor
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.pre_merge,
+]
+
 
 @pytest.fixture
 def mock_engine():
