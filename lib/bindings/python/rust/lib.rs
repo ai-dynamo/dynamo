@@ -750,6 +750,20 @@ impl DistributedRuntime {
         Ok(())
     }
 
+    /// Set the system-level health status (Ready / NotReady).
+    ///
+    /// This controls the Branch 3 fallback in `SystemHealth.get_health_status()`:
+    /// when no endpoint health targets are registered, the probe returns this value.
+    fn set_health_status(&self, ready: bool) -> PyResult<()> {
+        let status = if ready {
+            config::HealthStatus::Ready
+        } else {
+            config::HealthStatus::NotReady
+        };
+        self.inner.system_health().lock().set_health_status(status);
+        Ok(())
+    }
+
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
     // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
     // TODO: Create a separate crate "dynamo-python" so that all binding crates can import

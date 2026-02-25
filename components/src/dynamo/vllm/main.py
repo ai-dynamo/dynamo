@@ -52,6 +52,8 @@ from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
+from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
 from .args import Config, parse_args
 from .checkpoint_restore import get_checkpoint_config
 from .constants import DisaggregationMode
@@ -924,25 +926,46 @@ async def init(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    await register_vllm_model(
-        model_input,
-        model_type,
-        generate_endpoint,
-        config,
-        engine_client,
-        vllm_config,
-    )
-
-    # Shadow mode: auto-sleep after registration
-    # The sleep call unregisters from discovery, so the engine won't receive
-    # inference requests until woken. The wake_up route remains accessible
-    # via DYN_SYSTEM_PORT for external coordinators to activate the engine.
     if config.gms_mode == "shadow":
-        logger.info("[Shadow] Auto-sleeping engine after registration")
-        await handler.sleep({"level": 1})
-        logger.info(
-            "[Shadow] Engine is now sleeping - call /engine/wake_up on port %s to activate",
-            os.environ.get("DYN_SYSTEM_PORT", "8080"),
+        # Shadow mode: lock-driven activation.
+        # Flow: sleep → startup probe passes → block on lock → wake → register → serve.
+        # The engine is NOT registered with discovery until after the lock is acquired
+        # and the wake completes, so the frontend never sees a sleeping shadow.
+
+        await handler.sleep_engine(level=1)
+
+        # Flip the system health status so the startup/liveness probes pass.
+        # Branch 3 of SystemHealth.get_health_status() returns this value when
+        # no endpoint health targets are registered yet.
+        runtime.set_health_status(True)
+        logger.info("[Shadow] Engine sleeping, startup probe now passing, waiting for lock")
+
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        lock = FlockFailoverLock(lock_path)
+        await lock.acquire(engine_id=f"engine-{engine_id}")
+        logger.info("[Shadow] Lock acquired, waking engine")
+
+        await handler.wake_engine()
+        logger.info("[Shadow] Engine awake, registering with discovery")
+
+        await register_vllm_model(
+            model_input,
+            model_type,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+        )
+    else:
+        # Normal mode: register immediately and serve.
+        await register_vllm_model(
+            model_input,
+            model_type,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
         )
 
     health_check_payload = VllmHealthCheckPayload(
