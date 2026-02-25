@@ -29,6 +29,8 @@ pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
 pub mod config;
+pub mod indexer_standalone;
+mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
@@ -41,6 +43,7 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use config::{KvRouterConfig, RouterConfigOverride};
+pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
@@ -60,6 +63,8 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
 };
 
+use std::collections::HashSet;
+
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 
@@ -78,6 +83,9 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
 
+// for standalone indexer query
+pub const KV_INDEXER_QUERY_ENDPOINT: &str = "kv_indexer_query";
+
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
@@ -88,23 +96,22 @@ pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
 }
 
 // for router discovery registration
-pub const KV_ROUTER_COMPONENT: &str = "kv-router";
-pub const KV_ROUTER_ENDPOINT: &str = "generate";
+pub const KV_ROUTER_ENDPOINT: &str = "router-discovery";
 
 /// Creates an EndpointId for the KV router in the given namespace.
-pub fn router_endpoint_id(namespace: String) -> EndpointId {
+pub fn router_endpoint_id(namespace: String, component: String) -> EndpointId {
     EndpointId {
         namespace,
-        component: KV_ROUTER_COMPONENT.to_string(),
+        component,
         name: KV_ROUTER_ENDPOINT.to_string(),
     }
 }
 
 /// Creates a DiscoveryQuery for the KV router in the given namespace.
-pub fn router_discovery_query(namespace: String) -> DiscoveryQuery {
+pub fn router_discovery_query(namespace: String, component: String) -> DiscoveryQuery {
     DiscoveryQuery::Endpoint {
         namespace,
-        component: KV_ROUTER_COMPONENT.to_string(),
+        component,
         endpoint: KV_ROUTER_ENDPOINT.to_string(),
     }
 }
@@ -346,7 +353,9 @@ impl KvRouter {
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
-    /// Now also takes optional context_id for request tracking
+    /// Now also takes optional context_id for request tracking.
+    ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
         &self,
@@ -357,6 +366,7 @@ impl KvRouter {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let start = Instant::now();
 
@@ -366,16 +376,28 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
-        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
-            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos));
+        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes").in_scope(|| {
+            compute_block_hash_for_seq(
+                tokens,
+                self.block_size,
+                block_mm_infos,
+                lora_name.as_deref(),
+            )
+        });
         let hash_elapsed = start.elapsed();
 
-        let overlap_scores = self
+        let mut overlap_scores = self
             .indexer
             .find_matches(block_hashes)
             .instrument(tracing::info_span!("kv_router.find_matches"))
             .await?;
         let find_matches_elapsed = start.elapsed();
+
+        if let Some(ref allowed_ids) = allowed_worker_ids {
+            overlap_scores
+                .scores
+                .retain(|worker, _| allowed_ids.contains(&worker.worker_id));
+        }
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
@@ -383,32 +405,36 @@ impl KvRouter {
                 tokens,
                 self.block_size,
                 router_config_override,
+                lora_name.as_deref(),
             )
         });
         let seq_hash_elapsed = start.elapsed();
 
-        let best_worker = self
+        let response = self
             .scheduler
             .schedule(
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
-                overlap_scores.clone(),
+                overlap_scores,
                 router_config_override,
                 update_states,
                 lora_name,
                 priority_jump,
+                allowed_worker_ids,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
         let total_elapsed = start.elapsed();
 
-        metrics::ROUTING_OVERHEAD_METRICS.observe(
-            hash_elapsed,
-            find_matches_elapsed,
-            seq_hash_elapsed,
-            total_elapsed,
-        );
+        if let Some(m) = metrics::RoutingOverheadMetrics::get() {
+            m.observe(
+                hash_elapsed,
+                find_matches_elapsed,
+                seq_hash_elapsed,
+                total_elapsed,
+            );
+        }
 
         #[cfg(feature = "bench")]
         tracing::info!(
@@ -421,15 +447,7 @@ impl KvRouter {
             "find_best_match completed"
         );
 
-        // Note: Routing decision recording (for approximate mode) is now handled
-        // by KvPushRouter::generate after select_worker returns.
-
-        let overlap_amount = overlap_scores
-            .scores
-            .get(&best_worker)
-            .copied()
-            .unwrap_or(0);
-        Ok((best_worker, overlap_amount))
+        Ok((response.best_worker, response.overlap_blocks))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -449,6 +467,7 @@ impl KvRouter {
             tokens,
             self.block_size,
             router_config_override,
+            lora_name.as_deref(),
         );
 
         if let Err(e) = self
@@ -482,14 +501,12 @@ impl KvRouter {
         self.scheduler.worker_type()
     }
 
-    pub async fn add_output_block(
+    pub fn add_output_block(
         &self,
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
-        self.scheduler
-            .add_output_block(request_id, decay_fraction)
-            .await
+        self.scheduler.add_output_block(request_id, decay_fraction)
     }
 
     pub fn block_size(&self) -> u32 {
@@ -502,8 +519,9 @@ impl KvRouter {
         &self,
         tokens: &[u32],
         worker: WorkerWithDpRank,
+        lora_name: Option<&str>,
     ) -> Result<u32, KvRouterError> {
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
         Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
     }
@@ -513,21 +531,22 @@ impl KvRouter {
         &self,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
+        lora_name: Option<&str>,
     ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
             tokens,
             self.block_size,
             router_config_override,
+            lora_name,
         );
 
         Ok(self
             .scheduler
-            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores)
-            .await)
+            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores))
     }
 
     /// Dump all events from the indexer
@@ -561,6 +580,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                         true,
                         None,
                         0.0,
+                        None,
                     )
                     .await?;
 

@@ -161,7 +161,7 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
 | `--omni` | Enable the vLLM-Omni orchestrator (required for all omni workloads) |
 | `--output-modalities <modality>` | Output modality: `text`, `image`, or `video` |
 | `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
-| `--connector none` | Disable KV connector (recommended for omni workers) |
+| _(no `--kv-transfer-config`)_ | KV connector is disabled by default; omit the flag for omni workers |
 | `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
 | `--media-output-http-url <url>` | Base URL for rewriting media paths in responses (optional) |
 

@@ -126,7 +126,7 @@ jobs:
         working-directory: ./deploy/operator
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "pydantic>=2,<3" "black==23.1.0"
+          python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
       - name: Check for uncommitted changes
         shell: bash
         working-directory: ./deploy/operator
@@ -194,9 +194,10 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_multi_gpu_tests: true
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
       test_gpu_timeout_minutes: 35
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
     secrets: inherit
 
   # ============================================================================
@@ -215,8 +216,9 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_multi_gpu_tests: true
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
     secrets: inherit
 
   # ============================================================================
@@ -235,8 +237,9 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_multi_gpu_tests: true
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
     secrets: inherit
 
 
@@ -329,6 +332,7 @@ jobs:
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ steps.operator-tag.outputs.tag }} \
           --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.upgradeCRD=false \
           --debug
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
@@ -360,7 +364,7 @@ jobs:
     # Run if core, vllm, or deploy is changed
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     runs-on: prod-default-small-v2
-    needs: [deploy-operator, vllm-pipeline]
+    needs: [changed-files, deploy-operator, vllm-pipeline]
     permissions:
       contents: read
     strategy:

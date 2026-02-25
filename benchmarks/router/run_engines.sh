@@ -186,10 +186,10 @@ if [ "$USE_MOCKERS" = true ]; then
     # Set endpoint based on worker mode
     if [ "$MODE" = "prefill" ]; then
         MOCKER_ARGS+=("--endpoint" "dyn://test.prefill.generate")
-        MOCKER_ARGS+=("--is-prefill-worker")
+        MOCKER_ARGS+=("--disaggregation-mode" "prefill")
     elif [ "$MODE" = "decode" ]; then
         MOCKER_ARGS+=("--endpoint" "dyn://test.mocker.generate")
-        MOCKER_ARGS+=("--is-decode-worker")
+        MOCKER_ARGS+=("--disaggregation-mode" "decode")
     else
         MOCKER_ARGS+=("--endpoint" "dyn://test.mocker.generate")
     fi
@@ -254,9 +254,9 @@ else
                     VLLM_ARGS+=("--data-parallel-size" "$DATA_PARALLEL_SIZE")
                 fi
                 if [ "$MODE" = "prefill" ]; then
-                    VLLM_ARGS+=("--is-prefill-worker")
+                    VLLM_ARGS+=("--disaggregation-mode" "prefill")
                 elif [ "$MODE" = "decode" ]; then
-                    VLLM_ARGS+=("--is-decode-worker")
+                    VLLM_ARGS+=("--disaggregation-mode" "decode")
                 fi
                 VLLM_ARGS+=("${EXTRA_ARGS[@]}")
 

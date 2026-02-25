@@ -8,7 +8,7 @@ title: FlexKV
 
 ## Introduction
 
-[FlexKV](https://github.com/taco-project/FlexKV) is a scalable, distributed runtime for KV cache offloading developed by Tencent Cloud's TACO team in collaboration with the community. It acts as a unified KV caching layer for inference engines like vLLM, TensorRT-LLM, and SGLang.
+[FlexKV](https://github.com/taco-project/FlexKV) is a scalable, distributed runtime for KV cache offloading developed by Tencent Cloud's TACO team in collaboration with the community. It acts as a unified KV caching layer for inference engines like SGLang, TensorRT-LLM, and vLLM.
 
 ### Key Features
 
@@ -34,11 +34,11 @@ title: FlexKV
 
 ### Enable FlexKV
 
-Set the `DYNAMO_USE_FLEXKV` environment variable and use the `--connector flexkv` flag:
+Set the `DYNAMO_USE_FLEXKV` environment variable and use the `--kv-transfer-config` flag:
 
 ```bash
 export DYNAMO_USE_FLEXKV=1
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector flexkv
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"FlexKVConnector","kv_role":"kv_both"}'
 ```
 
 ## Aggregated Serving
@@ -52,7 +52,7 @@ python -m dynamo.frontend &
 # Terminal 2: Start vLLM worker with FlexKV
 DYNAMO_USE_FLEXKV=1 \
 FLEXKV_CPU_CACHE_GB=32 \
-  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector flexkv
+  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"FlexKVConnector","kv_role":"kv_both"}'
 ```
 
 ### With KV-Aware Routing
@@ -72,7 +72,7 @@ FLEXKV_SERVER_RECV_PORT="ipc:///tmp/flexkv_server_0" \
 CUDA_VISIBLE_DEVICES=0 \
 python -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
-    --connector flexkv \
+    --kv-transfer-config '{"kv_connector":"FlexKVConnector","kv_role":"kv_both"}' \
     --gpu-memory-utilization 0.2 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
@@ -83,7 +83,7 @@ FLEXKV_SERVER_RECV_PORT="ipc:///tmp/flexkv_server_1" \
 CUDA_VISIBLE_DEVICES=1 \
 python -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
-    --connector flexkv \
+    --kv-transfer-config '{"kv_connector":"FlexKVConnector","kv_role":"kv_both"}' \
     --gpu-memory-utilization 0.2 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 ```
@@ -97,7 +97,7 @@ FlexKV can be used with disaggregated prefill/decode serving. The prefill worker
 python -m dynamo.frontend &
 
 # Terminal 2: Decode worker (without FlexKV)
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector nixl &
+CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # Terminal 3: Prefill worker (with FlexKV)
 DYN_VLLM_KV_EVENT_PORT=20081 \
@@ -107,8 +107,8 @@ FLEXKV_CPU_CACHE_GB=32 \
 CUDA_VISIBLE_DEVICES=1 \
   python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
-  --is-prefill-worker \
-  --connector nixl flexkv
+  --disaggregation-mode prefill \
+  --kv-transfer-config '{"kv_connector":"FlexKVConnector","kv_role":"kv_both"}'
 ```
 
 ## Configuration
