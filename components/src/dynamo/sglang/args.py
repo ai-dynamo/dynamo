@@ -55,6 +55,10 @@ class Config:
             return DisaggregationMode.PREFILL
         elif self.server_args.disaggregation_mode == "decode":
             return DisaggregationMode.DECODE
+        elif self.server_args.disaggregation_mode == "attention":
+            return DisaggregationMode.ATTENTION
+        elif self.server_args.disaggregation_mode == "ffn":
+            return DisaggregationMode.FFN
         else:
             return DisaggregationMode.AGGREGATED
 

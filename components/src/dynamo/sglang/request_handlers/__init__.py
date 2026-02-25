@@ -11,7 +11,7 @@ from .handler_base import BaseGenerativeHandler, BaseWorkerHandler
 from .image_diffusion import ImageDiffusionWorkerHandler
 
 # LLM handlers
-from .llm import DecodeWorkerHandler, DiffusionWorkerHandler, PrefillWorkerHandler
+from .llm import AFDAttentionHandler, AFDFFNHandler, DecodeWorkerHandler, DiffusionWorkerHandler, PrefillWorkerHandler
 
 # Multimodal handlers
 from .multimodal import (
@@ -32,6 +32,9 @@ __all__ = [
     "DecodeWorkerHandler",
     "DiffusionWorkerHandler",
     "PrefillWorkerHandler",
+    # AFD handlers
+    "AFDAttentionHandler",
+    "AFDFFNHandler",
     # Embedding handlers
     "EmbeddingWorkerHandler",
     # Image diffusion handlers

@@ -12,3 +12,6 @@ class DisaggregationMode(Enum):
     AGGREGATED = "agg"
     PREFILL = "prefill"
     DECODE = "decode"
+    # AFD (Attention-FFN Disaggregation) modes - decode phase only
+    ATTENTION = "attention"  # Attention worker (stateful, KV-cache dominated)
+    FFN = "ffn"  # FFN worker (stateless, compute-intensive)
