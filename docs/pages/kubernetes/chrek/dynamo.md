@@ -77,7 +77,6 @@ spec:
     worker:
       replicas: 1
       extraPodSpec:
-        runtimeClassName: nvidia
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm-placeholder:latest
           command: ["python3"]
@@ -86,15 +85,12 @@ spec:
             - "dynamo.vllm"
             - "--model"
             - "meta-llama/Llama-3-8B"
-            - "--tensor-parallel-size"
-            - "1"
-            - "--connector"
-            - "none"
             - "--max-model-len"
             - "4096"
             - "--gpu-memory-utilization"
             - "0.90"
           env:
+            # Required for cross-node checkpoint/restore
             - name: GLOO_SOCKET_IFNAME
               value: "lo"
             - name: NCCL_SOCKET_IFNAME
@@ -125,7 +121,6 @@ spec:
     worker:
       replicas: 1
       extraPodSpec:
-        runtimeClassName: nvidia
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/dynamo-sglang-placeholder:latest
           command: ["python3"]
@@ -134,15 +129,10 @@ spec:
             - "dynamo.sglang"
             - "--model"
             - "meta-llama/Llama-3-8B"
-            - "--tensor-parallel-size"
-            - "1"
-            - "--connector"
-            - "none"
-            - "--context-length"
-            - "4096"
             - "--mem-fraction-static"
             - "0.90"
           env:
+            # Required for cross-node checkpoint/restore
             - name: GLOO_SOCKET_IFNAME
               value: "lo"
             - name: NCCL_SOCKET_IFNAME
@@ -166,7 +156,7 @@ spec:
 | Setting | vLLM | SGLang |
 |---------|------|--------|
 | Module | `dynamo.vllm` | `dynamo.sglang` |
-| Max context | `--max-model-len` | `--context-length` |
+| Max context (optional) | `--max-model-len` | `--context-length` |
 | GPU memory | `--gpu-memory-utilization` | `--mem-fraction-static` |
 | Placeholder image | `dynamo-vllm-placeholder` | `dynamo-sglang-placeholder` |
 | Identity `backendFramework` | `"vllm"` | `"sglang"` |
@@ -539,7 +529,6 @@ spec:
     backoffLimit: 3
     podTemplateSpec:
       spec:
-        runtimeClassName: nvidia
         containers:
           - name: main
             image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm-placeholder:latest
@@ -549,10 +538,6 @@ spec:
               - "dynamo.vllm"
               - "--model"
               - "meta-llama/Meta-Llama-3-8B-Instruct"
-              - "--tensor-parallel-size"
-              - "1"
-              - "--connector"
-              - "none"
               - "--max-model-len"
               - "4096"
               - "--gpu-memory-utilization"
@@ -585,7 +570,6 @@ spec:
     worker:
       replicas: 2
       extraPodSpec:
-        runtimeClassName: nvidia
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm-placeholder:latest
           command: ["python3"]
@@ -594,10 +578,6 @@ spec:
             - "dynamo.vllm"
             - "--model"
             - "meta-llama/Meta-Llama-3-8B-Instruct"
-            - "--tensor-parallel-size"
-            - "1"
-            - "--connector"
-            - "none"
             - "--max-model-len"
             - "4096"
             - "--gpu-memory-utilization"
