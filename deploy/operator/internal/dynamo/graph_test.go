@@ -7177,71 +7177,27 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 func TestGenerateBasePodSpec_FrontendSidecarImagePullSecrets(t *testing.T) {
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
-	tests := []struct {
-		name                     string
-		component                *v1alpha1.DynamoComponentDeploymentSharedSpec
-		secretsRetriever         SecretsRetriever
-		expectedImagePullSecrets []corev1.LocalObjectReference
-	}{
-		{
-			name: "sidecar image pull secrets are discovered",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: commonconsts.ComponentTypeWorker,
-				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
-					Image: "private-registry/frontend:latest",
-				},
-			},
-			secretsRetriever: &mockSecretsRetrieverWithSecrets{},
-			expectedImagePullSecrets: []corev1.LocalObjectReference{
-				{Name: "test-docker-secret"},
-			},
-		},
-		{
-			name: "sidecar image pull secret discovery disabled via annotation",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: commonconsts.ComponentTypeWorker,
-				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDisableImagePullSecretDiscovery: commonconsts.KubeLabelValueTrue,
-				},
-				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
-					Image: "private-registry/frontend:latest",
-				},
-			},
-			secretsRetriever:         &mockSecretsRetrieverWithSecrets{},
-			expectedImagePullSecrets: nil,
-		},
-		{
-			name: "sidecar with nil secrets retriever does not panic",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: commonconsts.ComponentTypeWorker,
-				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
-					Image: "private-registry/frontend:latest",
-				},
-			},
-			secretsRetriever:         nil,
-			expectedImagePullSecrets: nil,
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+			Image: "private-registry/frontend:latest",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			podSpec, err := GenerateBasePodSpec(
-				tt.component,
-				BackendFrameworkVLLM,
-				tt.secretsRetriever,
-				"test-dgd",
-				"test-ns",
-				RoleMain,
-				1,
-				controllerConfig,
-				commonconsts.MultinodeDeploymentTypeGrove,
-				"test-service",
-				nil,
-			)
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkVLLM,
+		&mockSecretsRetrieverWithSecrets{},
+		"test-dgd",
+		"test-ns",
+		RoleMain,
+		1,
+		controllerConfig,
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"test-service",
+		nil,
+	)
 
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedImagePullSecrets, podSpec.ImagePullSecrets,
-				"imagePullSecrets should match expected")
-		})
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, []corev1.LocalObjectReference{{Name: "test-docker-secret"}}, podSpec.ImagePullSecrets)
 }

@@ -134,8 +134,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// FrontendSidecar configures an auto-generated frontend sidecar container.
 	// When specified, the operator injects a fully configured frontend container
 	// with all standard Dynamo environment variables, health probes, and ports.
-	// This eliminates the need to manually specify these in extraPodSpec.containers.
-	// Typically used in GAIE deployments where the frontend runs alongside the worker.
+	// This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
 	// +optional
 	FrontendSidecar *FrontendSidecarSpec `json:"frontendSidecar,omitempty"`
 
