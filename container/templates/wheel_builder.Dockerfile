@@ -148,13 +148,11 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Build FFmpeg from source
+# Always build FFmpeg so libs are available for Rust checks in CI
 # Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION
-ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
@@ -185,8 +183,7 @@ if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
     ldconfig && \
     mkdir -p /usr/local/src/ffmpeg && \
-    mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/; \
-fi
+    mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
@@ -329,6 +326,7 @@ COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels. The caches do not need the "shared" lock because Cargo has its own locking mechanism.
 ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cargo/registry \
