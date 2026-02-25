@@ -417,6 +417,18 @@ pub mod kvbm {
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
+/// Router per-request metrics (component-scoped via `MetricsHierarchy`).
+///
+/// Metric names are composed as `"{METRIC_PREFIX}{frontend_service::*}"` at init time,
+/// then passed to `component.metrics().create_*()` which auto-prepends `dynamo_component_`,
+/// yielding e.g. `dynamo_component_router_requests_total`.
+/// See `lib/llm/src/kv_router/metrics.rs` `RouterRequestMetrics::from_component()`.
+pub mod router_request {
+    /// Prefix prepended to `frontend_service::*` names to form router metric names.
+    /// e.g. `"router_"` + `frontend_service::REQUESTS_TOTAL` → `"router_requests_total"`.
+    pub const METRIC_PREFIX: &str = "router_";
+}
+
 /// Routing overhead phase latency histogram suffixes.
 ///
 /// Combined with `name_prefix::ROUTER` ("dynamo_router") in `RoutingOverheadMetrics::register()`,
