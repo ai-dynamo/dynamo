@@ -103,6 +103,7 @@ jobs:
   vllm-pipeline:
     name: vllm builds
     needs: [release-gate]
+    if: needs.release-gate.result == 'success'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
@@ -124,6 +125,7 @@ jobs:
   sglang-pipeline:
     name: sglang builds
     needs: [release-gate]
+    if: needs.release-gate.result == 'success'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
@@ -145,6 +147,7 @@ jobs:
   trtllm-pipeline:
     name: trtllm builds
     needs: [release-gate]
+    if: needs.release-gate.result == 'success'
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
@@ -170,6 +173,7 @@ jobs:
   operator-build:
     name: Build Operator Image
     needs: [release-gate]
+    if: needs.release-gate.result == 'success'
     runs-on: prod-default-v2
     env:
       IMAGE_REGISTRY: ai-dynamo
@@ -222,6 +226,7 @@ jobs:
   frontend-build:
     name: Build Frontend Images
     needs: [release-gate]
+    if: needs.release-gate.result == 'success'
     uses: ./.github/workflows/build-frontend-image.yaml
     with:
       skip_change_detection: true
