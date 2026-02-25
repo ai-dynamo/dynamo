@@ -1,0 +1,47 @@
+apiVersion: dynamo.nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: deepseek-r1-thorough-sglang-overrides
+spec:
+  model: "deepseek-ai/DeepSeek-R1"
+  backend: sglang
+  image: "hongkuanz196/sglang-runtime:hzhou-0224"
+  hardware:
+    gpuSku: h200_sxm
+    totalGpus: 16
+    numGpusPerNode: 8
+  # download model in PVC and update accordingly!
+  modelCache:
+    pvcName: model-cache
+    pvcMountPath: /opt/model
+  searchStrategy: thorough
+  overrides:
+    dgd:
+      spec:
+        services:
+          decode:
+            sharedMemory:
+              size: 80Gi
+            extraPodSpec:
+              mainContainer:
+                workingDir: /workspace
+                args:
+                  - --mem-fraction-static
+                  - "0.75"
+                  - --prefill-round-robin-balance
+                  - --watchdog-timeout
+                  - "3600"
+          prefill:
+            sharedMemory:
+              size: 80Gi
+            extraPodSpec:
+              mainContainer:
+                workingDir: /workspace
+                args:
+                  - --mem-fraction-static
+                  - "0.75"
+                  - --load-balance-method
+                  - round_robin
+                  - --watchdog-timeout
+                  - "3600"
+  autoApply: true

@@ -1,0 +1,22 @@
+apiVersion: dynamo.nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-32b-rapid-pvc-no-planner-with-load
+spec:
+  model: "Qwen/Qwen3-32B"
+  backend: trtllm
+  image: "hongkuanz196/trtllm-runtime:hzhou-0224"
+  hardware:
+    gpuSku: h200_sxm
+    totalGpus: 8
+    numGpusPerNode: 8
+  # download model in PVC and update accordingly!
+  modelCache:
+    pvcName: model-cache
+    pvcModelPath: /model/Qwen3-32B
+  workload:
+    requestRate: 5.0
+  sla:
+    itl: 50.0
+  searchStrategy: rapid
+  autoApply: true

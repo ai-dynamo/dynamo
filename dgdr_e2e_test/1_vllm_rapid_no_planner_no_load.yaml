@@ -1,0 +1,16 @@
+apiVersion: dynamo.nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-32b-rapid-no-planner-no-load
+spec:
+  model: "Qwen/Qwen3-32B"
+  backend: vllm
+  image: "hongkuanz196/vllm-runtime:hzhou-0224"
+  hardware:
+    gpuSku: h200_sxm
+    totalGpus: 8
+    numGpusPerNode: 8
+  sla:
+    itl: 50.0
+  searchStrategy: rapid
+  autoApply: true

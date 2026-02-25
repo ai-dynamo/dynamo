@@ -1,0 +1,23 @@
+apiVersion: dynamo.nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-32b-thorough-planner-thorough-sweep
+spec:
+  model: "Qwen/Qwen3-32B"
+  backend: vllm
+  image: "hongkuanz196/vllm-runtime:hzhou-0224"
+  hardware:
+    gpuSku: h200_sxm
+    totalGpus: 8
+    numGpusPerNode: 8
+  sla:
+    itl: 50.0
+  features:
+    planner:
+      pre_deployment_sweeping_mode: thorough
+      enable_throughput_scaling: true
+      enable_load_scaling: false
+      mode: disagg
+      backend: vllm
+  searchStrategy: thorough
+  autoApply: true
