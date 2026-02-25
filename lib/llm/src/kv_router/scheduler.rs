@@ -170,6 +170,7 @@ impl KvScheduler {
             kv_router_config.router_queue_threshold,
             block_size,
             selector,
+            kv_router_config.worker_discovery_mode,
         ));
         let queue_clone = queue.clone();
 

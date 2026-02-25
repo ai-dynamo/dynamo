@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use super::WorkerDiscoveryMode;
 use super::WorkerSelector;
 use super::protocols::{WorkerId, WorkerWithDpRank};
 use super::scheduler::{SchedulingRequest, SchedulingResponse};
@@ -60,6 +61,7 @@ pub struct SchedulerQueue {
     start_time: Instant,
     block_size: u32,
     selector: Box<dyn WorkerSelector + Send + Sync>,
+    worker_discovery_mode: WorkerDiscoveryMode,
 }
 
 impl SchedulerQueue {
@@ -69,6 +71,7 @@ impl SchedulerQueue {
         threshold_frac: Option<f64>,
         block_size: u32,
         selector: Box<dyn WorkerSelector + Send + Sync>,
+        worker_discovery_mode: WorkerDiscoveryMode,
     ) -> Self {
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
@@ -81,6 +84,7 @@ impl SchedulerQueue {
             start_time: Instant::now(),
             block_size,
             selector,
+            worker_discovery_mode,
         }
     }
 
@@ -98,11 +102,20 @@ impl SchedulerQueue {
     /// Enqueue a new request.
     /// If queueing is disabled or workers have capacity, schedule immediately.
     /// Otherwise park in the pending heap.
+    ///
+    /// In External discovery mode the capacity check is skipped because the
+    /// discovery-based worker map may be empty; the effective worker set is
+    /// determined per-request inside `schedule()`.
     pub async fn enqueue(&self, request: SchedulingRequest) {
         let Some(threshold) = self.threshold_frac else {
             self.schedule(request).await;
             return;
         };
+
+        if self.worker_discovery_mode == WorkerDiscoveryMode::External {
+            self.schedule(request).await;
+            return;
+        }
 
         if self.all_workers_busy(threshold) {
             tracing::debug!("all workers busy, queueing request");
@@ -136,6 +149,15 @@ impl SchedulerQueue {
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load → select worker → respond → book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest) {
+        if self.worker_discovery_mode == WorkerDiscoveryMode::External
+            && request.allowed_worker_ids.is_none()
+        {
+            tracing::warn!(
+                "External discovery mode but no worker IDs provided in request; \
+                 falling back to discovery-based workers"
+            );
+        }
+
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
             request.token_seq.clone(),
             request.isl_tokens,
