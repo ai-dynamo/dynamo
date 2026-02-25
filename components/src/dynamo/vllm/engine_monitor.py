@@ -122,7 +122,14 @@ class VllmEngineMonitor:
 
     async def _periodic_log_stats(self):
         """Periodically flush vLLM engine stats (throughput, cache usage, etc.)."""
-        interval = float(os.environ.get("VLLM_LOG_STATS_INTERVAL", "10.0"))
+        try:
+            interval = float(os.environ.get("VLLM_LOG_STATS_INTERVAL", "10.0"))
+        except ValueError:
+            logger.warning(
+                "Invalid VLLM_LOG_STATS_INTERVAL value: %r, using default 10.0",
+                os.environ.get("VLLM_LOG_STATS_INTERVAL"),
+            )
+            interval = 10.0
         if interval <= 0:
             return
         if not getattr(self.engine_client, "log_stats", True):

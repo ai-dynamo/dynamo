@@ -45,6 +45,20 @@ class LogHandler(logging.Handler):
         )
 
 
+class _HealthCheckFilter(logging.Filter):
+    """Suppress DEBUG-level check_health messages from vLLM's AsyncLLM.
+
+    Dynamo's VllmEngineMonitor calls check_health every 2s which floods
+    the logs at DEBUG level.  vLLM's own server doesn't have this issue
+    because it doesn't run a periodic health check loop.
+    """
+
+    def filter(self, record):
+        return not (
+            record.funcName == "check_health" and record.levelno <= logging.DEBUG
+        )
+
+
 class VllmColorFormatter(logging.Formatter):
     """Formatter that matches Rust tracing's compact colored output style.
 
@@ -206,8 +220,10 @@ def configure_vllm_logging(dyn_level: int):
     """
     Configure vLLM logging for the main process and subprocesses.
 
-    Main process: replaces vLLM's StreamHandler with dynamo's LogHandler so logs
-    flow through the Rust logging bridge.
+    Main process: replaces vLLM's StreamHandler with a new StreamHandler that
+    uses VllmColorFormatter and writes directly to stderr.  This bypasses the
+    Rust LogHandler bridge so that VLLM_LOGGING_LEVEL is respected independently
+    of DYN_LOG (the Rust bridge filters based on DYN_LOG).
 
     Subprocesses (EngineCore, workers): use vLLM's DEFAULT_LOGGING_CONFIG
     (StreamHandler to stderr) since the Rust runtime is not initialized there.
@@ -223,17 +239,9 @@ def configure_vllm_logging(dyn_level: int):
     # DYN_LOG controls dynamo logging only — it does not affect vLLM.
     vllm_level = os.environ.get("VLLM_LOGGING_LEVEL", "INFO").upper()
 
-    # Route vLLM logs through dynamo's LogHandler (Rust bridge) for consistent
-    # colored output.  The Rust env_filter (DYN_LOG) also filters messages, so
-    # when VLLM_LOGGING_LEVEL is more verbose than DYN_LOG we must widen the
-    # Rust filter for vLLM targets.  Python-side logger level still controls
-    # what reaches the handler.
-    #
-    # The LogHandler sets Rust target to "<module>.<funcName>", so vLLM log
-    # records have targets like "loggers.log", "async_llm.check_health", etc.
-    # We add a blanket "vllm=" directive isn't possible since targets don't
-    # start with "vllm".  Instead, we use a StreamHandler that writes directly
-    # to stderr, bypassing the Rust filter, but formatted to match Rust output.
+    # Use a StreamHandler to stderr with VllmColorFormatter (colored output
+    # matching Rust tracing style).  This bypasses the Rust env_filter so
+    # VLLM_LOGGING_LEVEL is fully independent of DYN_LOG.
     main_config = {
         "formatters": {
             "vllm": {
@@ -259,17 +267,10 @@ def configure_vllm_logging(dyn_level: int):
     }
     logging.config.dictConfig(main_config)
 
-    # Suppress noisy "Called check_health" debug spam from vLLM's AsyncLLM.
-    # Dynamo's VllmEngineMonitor calls check_health every 2s which floods
-    # the logs at DEBUG level.  vLLM's own server doesn't have this issue
-    # because it doesn't run a periodic health check loop.
-    class _HealthCheckFilter(logging.Filter):
-        def filter(self, record):
-            return not (
-                record.funcName == "check_health" and record.levelno <= logging.DEBUG
-            )
-
-    logging.getLogger("vllm.v1.engine.async_llm").addFilter(_HealthCheckFilter())
+    # Add health-check filter (idempotent — skips if already present).
+    async_llm_logger = logging.getLogger("vllm.v1.engine.async_llm")
+    if not any(isinstance(f, _HealthCheckFilter) for f in async_llm_logger.filters):
+        async_llm_logger.addFilter(_HealthCheckFilter())
 
 
 def map_dyn_log_to_tllm_level(dyn_log_value: str) -> str:

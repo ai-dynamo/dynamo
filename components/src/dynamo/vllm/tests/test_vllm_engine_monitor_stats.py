@@ -151,3 +151,20 @@ async def test_periodic_log_stats_no_shutdown_event(mock_engine):
             pass
 
     assert mock_engine.do_log_stats.call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_periodic_log_stats_malformed_interval(mock_engine):
+    """Stats task falls back to default 10s when VLLM_LOG_STATS_INTERVAL is invalid."""
+    shutdown_event = asyncio.Event()
+    monitor = _make_monitor(mock_engine, shutdown_event)
+
+    with patch.dict("os.environ", {"VLLM_LOG_STATS_INTERVAL": "not_a_number"}):
+        # Should not crash — falls back to 10.0s default
+        task = asyncio.create_task(monitor._periodic_log_stats())
+        # Give it a moment to start (it will sleep 10s, so just cancel quickly)
+        await asyncio.sleep(0.05)
+        shutdown_event.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    # Task ran without error (used 10s fallback, didn't crash)

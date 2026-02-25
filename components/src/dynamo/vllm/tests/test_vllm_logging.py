@@ -28,7 +28,7 @@ import os
 import pytest
 
 from dynamo.runtime.logging import (
-    LogHandler,
+    VllmColorFormatter,
     configure_dynamo_logging,
     configure_vllm_logging,
 )
@@ -58,13 +58,19 @@ def _clean_env(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_loggers():
-    """Reset the root and vllm loggers after each test."""
+    """Reset the root and vllm loggers before/after each test."""
+
+    def _reset():
+        for name in (None, "vllm"):
+            lgr = logging.getLogger(name)
+            lgr.handlers.clear()
+            lgr.setLevel(logging.WARNING if name is None else logging.NOTSET)
+        logging.getLogger("vllm").propagate = True
+        logging.getLogger("vllm.v1.engine.async_llm").filters.clear()
+
+    _reset()
     yield
-    for name in (None, "vllm"):
-        lgr = logging.getLogger(name)
-        lgr.handlers.clear()
-        lgr.setLevel(logging.WARNING if name is None else logging.NOTSET)
-    logging.getLogger("vllm").propagate = True
+    _reset()
 
 
 def _simulate_vllm_import_time_logger():
@@ -78,14 +84,16 @@ def _simulate_vllm_import_time_logger():
 def test_dictconfig_replaces_vllm_stream_handler():
     """
     Regression: vLLM sets up a StreamHandler at import time. configure_vllm_logging()
-    must replace it with LogHandler so logs flow through dynamo's Rust bridge.
+    must replace it with a new StreamHandler using VllmColorFormatter so logs
+    bypass the Rust bridge and respect VLLM_LOGGING_LEVEL independently.
     """
     vllm_logger = _simulate_vllm_import_time_logger()
 
     configure_vllm_logging(logging.INFO)
 
     assert len(vllm_logger.handlers) == 1
-    assert isinstance(vllm_logger.handlers[0], LogHandler)
+    assert isinstance(vllm_logger.handlers[0], logging.StreamHandler)
+    assert isinstance(vllm_logger.handlers[0].formatter, VllmColorFormatter)
 
 
 def test_vllm_logging_level_controls_vllm_logger(monkeypatch):
@@ -99,8 +107,8 @@ def test_vllm_logging_level_controls_vllm_logger(monkeypatch):
 
     vllm_logger = logging.getLogger("vllm")
     assert vllm_logger.level == logging.DEBUG
-    assert isinstance(vllm_logger.handlers[0], LogHandler)
-    assert vllm_logger.handlers[0].level == logging.DEBUG
+    assert isinstance(vllm_logger.handlers[0], logging.StreamHandler)
+    assert isinstance(vllm_logger.handlers[0].formatter, VllmColorFormatter)
 
 
 def test_dyn_log_does_not_affect_vllm_level(monkeypatch):
@@ -114,8 +122,8 @@ def test_dyn_log_does_not_affect_vllm_level(monkeypatch):
 
     vllm_logger = logging.getLogger("vllm")
     assert vllm_logger.level == logging.INFO
-    assert isinstance(vllm_logger.handlers[0], LogHandler)
-    assert vllm_logger.handlers[0].level == logging.INFO
+    assert isinstance(vllm_logger.handlers[0], logging.StreamHandler)
+    assert isinstance(vllm_logger.handlers[0].formatter, VllmColorFormatter)
 
 
 def test_no_config_file_written():
@@ -129,3 +137,46 @@ def test_no_config_file_written():
 
     assert "VLLM_LOGGING_CONFIG_PATH" not in os.environ
     assert os.environ.get("VLLM_CONFIGURE_LOGGING") == "1"
+
+
+def test_health_check_filter_applied():
+    """
+    configure_vllm_logging() must add a filter to vllm.v1.engine.async_llm
+    that suppresses DEBUG-level check_health messages.
+    """
+    configure_vllm_logging(logging.INFO)
+
+    async_llm_logger = logging.getLogger("vllm.v1.engine.async_llm")
+    assert len(async_llm_logger.filters) == 1
+
+    # Simulate a check_health DEBUG record — should be filtered out
+    record = logging.LogRecord(
+        name="vllm.v1.engine.async_llm",
+        level=logging.DEBUG,
+        pathname="",
+        lineno=0,
+        msg="Called check_health.",
+        args=(),
+        exc_info=None,
+    )
+    record.funcName = "check_health"
+    health_filter = async_llm_logger.filters[0]
+    assert isinstance(health_filter, logging.Filter)
+    assert not health_filter.filter(record)
+
+    # Same message at WARNING level — should pass through
+    record.levelno = logging.WARNING
+    assert health_filter.filter(record)
+
+
+def test_health_check_filter_not_duplicated():
+    """
+    Calling configure_vllm_logging() multiple times must not accumulate
+    duplicate health-check filters.
+    """
+    configure_vllm_logging(logging.INFO)
+    configure_vllm_logging(logging.INFO)
+    configure_vllm_logging(logging.INFO)
+
+    async_llm_logger = logging.getLogger("vllm.v1.engine.async_llm")
+    assert len(async_llm_logger.filters) == 1
