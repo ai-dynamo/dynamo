@@ -124,9 +124,12 @@ class PrometheusAPIClient:
             if model_name is None:
                 # Router aggregate path: filter by dynamo_namespace so each pool
                 # planner only reads its own LocalRouter's metrics.
-                # Prometheus labels use underscores; DYN_NAMESPACE uses dashes.
-                prom_namespace = self.dynamo_namespace.replace("-", "_")
-                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{prom_namespace}"'
+                # dynamo_component_router_* metrics are registered via MetricsHierarchy
+                # which auto-injects dynamo_namespace with underscores (e.g.
+                # "darfeen_dynamo_cloud_gp_prefill_1"). DYN_NAMESPACE uses dashes, so
+                # normalize before building the PromQL filter.
+                ns = self.dynamo_namespace.replace("-", "_")
+                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
                 query = (
                     f"sum(increase({full_metric_name}_sum{{{ns_filter}}}[{interval}])) / "
                     f"sum(increase({full_metric_name}_count{{{ns_filter}}}[{interval}]))"
@@ -220,8 +223,8 @@ class PrometheusAPIClient:
         if self.metrics_source == "router":
             try:
                 router_req_total = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
-                prom_namespace = self.dynamo_namespace.replace("-", "_")
-                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{prom_namespace}"'
+                ns = self.dynamo_namespace.replace("-", "_")
+                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
                 query = f"sum(increase({router_req_total}{{{ns_filter}}}[{interval}]))"
                 result = self.prom.custom_query(query=query)
                 if not result:
@@ -290,6 +293,34 @@ class PrometheusAPIClient:
             "avg output sequence tokens",
             model_name,
         )
+
+    def warn_if_router_not_scraped(self) -> None:
+        """Warn if Prometheus is not scraping any dynamo_component_router_* series.
+
+        Called once at planner startup when throughput_metrics_source="router".
+        Detects a missing or misconfigured PodMonitor early so the operator
+        sees a clear warning rather than silent zero metrics.
+
+        Uses absent() to check whether any dynamo_component_router_requests_total
+        series exist for this namespace. MetricsHierarchy injects dynamo_namespace
+        with underscores, so DYN_NAMESPACE dashes are normalized before the query.
+        """
+        try:
+            metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
+            ns = self.dynamo_namespace.replace("-", "_")
+            ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
+            result = self.prom.custom_query(query=f"absent({metric}{{{ns_filter}}})")
+            if result:
+                logger.warning(
+                    f"[throughput_metrics_source=router] No '{metric}' series found "
+                    f"for namespace '{ns}' in Prometheus. "
+                    "Router metrics will read as zero until scraping is working. "
+                    "Check: (1) PodMonitor 'dynamo-router' is installed in the operator namespace, "
+                    "(2) LocalRouter pods have DYN_SYSTEM_PORT=9090, "
+                    "(3) pods have label nvidia.com/metrics-enabled=true."
+                )
+        except Exception as e:
+            logger.warning(f"Could not check router scraping status: {e}")
 
 
 def parse_frontend_metric_containers(

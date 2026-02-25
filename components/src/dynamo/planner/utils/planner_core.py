@@ -301,6 +301,8 @@ class BasePlanner:
                     metrics_source=config.throughput_metrics_source,
                 )
             )
+            if config.throughput_metrics_source == "router":
+                self.prometheus_traffic_client.warn_if_router_not_scraped()
 
         predictor_cls = LOAD_PREDICTORS[config.load_predictor]
         self.num_req_predictor = predictor_cls(config)

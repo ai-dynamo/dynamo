@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import math
 from unittest.mock import MagicMock, patch
 
@@ -280,7 +281,7 @@ class TestPrometheusAPIClientRouterSource:
     def test_get_avg_inter_token_latency_dispatches_to_router_histogram(
         self, router_client
     ):
-        """get_avg_inter_token_latency with router source calls _get_router_average_histogram."""
+        """get_avg_inter_token_latency with router source queries dynamo_component_router_* metric."""
         result = router_client.get_avg_inter_token_latency("60s", "mymodel")
         assert result == 42.0
 
@@ -291,7 +292,7 @@ class TestPrometheusAPIClientRouterSource:
     def test_get_avg_time_to_first_token_dispatches_to_router_histogram(
         self, router_client
     ):
-        """get_avg_time_to_first_token with router source calls _get_router_average_histogram."""
+        """get_avg_time_to_first_token with router source queries dynamo_component_router_* metric."""
         result = router_client.get_avg_time_to_first_token("60s", "mymodel")
         assert result == 42.0
 
@@ -302,7 +303,7 @@ class TestPrometheusAPIClientRouterSource:
     def test_get_avg_input_sequence_tokens_dispatches_to_router_histogram(
         self, router_client
     ):
-        """get_avg_input_sequence_tokens with router source calls _get_router_average_histogram."""
+        """get_avg_input_sequence_tokens with router source queries dynamo_component_router_* metric."""
         result = router_client.get_avg_input_sequence_tokens("60s", "mymodel")
         assert result == 42.0
 
@@ -313,7 +314,7 @@ class TestPrometheusAPIClientRouterSource:
     def test_get_avg_output_sequence_tokens_dispatches_to_router_histogram(
         self, router_client
     ):
-        """get_avg_output_sequence_tokens with router source calls _get_router_average_histogram."""
+        """get_avg_output_sequence_tokens with router source queries dynamo_component_router_* metric."""
         result = router_client.get_avg_output_sequence_tokens("60s", "mymodel")
         assert result == 42.0
 
@@ -322,7 +323,7 @@ class TestPrometheusAPIClientRouterSource:
         assert expected_metric in call_args
 
     def test_get_avg_request_count_uses_router_requests_total(self, router_client):
-        """get_avg_request_count with router source queries router_requests_total counter."""
+        """get_avg_request_count with router source queries dynamo_component_router_requests_total."""
         result = router_client.get_avg_request_count("60s", "mymodel")
         assert result == 42.0
 
@@ -333,27 +334,29 @@ class TestPrometheusAPIClientRouterSource:
     def test_dynamo_namespace_filter_in_router_histogram_query(self, router_client):
         """Router histogram query must filter by dynamo_namespace so each pool planner
         only reads its own LocalRouter's metrics, not the cluster-wide aggregate.
-        DYN_NAMESPACE uses dashes (e.g. 'my-ns') but Prometheus labels use underscores
-        ('my_ns'), so the filter must normalize dashes to underscores."""
+        dynamo_component_router_* metrics use MetricsHierarchy which injects dynamo_namespace
+        with underscores. DYN_NAMESPACE dashes are normalized to underscores for the PromQL filter.
+        """
         router_client.get_avg_inter_token_latency("60s", "mymodel")
         call_args = str(router_client.prom.custom_query.call_args)
         assert "dynamo_namespace" in call_args, (
             "dynamo_namespace filter missing from router histogram query — "
             "without it, all pool planners read the same cluster-wide aggregate"
         )
-        # Dashes in DYN_NAMESPACE are normalized to underscores for Prometheus
+        # MetricsHierarchy injects underscores; DYN_NAMESPACE dashes are normalized
         assert "test_fe_namespace" in call_args
 
     def test_dynamo_namespace_filter_in_router_request_count_query(self, router_client):
         """Router request count query must filter by dynamo_namespace.
-        Dashes in DYN_NAMESPACE are normalized to underscores for Prometheus labels."""
+        dynamo_component_router_* get dynamo_namespace from MetricsHierarchy (underscores).
+        """
         router_client.get_avg_request_count("60s", "mymodel")
         call_args = str(router_client.prom.custom_query.call_args)
         assert "dynamo_namespace" in call_args, (
             "dynamo_namespace filter missing from router request count query — "
             "without it, all pool planners read the same cluster-wide aggregate"
         )
-        # Dashes in DYN_NAMESPACE are normalized to underscores for Prometheus
+        # MetricsHierarchy injects underscores; DYN_NAMESPACE dashes are normalized
         assert "test_fe_namespace" in call_args
 
     def test_router_histogram_returns_zero_on_empty_result(self, router_client):
@@ -373,3 +376,27 @@ class TestPrometheusAPIClientRouterSource:
         router_client.prom.custom_query.return_value = [{"value": [0, "NaN"]}]
         result = router_client.get_avg_inter_token_latency("60s", "mymodel")
         assert result == 0
+
+    def test_warn_if_router_not_scraped_logs_warning_when_absent(
+        self, router_client, caplog
+    ):
+        """warn_if_router_not_scraped logs a warning when absent() returns a result."""
+        router_client.prom.custom_query.return_value = [{"value": [0, "1"]}]
+        with caplog.at_level(logging.WARNING):
+            router_client.warn_if_router_not_scraped()
+        assert any(
+            "No 'dynamo_component_router_requests_total'" in r.message
+            for r in caplog.records
+        )
+
+    def test_warn_if_router_not_scraped_silent_when_present(
+        self, router_client, caplog
+    ):
+        """warn_if_router_not_scraped is silent when the metric exists (absent() returns empty)."""
+        router_client.prom.custom_query.return_value = []
+        with caplog.at_level(logging.WARNING):
+            router_client.warn_if_router_not_scraped()
+        assert not any(
+            "dynamo_component_router_requests_total" in r.message
+            for r in caplog.records
+        )
