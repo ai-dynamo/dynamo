@@ -61,7 +61,7 @@ Coordination and messaging support:
 ### NIXL (NVIDIA Interchange Library):
 - Enables high-speed GPU-to-GPU data transfers using NVLink, InfiniBand/UCX, or PCIe
 - Transfer metadata exchanged via `disaggregated_params` in prefill response
-- Backend-specific coordination: SGLang uses bootstrap connections, vLLM uses block IDs, TRTLLM uses opaque state
+- Backend-specific coordination: SGLang uses bootstrap connections, TRTLLM uses opaque state, vLLM uses block IDs
 
 ### Disaggregated KV Cache:
 - Each worker maintains local KV cache in its GPU memory
