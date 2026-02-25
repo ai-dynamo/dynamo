@@ -457,8 +457,8 @@ class TerminateProcessFailure(Failure):
                         lines.append(
                             f"  GPU {gpu_id}: PID {pid} ({process_name}) - {memory}"
                         )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to parse nvidia-smi processes: {e}")
 
         return lines
 
