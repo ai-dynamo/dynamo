@@ -16,6 +16,7 @@ pub mod naive_indexers;
 pub mod nested_map;
 pub mod protocols;
 pub mod radix_tree;
+pub mod zmq_wire;
 
 #[cfg(test)]
 pub(crate) mod test_utils;

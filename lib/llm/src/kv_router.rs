@@ -29,7 +29,6 @@ pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
 pub mod config;
-pub mod indexer_standalone;
 mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
@@ -43,7 +42,6 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use config::{KvRouterConfig, RouterConfigOverride};
-pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
