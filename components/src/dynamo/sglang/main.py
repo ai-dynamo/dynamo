@@ -32,6 +32,53 @@ from dynamo.sglang.shutdown import install_graceful_shutdown
 
 configure_dynamo_logging()
 
+# SGLang's sleep level is ignored; release_memory_occupation always releases
+# kv_cache + weights + cuda_graph.  The constant exists only so the caller
+# mirrors the vLLM integration pattern.
+CHECKPOINT_SLEEP_MODE_LEVEL = 1
+
+# Memory tags to release/resume for CRIU checkpoint/restore
+CHECKPOINT_MEMORY_TAGS = ["kv_cache", "weights", "cuda_graph"]
+
+
+class _SGLangCheckpointAdapter:
+    """Adapts an sgl.Engine to the sleep/wake_up interface expected by
+    CheckpointConfig.run_lifecycle (matching vLLM's AsyncLLM API).
+
+    sleep():   pause generation → release GPU memory
+    wake_up(): resume GPU memory → continue generation
+    """
+
+    def __init__(self, engine: sgl.Engine):
+        self._engine = engine
+
+    async def sleep(self, level: int = 1) -> None:
+        from sglang.srt.managers.io_struct import (
+            PauseGenerationReqInput,
+            ReleaseMemoryOccupationReqInput,
+        )
+
+        # Drain in-flight requests before touching GPU memory
+        await self._engine.tokenizer_manager.pause_generation(
+            PauseGenerationReqInput()
+        )
+        await self._engine.tokenizer_manager.release_memory_occupation(
+            ReleaseMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS), None
+        )
+
+    async def wake_up(self) -> None:
+        from sglang.srt.managers.io_struct import (
+            ContinueGenerationReqInput,
+            ResumeMemoryOccupationReqInput,
+        )
+
+        await self._engine.tokenizer_manager.resume_memory_occupation(
+            ResumeMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS), None
+        )
+        await self._engine.tokenizer_manager.continue_generation(
+            ContinueGenerationReqInput()
+        )
+
 
 async def worker():
     config = await parse_args(sys.argv[1:])
@@ -42,22 +89,27 @@ async def worker():
 
         config.server_args.load_format = setup_gms(config.server_args)
 
-    # Check checkpoint mode early (fail fast if misconfigured)
+    # Check checkpoint mode and validate env vars EARLY (fail fast if misconfigured)
     early_exit, checkpoint_cfg = get_checkpoint_config()
     if early_exit:
         return
 
-    # CHECKPOINT MODE: Load engine BEFORE runtime creation so CRIU captures
-    # only the engine state, not etcd/NATS connections.
+    # CHECKPOINT MODE: Load engine BEFORE runtime creation.
+    # This allows checkpointing GPU state before runtime connections are established.
     pre_created_engine = None
     if checkpoint_cfg is not None:
         logging.info("Checkpoint mode enabled (watcher-driven signals)")
+
         start_time = time.time()
         engine = sgl.Engine(server_args=config.server_args)
         load_time = time.time() - start_time
         logging.info(f"SGLang engine loaded in {load_time:.2f}s (checkpoint mode)")
 
-        if not await checkpoint_cfg.run_lifecycle(engine):
+        engine_client = _SGLangCheckpointAdapter(engine)
+
+        if not await checkpoint_cfg.run_lifecycle(
+            engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
+        ):
             return
 
         pre_created_engine = engine

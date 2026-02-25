@@ -6,13 +6,10 @@ Checkpoint/restore (chrek) integration for SGLang workers.
 
 Handles the checkpoint job pod lifecycle:
 1. Early exit if a checkpoint already exists (idempotency)
-2. Release GPU memory occupation for CRIU-friendly state
+2. Sleep model for CRIU-friendly GPU state
 3. Signal readiness for DaemonSet to begin checkpoint
 4. Wait for watcher signals from the DaemonSet
-5. Resume GPU memory occupation after restore
-
-SGLang uses release_memory_occupation/resume_memory_occupation instead of
-vLLM's sleep/wake_up to manage GPU memory state for CRIU checkpoint/restore.
+5. Wake model after restore
 
 Environment variables:
 - DYN_READY_FOR_CHECKPOINT_FILE: Path where this worker writes readiness marker
@@ -22,7 +19,7 @@ Environment variables:
 
 Signals handled in checkpoint mode:
 - SIGUSR1: Checkpoint completed, exit process
-- SIGCONT: Restore completed, resume memory and continue
+- SIGCONT: Restore completed, wake model and continue
 - SIGKILL (from watcher on failure): Process is terminated immediately (unhandleable)
 """
 
@@ -32,13 +29,7 @@ import os
 import signal
 from typing import Optional
 
-import sglang as sgl
-
 logger = logging.getLogger(__name__)
-
-# Memory tags to release/resume for CRIU checkpoint/restore.
-# All GPU resources must be released so CRIU can snapshot the process cleanly.
-CHECKPOINT_MEMORY_TAGS = ["kv_cache", "weights", "cuda_graph"]
 
 
 class CheckpointConfig:
@@ -73,40 +64,25 @@ class CheckpointConfig:
         logger.info(f"No checkpoint at {self.location}, creating new one")
         return False
 
-    async def run_lifecycle(self, engine: sgl.Engine) -> bool:
+    async def run_lifecycle(self, engine_client, sleep_level: int) -> bool:
         """Run the full checkpoint lifecycle after the engine is loaded.
 
-        Uses SGLang's release_memory_occupation/resume_memory_occupation to
-        manage GPU memory state, which is analogous to vLLM's sleep/wake_up.
-
-        1. Pause generation to drain in-flight requests
-        2. Release GPU memory occupation (CRIU-friendly state)
-        3. Write ready file (triggers DaemonSet checkpoint)
-        4. Wait for watcher signal (checkpoint complete, restore complete, or failure)
-        5. If restored: resume memory occupation and return True
-        6. If checkpoint done: return False (caller should exit)
+        1. Put model to sleep (CRIU-friendly GPU state)
+        2. Write ready file (triggers DaemonSet checkpoint via readiness probe)
+        3. Wait for watcher signal (checkpoint complete, restore complete, or failure)
+        4. If restored: wake model and return True (caller proceeds with registration)
+        5. If checkpoint done: return False (caller should exit)
         """
-        from sglang.srt.managers.io_struct import (
-            PauseGenerationReqInput,
-            ReleaseMemoryOccupationReqInput,
-        )
+        # Sleep model for checkpoint
+        logger.info(f"Putting model to sleep (level={sleep_level})")
+        await engine_client.sleep(level=sleep_level)
 
-        # Pause generation to drain in-flight requests before releasing memory
-        logger.info("Pausing generation to drain in-flight requests")
-        pause_req = PauseGenerationReqInput()
-        await engine.tokenizer_manager.pause_generation(pause_req)
-
-        # Release GPU memory for CRIU-friendly state
-        logger.info(f"Releasing GPU memory occupation (tags={CHECKPOINT_MEMORY_TAGS})")
-        release_req = ReleaseMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS)
-        await engine.tokenizer_manager.release_memory_occupation(release_req, None)
-
-        # Install signal handlers BEFORE writing the ready file so there is no
+        # Install signal handlers before writing the ready file so there is no
         # window where the DaemonSet can send SIGUSR1/SIGCONT while the default
         # signal disposition (terminate) is still in effect.
         self._install_signal_handlers()
 
-        # Signal readiness for DaemonSet to begin checkpoint
+        # Signal readiness
         with open(self.ready_file, "w") as f:
             f.write("ready")
         logger.info(
@@ -118,9 +94,8 @@ class CheckpointConfig:
             event = await self._wait_for_watcher_signal()
             if event == "restore":
                 logger.info("Restore signal detected (SIGCONT)")
-                logger.info("Resuming GPU memory occupation after restore")
-                await self._resume_memory(engine)
                 logger.info("Waking up model after restore")
+                await engine_client.wake_up()
                 return True
 
             # SIGUSR1: checkpoint complete
@@ -134,19 +109,6 @@ class CheckpointConfig:
                 os.unlink(self.ready_file)
             except OSError:
                 pass
-
-    async def _resume_memory(self, engine: sgl.Engine) -> None:
-        """Resume GPU memory occupation and continue generation after restore."""
-        from sglang.srt.managers.io_struct import (
-            ContinueGenerationReqInput,
-            ResumeMemoryOccupationReqInput,
-        )
-
-        resume_req = ResumeMemoryOccupationReqInput(tags=CHECKPOINT_MEMORY_TAGS)
-        await engine.tokenizer_manager.resume_memory_occupation(resume_req, None)
-
-        continue_req = ContinueGenerationReqInput()
-        await engine.tokenizer_manager.continue_generation(continue_req)
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
@@ -191,15 +153,16 @@ def get_checkpoint_config() -> tuple[bool, Optional[CheckpointConfig]]:
     Returns:
         (early_exit, config) where:
         - early_exit=True, config=None: checkpoint job re-run, checkpoint already
-          exists -- caller should return immediately.
+          exists — caller should return immediately.
         - early_exit=False, config=None: not in checkpoint mode, or regular worker
-          with no checkpoint available yet -- cold-start normally.
+          with no checkpoint available yet — cold-start normally.
         - early_exit=False, config=CheckpointConfig: checkpoint lifecycle should run.
     """
     if "DYN_READY_FOR_CHECKPOINT_FILE" not in os.environ:
         return False, None
 
     # Validate checkpoint location: either a full location or path + hash must be set.
+    # Check the value (not just presence) so an empty string is treated as unset.
     if not os.environ.get("DYN_CHECKPOINT_LOCATION"):
         path = os.environ.get("DYN_CHECKPOINT_PATH", "")
         hash_ = os.environ.get("DYN_CHECKPOINT_HASH", "")
