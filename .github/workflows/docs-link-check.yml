@@ -20,14 +20,14 @@ jobs:
       # https://lychee.cli.rs/github_action_recipes/caching/
       - name: Restore lychee cache
         id: restore-lychee-cache
-        uses: actions/cache@v5.0.3
+        uses: actions/cache@v5
         with:
           path: .lycheecache
           key: cache-lychee-${{ github.sha }}
           restore-keys: cache-lychee-
 
       - name: Check documentation links with lychee
-        uses: lycheeverse/lychee-action@v2.8.0
+        uses: lycheeverse/lychee-action@v2
         with:
           args: >-
             --cache
@@ -51,7 +51,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Save lychee cache
-        uses: actions/cache/save@v5.0.3
+        uses: actions/cache/save@v5
         if: always()
         with:
           path: .lycheecache
