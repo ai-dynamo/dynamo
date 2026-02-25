@@ -1550,12 +1550,17 @@ pub struct OutputMessage {
     /// The content of the output message.
     pub content: Vec<OutputMessageContent>,
     /// The unique ID of the output message.
-    pub id: String,
+    /// Optional when provided as input (e.g., replaying assistant turns in conversation history).
+    /// Always present in model-generated output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// The role of the output message. Always `assistant`.
     pub role: AssistantRole,
     /// The status of the message input. One of `in_progress`, `completed`, or
     /// `incomplete`. Populated when input items are returned via API.
-    pub status: OutputStatus,
+    /// Optional when provided as input (e.g., replaying assistant turns in conversation history).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<OutputStatus>,
     ///// The type of the output message. Always `message`.
     //pub r#type: MessageType,
 }
@@ -2840,4 +2845,95 @@ pub struct CompactResource {
     pub created_at: u64,
     /// Token accounting for the compaction pass, including cached, reasoning, and total tokens.
     pub usage: ResponseUsage,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #6: Assistant messages with output_text content should deserialize
+    /// without requiring `id` and `status` fields. Clients replay previous
+    /// assistant turns in conversation history without output metadata.
+    #[test]
+    fn test_assistant_output_text_without_id_status() {
+        let json = r#"{
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hello!"}],
+            "type": "message"
+        }"#;
+        let item: InputItem = serde_json::from_str(json)
+            .expect("assistant output_text without id/status should deserialize");
+        match &item {
+            InputItem::Item(Item::Message(MessageItem::Output(out_msg))) => {
+                assert!(out_msg.id.is_none());
+                assert!(out_msg.status.is_none());
+                assert_eq!(out_msg.content.len(), 1);
+            }
+            other => panic!("expected OutputMessage, got {:?}", other),
+        }
+    }
+
+    /// Issue #6 extended: full multi-turn conversation with output_text history.
+    #[test]
+    fn test_multiturn_with_output_text_history() {
+        let json = r#"{
+            "model": "test-model",
+            "input": [
+                {"role": "user", "content": "hi", "type": "message"},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello!"}],
+                    "type": "message"
+                },
+                {"role": "user", "content": "bye", "type": "message"}
+            ],
+            "stream": false
+        }"#;
+        let request: CreateResponse = serde_json::from_str(json)
+            .expect("multi-turn with output_text history should deserialize");
+        match &request.input {
+            InputParam::Items(items) => assert_eq!(items.len(), 3),
+            other => panic!("expected Items, got {:?}", other),
+        }
+    }
+
+    /// Issue #7: Reasoning items in the input array should deserialize.
+    #[test]
+    fn test_reasoning_item_in_input() {
+        let json = r#"{
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{"text": "thinking", "type": "summary_text"}]
+        }"#;
+        let item: InputItem = serde_json::from_str(json)
+            .expect("reasoning item should deserialize");
+        match &item {
+            InputItem::Item(Item::Reasoning(r)) => {
+                assert_eq!(r.id, "rs_1");
+                assert_eq!(r.summary.len(), 1);
+            }
+            other => panic!("expected Reasoning item, got {:?}", other),
+        }
+    }
+
+    /// OutputMessage with id and status should still work (backwards compat).
+    #[test]
+    fn test_output_message_with_id_and_status() {
+        let json = r#"{
+            "role": "assistant",
+            "id": "msg_abc123",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Hello!"}],
+            "type": "message"
+        }"#;
+        let item: InputItem = serde_json::from_str(json)
+            .expect("output message with id/status should still deserialize");
+        match &item {
+            InputItem::Item(Item::Message(MessageItem::Output(out_msg))) => {
+                assert_eq!(out_msg.id.as_deref(), Some("msg_abc123"));
+                assert_eq!(out_msg.status, Some(OutputStatus::Completed));
+            }
+            other => panic!("expected OutputMessage, got {:?}", other),
+        }
+    }
 }
