@@ -1,0 +1,6512 @@
+{
+  "config": {
+    "model": "Qwen3-32B-FP8",
+    "hidden_dim": 5120,
+    "ffn_expansion": 4,
+    "num_layers": 64,
+    "memory_bandwidth_gbps": 2039.0,
+    "compute_tflops": 148.0
+  },
+  "results": [
+    {
+      "mode": "baseline",
+      "batch_size": 1,
+      "sequence_length": 128,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 0.3438697290131724,
+        "p50_ms": 0.3483663556029305,
+        "p99_ms": 0.4590841282763534,
+        "max_ms": 0.47238454122354434
+      },
+      "throughput": {
+        "tokens_per_second": 377325.1829782316,
+        "requests_per_second": 2947.852992017434
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.3241153331583668,
+        "ffn_ms": 0.01511460900900901,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 0.17039359999999998,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9554443546096191,
+        "ffn": 0.04455564539038087
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 1,
+      "sequence_length": 512,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 4.3723656052400335,
+        "p50_ms": 4.355797959124061,
+        "p99_ms": 5.837626584007718,
+        "max_ms": 5.94602958676047
+      },
+      "throughput": {
+        "tokens_per_second": 120218.13867534244,
+        "requests_per_second": 234.8010521002782
+      },
+      "compute_breakdown": {
+        "attention_ms": 4.198466262363197,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 0.6815743999999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9858042956104013,
+        "ffn": 0.014195704389598636
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 1,
+      "sequence_length": 1024,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 15.990588763709539,
+        "p50_ms": 15.745478099234507,
+        "p99_ms": 20.45858054284842,
+        "max_ms": 21.51974440704682
+      },
+      "throughput": {
+        "tokens_per_second": 62990.07536044012,
+        "requests_per_second": 61.5137454691798
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.13561233733901,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 1.3631487999999998,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9925619503084292,
+        "ffn": 0.0074380496915708175
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 1,
+      "sequence_length": 2048,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 63.32166666403557,
+        "p50_ms": 62.938645401583585,
+        "p99_ms": 80.45923063661658,
+        "max_ms": 83.48204747349283
+      },
+      "throughput": {
+        "tokens_per_second": 32268.342696226497,
+        "requests_per_second": 15.756026707141844
+      },
+      "compute_breakdown": {
+        "attention_ms": 63.22594392512847,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 2.7262975999999997,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9961896610685768,
+        "ffn": 0.0038103389314232427
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 1,
+      "sequence_length": 4096,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 253.07685066687452,
+        "p50_ms": 252.91850442557848,
+        "p99_ms": 347.42728514428404,
+        "max_ms": 363.9871743234968
+      },
+      "throughput": {
+        "tokens_per_second": 16334.706277257472,
+        "requests_per_second": 3.987965399721062
+      },
+      "compute_breakdown": {
+        "attention_ms": 250.27076485205873,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 5.452595199999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9980711507917364,
+        "ffn": 0.0019288492082636859
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 2,
+      "sequence_length": 128,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 0.6731861480474816,
+        "p50_ms": 0.6738120840654702,
+        "p99_ms": 0.9093650613321093,
+        "max_ms": 0.9809428165779525
+      },
+      "throughput": {
+        "tokens_per_second": 377325.1829782316,
+        "requests_per_second": 1473.926496008717
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.6482306663167337,
+        "ffn_ms": 0.03022921801801802,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 0.34078719999999996,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9554443546096191,
+        "ffn": 0.04455564539038087
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 2,
+      "sequence_length": 512,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 8.533024705775345,
+        "p50_ms": 8.752260327116247,
+        "p99_ms": 11.114329752969208,
+        "max_ms": 11.299191380937186
+      },
+      "throughput": {
+        "tokens_per_second": 120218.13867534244,
+        "requests_per_second": 117.4005260501391
+      },
+      "compute_breakdown": {
+        "attention_ms": 8.396932524726394,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 1.3631487999999998,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9858042956104013,
+        "ffn": 0.014195704389598636
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 2,
+      "sequence_length": 1024,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 32.13518259466084,
+        "p50_ms": 32.25014962899559,
+        "p99_ms": 43.84233620857836,
+        "max_ms": 48.90924264635056
+      },
+      "throughput": {
+        "tokens_per_second": 62990.07536044012,
+        "requests_per_second": 30.7568727345899
+      },
+      "compute_breakdown": {
+        "attention_ms": 32.27122467467802,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 2.7262975999999997,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9925619503084292,
+        "ffn": 0.0074380496915708175
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 2,
+      "sequence_length": 2048,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 126.61522959918932,
+        "p50_ms": 124.86170345283153,
+        "p99_ms": 173.0800575578101,
+        "max_ms": 181.1918807516438
+      },
+      "throughput": {
+        "tokens_per_second": 32268.342696226497,
+        "requests_per_second": 7.878013353570922
+      },
+      "compute_breakdown": {
+        "attention_ms": 126.45188785025694,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 5.452595199999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9961896610685768,
+        "ffn": 0.0038103389314232427
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 2,
+      "sequence_length": 4096,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 497.950246201054,
+        "p50_ms": 486.8670199337106,
+        "p99_ms": 702.2700669524625,
+        "max_ms": 711.4319067570221
+      },
+      "throughput": {
+        "tokens_per_second": 16334.706277257472,
+        "requests_per_second": 1.993982699860531
+      },
+      "compute_breakdown": {
+        "attention_ms": 500.54152970411747,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 10.905190399999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9980711507917364,
+        "ffn": 0.0019288492082636859
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 4,
+      "sequence_length": 128,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 1.3643669981764543,
+        "p50_ms": 1.367016357445876,
+        "p99_ms": 1.7665482459867428,
+        "max_ms": 1.8704012941705133
+      },
+      "throughput": {
+        "tokens_per_second": 377325.1829782316,
+        "requests_per_second": 736.9632480043585
+      },
+      "compute_breakdown": {
+        "attention_ms": 1.2964613326334673,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 0.6815743999999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9554443546096191,
+        "ffn": 0.04455564539038087
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 4,
+      "sequence_length": 512,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 16.94445786982657,
+        "p50_ms": 16.840754609056454,
+        "p99_ms": 23.295508312735514,
+        "max_ms": 23.33305487520581
+      },
+      "throughput": {
+        "tokens_per_second": 120218.13867534244,
+        "requests_per_second": 58.70026302506955
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.793865049452787,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 2.7262975999999997,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9858042956104013,
+        "ffn": 0.014195704389598636
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 4,
+      "sequence_length": 1024,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 64.79270724129506,
+        "p50_ms": 65.30917760037634,
+        "p99_ms": 81.87263216181061,
+        "max_ms": 82.37657339585223
+      },
+      "throughput": {
+        "tokens_per_second": 62990.07536044012,
+        "requests_per_second": 15.37843636729495
+      },
+      "compute_breakdown": {
+        "attention_ms": 64.54244934935603,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 5.452595199999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9925619503084292,
+        "ffn": 0.0074380496915708175
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 4,
+      "sequence_length": 2048,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 256.35231124642655,
+        "p50_ms": 256.2393246134503,
+        "p99_ms": 330.62898539562394,
+        "max_ms": 341.49874661204035
+      },
+      "throughput": {
+        "tokens_per_second": 32268.342696226497,
+        "requests_per_second": 3.939006676785461
+      },
+      "compute_breakdown": {
+        "attention_ms": 252.90377570051388,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 10.905190399999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9961896610685768,
+        "ffn": 0.0038103389314232427
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 4,
+      "sequence_length": 4096,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 1000.7986485781606,
+        "p50_ms": 999.0912631160863,
+        "p99_ms": 1338.2374642373497,
+        "max_ms": 1343.1651320978842
+      },
+      "throughput": {
+        "tokens_per_second": 16334.706277257472,
+        "requests_per_second": 0.9969913499302655
+      },
+      "compute_breakdown": {
+        "attention_ms": 1001.0830594082349,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 21.810380799999997,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9980711507917364,
+        "ffn": 0.0019288492082636859
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 8,
+      "sequence_length": 128,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 2.6822247875372507,
+        "p50_ms": 2.6504165947705713,
+        "p99_ms": 3.472478478628387,
+        "max_ms": 3.5390141672355115
+      },
+      "throughput": {
+        "tokens_per_second": 377325.1829782316,
+        "requests_per_second": 368.4816240021793
+      },
+      "compute_breakdown": {
+        "attention_ms": 2.5929226652669346,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 1.3631487999999998,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9554443546096191,
+        "ffn": 0.04455564539038087
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 8,
+      "sequence_length": 512,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 33.369227070291025,
+        "p50_ms": 33.51283276876372,
+        "p99_ms": 43.77777827907767,
+        "max_ms": 45.19731218397175
+      },
+      "throughput": {
+        "tokens_per_second": 120218.13867534244,
+        "requests_per_second": 29.350131512534777
+      },
+      "compute_breakdown": {
+        "attention_ms": 33.587730098905574,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 5.452595199999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9858042956104013,
+        "ffn": 0.014195704389598636
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 8,
+      "sequence_length": 1024,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 132.41605179814522,
+        "p50_ms": 129.9944713211691,
+        "p99_ms": 173.18738807327884,
+        "max_ms": 178.30453790514
+      },
+      "throughput": {
+        "tokens_per_second": 62990.07536044012,
+        "requests_per_second": 7.689218183647475
+      },
+      "compute_breakdown": {
+        "attention_ms": 129.08489869871207,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 10.905190399999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9925619503084292,
+        "ffn": 0.0074380496915708175
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 8,
+      "sequence_length": 2048,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 509.21751130408643,
+        "p50_ms": 502.3426904875771,
+        "p99_ms": 666.1722457123217,
+        "max_ms": 697.5973395806432
+      },
+      "throughput": {
+        "tokens_per_second": 32268.342696226497,
+        "requests_per_second": 1.9695033383927305
+      },
+      "compute_breakdown": {
+        "attention_ms": 505.80755140102775,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 21.810380799999997,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9961896610685768,
+        "ffn": 0.0038103389314232427
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 8,
+      "sequence_length": 4096,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 2023.3447337494808,
+        "p50_ms": 2066.37502484968,
+        "p99_ms": 2708.0743401659065,
+        "max_ms": 2817.81553875615
+      },
+      "throughput": {
+        "tokens_per_second": 16334.706277257472,
+        "requests_per_second": 0.49849567496513275
+      },
+      "compute_breakdown": {
+        "attention_ms": 2002.1661188164699,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 43.620761599999994,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9980711507917364,
+        "ffn": 0.0019288492082636859
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 16,
+      "sequence_length": 128,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 5.487204176006199,
+        "p50_ms": 5.537757041736352,
+        "p99_ms": 6.999533056453946,
+        "max_ms": 7.1120692734108335
+      },
+      "throughput": {
+        "tokens_per_second": 377325.1829782316,
+        "requests_per_second": 184.24081200108964
+      },
+      "compute_breakdown": {
+        "attention_ms": 5.185845330533869,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 2.7262975999999997,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9554443546096191,
+        "ffn": 0.04455564539038087
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 16,
+      "sequence_length": 512,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 69.23256869581799,
+        "p50_ms": 68.21684890543136,
+        "p99_ms": 92.01146637275635,
+        "max_ms": 97.76686256293138
+      },
+      "throughput": {
+        "tokens_per_second": 120218.13867534244,
+        "requests_per_second": 14.675065756267388
+      },
+      "compute_breakdown": {
+        "attention_ms": 67.17546019781115,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 10.905190399999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9858042956104013,
+        "ffn": 0.014195704389598636
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 16,
+      "sequence_length": 1024,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 267.53047615176536,
+        "p50_ms": 273.1106859794162,
+        "p99_ms": 326.5387644835417,
+        "max_ms": 359.2666883263636
+      },
+      "throughput": {
+        "tokens_per_second": 62990.07536044012,
+        "requests_per_second": 3.8446090918237377
+      },
+      "compute_breakdown": {
+        "attention_ms": 258.16979739742413,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 21.810380799999997,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9925619503084292,
+        "ffn": 0.0074380496915708175
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 16,
+      "sequence_length": 2048,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 990.3214275126406,
+        "p50_ms": 1015.1350998801956,
+        "p99_ms": 1295.4519860905536,
+        "max_ms": 1307.2303223638244
+      },
+      "throughput": {
+        "tokens_per_second": 32268.342696226497,
+        "requests_per_second": 0.9847516691963653
+      },
+      "compute_breakdown": {
+        "attention_ms": 1011.6151028020555,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 43.620761599999994,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9961896610685768,
+        "ffn": 0.0038103389314232427
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 16,
+      "sequence_length": 4096,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 4080.6510082067944,
+        "p50_ms": 4054.544062639022,
+        "p99_ms": 5589.881788565134,
+        "max_ms": 5702.577874510354
+      },
+      "throughput": {
+        "tokens_per_second": 16334.706277257472,
+        "requests_per_second": 0.24924783748256638
+      },
+      "compute_breakdown": {
+        "attention_ms": 4004.3322376329397,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 87.24152319999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9980711507917364,
+        "ffn": 0.0019288492082636859
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 32,
+      "sequence_length": 128,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 10.735102901998738,
+        "p50_ms": 10.769105538306135,
+        "p99_ms": 14.87785961190181,
+        "max_ms": 16.631811504237035
+      },
+      "throughput": {
+        "tokens_per_second": 377325.1829782316,
+        "requests_per_second": 92.12040600054482
+      },
+      "compute_breakdown": {
+        "attention_ms": 10.371690661067738,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 5.452595199999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9554443546096191,
+        "ffn": 0.04455564539038087
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 32,
+      "sequence_length": 512,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 139.14811475401063,
+        "p50_ms": 139.2595106155298,
+        "p99_ms": 185.6806724978851,
+        "max_ms": 197.14262922813595
+      },
+      "throughput": {
+        "tokens_per_second": 120218.13867534244,
+        "requests_per_second": 7.337532878133694
+      },
+      "compute_breakdown": {
+        "attention_ms": 134.3509203956223,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 21.810380799999997,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9858042956104013,
+        "ffn": 0.014195704389598636
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 32,
+      "sequence_length": 1024,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 515.6646512482973,
+        "p50_ms": 506.3903337332622,
+        "p99_ms": 682.8142232158211,
+        "max_ms": 703.8578330446924
+      },
+      "throughput": {
+        "tokens_per_second": 62990.07536044012,
+        "requests_per_second": 1.9223045459118688
+      },
+      "compute_breakdown": {
+        "attention_ms": 516.3395947948483,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 43.620761599999994,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9925619503084292,
+        "ffn": 0.0074380496915708175
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 32,
+      "sequence_length": 2048,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 1944.9322488759542,
+        "p50_ms": 1991.3023237518096,
+        "p99_ms": 2513.7077986899853,
+        "max_ms": 2541.180900416399
+      },
+      "throughput": {
+        "tokens_per_second": 32268.342696226497,
+        "requests_per_second": 0.4923758345981826
+      },
+      "compute_breakdown": {
+        "attention_ms": 2023.230205604111,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 87.24152319999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9961896610685768,
+        "ffn": 0.0038103389314232427
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 32,
+      "sequence_length": 4096,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 7952.708209096574,
+        "p50_ms": 7953.887966197786,
+        "p99_ms": 10464.942463250076,
+        "max_ms": 10604.519586751401
+      },
+      "throughput": {
+        "tokens_per_second": 16334.706277257472,
+        "requests_per_second": 0.12462391874128319
+      },
+      "compute_breakdown": {
+        "attention_ms": 8008.664475265879,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 174.48304639999998,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9980711507917364,
+        "ffn": 0.0019288492082636859
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 64,
+      "sequence_length": 128,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 21.595395031706925,
+        "p50_ms": 21.51030694665382,
+        "p99_ms": 29.903631067955935,
+        "max_ms": 30.82214694533177
+      },
+      "throughput": {
+        "tokens_per_second": 377325.1829782316,
+        "requests_per_second": 46.06020300027241
+      },
+      "compute_breakdown": {
+        "attention_ms": 20.743381322135477,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 10.905190399999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9554443546096191,
+        "ffn": 0.04455564539038087
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 64,
+      "sequence_length": 512,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 271.3708824957845,
+        "p50_ms": 274.3385483002419,
+        "p99_ms": 337.7467381154651,
+        "max_ms": 345.61675346713764
+      },
+      "throughput": {
+        "tokens_per_second": 120218.13867534244,
+        "requests_per_second": 3.668766439066847
+      },
+      "compute_breakdown": {
+        "attention_ms": 268.7018407912446,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 43.620761599999994,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9858042956104013,
+        "ffn": 0.014195704389598636
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 64,
+      "sequence_length": 1024,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 1031.7568469876082,
+        "p50_ms": 1041.568995396126,
+        "p99_ms": 1363.0665586441737,
+        "max_ms": 1438.5514274867762
+      },
+      "throughput": {
+        "tokens_per_second": 62990.07536044012,
+        "requests_per_second": 0.9611522729559344
+      },
+      "compute_breakdown": {
+        "attention_ms": 1032.6791895896965,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 87.24152319999999,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9925619503084292,
+        "ffn": 0.0074380496915708175
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 64,
+      "sequence_length": 2048,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 3935.895726566373,
+        "p50_ms": 4011.6558284198554,
+        "p99_ms": 5130.8219601521805,
+        "max_ms": 5197.00227863876
+      },
+      "throughput": {
+        "tokens_per_second": 32268.342696226497,
+        "requests_per_second": 0.2461879172990913
+      },
+      "compute_breakdown": {
+        "attention_ms": 4046.460411208222,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 174.48304639999998,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9961896610685768,
+        "ffn": 0.0038103389314232427
+      }
+    },
+    {
+      "mode": "baseline",
+      "batch_size": 64,
+      "sequence_length": 4096,
+      "attention_ratio": null,
+      "latency": {
+        "avg_ms": 16471.173592572828,
+        "p50_ms": 16359.541585879873,
+        "p99_ms": 21121.97925793856,
+        "max_ms": 21229.773160918958
+      },
+      "throughput": {
+        "tokens_per_second": 16334.706277257472,
+        "requests_per_second": 0.062311959370641594
+      },
+      "compute_breakdown": {
+        "attention_ms": 16017.328950531759,
+        "ffn_ms": 30.954719250450452,
+        "transfer_ms": 0.0
+      },
+      "memory": {
+        "attention_gb": 348.96609279999996,
+        "ffn_gb": 0.0
+      },
+      "utilization": {
+        "attention": 0.9980711507917364,
+        "ffn": 0.0019288492082636859
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 128,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 0.3213129542611706,
+        "p50_ms": 0.3244224146951361,
+        "p99_ms": 0.380299103425718,
+        "max_ms": 0.39375496300279456
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 3048.3390998426075
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.3241153331583668,
+        "ffn_ms": 0.01511460900900901,
+        "transfer_ms": 0.0039321600000000005
+      },
+      "memory": {
+        "attention_gb": 0.16908288,
+        "ffn_gb": 0.00131072
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.04607445362099549
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 512,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 4.270334669328596,
+        "p50_ms": 4.318791264387194,
+        "p99_ms": 5.136916598912549,
+        "max_ms": 5.270671366775103
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 237.29324892857457
+      },
+      "compute_breakdown": {
+        "attention_ms": 4.198466262363197,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.015728640000000002
+      },
+      "memory": {
+        "attention_gb": 0.67633152,
+        "ffn_gb": 0.00524288
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.014346378712131402
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 1024,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 16.149649740495356,
+        "p50_ms": 16.4299663105774,
+        "p99_ms": 19.572644944650825,
+        "max_ms": 19.97555812969836
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 61.85412840231174
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.13561233733901,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.01048576
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.007479207731151848
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 2048,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 63.98039546763733,
+        "p50_ms": 64.17449682133534,
+        "p99_ms": 77.96155619765736,
+        "max_ms": 79.06284247786806
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 15.800569388290969
+      },
+      "compute_breakdown": {
+        "attention_ms": 63.22594392512847,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0038211108547797543
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 4096,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 250.613293821578,
+        "p50_ms": 250.75986700962096,
+        "p99_ms": 300.33210757481726,
+        "max_ms": 337.2658791220108
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 3.9936645468571674
+      },
+      "compute_breakdown": {
+        "attention_ms": 250.27076485205873,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0019316057004443912
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 128,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 0.6558865716263458,
+        "p50_ms": 0.6545542534493372,
+        "p99_ms": 0.7991328839447359,
+        "max_ms": 0.812095844704489
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 1524.1695499213038
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.6482306663167337,
+        "ffn_ms": 0.03022921801801802,
+        "transfer_ms": 0.007864320000000001
+      },
+      "memory": {
+        "attention_gb": 0.33816576,
+        "ffn_gb": 0.00262144
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.04607445362099549
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 512,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 8.385432728405135,
+        "p50_ms": 8.34322594365002,
+        "p99_ms": 10.149824128868048,
+        "max_ms": 10.544538804622036
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 118.64662446428729
+      },
+      "compute_breakdown": {
+        "attention_ms": 8.396932524726394,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.01048576
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.014346378712131402
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 1024,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 32.234635649461275,
+        "p50_ms": 32.578975010071346,
+        "p99_ms": 40.107820834976806,
+        "max_ms": 42.55520892248129
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 30.92706420115587
+      },
+      "compute_breakdown": {
+        "attention_ms": 32.27122467467802,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.007479207731151848
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 2048,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 127.15597297532159,
+        "p50_ms": 126.54910173716691,
+        "p99_ms": 152.88932372390286,
+        "max_ms": 164.13273271576873
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 7.900284694145484
+      },
+      "compute_breakdown": {
+        "attention_ms": 126.45188785025694,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0038211108547797543
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 4096,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 486.2059429702663,
+        "p50_ms": 488.41802778042387,
+        "p99_ms": 605.2950931190171,
+        "max_ms": 622.0975449718064
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 1.9968322734285837
+      },
+      "compute_breakdown": {
+        "attention_ms": 500.54152970411747,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0019316057004443912
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 128,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 1.3082963779729997,
+        "p50_ms": 1.294751259477822,
+        "p99_ms": 1.612853847929122,
+        "max_ms": 1.714943112742148
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 762.0847749606519
+      },
+      "compute_breakdown": {
+        "attention_ms": 1.2964613326334673,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.015728640000000002
+      },
+      "memory": {
+        "attention_gb": 0.67633152,
+        "ffn_gb": 0.00524288
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.04607445362099549
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 512,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 17.098512558470674,
+        "p50_ms": 17.165434888478764,
+        "p99_ms": 19.78653033734455,
+        "max_ms": 20.941067439621175
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 59.32331223214364
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.793865049452787,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.014346378712131402
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 1024,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 65.44585643240593,
+        "p50_ms": 66.26254507319214,
+        "p99_ms": 81.01004187344313,
+        "max_ms": 81.83071217562058
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 15.463532100577934
+      },
+      "compute_breakdown": {
+        "attention_ms": 64.54244934935603,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.007479207731151848
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 2048,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 253.8472832628543,
+        "p50_ms": 255.00492835610436,
+        "p99_ms": 315.1151300154169,
+        "max_ms": 320.20533134980917
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 3.950142347072742
+      },
+      "compute_breakdown": {
+        "attention_ms": 252.90377570051388,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0038211108547797543
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 4096,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 1008.0373214429346,
+        "p50_ms": 1018.541073223889,
+        "p99_ms": 1207.1703680973364,
+        "max_ms": 1209.2412730650626
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.9984161367142919
+      },
+      "compute_breakdown": {
+        "attention_ms": 1001.0830594082349,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0019316057004443912
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 128,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 2.601411319340303,
+        "p50_ms": 2.5849347793828343,
+        "p99_ms": 3.3032529406161486,
+        "max_ms": 3.3630277336980905
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 381.04238748032594
+      },
+      "compute_breakdown": {
+        "attention_ms": 2.5929226652669346,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.01048576
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.04607445362099549
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 512,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 34.17375630034427,
+        "p50_ms": 34.38935828536932,
+        "p99_ms": 42.63053385061765,
+        "max_ms": 44.462324007995775
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 29.66165611607182
+      },
+      "compute_breakdown": {
+        "attention_ms": 33.587730098905574,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.014346378712131402
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 1024,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 128.5391275873909,
+        "p50_ms": 128.6901407322909,
+        "p99_ms": 156.90456730386393,
+        "max_ms": 162.41340438571973
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 7.731766050288967
+      },
+      "compute_breakdown": {
+        "attention_ms": 129.08489869871207,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.007479207731151848
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 2048,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 499.87000166942227,
+        "p50_ms": 504.00026182377337,
+        "p99_ms": 590.3562379551487,
+        "max_ms": 602.2309619003232
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 1.975071173536371
+      },
+      "compute_breakdown": {
+        "attention_ms": 505.80755140102775,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0038211108547797543
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 4096,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 1989.334402499358,
+        "p50_ms": 2008.968768857183,
+        "p99_ms": 2384.6166965840066,
+        "max_ms": 2441.3653368832424
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.49920806835714593
+      },
+      "compute_breakdown": {
+        "attention_ms": 2002.1661188164699,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0019316057004443912
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 128,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 5.1956259394059385,
+        "p50_ms": 5.242306850177288,
+        "p99_ms": 6.231826343921373,
+        "max_ms": 6.253737377677247
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 190.52119374016297
+      },
+      "compute_breakdown": {
+        "attention_ms": 5.185845330533869,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.04607445362099549
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 512,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 67.16759278581671,
+        "p50_ms": 67.22838981974277,
+        "p99_ms": 80.99490488941596,
+        "max_ms": 82.79780895040042
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 14.83082805803591
+      },
+      "compute_breakdown": {
+        "attention_ms": 67.17546019781115,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.014346378712131402
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 1024,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 258.72901165732344,
+        "p50_ms": 259.21131688211915,
+        "p99_ms": 308.96275792450245,
+        "max_ms": 354.6001494987636
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 3.8658830251444836
+      },
+      "compute_breakdown": {
+        "attention_ms": 258.16979739742413,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.007479207731151848
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 2048,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 1014.7711050344537,
+        "p50_ms": 1023.836412127142,
+        "p99_ms": 1305.51445548843,
+        "max_ms": 1312.1238936425716
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.9875355867681855
+      },
+      "compute_breakdown": {
+        "attention_ms": 1011.6151028020555,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0038211108547797543
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 4096,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 4067.050874553264,
+        "p50_ms": 4092.686021221328,
+        "p99_ms": 4953.916364925231,
+        "max_ms": 5131.97148626448
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.24960403417857296
+      },
+      "compute_breakdown": {
+        "attention_ms": 4004.3322376329397,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0019316057004443912
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 128,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 10.53115431242301,
+        "p50_ms": 10.33205272206349,
+        "p99_ms": 13.326858156264537,
+        "max_ms": 13.356032903781147
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 95.26059687008149
+      },
+      "compute_breakdown": {
+        "attention_ms": 10.371690661067738,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.04607445362099549
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 512,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 136.09185186712722,
+        "p50_ms": 134.5989356650449,
+        "p99_ms": 168.5820996025248,
+        "max_ms": 170.50240065680669
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 7.415414029017955
+      },
+      "compute_breakdown": {
+        "attention_ms": 134.3509203956223,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.014346378712131402
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 1024,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 508.46308644083126,
+        "p50_ms": 501.3747060422331,
+        "p99_ms": 634.026813327397,
+        "max_ms": 636.0205831532705
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 1.9329415125722418
+      },
+      "compute_breakdown": {
+        "attention_ms": 516.3395947948483,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.007479207731151848
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 2048,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 2013.9692905599263,
+        "p50_ms": 2041.982569909204,
+        "p99_ms": 2492.1739374147055,
+        "max_ms": 2586.701516880584
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.49376779338409277
+      },
+      "compute_breakdown": {
+        "attention_ms": 2023.230205604111,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0038211108547797543
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 4096,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 7998.518600655969,
+        "p50_ms": 8071.58556087368,
+        "p99_ms": 9714.181772862778,
+        "max_ms": 9777.811724246105
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.12480201708928648
+      },
+      "compute_breakdown": {
+        "attention_ms": 8008.664475265879,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 4.0265318400000005
+      },
+      "memory": {
+        "attention_gb": 173.14086912,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0019316057004443912
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 128,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 21.1078359218544,
+        "p50_ms": 21.06530499614989,
+        "p99_ms": 24.951663493844915,
+        "max_ms": 25.315865729800556
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 47.63029843504074
+      },
+      "compute_breakdown": {
+        "attention_ms": 20.743381322135477,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.04607445362099549
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 512,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 264.33451146293925,
+        "p50_ms": 263.85045651431756,
+        "p99_ms": 317.29934053116176,
+        "max_ms": 323.84384091159245
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 3.7077070145089777
+      },
+      "compute_breakdown": {
+        "attention_ms": 268.7018407912446,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.014346378712131402
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 1024,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 1043.6835239922987,
+        "p50_ms": 1037.6224287448035,
+        "p99_ms": 1217.4435626587422,
+        "max_ms": 1228.3998684860587
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 0.9664707562861209
+      },
+      "compute_breakdown": {
+        "attention_ms": 1032.6791895896965,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.007479207731151848
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 2048,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 4078.034611653382,
+        "p50_ms": 4052.325692534016,
+        "p99_ms": 5198.661665458807,
+        "max_ms": 5650.7884354907765
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.24688389669204638
+      },
+      "compute_breakdown": {
+        "attention_ms": 4046.460411208222,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 4.0265318400000005
+      },
+      "memory": {
+        "attention_gb": 173.14086912,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0038211108547797543
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 4096,
+      "attention_ratio": 1,
+      "latency": {
+        "avg_ms": 16258.457432197845,
+        "p50_ms": 16179.176269782321,
+        "p99_ms": 19920.471560046197,
+        "max_ms": 19986.082313904364
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.06240100854464324
+      },
+      "compute_breakdown": {
+        "attention_ms": 16017.328950531759,
+        "ffn_ms": 30.954719250450452,
+        "transfer_ms": 8.053063680000001
+      },
+      "memory": {
+        "attention_gb": 346.28173824,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0019316057004443912
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 128,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 0.32511589335062496,
+        "p50_ms": 0.3250099191793189,
+        "p99_ms": 0.39177698332690686,
+        "max_ms": 0.39227440936544433
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 3048.3390998426075
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.3241153331583668,
+        "ffn_ms": 0.01511460900900901,
+        "transfer_ms": 0.0039321600000000005
+      },
+      "memory": {
+        "attention_gb": 0.16908288,
+        "ffn_gb": 0.00262144
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.023037226810497746
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 512,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 4.214890445220049,
+        "p50_ms": 4.200990207740912,
+        "p99_ms": 5.231038658468454,
+        "max_ms": 5.324913430740846
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 237.29324892857457
+      },
+      "compute_breakdown": {
+        "attention_ms": 4.198466262363197,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.015728640000000002
+      },
+      "memory": {
+        "attention_gb": 0.67633152,
+        "ffn_gb": 0.01048576
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.007173189356065701
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 1024,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 16.24505108765797,
+        "p50_ms": 16.287556884486236,
+        "p99_ms": 19.562579923821357,
+        "max_ms": 20.3874506351024
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 61.85412840231174
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.13561233733901,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.003739603865575924
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 2048,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 62.80261004654481,
+        "p50_ms": 62.684256501983015,
+        "p99_ms": 76.77813308070178,
+        "max_ms": 77.16137952723965
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 15.800569388290969
+      },
+      "compute_breakdown": {
+        "attention_ms": 63.22594392512847,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0019105554273898772
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 4096,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 247.68520650637,
+        "p50_ms": 245.16643320018662,
+        "p99_ms": 302.9121374449344,
+        "max_ms": 309.9522188548509
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 3.9936645468571674
+      },
+      "compute_breakdown": {
+        "attention_ms": 250.27076485205873,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0009658028502221956
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 128,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 0.6526831236487545,
+        "p50_ms": 0.6505245754276424,
+        "p99_ms": 0.7969055334469636,
+        "max_ms": 0.8060986676494634
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 1524.1695499213038
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.6482306663167337,
+        "ffn_ms": 0.03022921801801802,
+        "transfer_ms": 0.007864320000000001
+      },
+      "memory": {
+        "attention_gb": 0.33816576,
+        "ffn_gb": 0.00524288
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.023037226810497746
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 512,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 8.500453567796765,
+        "p50_ms": 8.462227216773542,
+        "p99_ms": 10.29715127318451,
+        "max_ms": 10.357388839189891
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 118.64662446428729
+      },
+      "compute_breakdown": {
+        "attention_ms": 8.396932524726394,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.007173189356065701
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 1024,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 32.53655664823203,
+        "p50_ms": 32.66670752994117,
+        "p99_ms": 40.323707053340655,
+        "max_ms": 40.82106952537642
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 30.92706420115587
+      },
+      "compute_breakdown": {
+        "attention_ms": 32.27122467467802,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.003739603865575924
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 2048,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 128.14306851174754,
+        "p50_ms": 129.93006534045776,
+        "p99_ms": 152.18098783877775,
+        "max_ms": 152.82687961612487
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 7.900284694145484
+      },
+      "compute_breakdown": {
+        "attention_ms": 126.45188785025694,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0019105554273898772
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 4096,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 493.15326974301274,
+        "p50_ms": 495.79879332195344,
+        "p99_ms": 587.0369599043454,
+        "max_ms": 602.440374967384
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 1.9968322734285837
+      },
+      "compute_breakdown": {
+        "attention_ms": 500.54152970411747,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0009658028502221956
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 128,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 1.323161312062455,
+        "p50_ms": 1.3388567329877241,
+        "p99_ms": 1.599560301225069,
+        "max_ms": 1.6299274415346325
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 762.0847749606519
+      },
+      "compute_breakdown": {
+        "attention_ms": 1.2964613326334673,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.015728640000000002
+      },
+      "memory": {
+        "attention_gb": 0.67633152,
+        "ffn_gb": 0.01048576
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.023037226810497746
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 512,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 16.74441179891036,
+        "p50_ms": 16.72256903381798,
+        "p99_ms": 20.563234332432618,
+        "max_ms": 21.089727015794615
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 59.32331223214364
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.793865049452787,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.007173189356065701
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 1024,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 64.10442758266723,
+        "p50_ms": 64.102379571731,
+        "p99_ms": 84.72360570544645,
+        "max_ms": 86.46194682460478
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 15.463532100577934
+      },
+      "compute_breakdown": {
+        "attention_ms": 64.54244934935603,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.003739603865575924
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 2048,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 250.09027214905655,
+        "p50_ms": 251.4542147800282,
+        "p99_ms": 310.47021082939546,
+        "max_ms": 324.15274637213946
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 3.950142347072742
+      },
+      "compute_breakdown": {
+        "attention_ms": 252.90377570051388,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0019105554273898772
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 4096,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 1003.668336217428,
+        "p50_ms": 1001.2806492529314,
+        "p99_ms": 1225.7500794207365,
+        "max_ms": 1231.5115565936712
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.9984161367142919
+      },
+      "compute_breakdown": {
+        "attention_ms": 1001.0830594082349,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0009658028502221956
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 128,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 2.639638331308127,
+        "p50_ms": 2.643018834474554,
+        "p99_ms": 3.1361397772296593,
+        "max_ms": 3.228127828812943
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 381.04238748032594
+      },
+      "compute_breakdown": {
+        "attention_ms": 2.5929226652669346,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.023037226810497746
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 512,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 33.9648802237795,
+        "p50_ms": 33.966639355540266,
+        "p99_ms": 40.50366152969197,
+        "max_ms": 41.718714803779555
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 29.66165611607182
+      },
+      "compute_breakdown": {
+        "attention_ms": 33.587730098905574,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.007173189356065701
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 1024,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 128.87241210775315,
+        "p50_ms": 128.37130952594538,
+        "p99_ms": 153.03568327617106,
+        "max_ms": 155.83007548541528
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 7.731766050288967
+      },
+      "compute_breakdown": {
+        "attention_ms": 129.08489869871207,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.003739603865575924
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 2048,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 507.75116040613136,
+        "p50_ms": 507.5402450539003,
+        "p99_ms": 625.5827205514877,
+        "max_ms": 640.5937104498794
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 1.975071173536371
+      },
+      "compute_breakdown": {
+        "attention_ms": 505.80755140102775,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0019105554273898772
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 4096,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 2000.1316709206308,
+        "p50_ms": 2000.7136518325653,
+        "p99_ms": 2376.158144380484,
+        "max_ms": 2384.9519753455497
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.49920806835714593
+      },
+      "compute_breakdown": {
+        "attention_ms": 2002.1661188164699,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0009658028502221956
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 128,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 5.265937590129889,
+        "p50_ms": 5.240523242937838,
+        "p99_ms": 6.499028053603783,
+        "max_ms": 6.611126245118318
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 190.52119374016297
+      },
+      "compute_breakdown": {
+        "attention_ms": 5.185845330533869,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.023037226810497746
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 512,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 66.33219529363436,
+        "p50_ms": 65.94120523268329,
+        "p99_ms": 81.73614243625607,
+        "max_ms": 85.46245973327389
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 14.83082805803591
+      },
+      "compute_breakdown": {
+        "attention_ms": 67.17546019781115,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.007173189356065701
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 1024,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 260.081263066605,
+        "p50_ms": 258.4662666202721,
+        "p99_ms": 317.34026748960446,
+        "max_ms": 329.78487985736183
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 3.8658830251444836
+      },
+      "compute_breakdown": {
+        "attention_ms": 258.16979739742413,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.003739603865575924
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 2048,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 1001.1954556987279,
+        "p50_ms": 1005.6839453850787,
+        "p99_ms": 1194.6283267376762,
+        "max_ms": 1223.989724777823
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.9875355867681855
+      },
+      "compute_breakdown": {
+        "attention_ms": 1011.6151028020555,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0019105554273898772
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 4096,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 4018.181400631773,
+        "p50_ms": 3994.8668751905902,
+        "p99_ms": 4955.3111511960005,
+        "max_ms": 5020.838537274224
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.24960403417857296
+      },
+      "compute_breakdown": {
+        "attention_ms": 4004.3322376329397,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0009658028502221956
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 128,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 10.404205686930865,
+        "p50_ms": 10.425418468920427,
+        "p99_ms": 12.658526219758075,
+        "max_ms": 13.041816477486426
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 95.26059687008149
+      },
+      "compute_breakdown": {
+        "attention_ms": 10.371690661067738,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.023037226810497746
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 512,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 134.0351408848971,
+        "p50_ms": 134.65203104768742,
+        "p99_ms": 161.42703533046065,
+        "max_ms": 165.26469922017714
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 7.415414029017955
+      },
+      "compute_breakdown": {
+        "attention_ms": 134.3509203956223,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.007173189356065701
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 1024,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 519.0940566258017,
+        "p50_ms": 517.3008505299193,
+        "p99_ms": 623.8928677286491,
+        "max_ms": 628.7620664829302
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 1.9329415125722418
+      },
+      "compute_breakdown": {
+        "attention_ms": 516.3395947948483,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.003739603865575924
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 2048,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 2064.8904965625643,
+        "p50_ms": 2050.48842106214,
+        "p99_ms": 2517.382896328619,
+        "max_ms": 2608.1496667134097
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.49376779338409277
+      },
+      "compute_breakdown": {
+        "attention_ms": 2023.230205604111,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0019105554273898772
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 4096,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 8005.7921085941525,
+        "p50_ms": 8044.616207595745,
+        "p99_ms": 9999.972441847574,
+        "max_ms": 10277.52936687417
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.12480201708928648
+      },
+      "compute_breakdown": {
+        "attention_ms": 8008.664475265879,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 4.0265318400000005
+      },
+      "memory": {
+        "attention_gb": 173.14086912,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0009658028502221956
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 128,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 21.167642534144615,
+        "p50_ms": 21.1477562367838,
+        "p99_ms": 25.632708168237734,
+        "max_ms": 25.97084373491965
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 47.63029843504074
+      },
+      "compute_breakdown": {
+        "attention_ms": 20.743381322135477,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.023037226810497746
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 512,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 268.8577414529876,
+        "p50_ms": 270.27805755136706,
+        "p99_ms": 338.019074129224,
+        "max_ms": 339.08060581701903
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 3.7077070145089777
+      },
+      "compute_breakdown": {
+        "attention_ms": 268.7018407912446,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.007173189356065701
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 1024,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 1035.3229335309252,
+        "p50_ms": 1025.6931022761828,
+        "p99_ms": 1234.2803740889633,
+        "max_ms": 1332.0346008405197
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 0.9664707562861209
+      },
+      "compute_breakdown": {
+        "attention_ms": 1032.6791895896965,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.003739603865575924
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 2048,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 4039.837017808003,
+        "p50_ms": 4012.8288990875612,
+        "p99_ms": 5076.026858697447,
+        "max_ms": 5207.705372291285
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.24688389669204638
+      },
+      "compute_breakdown": {
+        "attention_ms": 4046.460411208222,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 4.0265318400000005
+      },
+      "memory": {
+        "attention_gb": 173.14086912,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0019105554273898772
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 4096,
+      "attention_ratio": 2,
+      "latency": {
+        "avg_ms": 15925.405993146187,
+        "p50_ms": 15717.735634996865,
+        "p99_ms": 19563.402133756474,
+        "max_ms": 19811.264156367095
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.06240100854464324
+      },
+      "compute_breakdown": {
+        "attention_ms": 16017.328950531759,
+        "ffn_ms": 30.954719250450452,
+        "transfer_ms": 8.053063680000001
+      },
+      "memory": {
+        "attention_gb": 346.28173824,
+        "ffn_gb": 5.36870912
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0009658028502221956
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 128,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 0.3260675113468758,
+        "p50_ms": 0.3257988962360491,
+        "p99_ms": 0.3931167303522353,
+        "max_ms": 0.40732494907302763
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 3048.3390998426075
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.3241153331583668,
+        "ffn_ms": 0.01511460900900901,
+        "transfer_ms": 0.0039321600000000005
+      },
+      "memory": {
+        "attention_gb": 0.16908288,
+        "ffn_gb": 0.00524288
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.011518613405248873
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 512,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 4.298642120026462,
+        "p50_ms": 4.262604309764761,
+        "p99_ms": 5.366089340668619,
+        "max_ms": 5.632068780516661
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 237.29324892857457
+      },
+      "compute_breakdown": {
+        "attention_ms": 4.198466262363197,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.015728640000000002
+      },
+      "memory": {
+        "attention_gb": 0.67633152,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0035865946780328506
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 1024,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 16.135118062162604,
+        "p50_ms": 16.269539996669817,
+        "p99_ms": 19.77908753798454,
+        "max_ms": 20.066427923313377
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 61.85412840231174
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.13561233733901,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.001869801932787962
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 2048,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 63.6884999860828,
+        "p50_ms": 64.08389856507293,
+        "p99_ms": 78.99177317154243,
+        "max_ms": 79.31898436155885
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 15.800569388290969
+      },
+      "compute_breakdown": {
+        "attention_ms": 63.22594392512847,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0009552777136949386
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 4096,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 247.29644387328247,
+        "p50_ms": 249.26177594430516,
+        "p99_ms": 300.28127424337254,
+        "max_ms": 302.7553042228149
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 3.9936645468571674
+      },
+      "compute_breakdown": {
+        "attention_ms": 250.27076485205873,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0004829014251110978
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 128,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 0.6485777633478871,
+        "p50_ms": 0.650634851641491,
+        "p99_ms": 0.7902251989087451,
+        "max_ms": 0.8156030929717102
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 1524.1695499213038
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.6482306663167337,
+        "ffn_ms": 0.03022921801801802,
+        "transfer_ms": 0.007864320000000001
+      },
+      "memory": {
+        "attention_gb": 0.33816576,
+        "ffn_gb": 0.01048576
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.011518613405248873
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 512,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 8.55315445550164,
+        "p50_ms": 8.55065399114442,
+        "p99_ms": 10.161044315995783,
+        "max_ms": 11.158676977263003
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 118.64662446428729
+      },
+      "compute_breakdown": {
+        "attention_ms": 8.396932524726394,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0035865946780328506
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 1024,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 32.200193546282854,
+        "p50_ms": 32.0493236433673,
+        "p99_ms": 39.60053792034903,
+        "max_ms": 39.961542501296805
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 30.92706420115587
+      },
+      "compute_breakdown": {
+        "attention_ms": 32.27122467467802,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.001869801932787962
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 2048,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 127.55057435818475,
+        "p50_ms": 127.31620058069916,
+        "p99_ms": 151.78400118117113,
+        "max_ms": 153.05785594335728
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 7.900284694145484
+      },
+      "compute_breakdown": {
+        "attention_ms": 126.45188785025694,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0009552777136949386
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 4096,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 499.299887538739,
+        "p50_ms": 499.8113880147894,
+        "p99_ms": 611.1984569474874,
+        "max_ms": 622.2752837435527
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 1.9968322734285837
+      },
+      "compute_breakdown": {
+        "attention_ms": 500.54152970411747,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0004829014251110978
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 128,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 1.3137212957590791,
+        "p50_ms": 1.3074529428164705,
+        "p99_ms": 1.6166770058171724,
+        "max_ms": 1.6351628736945067
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 762.0847749606519
+      },
+      "compute_breakdown": {
+        "attention_ms": 1.2964613326334673,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.015728640000000002
+      },
+      "memory": {
+        "attention_gb": 0.67633152,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.011518613405248873
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 512,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 16.940858055896754,
+        "p50_ms": 17.134400008503757,
+        "p99_ms": 21.192111612056777,
+        "max_ms": 21.80102500070165
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 59.32331223214364
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.793865049452787,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0035865946780328506
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 1024,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 63.85106648765387,
+        "p50_ms": 63.28465677000679,
+        "p99_ms": 75.295760748514,
+        "max_ms": 75.34192263168715
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 15.463532100577934
+      },
+      "compute_breakdown": {
+        "attention_ms": 64.54244934935603,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.001869801932787962
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 2048,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 250.69273070743344,
+        "p50_ms": 248.37368893998195,
+        "p99_ms": 304.1860413679175,
+        "max_ms": 310.9913571899212
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 3.950142347072742
+      },
+      "compute_breakdown": {
+        "attention_ms": 252.90377570051388,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0009552777136949386
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 4096,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 1014.5846961262233,
+        "p50_ms": 1004.9052794048436,
+        "p99_ms": 1237.6195079144243,
+        "max_ms": 1299.6037723537802
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.9984161367142919
+      },
+      "compute_breakdown": {
+        "attention_ms": 1001.0830594082349,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0004829014251110978
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 128,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 2.608723945299331,
+        "p50_ms": 2.579524492439899,
+        "p99_ms": 3.1920769397884863,
+        "max_ms": 3.534755513700849
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 381.04238748032594
+      },
+      "compute_breakdown": {
+        "attention_ms": 2.5929226652669346,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.011518613405248873
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 512,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 33.34014381266367,
+        "p50_ms": 33.42935368594539,
+        "p99_ms": 39.19579070965211,
+        "max_ms": 40.15099850600492
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 29.66165611607182
+      },
+      "compute_breakdown": {
+        "attention_ms": 33.587730098905574,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0035865946780328506
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 1024,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 130.52750050458835,
+        "p50_ms": 128.3765720850836,
+        "p99_ms": 161.96864414107796,
+        "max_ms": 166.2791587774048
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 7.731766050288967
+      },
+      "compute_breakdown": {
+        "attention_ms": 129.08489869871207,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.001869801932787962
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 2048,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 499.0654843677149,
+        "p50_ms": 492.05254561160325,
+        "p99_ms": 632.1338144233182,
+        "max_ms": 643.68982912695
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 1.975071173536371
+      },
+      "compute_breakdown": {
+        "attention_ms": 505.80755140102775,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0009552777136949386
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 4096,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 2006.483792440884,
+        "p50_ms": 2000.2436223900254,
+        "p99_ms": 2397.957232059495,
+        "max_ms": 2480.733763129191
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.49920806835714593
+      },
+      "compute_breakdown": {
+        "attention_ms": 2002.1661188164699,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0004829014251110978
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 128,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 5.282805691236335,
+        "p50_ms": 5.303517341722269,
+        "p99_ms": 6.251894337501772,
+        "max_ms": 6.466791159655786
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 190.52119374016297
+      },
+      "compute_breakdown": {
+        "attention_ms": 5.185845330533869,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.011518613405248873
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 512,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 66.93205405797508,
+        "p50_ms": 67.82616861311327,
+        "p99_ms": 82.03509341111709,
+        "max_ms": 85.04139486746195
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 14.83082805803591
+      },
+      "compute_breakdown": {
+        "attention_ms": 67.17546019781115,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0035865946780328506
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 1024,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 253.39774842722775,
+        "p50_ms": 252.52785640908243,
+        "p99_ms": 320.79844828575074,
+        "max_ms": 329.77281289480936
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 3.8658830251444836
+      },
+      "compute_breakdown": {
+        "attention_ms": 258.16979739742413,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.001869801932787962
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 2048,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 1026.1218777715737,
+        "p50_ms": 1037.4399707680186,
+        "p99_ms": 1222.1224581975666,
+        "max_ms": 1270.1759549520666
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.9875355867681855
+      },
+      "compute_breakdown": {
+        "attention_ms": 1011.6151028020555,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0009552777136949386
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 4096,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 4009.8784938901395,
+        "p50_ms": 4021.026581957251,
+        "p99_ms": 4997.9731079827025,
+        "max_ms": 5004.8053057013885
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.24960403417857296
+      },
+      "compute_breakdown": {
+        "attention_ms": 4004.3322376329397,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0004829014251110978
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 128,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 10.515564076838906,
+        "p50_ms": 10.528468973586055,
+        "p99_ms": 12.489203070020066,
+        "max_ms": 12.579238473358366
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 95.26059687008149
+      },
+      "compute_breakdown": {
+        "attention_ms": 10.371690661067738,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.011518613405248873
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 512,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 138.13129290568395,
+        "p50_ms": 137.93434144436628,
+        "p99_ms": 170.8139783847435,
+        "max_ms": 174.49228588791877
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 7.415414029017955
+      },
+      "compute_breakdown": {
+        "attention_ms": 134.3509203956223,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0035865946780328506
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 1024,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 529.931216104456,
+        "p50_ms": 530.4216528723741,
+        "p99_ms": 655.465528593428,
+        "max_ms": 663.4814082164228
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 1.9329415125722418
+      },
+      "compute_breakdown": {
+        "attention_ms": 516.3395947948483,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.001869801932787962
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 2048,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 2020.5454791725344,
+        "p50_ms": 2013.3894143993093,
+        "p99_ms": 2497.4626972673695,
+        "max_ms": 2533.749555075548
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.49376779338409277
+      },
+      "compute_breakdown": {
+        "attention_ms": 2023.230205604111,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0009552777136949386
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 4096,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 7964.978482475098,
+        "p50_ms": 7965.6927586236725,
+        "p99_ms": 10251.383503331988,
+        "max_ms": 10397.000475314873
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.12480201708928648
+      },
+      "compute_breakdown": {
+        "attention_ms": 8008.664475265879,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 4.0265318400000005
+      },
+      "memory": {
+        "attention_gb": 173.14086912,
+        "ffn_gb": 5.36870912
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0004829014251110978
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 128,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 20.857104248039604,
+        "p50_ms": 21.017187819673374,
+        "p99_ms": 25.298531626069398,
+        "max_ms": 25.633707282126153
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 47.63029843504074
+      },
+      "compute_breakdown": {
+        "attention_ms": 20.743381322135477,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.011518613405248873
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 512,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 270.4883636761852,
+        "p50_ms": 272.4247962039597,
+        "p99_ms": 321.0520384650273,
+        "max_ms": 335.89959284774307
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 3.7077070145089777
+      },
+      "compute_breakdown": {
+        "attention_ms": 268.7018407912446,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0035865946780328506
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 1024,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 1039.0226700886267,
+        "p50_ms": 1049.0331744351,
+        "p99_ms": 1257.0734152848936,
+        "max_ms": 1277.4388794546205
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 0.9664707562861209
+      },
+      "compute_breakdown": {
+        "attention_ms": 1032.6791895896965,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.001869801932787962
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 2048,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 4059.231127213606,
+        "p50_ms": 4086.7178659996666,
+        "p99_ms": 4995.139424665527,
+        "max_ms": 5032.48347333054
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.24688389669204638
+      },
+      "compute_breakdown": {
+        "attention_ms": 4046.460411208222,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 4.0265318400000005
+      },
+      "memory": {
+        "attention_gb": 173.14086912,
+        "ffn_gb": 5.36870912
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0009552777136949386
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 4096,
+      "attention_ratio": 4,
+      "latency": {
+        "avg_ms": 16006.308451338822,
+        "p50_ms": 15913.960357473383,
+        "p99_ms": 19411.168868878845,
+        "max_ms": 20362.881288938377
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.06240100854464324
+      },
+      "compute_breakdown": {
+        "attention_ms": 16017.328950531759,
+        "ffn_ms": 30.954719250450452,
+        "transfer_ms": 8.053063680000001
+      },
+      "memory": {
+        "attention_gb": 346.28173824,
+        "ffn_gb": 10.73741824
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0004829014251110978
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 128,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 0.3341209431520312,
+        "p50_ms": 0.333250963413271,
+        "p99_ms": 0.3920154349445787,
+        "max_ms": 0.4068083593012022
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 3048.3390998426075
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.3241153331583668,
+        "ffn_ms": 0.01511460900900901,
+        "transfer_ms": 0.0039321600000000005
+      },
+      "memory": {
+        "attention_gb": 0.16908288,
+        "ffn_gb": 0.01048576
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.0057593067026244366
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 512,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 4.222524403928569,
+        "p50_ms": 4.254259957833241,
+        "p99_ms": 5.233577541824049,
+        "max_ms": 5.465817240200417
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 237.29324892857457
+      },
+      "compute_breakdown": {
+        "attention_ms": 4.198466262363197,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.015728640000000002
+      },
+      "memory": {
+        "attention_gb": 0.67633152,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0017932973390164253
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 1024,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 16.192139993422202,
+        "p50_ms": 16.18664355273377,
+        "p99_ms": 20.47124362709473,
+        "max_ms": 20.627595185916537
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 61.85412840231174
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.13561233733901,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.000934900966393981
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 2048,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 63.46296588608894,
+        "p50_ms": 63.651754756908765,
+        "p99_ms": 75.84828977419872,
+        "max_ms": 79.114903846154
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 15.800569388290969
+      },
+      "compute_breakdown": {
+        "attention_ms": 63.22594392512847,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0004776388568474693
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 1,
+      "sequence_length": 4096,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 248.09560073769072,
+        "p50_ms": 246.33578583848495,
+        "p99_ms": 301.2212078110529,
+        "max_ms": 311.49621613182217
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 3.9936645468571674
+      },
+      "compute_breakdown": {
+        "attention_ms": 250.27076485205873,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0002414507125555489
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 128,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 0.6510412676200673,
+        "p50_ms": 0.6530117990991686,
+        "p99_ms": 0.759819348972319,
+        "max_ms": 0.7666588472388478
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 1524.1695499213038
+      },
+      "compute_breakdown": {
+        "attention_ms": 0.6482306663167337,
+        "ffn_ms": 0.03022921801801802,
+        "transfer_ms": 0.007864320000000001
+      },
+      "memory": {
+        "attention_gb": 0.33816576,
+        "ffn_gb": 0.02097152
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.0057593067026244366
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 512,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 8.381212067681785,
+        "p50_ms": 8.420533363967522,
+        "p99_ms": 10.30653543255418,
+        "max_ms": 10.720595140063281
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 118.64662446428729
+      },
+      "compute_breakdown": {
+        "attention_ms": 8.396932524726394,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0017932973390164253
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 1024,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 32.54148937415058,
+        "p50_ms": 32.42619744898907,
+        "p99_ms": 38.77833124377283,
+        "max_ms": 39.213725449630815
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 30.92706420115587
+      },
+      "compute_breakdown": {
+        "attention_ms": 32.27122467467802,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.000934900966393981
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 2048,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 127.47555057196067,
+        "p50_ms": 127.73546488109534,
+        "p99_ms": 153.2875071841473,
+        "max_ms": 156.52704024425054
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 7.900284694145484
+      },
+      "compute_breakdown": {
+        "attention_ms": 126.45188785025694,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0004776388568474693
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 2,
+      "sequence_length": 4096,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 508.08207184818093,
+        "p50_ms": 506.99898224937067,
+        "p99_ms": 624.231654369593,
+        "max_ms": 643.4971112487734
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 1.9968322734285837
+      },
+      "compute_breakdown": {
+        "attention_ms": 500.54152970411747,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0002414507125555489
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 128,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 1.3152396547443788,
+        "p50_ms": 1.306328352895871,
+        "p99_ms": 1.616613613425896,
+        "max_ms": 1.64374677959528
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 762.0847749606519
+      },
+      "compute_breakdown": {
+        "attention_ms": 1.2964613326334673,
+        "ffn_ms": 0.06045843603603604,
+        "transfer_ms": 0.015728640000000002
+      },
+      "memory": {
+        "attention_gb": 0.67633152,
+        "ffn_gb": 0.04194304
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.0057593067026244366
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 512,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 16.868287447564434,
+        "p50_ms": 16.822771000874152,
+        "p99_ms": 20.64878430090306,
+        "max_ms": 20.841926634464247
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 59.32331223214364
+      },
+      "compute_breakdown": {
+        "attention_ms": 16.793865049452787,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0017932973390164253
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 1024,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 65.30759237227831,
+        "p50_ms": 64.78126849740045,
+        "p99_ms": 78.5299632431392,
+        "max_ms": 81.8026098636786
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 15.463532100577934
+      },
+      "compute_breakdown": {
+        "attention_ms": 64.54244934935603,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.000934900966393981
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 2048,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 252.90336865348738,
+        "p50_ms": 254.38795116806853,
+        "p99_ms": 298.6569407751191,
+        "max_ms": 299.0937071702984
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 3.950142347072742
+      },
+      "compute_breakdown": {
+        "attention_ms": 252.90377570051388,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0004776388568474693
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 4,
+      "sequence_length": 4096,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 1003.5946567275039,
+        "p50_ms": 1005.4569496570367,
+        "p99_ms": 1209.847045593606,
+        "max_ms": 1243.8454500614464
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.9984161367142919
+      },
+      "compute_breakdown": {
+        "attention_ms": 1001.0830594082349,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0002414507125555489
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 128,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 2.668909601376636,
+        "p50_ms": 2.6678986503282616,
+        "p99_ms": 3.2589224018998264,
+        "max_ms": 3.332926813166016
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 381.04238748032594
+      },
+      "compute_breakdown": {
+        "attention_ms": 2.5929226652669346,
+        "ffn_ms": 0.12091687207207208,
+        "transfer_ms": 0.031457280000000004
+      },
+      "memory": {
+        "attention_gb": 1.35266304,
+        "ffn_gb": 0.08388608
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.0057593067026244366
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 512,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 34.24226595047684,
+        "p50_ms": 34.176489622594374,
+        "p99_ms": 40.462159499524034,
+        "max_ms": 41.72959761441513
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 29.66165611607182
+      },
+      "compute_breakdown": {
+        "attention_ms": 33.587730098905574,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0017932973390164253
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 1024,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 130.4665871530884,
+        "p50_ms": 129.91849694136022,
+        "p99_ms": 157.7384667339082,
+        "max_ms": 160.58924435584115
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 7.731766050288967
+      },
+      "compute_breakdown": {
+        "attention_ms": 129.08489869871207,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.000934900966393981
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 2048,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 498.1034551090898,
+        "p50_ms": 495.7871557730863,
+        "p99_ms": 615.1273014894207,
+        "max_ms": 680.2381896658909
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 1.975071173536371
+      },
+      "compute_breakdown": {
+        "attention_ms": 505.80755140102775,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0004776388568474693
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 8,
+      "sequence_length": 4096,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 1997.5935031745375,
+        "p50_ms": 1983.223217092619,
+        "p99_ms": 2521.9706256724508,
+        "max_ms": 2615.759620952209
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.49920806835714593
+      },
+      "compute_breakdown": {
+        "attention_ms": 2002.1661188164699,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0002414507125555489
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 128,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 5.187416606497014,
+        "p50_ms": 5.231009312979177,
+        "p99_ms": 6.355437520233837,
+        "max_ms": 6.576194848122762
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 190.52119374016297
+      },
+      "compute_breakdown": {
+        "attention_ms": 5.185845330533869,
+        "ffn_ms": 0.24183374414414416,
+        "transfer_ms": 0.06291456000000001
+      },
+      "memory": {
+        "attention_gb": 2.70532608,
+        "ffn_gb": 0.16777216
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.0057593067026244366
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 512,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 67.17852195993855,
+        "p50_ms": 66.41067497219515,
+        "p99_ms": 83.0480712034508,
+        "max_ms": 84.18227018036212
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 14.83082805803591
+      },
+      "compute_breakdown": {
+        "attention_ms": 67.17546019781115,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0017932973390164253
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 1024,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 262.1480169280248,
+        "p50_ms": 260.18892283862226,
+        "p99_ms": 312.4733662324267,
+        "max_ms": 317.5621329774813
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 3.8658830251444836
+      },
+      "compute_breakdown": {
+        "attention_ms": 258.16979739742413,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.000934900966393981
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 2048,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 1002.8456221576166,
+        "p50_ms": 1002.9741508919199,
+        "p99_ms": 1211.0463710061736,
+        "max_ms": 1234.7208379616427
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.9875355867681855
+      },
+      "compute_breakdown": {
+        "attention_ms": 1011.6151028020555,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0004776388568474693
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 16,
+      "sequence_length": 4096,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 3992.0322604859,
+        "p50_ms": 3975.5772757166833,
+        "p99_ms": 4858.123887782803,
+        "max_ms": 5011.495526219477
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.24960403417857296
+      },
+      "compute_breakdown": {
+        "attention_ms": 4004.3322376329397,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 5.36870912
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0002414507125555489
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 128,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 10.578885272193029,
+        "p50_ms": 10.806694170251518,
+        "p99_ms": 13.011072954061857,
+        "max_ms": 13.070757402730829
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 95.26059687008149
+      },
+      "compute_breakdown": {
+        "attention_ms": 10.371690661067738,
+        "ffn_ms": 0.4836674882882883,
+        "transfer_ms": 0.12582912000000002
+      },
+      "memory": {
+        "attention_gb": 5.41065216,
+        "ffn_gb": 0.33554432
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.0057593067026244366
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 512,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 133.49771321944252,
+        "p50_ms": 133.25724768908745,
+        "p99_ms": 160.08266941687273,
+        "max_ms": 166.6250414767323
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 7.415414029017955
+      },
+      "compute_breakdown": {
+        "attention_ms": 134.3509203956223,
+        "ffn_ms": 1.9346699531531533,
+        "transfer_ms": 0.5033164800000001
+      },
+      "memory": {
+        "attention_gb": 21.64260864,
+        "ffn_gb": 1.34217728
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0017932973390164253
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 1024,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 515.2262642335184,
+        "p50_ms": 514.7085875100768,
+        "p99_ms": 626.9646303546431,
+        "max_ms": 629.4500751160078
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 1.9329415125722418
+      },
+      "compute_breakdown": {
+        "attention_ms": 516.3395947948483,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.000934900966393981
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 2048,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 2019.576537051928,
+        "p50_ms": 1983.755056440191,
+        "p99_ms": 2439.91353909308,
+        "max_ms": 2567.4492444593598
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.49376779338409277
+      },
+      "compute_breakdown": {
+        "attention_ms": 2023.230205604111,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 5.36870912
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0004776388568474693
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 32,
+      "sequence_length": 4096,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 8035.607644408604,
+        "p50_ms": 8002.506622470986,
+        "p99_ms": 9978.242989551956,
+        "max_ms": 10377.089598019427
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.12480201708928648
+      },
+      "compute_breakdown": {
+        "attention_ms": 8008.664475265879,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 4.0265318400000005
+      },
+      "memory": {
+        "attention_gb": 173.14086912,
+        "ffn_gb": 10.73741824
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0002414507125555489
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 128,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 21.392207105678185,
+        "p50_ms": 21.3978016712204,
+        "p99_ms": 26.564792644739192,
+        "max_ms": 27.136135806300995
+      },
+      "throughput": {
+        "tokens_per_second": 390187.4047798538,
+        "requests_per_second": 47.63029843504074
+      },
+      "compute_breakdown": {
+        "attention_ms": 20.743381322135477,
+        "ffn_ms": 0.9673349765765766,
+        "transfer_ms": 0.25165824000000003
+      },
+      "memory": {
+        "attention_gb": 10.82130432,
+        "ffn_gb": 0.67108864
+      },
+      "utilization": {
+        "attention": 0.9880134429251628,
+        "ffn": 0.0057593067026244366
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 512,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 269.21490993308583,
+        "p50_ms": 267.8520951877316,
+        "p99_ms": 321.93099184391133,
+        "max_ms": 331.40832430694553
+      },
+      "throughput": {
+        "tokens_per_second": 121494.14345143018,
+        "requests_per_second": 3.7077070145089777
+      },
+      "compute_breakdown": {
+        "attention_ms": 268.7018407912446,
+        "ffn_ms": 3.8693399063063065,
+        "transfer_ms": 1.0066329600000001
+      },
+      "memory": {
+        "attention_gb": 43.28521728,
+        "ffn_gb": 2.68435456
+      },
+      "utilization": {
+        "attention": 0.9962676999131721,
+        "ffn": 0.0017932973390164253
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 1024,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 1035.368151729831,
+        "p50_ms": 1034.0080551828494,
+        "p99_ms": 1215.11019460995,
+        "max_ms": 1283.3636151684136
+      },
+      "throughput": {
+        "tokens_per_second": 63338.627483967226,
+        "requests_per_second": 0.9664707562861209
+      },
+      "compute_breakdown": {
+        "attention_ms": 1032.6791895896965,
+        "ffn_ms": 7.738679812612613,
+        "transfer_ms": 2.0132659200000003
+      },
+      "memory": {
+        "attention_gb": 86.57043456,
+        "ffn_gb": 5.36870912
+      },
+      "utilization": {
+        "attention": 0.9980542373636925,
+        "ffn": 0.000934900966393981
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 2048,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 4071.9358231081674,
+        "p50_ms": 4119.8180158931955,
+        "p99_ms": 4810.619352691276,
+        "max_ms": 5157.784057180381
+      },
+      "throughput": {
+        "tokens_per_second": 32359.566107219904,
+        "requests_per_second": 0.24688389669204638
+      },
+      "compute_breakdown": {
+        "attention_ms": 4046.460411208222,
+        "ffn_ms": 15.477359625225226,
+        "transfer_ms": 4.0265318400000005
+      },
+      "memory": {
+        "attention_gb": 173.14086912,
+        "ffn_gb": 10.73741824
+      },
+      "utilization": {
+        "attention": 0.9990059141291862,
+        "ffn": 0.0004776388568474693
+      }
+    },
+    {
+      "mode": "afd",
+      "batch_size": 64,
+      "sequence_length": 4096,
+      "attention_ratio": 8,
+      "latency": {
+        "avg_ms": 16160.192750233202,
+        "p50_ms": 16122.813492643993,
+        "p99_ms": 20545.553465902205,
+        "max_ms": 20743.896513324242
+      },
+      "throughput": {
+        "tokens_per_second": 16358.049983926958,
+        "requests_per_second": 0.06240100854464324
+      },
+      "compute_breakdown": {
+        "attention_ms": 16017.328950531759,
+        "ffn_ms": 30.954719250450452,
+        "transfer_ms": 8.053063680000001
+      },
+      "memory": {
+        "attention_gb": 346.28173824,
+        "ffn_gb": 21.47483648
+      },
+      "utilization": {
+        "attention": 0.9994974807044938,
+        "ffn": 0.0002414507125555489
+      }
+    }
+  ],
+  "analysis": {
+    "config": {
+      "model": "/raid/model_hub/Qwen3-32B-FP8",
+      "hidden_dim": 5120,
+      "ffn_expansion": 4,
+      "num_layers": 64
+    },
+    "summary": {
+      "total_benchmarks": 175,
+      "avg_speedup": 1.0100421518661675,
+      "max_speedup": 1.0702018840288248,
+      "best_overall": {
+        "batch_size": 1,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.0702018840288248,
+        "baseline_latency_ms": 0.3438697290131724,
+        "afd_latency_ms": 0.3213129542611706
+      }
+    },
+    "best_configurations": {
+      "batch_1_seq_128": {
+        "batch_size": 1,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.0702018840288248,
+        "baseline_latency_ms": 0.3438697290131724,
+        "afd_latency_ms": 0.3213129542611706
+      },
+      "batch_1_seq_512": {
+        "batch_size": 1,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 1.0373616258990959,
+        "baseline_latency_ms": 4.3723656052400335,
+        "afd_latency_ms": 4.214890445220049
+      },
+      "batch_1_seq_1024": {
+        "batch_size": 1,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 0.991042563314613,
+        "baseline_latency_ms": 15.990588763709539,
+        "afd_latency_ms": 16.135118062162604
+      },
+      "batch_1_seq_2048": {
+        "batch_size": 1,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 1.008264889263457,
+        "baseline_latency_ms": 63.32166666403557,
+        "afd_latency_ms": 62.80261004654481
+      },
+      "batch_1_seq_4096": {
+        "batch_size": 1,
+        "sequence_length": 4096,
+        "attention_ratio": 4,
+        "speedup": 1.023374403218487,
+        "baseline_latency_ms": 253.07685066687452,
+        "afd_latency_ms": 247.29644387328247
+      },
+      "batch_2_seq_128": {
+        "batch_size": 2,
+        "sequence_length": 128,
+        "attention_ratio": 4,
+        "speedup": 1.0379420727787039,
+        "baseline_latency_ms": 0.6731861480474816,
+        "afd_latency_ms": 0.6485777633478871
+      },
+      "batch_2_seq_512": {
+        "batch_size": 2,
+        "sequence_length": 512,
+        "attention_ratio": 8,
+        "speedup": 1.0181134467028885,
+        "baseline_latency_ms": 8.533024705775345,
+        "afd_latency_ms": 8.381212067681785
+      },
+      "batch_2_seq_1024": {
+        "batch_size": 2,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 0.9979810384826237,
+        "baseline_latency_ms": 32.13518259466084,
+        "afd_latency_ms": 32.200193546282854
+      },
+      "batch_2_seq_2048": {
+        "batch_size": 2,
+        "sequence_length": 2048,
+        "attention_ratio": 1,
+        "speedup": 0.9957474009008038,
+        "baseline_latency_ms": 126.61522959918932,
+        "afd_latency_ms": 127.15597297532159
+      },
+      "batch_2_seq_4096": {
+        "batch_size": 2,
+        "sequence_length": 4096,
+        "attention_ratio": 1,
+        "speedup": 1.0241549972816888,
+        "baseline_latency_ms": 497.950246201054,
+        "afd_latency_ms": 486.2059429702663
+      },
+      "batch_4_seq_128": {
+        "batch_size": 4,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.042857735561668,
+        "baseline_latency_ms": 1.3643669981764543,
+        "afd_latency_ms": 1.3082963779729997
+      },
+      "batch_4_seq_512": {
+        "batch_size": 4,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 1.011947034826821,
+        "baseline_latency_ms": 16.94445786982657,
+        "afd_latency_ms": 16.74441179891036
+      },
+      "batch_4_seq_1024": {
+        "batch_size": 4,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 1.0147474553745044,
+        "baseline_latency_ms": 64.79270724129506,
+        "afd_latency_ms": 63.85106648765387
+      },
+      "batch_4_seq_2048": {
+        "batch_size": 4,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 1.0250391150505758,
+        "baseline_latency_ms": 256.35231124642655,
+        "afd_latency_ms": 250.09027214905655
+      },
+      "batch_4_seq_4096": {
+        "batch_size": 4,
+        "sequence_length": 4096,
+        "attention_ratio": 8,
+        "speedup": 0.9972140065407876,
+        "baseline_latency_ms": 1000.7986485781606,
+        "afd_latency_ms": 1003.5946567275039
+      },
+      "batch_8_seq_128": {
+        "batch_size": 8,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.0310652404701004,
+        "baseline_latency_ms": 2.6822247875372507,
+        "afd_latency_ms": 2.601411319340303
+      },
+      "batch_8_seq_512": {
+        "batch_size": 8,
+        "sequence_length": 512,
+        "attention_ratio": 4,
+        "speedup": 1.0008723195014027,
+        "baseline_latency_ms": 33.369227070291025,
+        "afd_latency_ms": 33.34014381266367
+      },
+      "batch_8_seq_1024": {
+        "batch_size": 8,
+        "sequence_length": 1024,
+        "attention_ratio": 1,
+        "speedup": 1.030161432425457,
+        "baseline_latency_ms": 132.41605179814522,
+        "afd_latency_ms": 128.5391275873909
+      },
+      "batch_8_seq_2048": {
+        "batch_size": 8,
+        "sequence_length": 2048,
+        "attention_ratio": 8,
+        "speedup": 1.0223127466412827,
+        "baseline_latency_ms": 509.21751130408643,
+        "afd_latency_ms": 498.1034551090898
+      },
+      "batch_8_seq_4096": {
+        "batch_size": 8,
+        "sequence_length": 4096,
+        "attention_ratio": 1,
+        "speedup": 1.0170963369493802,
+        "baseline_latency_ms": 2023.3447337494808,
+        "afd_latency_ms": 1989.334402499358
+      },
+      "batch_16_seq_128": {
+        "batch_size": 16,
+        "sequence_length": 128,
+        "attention_ratio": 8,
+        "speedup": 1.0577913038898232,
+        "baseline_latency_ms": 5.487204176006199,
+        "afd_latency_ms": 5.187416606497014
+      },
+      "batch_16_seq_512": {
+        "batch_size": 16,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 1.0437249723055972,
+        "baseline_latency_ms": 69.23256869581799,
+        "afd_latency_ms": 66.33219529363436
+      },
+      "batch_16_seq_1024": {
+        "batch_size": 16,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 1.0557729017414546,
+        "baseline_latency_ms": 267.53047615176536,
+        "afd_latency_ms": 253.39774842722775
+      },
+      "batch_16_seq_2048": {
+        "batch_size": 16,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 0.9891389557112019,
+        "baseline_latency_ms": 990.3214275126406,
+        "afd_latency_ms": 1001.1954556987279
+      },
+      "batch_16_seq_4096": {
+        "batch_size": 16,
+        "sequence_length": 4096,
+        "attention_ratio": 8,
+        "speedup": 1.022198905704762,
+        "baseline_latency_ms": 4080.6510082067944,
+        "afd_latency_ms": 3992.0322604859
+      },
+      "batch_32_seq_128": {
+        "batch_size": 32,
+        "sequence_length": 128,
+        "attention_ratio": 2,
+        "speedup": 1.0318041785240295,
+        "baseline_latency_ms": 10.735102901998738,
+        "afd_latency_ms": 10.404205686930865
+      },
+      "batch_32_seq_512": {
+        "batch_size": 32,
+        "sequence_length": 512,
+        "attention_ratio": 8,
+        "speedup": 1.0423258301457197,
+        "baseline_latency_ms": 139.14811475401063,
+        "afd_latency_ms": 133.49771321944252
+      },
+      "batch_32_seq_1024": {
+        "batch_size": 32,
+        "sequence_length": 1024,
+        "attention_ratio": 1,
+        "speedup": 1.014163397500251,
+        "baseline_latency_ms": 515.6646512482973,
+        "afd_latency_ms": 508.46308644083126
+      },
+      "batch_32_seq_2048": {
+        "batch_size": 32,
+        "sequence_length": 2048,
+        "attention_ratio": 1,
+        "speedup": 0.9657209064668616,
+        "baseline_latency_ms": 1944.9322488759542,
+        "afd_latency_ms": 2013.9692905599263
+      },
+      "batch_32_seq_4096": {
+        "batch_size": 32,
+        "sequence_length": 4096,
+        "attention_ratio": 4,
+        "speedup": 0.9984594718735874,
+        "baseline_latency_ms": 7952.708209096574,
+        "afd_latency_ms": 7964.978482475098
+      },
+      "batch_64_seq_128": {
+        "batch_size": 64,
+        "sequence_length": 128,
+        "attention_ratio": 4,
+        "speedup": 1.035397568851712,
+        "baseline_latency_ms": 21.595395031706925,
+        "afd_latency_ms": 20.857104248039604
+      },
+      "batch_64_seq_512": {
+        "batch_size": 64,
+        "sequence_length": 512,
+        "attention_ratio": 1,
+        "speedup": 1.0266191916973042,
+        "baseline_latency_ms": 271.3708824957845,
+        "afd_latency_ms": 264.33451146293925
+      },
+      "batch_64_seq_1024": {
+        "batch_size": 64,
+        "sequence_length": 1024,
+        "attention_ratio": 2,
+        "speedup": 0.9965555804591762,
+        "baseline_latency_ms": 1031.7568469876082,
+        "afd_latency_ms": 1035.3229335309252
+      },
+      "batch_64_seq_2048": {
+        "batch_size": 64,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 0.9742709196476377,
+        "baseline_latency_ms": 3935.895726566373,
+        "afd_latency_ms": 4039.837017808003
+      },
+      "batch_64_seq_4096": {
+        "batch_size": 64,
+        "sequence_length": 4096,
+        "attention_ratio": 2,
+        "speedup": 1.034270247154862,
+        "baseline_latency_ms": 16471.173592572828,
+        "afd_latency_ms": 15925.405993146187
+      }
+    },
+    "speedup_analysis": [
+      {
+        "batch_size": 1,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.0702018840288248,
+        "baseline_latency_ms": 0.3438697290131724,
+        "afd_latency_ms": 0.3213129542611706
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 512,
+        "attention_ratio": 1,
+        "speedup": 1.0238929601101918,
+        "baseline_latency_ms": 4.3723656052400335,
+        "afd_latency_ms": 4.270334669328596
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 1024,
+        "attention_ratio": 1,
+        "speedup": 0.9901508095010277,
+        "baseline_latency_ms": 15.990588763709539,
+        "afd_latency_ms": 16.149649740495356
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 2048,
+        "attention_ratio": 1,
+        "speedup": 0.9897042086284858,
+        "baseline_latency_ms": 63.32166666403557,
+        "afd_latency_ms": 63.98039546763733
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 4096,
+        "attention_ratio": 1,
+        "speedup": 1.0098301123924034,
+        "baseline_latency_ms": 253.07685066687452,
+        "afd_latency_ms": 250.613293821578
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.0263758661474642,
+        "baseline_latency_ms": 0.6731861480474816,
+        "afd_latency_ms": 0.6558865716263458
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 512,
+        "attention_ratio": 1,
+        "speedup": 1.0176009971280613,
+        "baseline_latency_ms": 8.533024705775345,
+        "afd_latency_ms": 8.385432728405135
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 1024,
+        "attention_ratio": 1,
+        "speedup": 0.9969147144741468,
+        "baseline_latency_ms": 32.13518259466084,
+        "afd_latency_ms": 32.234635649461275
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 2048,
+        "attention_ratio": 1,
+        "speedup": 0.9957474009008038,
+        "baseline_latency_ms": 126.61522959918932,
+        "afd_latency_ms": 127.15597297532159
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 4096,
+        "attention_ratio": 1,
+        "speedup": 1.0241549972816888,
+        "baseline_latency_ms": 497.950246201054,
+        "afd_latency_ms": 486.2059429702663
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.042857735561668,
+        "baseline_latency_ms": 1.3643669981764543,
+        "afd_latency_ms": 1.3082963779729997
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 512,
+        "attention_ratio": 1,
+        "speedup": 0.9909901701614516,
+        "baseline_latency_ms": 16.94445786982657,
+        "afd_latency_ms": 17.098512558470674
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 1024,
+        "attention_ratio": 1,
+        "speedup": 0.9900200069688834,
+        "baseline_latency_ms": 64.79270724129506,
+        "afd_latency_ms": 65.44585643240593
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 2048,
+        "attention_ratio": 1,
+        "speedup": 1.0098682481505163,
+        "baseline_latency_ms": 256.35231124642655,
+        "afd_latency_ms": 253.8472832628543
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 4096,
+        "attention_ratio": 1,
+        "speedup": 0.9928190427965382,
+        "baseline_latency_ms": 1000.7986485781606,
+        "afd_latency_ms": 1008.0373214429346
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.0310652404701004,
+        "baseline_latency_ms": 2.6822247875372507,
+        "afd_latency_ms": 2.601411319340303
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 512,
+        "attention_ratio": 1,
+        "speedup": 0.9764576880872431,
+        "baseline_latency_ms": 33.369227070291025,
+        "afd_latency_ms": 34.17375630034427
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 1024,
+        "attention_ratio": 1,
+        "speedup": 1.030161432425457,
+        "baseline_latency_ms": 132.41605179814522,
+        "afd_latency_ms": 128.5391275873909
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 2048,
+        "attention_ratio": 1,
+        "speedup": 1.0186998811759982,
+        "baseline_latency_ms": 509.21751130408643,
+        "afd_latency_ms": 499.87000166942227
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 4096,
+        "attention_ratio": 1,
+        "speedup": 1.0170963369493802,
+        "baseline_latency_ms": 2023.3447337494808,
+        "afd_latency_ms": 1989.334402499358
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.0561199439684066,
+        "baseline_latency_ms": 5.487204176006199,
+        "afd_latency_ms": 5.1956259394059385
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 512,
+        "attention_ratio": 1,
+        "speedup": 1.030743634308677,
+        "baseline_latency_ms": 69.23256869581799,
+        "afd_latency_ms": 67.16759278581671
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 1024,
+        "attention_ratio": 1,
+        "speedup": 1.034018081072791,
+        "baseline_latency_ms": 267.53047615176536,
+        "afd_latency_ms": 258.72901165732344
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 2048,
+        "attention_ratio": 1,
+        "speedup": 0.9759062143171854,
+        "baseline_latency_ms": 990.3214275126406,
+        "afd_latency_ms": 1014.7711050344537
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 4096,
+        "attention_ratio": 1,
+        "speedup": 1.0033439792304109,
+        "baseline_latency_ms": 4080.6510082067944,
+        "afd_latency_ms": 4067.050874553264
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.0193662141418953,
+        "baseline_latency_ms": 10.735102901998738,
+        "afd_latency_ms": 10.53115431242301
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 512,
+        "attention_ratio": 1,
+        "speedup": 1.0224573539484743,
+        "baseline_latency_ms": 139.14811475401063,
+        "afd_latency_ms": 136.09185186712722
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 1024,
+        "attention_ratio": 1,
+        "speedup": 1.014163397500251,
+        "baseline_latency_ms": 515.6646512482973,
+        "afd_latency_ms": 508.46308644083126
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 2048,
+        "attention_ratio": 1,
+        "speedup": 0.9657209064668616,
+        "baseline_latency_ms": 1944.9322488759542,
+        "afd_latency_ms": 2013.9692905599263
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 4096,
+        "attention_ratio": 1,
+        "speedup": 0.9942726404917483,
+        "baseline_latency_ms": 7952.708209096574,
+        "afd_latency_ms": 7998.518600655969
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 128,
+        "attention_ratio": 1,
+        "speedup": 1.0230984887156396,
+        "baseline_latency_ms": 21.595395031706925,
+        "afd_latency_ms": 21.1078359218544
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 512,
+        "attention_ratio": 1,
+        "speedup": 1.0266191916973042,
+        "baseline_latency_ms": 271.3708824957845,
+        "afd_latency_ms": 264.33451146293925
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 1024,
+        "attention_ratio": 1,
+        "speedup": 0.988572515776556,
+        "baseline_latency_ms": 1031.7568469876082,
+        "afd_latency_ms": 1043.6835239922987
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 2048,
+        "attention_ratio": 1,
+        "speedup": 0.9651452479876377,
+        "baseline_latency_ms": 3935.895726566373,
+        "afd_latency_ms": 4078.034611653382
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 4096,
+        "attention_ratio": 1,
+        "speedup": 1.0130834158936706,
+        "baseline_latency_ms": 16471.173592572828,
+        "afd_latency_ms": 16258.457432197845
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 128,
+        "attention_ratio": 2,
+        "speedup": 1.0576835400732691,
+        "baseline_latency_ms": 0.3438697290131724,
+        "afd_latency_ms": 0.32511589335062496
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 1.0373616258990959,
+        "baseline_latency_ms": 4.3723656052400335,
+        "afd_latency_ms": 4.214890445220049
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 1024,
+        "attention_ratio": 2,
+        "speedup": 0.9843360096206927,
+        "baseline_latency_ms": 15.990588763709539,
+        "afd_latency_ms": 16.24505108765797
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 1.008264889263457,
+        "baseline_latency_ms": 63.32166666403557,
+        "afd_latency_ms": 62.80261004654481
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 4096,
+        "attention_ratio": 2,
+        "speedup": 1.021768131559225,
+        "baseline_latency_ms": 253.07685066687452,
+        "afd_latency_ms": 247.68520650637
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 128,
+        "attention_ratio": 2,
+        "speedup": 1.0314134434549298,
+        "baseline_latency_ms": 0.6731861480474816,
+        "afd_latency_ms": 0.6526831236487545
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 1.0038316941230023,
+        "baseline_latency_ms": 8.533024705775345,
+        "afd_latency_ms": 8.500453567796765
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 1024,
+        "attention_ratio": 2,
+        "speedup": 0.987663905006586,
+        "baseline_latency_ms": 32.13518259466084,
+        "afd_latency_ms": 32.53655664823203
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 0.9880770850089472,
+        "baseline_latency_ms": 126.61522959918932,
+        "afd_latency_ms": 128.14306851174754
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 4096,
+        "attention_ratio": 2,
+        "speedup": 1.0097271512780215,
+        "baseline_latency_ms": 497.950246201054,
+        "afd_latency_ms": 493.15326974301274
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 128,
+        "attention_ratio": 2,
+        "speedup": 1.0311418462271775,
+        "baseline_latency_ms": 1.3643669981764543,
+        "afd_latency_ms": 1.323161312062455
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 1.011947034826821,
+        "baseline_latency_ms": 16.94445786982657,
+        "afd_latency_ms": 16.74441179891036
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 1024,
+        "attention_ratio": 2,
+        "speedup": 1.0107368505512393,
+        "baseline_latency_ms": 64.79270724129506,
+        "afd_latency_ms": 64.10442758266723
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 1.0250391150505758,
+        "baseline_latency_ms": 256.35231124642655,
+        "afd_latency_ms": 250.09027214905655
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 4096,
+        "attention_ratio": 2,
+        "speedup": 0.9971408008644743,
+        "baseline_latency_ms": 1000.7986485781606,
+        "afd_latency_ms": 1003.668336217428
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 128,
+        "attention_ratio": 2,
+        "speedup": 1.0161334436327947,
+        "baseline_latency_ms": 2.6822247875372507,
+        "afd_latency_ms": 2.639638331308127
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 0.9824626746932719,
+        "baseline_latency_ms": 33.369227070291025,
+        "afd_latency_ms": 33.9648802237795
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 1024,
+        "attention_ratio": 2,
+        "speedup": 1.0274972713898545,
+        "baseline_latency_ms": 132.41605179814522,
+        "afd_latency_ms": 128.87241210775315
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 1.0028879321453095,
+        "baseline_latency_ms": 509.21751130408643,
+        "afd_latency_ms": 507.75116040613136
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 4096,
+        "attention_ratio": 2,
+        "speedup": 1.0116057673433896,
+        "baseline_latency_ms": 2023.3447337494808,
+        "afd_latency_ms": 2000.1316709206308
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 128,
+        "attention_ratio": 2,
+        "speedup": 1.0420184595979711,
+        "baseline_latency_ms": 5.487204176006199,
+        "afd_latency_ms": 5.265937590129889
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 1.0437249723055972,
+        "baseline_latency_ms": 69.23256869581799,
+        "afd_latency_ms": 66.33219529363436
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 1024,
+        "attention_ratio": 2,
+        "speedup": 1.0286418675352735,
+        "baseline_latency_ms": 267.53047615176536,
+        "afd_latency_ms": 260.081263066605
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 0.9891389557112019,
+        "baseline_latency_ms": 990.3214275126406,
+        "afd_latency_ms": 1001.1954556987279
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 4096,
+        "attention_ratio": 2,
+        "speedup": 1.0155467365324022,
+        "baseline_latency_ms": 4080.6510082067944,
+        "afd_latency_ms": 4018.181400631773
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 128,
+        "attention_ratio": 2,
+        "speedup": 1.0318041785240295,
+        "baseline_latency_ms": 10.735102901998738,
+        "afd_latency_ms": 10.404205686930865
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 1.038146517662143,
+        "baseline_latency_ms": 139.14811475401063,
+        "afd_latency_ms": 134.0351408848971
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 1024,
+        "attention_ratio": 2,
+        "speedup": 0.9933934797870811,
+        "baseline_latency_ms": 515.6646512482973,
+        "afd_latency_ms": 519.0940566258017
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 0.9419057582538612,
+        "baseline_latency_ms": 1944.9322488759542,
+        "afd_latency_ms": 2064.8904965625643
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 4096,
+        "attention_ratio": 2,
+        "speedup": 0.993369313270002,
+        "baseline_latency_ms": 7952.708209096574,
+        "afd_latency_ms": 8005.7921085941525
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 128,
+        "attention_ratio": 2,
+        "speedup": 1.0202078477502783,
+        "baseline_latency_ms": 21.595395031706925,
+        "afd_latency_ms": 21.167642534144615
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 512,
+        "attention_ratio": 2,
+        "speedup": 1.0093474750967373,
+        "baseline_latency_ms": 271.3708824957845,
+        "afd_latency_ms": 268.8577414529876
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 1024,
+        "attention_ratio": 2,
+        "speedup": 0.9965555804591762,
+        "baseline_latency_ms": 1031.7568469876082,
+        "afd_latency_ms": 1035.3229335309252
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 2048,
+        "attention_ratio": 2,
+        "speedup": 0.9742709196476377,
+        "baseline_latency_ms": 3935.895726566373,
+        "afd_latency_ms": 4039.837017808003
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 4096,
+        "attention_ratio": 2,
+        "speedup": 1.034270247154862,
+        "baseline_latency_ms": 16471.173592572828,
+        "afd_latency_ms": 15925.405993146187
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 128,
+        "attention_ratio": 4,
+        "speedup": 1.0545967232146547,
+        "baseline_latency_ms": 0.3438697290131724,
+        "afd_latency_ms": 0.3260675113468758
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 512,
+        "attention_ratio": 4,
+        "speedup": 1.0171504124221251,
+        "baseline_latency_ms": 4.3723656052400335,
+        "afd_latency_ms": 4.298642120026462
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 0.991042563314613,
+        "baseline_latency_ms": 15.990588763709539,
+        "afd_latency_ms": 16.135118062162604
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 2048,
+        "attention_ratio": 4,
+        "speedup": 0.9942401952922836,
+        "baseline_latency_ms": 63.32166666403557,
+        "afd_latency_ms": 63.6884999860828
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 4096,
+        "attention_ratio": 4,
+        "speedup": 1.023374403218487,
+        "baseline_latency_ms": 253.07685066687452,
+        "afd_latency_ms": 247.29644387328247
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 128,
+        "attention_ratio": 4,
+        "speedup": 1.0379420727787039,
+        "baseline_latency_ms": 0.6731861480474816,
+        "afd_latency_ms": 0.6485777633478871
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 512,
+        "attention_ratio": 4,
+        "speedup": 0.9976465116079664,
+        "baseline_latency_ms": 8.533024705775345,
+        "afd_latency_ms": 8.55315445550164
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 0.9979810384826237,
+        "baseline_latency_ms": 32.13518259466084,
+        "afd_latency_ms": 32.200193546282854
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 2048,
+        "attention_ratio": 4,
+        "speedup": 0.9926668714452919,
+        "baseline_latency_ms": 126.61522959918932,
+        "afd_latency_ms": 127.55057435818475
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 4096,
+        "attention_ratio": 4,
+        "speedup": 0.9972969324220401,
+        "baseline_latency_ms": 497.950246201054,
+        "afd_latency_ms": 499.299887538739
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 128,
+        "attention_ratio": 4,
+        "speedup": 1.0385513294036326,
+        "baseline_latency_ms": 1.3643669981764543,
+        "afd_latency_ms": 1.3137212957590791
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 512,
+        "attention_ratio": 4,
+        "speedup": 1.000212493010563,
+        "baseline_latency_ms": 16.94445786982657,
+        "afd_latency_ms": 16.940858055896754
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 1.0147474553745044,
+        "baseline_latency_ms": 64.79270724129506,
+        "afd_latency_ms": 63.85106648765387
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 2048,
+        "attention_ratio": 4,
+        "speedup": 1.0225757664493194,
+        "baseline_latency_ms": 256.35231124642655,
+        "afd_latency_ms": 250.69273070743344
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 4096,
+        "attention_ratio": 4,
+        "speedup": 0.986412127444166,
+        "baseline_latency_ms": 1000.7986485781606,
+        "afd_latency_ms": 1014.5846961262233
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 128,
+        "attention_ratio": 4,
+        "speedup": 1.0281750172801385,
+        "baseline_latency_ms": 2.6822247875372507,
+        "afd_latency_ms": 2.608723945299331
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 512,
+        "attention_ratio": 4,
+        "speedup": 1.0008723195014027,
+        "baseline_latency_ms": 33.369227070291025,
+        "afd_latency_ms": 33.34014381266367
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 1.014468608425475,
+        "baseline_latency_ms": 132.41605179814522,
+        "afd_latency_ms": 130.52750050458835
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 2048,
+        "attention_ratio": 4,
+        "speedup": 1.020342073844745,
+        "baseline_latency_ms": 509.21751130408643,
+        "afd_latency_ms": 499.0654843677149
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 4096,
+        "attention_ratio": 4,
+        "speedup": 1.0084032282603617,
+        "baseline_latency_ms": 2023.3447337494808,
+        "afd_latency_ms": 2006.483792440884
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 128,
+        "attention_ratio": 4,
+        "speedup": 1.038691274431869,
+        "baseline_latency_ms": 5.487204176006199,
+        "afd_latency_ms": 5.282805691236335
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 512,
+        "attention_ratio": 4,
+        "speedup": 1.0343708955331066,
+        "baseline_latency_ms": 69.23256869581799,
+        "afd_latency_ms": 66.93205405797508
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 1.0557729017414546,
+        "baseline_latency_ms": 267.53047615176536,
+        "afd_latency_ms": 253.39774842722775
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 2048,
+        "attention_ratio": 4,
+        "speedup": 0.9651109180746825,
+        "baseline_latency_ms": 990.3214275126406,
+        "afd_latency_ms": 1026.1218777715737
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 4096,
+        "attention_ratio": 4,
+        "speedup": 1.0176495408587793,
+        "baseline_latency_ms": 4080.6510082067944,
+        "afd_latency_ms": 4009.8784938901395
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 128,
+        "attention_ratio": 4,
+        "speedup": 1.0208775129470589,
+        "baseline_latency_ms": 10.735102901998738,
+        "afd_latency_ms": 10.515564076838906
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 512,
+        "attention_ratio": 4,
+        "speedup": 1.0073612707659296,
+        "baseline_latency_ms": 139.14811475401063,
+        "afd_latency_ms": 138.13129290568395
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 0.9730784591988509,
+        "baseline_latency_ms": 515.6646512482973,
+        "afd_latency_ms": 529.931216104456
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 2048,
+        "attention_ratio": 4,
+        "speedup": 0.9625778132311351,
+        "baseline_latency_ms": 1944.9322488759542,
+        "afd_latency_ms": 2020.5454791725344
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 4096,
+        "attention_ratio": 4,
+        "speedup": 0.9984594718735874,
+        "baseline_latency_ms": 7952.708209096574,
+        "afd_latency_ms": 7964.978482475098
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 128,
+        "attention_ratio": 4,
+        "speedup": 1.035397568851712,
+        "baseline_latency_ms": 21.595395031706925,
+        "afd_latency_ms": 20.857104248039604
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 512,
+        "attention_ratio": 4,
+        "speedup": 1.0032626868217362,
+        "baseline_latency_ms": 271.3708824957845,
+        "afd_latency_ms": 270.4883636761852
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 1024,
+        "attention_ratio": 4,
+        "speedup": 0.9930070600861879,
+        "baseline_latency_ms": 1031.7568469876082,
+        "afd_latency_ms": 1039.0226700886267
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 2048,
+        "attention_ratio": 4,
+        "speedup": 0.9696160684666668,
+        "baseline_latency_ms": 3935.895726566373,
+        "afd_latency_ms": 4059.231127213606
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 4096,
+        "attention_ratio": 4,
+        "speedup": 1.0290426204547571,
+        "baseline_latency_ms": 16471.173592572828,
+        "afd_latency_ms": 16006.308451338822
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 128,
+        "attention_ratio": 8,
+        "speedup": 1.029177416324679,
+        "baseline_latency_ms": 0.3438697290131724,
+        "afd_latency_ms": 0.3341209431520312
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 512,
+        "attention_ratio": 8,
+        "speedup": 1.0354861658518906,
+        "baseline_latency_ms": 4.3723656052400335,
+        "afd_latency_ms": 4.222524403928569
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 1024,
+        "attention_ratio": 8,
+        "speedup": 0.987552526732443,
+        "baseline_latency_ms": 15.990588763709539,
+        "afd_latency_ms": 16.192139993422202
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 2048,
+        "attention_ratio": 8,
+        "speedup": 0.9977735168837367,
+        "baseline_latency_ms": 63.32166666403557,
+        "afd_latency_ms": 63.46296588608894
+      },
+      {
+        "batch_size": 1,
+        "sequence_length": 4096,
+        "attention_ratio": 8,
+        "speedup": 1.0200779454144793,
+        "baseline_latency_ms": 253.07685066687452,
+        "afd_latency_ms": 248.09560073769072
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 128,
+        "attention_ratio": 8,
+        "speedup": 1.0340145571852406,
+        "baseline_latency_ms": 0.6731861480474816,
+        "afd_latency_ms": 0.6510412676200673
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 512,
+        "attention_ratio": 8,
+        "speedup": 1.0181134467028885,
+        "baseline_latency_ms": 8.533024705775345,
+        "afd_latency_ms": 8.381212067681785
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 1024,
+        "attention_ratio": 8,
+        "speedup": 0.9875141922725734,
+        "baseline_latency_ms": 32.13518259466084,
+        "afd_latency_ms": 32.54148937415058
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 2048,
+        "attention_ratio": 8,
+        "speedup": 0.9932510903548858,
+        "baseline_latency_ms": 126.61522959918932,
+        "afd_latency_ms": 127.47555057196067
+      },
+      {
+        "batch_size": 2,
+        "sequence_length": 4096,
+        "attention_ratio": 8,
+        "speedup": 0.980058683018923,
+        "baseline_latency_ms": 497.950246201054,
+        "afd_latency_ms": 508.08207184818093
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 128,
+        "attention_ratio": 8,
+        "speedup": 1.0373523891671466,
+        "baseline_latency_ms": 1.3643669981764543,
+        "afd_latency_ms": 1.3152396547443788
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 512,
+        "attention_ratio": 8,
+        "speedup": 1.004515599019694,
+        "baseline_latency_ms": 16.94445786982657,
+        "afd_latency_ms": 16.868287447564434
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 1024,
+        "attention_ratio": 8,
+        "speedup": 0.9921159988864969,
+        "baseline_latency_ms": 64.79270724129506,
+        "afd_latency_ms": 65.30759237227831
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 2048,
+        "attention_ratio": 8,
+        "speedup": 1.0136373928560227,
+        "baseline_latency_ms": 256.35231124642655,
+        "afd_latency_ms": 252.90336865348738
+      },
+      {
+        "batch_size": 4,
+        "sequence_length": 4096,
+        "attention_ratio": 8,
+        "speedup": 0.9972140065407876,
+        "baseline_latency_ms": 1000.7986485781606,
+        "afd_latency_ms": 1003.5946567275039
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 128,
+        "attention_ratio": 8,
+        "speedup": 1.0049889985609655,
+        "baseline_latency_ms": 2.6822247875372507,
+        "afd_latency_ms": 2.668909601376636
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 512,
+        "attention_ratio": 8,
+        "speedup": 0.9745040564357378,
+        "baseline_latency_ms": 33.369227070291025,
+        "afd_latency_ms": 34.24226595047684
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 1024,
+        "attention_ratio": 8,
+        "speedup": 1.0149422521704299,
+        "baseline_latency_ms": 132.41605179814522,
+        "afd_latency_ms": 130.4665871530884
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 2048,
+        "attention_ratio": 8,
+        "speedup": 1.0223127466412827,
+        "baseline_latency_ms": 509.21751130408643,
+        "afd_latency_ms": 498.1034551090898
+      },
+      {
+        "batch_size": 8,
+        "sequence_length": 4096,
+        "attention_ratio": 8,
+        "speedup": 1.0128911265149891,
+        "baseline_latency_ms": 2023.3447337494808,
+        "afd_latency_ms": 1997.5935031745375
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 128,
+        "attention_ratio": 8,
+        "speedup": 1.0577913038898232,
+        "baseline_latency_ms": 5.487204176006199,
+        "afd_latency_ms": 5.187416606497014
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 512,
+        "attention_ratio": 8,
+        "speedup": 1.0305759441552518,
+        "baseline_latency_ms": 69.23256869581799,
+        "afd_latency_ms": 67.17852195993855
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 1024,
+        "attention_ratio": 8,
+        "speedup": 1.0205321378617118,
+        "baseline_latency_ms": 267.53047615176536,
+        "afd_latency_ms": 262.1480169280248
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 2048,
+        "attention_ratio": 8,
+        "speedup": 0.9875113433530973,
+        "baseline_latency_ms": 990.3214275126406,
+        "afd_latency_ms": 1002.8456221576166
+      },
+      {
+        "batch_size": 16,
+        "sequence_length": 4096,
+        "attention_ratio": 8,
+        "speedup": 1.022198905704762,
+        "baseline_latency_ms": 4080.6510082067944,
+        "afd_latency_ms": 3992.0322604859
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 128,
+        "attention_ratio": 8,
+        "speedup": 1.0147669273072024,
+        "baseline_latency_ms": 10.735102901998738,
+        "afd_latency_ms": 10.578885272193029
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 512,
+        "attention_ratio": 8,
+        "speedup": 1.0423258301457197,
+        "baseline_latency_ms": 139.14811475401063,
+        "afd_latency_ms": 133.49771321944252
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 1024,
+        "attention_ratio": 8,
+        "speedup": 1.0008508630968787,
+        "baseline_latency_ms": 515.6646512482973,
+        "afd_latency_ms": 515.2262642335184
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 2048,
+        "attention_ratio": 8,
+        "speedup": 0.9630396339002157,
+        "baseline_latency_ms": 1944.9322488759542,
+        "afd_latency_ms": 2019.576537051928
+      },
+      {
+        "batch_size": 32,
+        "sequence_length": 4096,
+        "attention_ratio": 8,
+        "speedup": 0.9896834889182633,
+        "baseline_latency_ms": 7952.708209096574,
+        "afd_latency_ms": 8035.607644408604
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 128,
+        "attention_ratio": 8,
+        "speedup": 1.0094982217134016,
+        "baseline_latency_ms": 21.595395031706925,
+        "afd_latency_ms": 21.392207105678185
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 512,
+        "attention_ratio": 8,
+        "speedup": 1.0080083698307591,
+        "baseline_latency_ms": 271.3708824957845,
+        "afd_latency_ms": 269.21490993308583
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 1024,
+        "attention_ratio": 8,
+        "speedup": 0.9965120573428986,
+        "baseline_latency_ms": 1031.7568469876082,
+        "afd_latency_ms": 1035.368151729831
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 2048,
+        "attention_ratio": 8,
+        "speedup": 0.9665908053437952,
+        "baseline_latency_ms": 3935.895726566373,
+        "afd_latency_ms": 4071.9358231081674
+      },
+      {
+        "batch_size": 64,
+        "sequence_length": 4096,
+        "attention_ratio": 8,
+        "speedup": 1.0192436344755318,
+        "baseline_latency_ms": 16471.173592572828,
+        "afd_latency_ms": 16160.192750233202
+      }
+    ]
+  }
+}
