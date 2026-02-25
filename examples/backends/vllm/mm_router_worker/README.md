@@ -160,14 +160,13 @@ python -m dynamo.vllm \
 
 Notes:
 - Current `dynamo.vllm` default component name is `backend` (used below by the MM router).
-- MM-aware routing depends on KV events from the vLLM worker. In current Dynamo builds, KV events are auto-configured when prefix caching is enabled (you may see a deprecation warning suggesting explicit `--kv-events-config` in future versions).
+- MM-aware routing depends on KV events from the vLLM worker. In current Dynamo builds, KV events are auto-configured when prefix caching is enabled.
 - When running multiple vLLM workers on the same host, each worker must use a unique KV events port (for example `20080`, `20081`) via `DYN_VLLM_KV_EVENT_PORT`; otherwise the second worker can fail with `Address already in use (addr='tcp://*:20080')`.
 
 ### Terminal 3: Start vLLM Worker #2 (backend)
 
 Start a second backend worker so we can verify the MM router picks the same
-worker again for a repeated multimodal request (instead of just having a single
-backend to choose from).
+worker again for a repeated multimodal request.
 
 ```bash
 cd "$DYNAMO_ROOT"
@@ -243,6 +242,15 @@ second request should typically be routed to the same backend and show higher
 cache reuse in scheduler logs (and possibly higher overlap in debug routing
 logs, if enabled).
 
+You can use the helper script:
+
+```bash
+./examples/backends/vllm/mm_router_worker/test_mm_request.sh
+./examples/backends/vllm/mm_router_worker/test_mm_request.sh
+```
+
+Or send the request manually:
+
 ```bash
 MODEL="$MODEL_NAME"
 IMAGE_URL="http://images.cocodataset.org/test2017/000000000001.jpg"
@@ -265,8 +273,7 @@ EOF
 ```
 
 Run the same `curl` command again. In the MM router worker logs (terminal 4),
-look for scheduler logs that show cached-block reuse. Depending on log level /
-build, the `[ROUTING] ... overlap` debug line may not be visible.
+look for scheduler logs that show cached-block reuse.
 
 Expected behavior:
 - First request: selected worker typically has low / zero `cached blocks`
@@ -282,31 +289,6 @@ DEBUG kv_router.select_worker: dynamo_llm::kv_router::push_router: [ROUTING] Bes
 ```
 
 The key signal is `cached blocks: 17` on the selected worker.
-
-### Example: Send the Same Request Twice
-
-This is the exact shape you can use (same payload twice):
-
-```bash
-MODEL="$MODEL_NAME"
-IMAGE_URL="http://images.cocodataset.org/test2017/000000000001.jpg"
-
-curl http://127.0.0.1:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  --data @- <<EOF | jq
-{
-    "model": "${MODEL}",
-    "messages": [{
-      "role": "user",
-      "content": [
-        {"type": "text", "text": "Describe this image"},
-        {"type": "image_url", "image_url": {"url": "${IMAGE_URL}"}}
-      ]
-    }],
-    "max_tokens": 100
-}
-EOF
-```
 
 If MM-aware routing and prefix reuse are working, after sending the same request twice you should typically observe:
 
