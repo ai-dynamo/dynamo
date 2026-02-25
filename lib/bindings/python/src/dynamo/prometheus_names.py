@@ -236,6 +236,11 @@ class router:
     INPUT_SEQUENCE_TOKENS = "router_input_sequence_tokens"
     # Output sequence length in tokens observed at the router
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
+    # TODO: Add REQUEST_DURATION_SECONDS = "router_request_duration_seconds" once
+    #       RouterRequestMetrics in lib/llm/src/kv_router/metrics.rs registers a
+    #       dynamo_component_router_request_duration_seconds histogram. Until then,
+    #       get_avg_request_duration (router path) falls back to the work_handler
+    #       constant and queries a non-existent metric, silently returning 0.
 
 
 class routing_overhead:
