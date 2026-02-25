@@ -48,6 +48,14 @@ pub enum PrefillError {
     NoDisaggregatedParams(String),
 }
 
+/// Result of the prefill phase in `generate()`.
+enum PrefillOutcome {
+    /// Bootstrap optimization: prefill spawned in background, bootstrap info ready
+    Bootstrap(BootstrapInfo),
+    /// Synchronous prefill completed with result
+    Completed(PrefillResult),
+}
+
 /// The inner router used by PrefillRouter
 #[derive(Clone)]
 enum InnerPrefillRouter {
@@ -193,7 +201,7 @@ impl PrefillRouter {
             "Activating prefill router"
         );
 
-        // Store endpoint_id for later use in build_bootstrap_info
+        // Store endpoint_id for later use in resolve_prefill_worker
         let _ = self.endpoint_id.set(endpoint.id());
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
@@ -270,10 +278,10 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Build bootstrap_info for disaggregated serving
+    /// Select a prefill worker and resolve its bootstrap connection info.
     /// If preselected_worker is provided (GAIE Stage 2), use it directly.
     /// Otherwise, query for the best worker (KV mode) or select next worker (non-KV modes).
-    async fn build_bootstrap_info(
+    async fn resolve_prefill_worker(
         &self,
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
@@ -503,7 +511,7 @@ impl PrefillRouter {
     /// Query the best prefill worker without executing a request.
     /// Returns (worker_id, dp_rank).
     ///
-    /// This is the shared worker selection logic used by both `build_bootstrap_info`
+    /// This is the shared worker selection logic used by both `resolve_prefill_worker`
     /// and `query_route`.
     pub async fn query_prefill_worker(
         &self,
@@ -601,23 +609,16 @@ impl
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
 
-        // Try build_bootstrap_info optimization: if we can get bootstrap info upfront,
+        // Try to resolve prefill worker upfront: if we can get bootstrap info early,
         // spawn prefill in background and proceed to decode immediately.
         let preselected_worker = prefill_req
             .routing
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
 
-        enum PrefillOutcome {
-            /// Bootstrap optimization: prefill spawned in background, bootstrap info ready
-            Bootstrap(BootstrapInfo),
-            /// Synchronous prefill completed with result
-            Completed(PrefillResult),
-        }
-
         let prefill_result = async {
             if let Some((worker_id, dp_rank, bootstrap_info)) = self
-                .build_bootstrap_info(&prefill_req, preselected_worker)
+                .resolve_prefill_worker(&prefill_req, preselected_worker)
                 .await
             {
                 // Bootstrap optimization path: spawn prefill in background
