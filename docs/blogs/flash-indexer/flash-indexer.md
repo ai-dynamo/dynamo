@@ -10,7 +10,7 @@ last-updated: February 23, 2026
 
 The **Flash Indexer** is a concurrent global index of every cached KV block across every inference worker, sustaining over **100 million operations per second**. It evolved through six iterations—from a Python dictionary to a jump-optimized spatial index—to the point where network latency, tokenization, and hashing are the bottlenecks. We're shipping it as the default indexer in Dynamo v1.0.0.
 
-For reference, a typical inference workload produces roughly one KV block per second (≈64 tokens). At 100 million index operations per second, the system could theoretically support on the order of 100 million concurrent workloads generating and querying blocks at that rate—well beyond current planetary-scale inference demand.
+For scale intuition: at 100M+ index ops/sec, the system can support approximately $$N \approx 10^8 / r$$ concurrent workloads, where $$r$$ is the workload's sustained index ops/sec (inserts + lookups) under real traffic, including bursty prefill, well beyond current planetary-scale inference demand.
 
 This post walks through those iterations—how each redesign drove a new order-of-magnitude improvement, and the specific data structure or concurrency breakthrough behind it.
 
@@ -67,7 +67,7 @@ Both paths are hot. Slow events mean stale routing decisions. Slow queries to th
 
 ### 2.1 Python Dictionary
 
-The simplest index: per worker, map local hash to the set of sequence hashes.
+The simplest possible index is a nested dictionary. For each worker, store a mapping from local block hash to the set of external sequence hashes that share that chunk hash. Since local hashes are chunk hashes, the same tokens can appear at different positions in different sequences, and a single local hash can map to multiple sequence hashes on the same worker. To find matches, iterate every worker and walk through the query sequence, checking for hits.
 
 ```py
 class KvIndex:
@@ -103,7 +103,7 @@ class KvIndex:
         return scores
 ```
 
-There is already a correctness issue. `local_hash in blocks` tells us the worker has *some* block with those tokens, but not *which* one—different sequences sharing the same chunk hash are conflated. This collision problem shapes every data structure decision that follows. This is `O(W × D)` per query (W workers, D query depth).
+There is a correctness issue with this approach. `local_hash in blocks` tells us the worker has *some* block with those tokens, but not *which* one—different sequences sharing the same chunk hash are conflated. This collision problem shapes every data structure decision that follows. This is `O(W × D)` per query (W workers, D query depth).
 
 With hundreds of workers and sequences thousands of blocks long, it's a non-starter.
 
@@ -115,7 +115,7 @@ Porting to Rust (`HashMap<WorkerId, HashMap<LocalHash, HashSet<ExternalHash>>>`)
 
 ## 3. Inverted Index
 
-`worker -> { hash -> ... }` forces `find_matches` to iterate every worker. But the question is *"which workers have this block?"*—keyed by block, not worker. Invert:
+`worker -> { hash -> ... }` forces `find_matches` to iterate every worker. But the question is *"which workers have this block?"*—keyed by block, not worker. Instead of iterating workers and checking blocks, build a forward index keyed by LocalHash that maps to the sequence hashes and their worker sets.
 
 ```rust
 // local_hash -> (seq_hash -> set of workers)
@@ -136,7 +136,7 @@ The radix tree resolves both.
 
 ## 4. Radix Tree
 
-A radix tree solves both problems. Each node has a small children map keyed by `LocalHash`, plus a worker set. Parent-child relationships scope collision risk: two blocks with the same chunk hash collide only if they share the same parent, which means the same prefix. Different prefixes lead to different parents. This requires one new field in KV events: the **parent hash**, so the tree can link child to parent as events arrive.
+Each node has a small children map keyed by `LocalHash`, plus a worker set. Parent-child relationships scope collision risk: two blocks with the same chunk hash collide only if they share the same parent, which means the same prefix. Different prefixes lead to different parents. This requires one new field in KV events: the **parent hash**, so the tree can link child to parent as events arrive.
 
 <Frame caption="Figure 3 — Prefix Tree Structure">
   <img src="./images/fig-3-prefix-tree.svg" alt="Prefix Tree Structure" style={{maxWidth: "420px", width: "100%"}} />
@@ -171,7 +171,7 @@ This approach remains single-threaded behind the actor, with serialized reads an
 
 ## 5. Concurrent Radix Tree
 
-Reads don't conflict with each other. Replace `Rc<RefCell<T>>` with `Arc<RwLock<T>>` (atomic reference counting + reader-writer lock). Now `find_matches` acquires only read locks and executes *inline on the caller's thread*—no channel, no actor, no queue.
+Reads don't conflict with each other. We replace `Rc<RefCell<T>>` with `Arc<RwLock<T>>` (atomic reference counting + reader-writer lock). Now `find_matches` acquires only read locks and executes *inline on the caller's thread*—no channel, no actor, no queue.
 
 Writes use **sticky routing**: a `ThreadPoolIndexer` deterministically assigns each `WorkerId` to one thread. Events for the same worker always land on the same thread, so there's no write-write contention on any worker's subtree.
 
