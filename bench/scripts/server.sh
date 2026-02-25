@@ -148,10 +148,9 @@ launch_scenario_3() {
     wait_for_port 4222 "nats-server"
 
     # Start dynamo frontend with vllm processor
-    # --chat-processor vllm enables vLLM's AsyncEngineArgs on the frontend parser,
-    # so --model is accepted to configure the tokenizer.
     python -m dynamo.frontend \
-        --chat-processor vllm \
+        --dyn-chat-processor vllm \
+        --dyn-preprocess-workers 32 \
         --model "$MODEL" &
     CHILD_PIDS+=($!)
     echo "[server.sh] dynamo.frontend (vllm processor) PID: ${CHILD_PIDS[-1]}"
