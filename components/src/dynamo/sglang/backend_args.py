@@ -95,6 +95,40 @@ class DynamoSGLangArgGroup(ArgGroup):
             help="Run as video generation worker for video generation (T2V/I2V).",
         )
 
+        # AFD (Attention-FFN Disaggregation) Options
+        afd_g = parser.add_argument_group("AFD (Attention-FFN Disaggregation) Options")
+        add_argument(
+            afd_g,
+            flag_name="--afd-attention-ratio",
+            env_var="DYN_SGL_AFD_ATTENTION_RATIO",
+            default=None,
+            type=int,
+            help="Number of Attention workers per FFN worker (r in r:1 AFD topology). Default: 1",
+        )
+        add_argument(
+            afd_g,
+            flag_name="--afd-ffn-endpoint",
+            env_var="DYN_SGL_AFD_FFN_ENDPOINT",
+            default=None,
+            help="Endpoint for FFN worker communication (used by Attention workers). Format: namespace.component.endpoint",
+        )
+        add_argument(
+            afd_g,
+            flag_name="--afd-microbatch-size",
+            env_var="DYN_SGL_AFD_MICROBATCH_SIZE",
+            default=256,
+            type=int,
+            help="Microbatch size for AFD pipelining. Default: 256",
+        )
+        add_argument(
+            afd_g,
+            flag_name="--afd-sync-timeout-ms",
+            env_var="DYN_SGL_AFD_SYNC_TIMEOUT_MS",
+            default=1000,
+            type=int,
+            help="Synchronization timeout in milliseconds for AFD workers. Default: 1000",
+        )
+
 
 class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
@@ -110,6 +144,12 @@ class DynamoSGLangConfig(ConfigBase):
     disagg_config_key: Optional[str] = None
 
     video_generation_worker: bool
+
+    # AFD (Attention-FFN Disaggregation) configuration
+    afd_attention_ratio: Optional[int] = None
+    afd_ffn_endpoint: Optional[str] = None
+    afd_microbatch_size: int = 256
+    afd_sync_timeout_ms: int = 1000
 
     def validate(self) -> None:
         if (self.disagg_config is not None) ^ (self.disagg_config_key is not None):

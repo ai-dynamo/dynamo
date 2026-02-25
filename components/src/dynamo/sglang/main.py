@@ -12,6 +12,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.init_afd import init_attention_worker, init_ffn_worker
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
@@ -108,6 +109,22 @@ async def worker():
             )
     elif config.dynamo_args.diffusion_worker:
         await init_llm_diffusion(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            run_deferred_handlers,
+        )
+    elif config.serving_mode == DisaggregationMode.ATTENTION:
+        await init_attention_worker(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            run_deferred_handlers,
+        )
+    elif config.serving_mode == DisaggregationMode.FFN:
+        await init_ffn_worker(
             runtime,
             config,
             shutdown_event,
