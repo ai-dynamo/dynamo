@@ -183,6 +183,18 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub bootstrap_port: Option<u16>,
 
+    /// KV cache bytes per token, auto-computed from model config by Python CLI.
+    /// Formula: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
+    #[builder(default = "None")]
+    pub kv_bytes_per_token: Option<usize>,
+
+    /// KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation.
+    /// Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay.
+    /// For intra-node NVLink, typical value is ~450.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub kv_transfer_bandwidth: Option<f64>,
+
     /// Reasoning/thinking token configuration.
     /// When set, the mocker wraps output in thinking boundary tokens.
     #[builder(default = "None")]
@@ -245,6 +257,8 @@ impl MockEngineArgs {
             "planner_profile_data",
             "enable_local_indexer",
             "bootstrap_port",
+            "kv_bytes_per_token",
+            "kv_transfer_bandwidth",
             "reasoning",
             "zmq_kv_events_port",
         ]
@@ -338,6 +352,18 @@ impl MockEngineArgs {
             && let Some(port) = value.as_u64()
         {
             builder = builder.bootstrap_port(Some(port as u16));
+        }
+
+        if let Some(value) = extra_args.get("kv_bytes_per_token")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.kv_bytes_per_token(Some(num as usize));
+        }
+
+        if let Some(value) = extra_args.get("kv_transfer_bandwidth")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.kv_transfer_bandwidth(Some(num));
         }
 
         if let Some(value) = extra_args.get("reasoning") {
