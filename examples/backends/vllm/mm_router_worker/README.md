@@ -220,7 +220,7 @@ python -m examples.backends.vllm.mm_router_worker \
 
 ### Terminal 5: Start Frontend
 
-Use `round-robin` here so the frontend routes to the MM router worker; the MM router itself performs KV-aware routing to vLLM backends.
+`--router-mode round-robin` is used here  rather than `--router-mode kv` because the MM router worker will be the one handling the KV routing logic. If there are multiple replicas of the MM router worker, the frontend will route in round-robin order between them. The MM router worker itself will perform KV-aware routing to the vLLM backend workers.
 
 ```bash
 cd "$DYNAMO_ROOT"
