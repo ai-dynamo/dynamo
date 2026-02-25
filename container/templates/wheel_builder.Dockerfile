@@ -326,6 +326,7 @@ COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels. The caches do not need the "shared" lock because Cargo has its own locking mechanism.
 ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     --mount=type=cache,target=/root/.cargo/registry \
