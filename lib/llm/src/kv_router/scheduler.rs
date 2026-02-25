@@ -408,11 +408,7 @@ impl WorkerSelector for DefaultWorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
 
-        let allowed_ids = request.allowed_worker_ids.as_ref();
-
-        if allowed_ids.map_or(workers.is_empty(), |ids| {
-            !workers.keys().any(|wid| ids.contains(wid))
-        }) {
+        if workers.is_empty() {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
@@ -432,10 +428,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             .and_then(|cfg| cfg.overlap_score_weight)
             .unwrap_or(self.kv_router_config.overlap_score_weight);
 
-        for (worker_id, config) in workers
-            .iter()
-            .filter(|(wid, _)| allowed_ids.is_none_or(|ids| ids.contains(wid)))
-        {
+        for (worker_id, config) in workers.iter() {
             let data_parallel_size = config.data_parallel_size;
 
             for dp_rank in 0..data_parallel_size {

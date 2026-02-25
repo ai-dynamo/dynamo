@@ -2,17 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
 use super::WorkerSelector;
-use super::protocols::WorkerWithDpRank;
+use super::protocols::{WorkerId, WorkerWithDpRank};
 use super::scheduler::{SchedulingRequest, SchedulingResponse};
 use super::sequence::{ActiveSequencesMultiWorker, SequenceRequest};
 use crate::discovery::RuntimeConfigWatch;
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
@@ -144,9 +145,11 @@ impl SchedulerQueue {
         request.prefill_tokens = prefill_tokens;
 
         let selection = {
-            let workers = self.workers_with_configs.borrow();
+            let discovery_workers = self.workers_with_configs.borrow();
+            let effective_workers =
+                build_effective_workers(&request.allowed_worker_ids, &discovery_workers);
             self.selector
-                .select_worker(&workers, &request, self.block_size)
+                .select_worker(&effective_workers, &request, self.block_size)
         };
 
         let selection = match selection {
@@ -210,5 +213,28 @@ impl SchedulerQueue {
             }
         }
         true
+    }
+}
+
+/// Build the effective worker map for a scheduling decision.
+///
+/// When `epp_worker_ids` is `Some`, the EPP-provided pods define the worker set.
+/// Configs are looked up from discovery; workers not yet discovered get a default config.
+///
+/// When `epp_worker_ids` is `None`, the discovery worker map is used as-is.
+fn build_effective_workers(
+    epp_worker_ids: &Option<std::collections::HashSet<WorkerId>>,
+    discovery_workers: &HashMap<WorkerId, ModelRuntimeConfig>,
+) -> HashMap<WorkerId, ModelRuntimeConfig> {
+    match epp_worker_ids {
+        Some(epp_ids) => {
+            let mut workers = HashMap::with_capacity(epp_ids.len());
+            for &id in epp_ids {
+                let config = discovery_workers.get(&id).cloned().unwrap_or_default();
+                workers.insert(id, config);
+            }
+            workers
+        }
+        None => discovery_workers.clone(),
     }
 }
