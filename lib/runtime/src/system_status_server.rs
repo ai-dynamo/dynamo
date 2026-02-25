@@ -288,10 +288,9 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 /// Metrics handler with DistributedRuntime uptime
 #[tracing::instrument(skip_all, level = "trace")]
 async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
-    // Update the uptime gauge with current value
-    state.drt().system_health().lock().update_uptime_gauge();
-
     // Get all metrics from the DistributedRuntime.
+    // The uptime gauge is updated automatically via a PrometheusUpdateCallback
+    // registered in DistributedRuntime::new(), so it is always fresh before scrape.
     //
     // NOTE: We use a multi-registry model (e.g. one registry per endpoint) and merge at scrape time,
     // so /metrics traverses registered child registries and produces a single combined output.
