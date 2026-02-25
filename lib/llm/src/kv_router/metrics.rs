@@ -24,7 +24,7 @@ fn router_metric(suffix: &str) -> String {
     format!("{}{}", router_request::METRIC_PREFIX, suffix)
 }
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use prometheus::{IntGaugeVec, Opts};
+use prometheus::{HistogramOpts, IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
 
