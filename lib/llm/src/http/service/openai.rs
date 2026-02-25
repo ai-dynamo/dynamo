@@ -1333,6 +1333,9 @@ async fn responses(
         tools: request.inner.tools.clone(),
         tool_choice: request.inner.tool_choice.clone(),
         instructions: request.inner.instructions.clone(),
+        reasoning: request.inner.reasoning.clone(),
+        text: request.inner.text.clone(),
+        service_tier: request.inner.service_tier,
     };
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
@@ -1557,24 +1560,9 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
         ));
     }
-    if inner.reasoning.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`reasoning` is not supported.",
-        ));
-    }
-    if inner.service_tier.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`service_tier` is not supported.",
-        ));
-    }
     if inner.store == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`store: true` is not supported.",
-        ));
-    }
-    if inner.text.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`text` is not supported.",
         ));
     }
     if inner.truncation.is_some() {
@@ -2178,24 +2166,7 @@ mod tests {
                     })
                 }),
             ),
-            (
-                "reasoning",
-                Box::new(|r| r.reasoning = Some(Default::default())),
-            ),
-            (
-                "service_tier",
-                Box::new(|r| r.service_tier = Some(ServiceTier::Auto)),
-            ),
             ("store", Box::new(|r| r.store = Some(true))),
-            (
-                "text",
-                Box::new(|r| {
-                    r.text = Some(TextConfig {
-                        format: TextResponseFormat::Text,
-                        verbosity: None,
-                    })
-                }),
-            ),
             (
                 "truncation",
                 Box::new(|r| r.truncation = Some(Truncation::Auto)),
