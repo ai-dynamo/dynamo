@@ -199,22 +199,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         logger.debug(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
         logger.debug("Multimodal data keys: %s", list(multi_modal_data.keys()))
 
-    # ── Response serialization ───────────────────────────────────────
-
-    @staticmethod
-    def _serialize_response(response) -> str:
-        """Build a JSON-serialized ``MyRequestOutput`` from an engine response."""
-        return MyRequestOutput(
-            request_id=response.request_id,
-            prompt=response.prompt,
-            prompt_token_ids=response.prompt_token_ids,
-            prompt_logprobs=response.prompt_logprobs,
-            outputs=response.outputs,
-            finished=response.finished,
-            metrics=response.metrics,
-            kv_transfer_params=response.kv_transfer_params,
-        ).model_dump_json()
-
     @staticmethod
     def _format_engine_output(
         response, num_output_tokens_so_far: int
@@ -346,13 +330,16 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 f"— ensure the same adapter is loaded on the decode worker."
             )
 
+        num_output_tokens_so_far = 0
         async for (
             decode_response
         ) in await self.decode_worker_client.round_robin(  # type: ignore[union-attr]
             request.model_dump_json()
         ):
             output = MyRequestOutput.model_validate_json(decode_response.data())  # type: ignore[attr-defined]
-            yield self._serialize_response(output)
+            yield self._format_engine_output(output, num_output_tokens_so_far)
+            if output.outputs:
+                num_output_tokens_so_far = len(output.outputs[0].token_ids)
 
     # ── Public entry point ───────────────────────────────────────────
 

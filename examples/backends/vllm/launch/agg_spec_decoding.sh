@@ -25,5 +25,4 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
         "num_speculative_tokens": 2,
         "method": "eagle"
     }' \
-    --connector none \
     --gpu-memory-utilization 0.8

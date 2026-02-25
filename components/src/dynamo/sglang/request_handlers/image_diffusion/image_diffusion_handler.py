@@ -160,10 +160,13 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             sampling_params_kwargs=args,
         )
 
+        # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
         if result is None:
             raise RuntimeError("No result from generator")
+        if isinstance(result, list):
+            result = result[0]
 
-        images = result["frames"] if "frames" in result else []
+        images = result.frames if result.frames else []
 
         # Convert images to bytes (handle PIL Images, numpy arrays, or bytes)
         image_bytes_list = []
