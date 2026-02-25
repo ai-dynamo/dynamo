@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 
+import numpy as np
 import pybase64
 import requests
 
@@ -112,8 +113,6 @@ def start_sglang_backend():
 
 def validate_routed_experts(routed_experts):
     """Check that routed_experts is a base64-encoded string of int32 expert IDs."""
-    import numpy as np
-
     assert isinstance(
         routed_experts, str
     ), f"Expected base64 string, got {type(routed_experts)}"
