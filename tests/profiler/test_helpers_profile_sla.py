@@ -27,7 +27,6 @@ try:
     from dynamo.profiler.profile_sla import (
         _assemble_final_config,
         _extract_profiler_params,
-        _run_gate_checks,
         _write_final_output,
     )
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
@@ -42,6 +41,7 @@ try:
         SLASpec,
         WorkloadSpec,
     )
+    from dynamo.profiler.utils.dgdr_validate import run_gate_checks
     from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError as e:
     pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
@@ -159,7 +159,7 @@ class TestExtractProfilerParams:
 
 
 # ---------------------------------------------------------------------------
-# _run_gate_checks
+# run_gate_checks
 # ---------------------------------------------------------------------------
 
 
@@ -170,7 +170,7 @@ class TestRunGateChecks:
         """THOROUGH + 'auto' backend is rejected."""
         dgdr = _make_dgdr()
         with pytest.raises(ValueError, match="does not support 'auto' backend"):
-            _run_gate_checks(
+            run_gate_checks(
                 dgdr,
                 aic_supported=True,
                 search_strategy=SearchStrategy.THOROUGH,
@@ -182,7 +182,7 @@ class TestRunGateChecks:
     def test_thorough_concrete_backend_passes(self):
         """THOROUGH + concrete backend is fine."""
         dgdr = _make_dgdr()
-        _run_gate_checks(
+        run_gate_checks(
             dgdr,
             aic_supported=True,
             search_strategy=SearchStrategy.THOROUGH,
@@ -194,7 +194,7 @@ class TestRunGateChecks:
     def test_rapid_auto_backend_passes(self):
         """RAPID allows 'auto' backend."""
         dgdr = _make_dgdr()
-        _run_gate_checks(
+        run_gate_checks(
             dgdr,
             aic_supported=False,
             search_strategy=SearchStrategy.RAPID,
@@ -206,7 +206,7 @@ class TestRunGateChecks:
     def test_no_planner_aic_unsupported_passes(self):
         """No planner, AIC unsupported — no error."""
         dgdr = _make_dgdr()
-        _run_gate_checks(
+        run_gate_checks(
             dgdr,
             aic_supported=False,
             search_strategy=SearchStrategy.RAPID,
@@ -228,7 +228,7 @@ class TestRunGateChecks:
         with pytest.raises(
             ValueError, match="Throughput-based planner scaling requires AIC support"
         ):
-            _run_gate_checks(
+            run_gate_checks(
                 dgdr,
                 aic_supported=False,
                 search_strategy=SearchStrategy.RAPID,
@@ -246,7 +246,7 @@ class TestRunGateChecks:
             backend="vllm",
         )
         dgdr = _make_dgdr(features=FeaturesSpec(planner=planner))
-        _run_gate_checks(
+        run_gate_checks(
             dgdr,
             aic_supported=False,
             search_strategy=SearchStrategy.RAPID,
@@ -265,7 +265,7 @@ class TestRunGateChecks:
             pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
         )
         dgdr = _make_dgdr(features=FeaturesSpec(planner=planner))
-        _run_gate_checks(
+        run_gate_checks(
             dgdr,
             aic_supported=True,
             search_strategy=SearchStrategy.RAPID,

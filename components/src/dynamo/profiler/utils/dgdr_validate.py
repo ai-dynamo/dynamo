@@ -28,11 +28,13 @@ from __future__ import annotations
 import logging
 
 from dynamo.planner.utils.planner_config import PlannerPreDeploymentSweepMode
+from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     SLASpec,
     WorkloadSpec,
 )
+from dynamo.profiler.utils.profile_common import is_planner_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +121,48 @@ def _validate_sla(sla: SLASpec) -> None:
     if not has_ttft_itl:
         raise ValueError(
             "Either both 'ttft' and 'itl', or 'e2eLatency', must be provided in the SLA spec."
+        )
+
+
+def run_gate_checks(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    aic_supported: bool,
+    search_strategy: SearchStrategy,
+    backend: str,
+) -> None:
+    """Raise ValueError or log warnings for unsupported combos.
+
+    Must be called after ``validate_dgdr_for_profiler``.
+    """
+    if is_planner_enabled(dgdr) and not aic_supported:
+        model = dgdr.model
+        system = dgdr.hardware.gpuSku.lower()
+        planner_cfg = dgdr.features.planner
+        if planner_cfg.enable_throughput_scaling:
+            raise ValueError(
+                "Throughput-based planner scaling requires AIC support, but "
+                f"{model} on {system}/{backend} is not supported by AIC. "
+                "Use a supported model/hardware/backend combination or disable throughput scaling."
+            )
+        if (
+            planner_cfg.pre_deployment_sweeping_mode
+            == PlannerPreDeploymentSweepMode.Rapid
+        ):
+            logger.warning(
+                "Planner pre-deployment sweeping mode is 'rapid' but AIC does not support "
+                "%s on %s/%s. Falling back to 'none' (no pre-deployment sweeping).",
+                model,
+                system,
+                backend,
+            )
+            planner_cfg.pre_deployment_sweeping_mode = (
+                PlannerPreDeploymentSweepMode.None_
+            )
+
+    if search_strategy == SearchStrategy.THOROUGH and backend == "auto":
+        raise ValueError(
+            "THOROUGH search strategy does not support 'auto' backend. "
+            "Please specify a concrete backend (trtllm, vllm, sglang)."
         )
 
 
