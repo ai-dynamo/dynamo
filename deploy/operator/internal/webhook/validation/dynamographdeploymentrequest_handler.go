@@ -94,22 +94,7 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context
 
 	// Create validator and perform validation
 	validator := NewDynamoGraphDeploymentRequestValidator(newRequest, h.isClusterWideOperator, h.gpuDiscoveryEnabled)
-
-	// Validate stateless rules
-	warnings, err := validator.Validate()
-	if err != nil {
-		return warnings, err
-	}
-
-	// Validate stateful rules (immutability)
-	updateWarnings, err := validator.ValidateUpdate(oldRequest)
-	if err != nil {
-		return updateWarnings, err
-	}
-
-	// Combine warnings
-	warnings = append(warnings, updateWarnings...)
-	return warnings, nil
+	return validator.ValidateUpdate(oldRequest)
 }
 
 // ValidateDelete validates a DynamoGraphDeploymentRequest delete request.
