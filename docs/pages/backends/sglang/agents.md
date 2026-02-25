@@ -181,7 +181,7 @@ python -m dynamo.frontend \
 
 | Environment Variable | Type | Default | Description |
 |---------------------|------|---------|-------------|
-| `SGLANG_HICACHE_MAX_PINNED_RATIO` | `float` | `0.0` | Max fraction of cache tokens that can be pinned. Must be in `[0, 1)`. `0` disables pinning entirely. Recommended: `0.1` (10% of cache). |
+| `SGLANG_HICACHE_MAX_PINNED_RATIO` | `float` | `0.0` | Max fraction of cache tokens that can be pinned. Must be in `[0, 1)`. `0` disables pinning entirely. |
 
 HiCache is required (`--enable-hierarchical-cache`). Without it, the scheduler rejects PIN requests. For best results, use `write_through` so that pinned nodes demote to host memory instead of being deleted when GPU memory fills:
 
@@ -244,9 +244,11 @@ response = client.chat.completions.create(
     }
 )
 
-# Consume the response...
+# Collect the assistant reply
+assistant_response = ""
 for chunk in response:
-    pass
+    if chunk.choices[0].delta.content:
+        assistant_response += chunk.choices[0].delta.content
 
 # Later turns reuse the pinned prefix -- even after heavy load from
 # other requests, the KV cache for this conversation is preserved.
