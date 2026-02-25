@@ -61,15 +61,21 @@ async def init_decode(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    pre_created_engine: sgl.Engine | None = None,
 ):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    start_time = time.time()
-    engine = sgl.Engine(server_args=server_args)
-    load_time = time.time() - start_time
+    # Use pre-created engine if provided (checkpoint/restore mode)
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+        load_time = 0.0
+    else:
+        start_time = time.time()
+        engine = sgl.Engine(server_args=server_args)
+        load_time = time.time() - start_time
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
@@ -145,13 +151,18 @@ async def init_prefill(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    pre_created_engine: sgl.Engine | None = None,
 ):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    engine = sgl.Engine(server_args=server_args)
+    # Use pre-created engine if provided (checkpoint/restore mode)
+    if pre_created_engine is not None:
+        engine = pre_created_engine
+    else:
+        engine = sgl.Engine(server_args=server_args)
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
