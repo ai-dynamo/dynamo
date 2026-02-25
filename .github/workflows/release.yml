@@ -9,10 +9,39 @@ on:
       - 'release/*'
   workflow_dispatch:
     inputs:
+      action:
+        description: 'Action to perform: release-ci (default) runs CI/build/publish; version-bump runs the version bump script only.'
+        required: true
+        type: choice
+        options:
+          - release-ci
+          - version-bump
+        default: release-ci
       rc_number:
-        description: 'RC number (e.g., 0 for rc0). Leave empty to auto-increment.'
+        description: 'RC number (e.g., 0 for rc0). Leave empty to auto-increment. Only used with release-ci action.'
         required: false
         type: string
+      # Component scope controls for version-bump action (post-releases)
+      update_core:
+        description: 'Update core version files (pyproject.toml, Cargo.toml, setup.py). Only used with version-bump action.'
+        required: false
+        type: boolean
+        default: true
+      update_containers:
+        description: 'Update container image tags across docs, recipes, examples. Only used with version-bump action.'
+        required: false
+        type: boolean
+        default: true
+      update_helm:
+        description: 'Update Helm Chart.yaml versions. Only used with version-bump action.'
+        required: false
+        type: boolean
+        default: true
+      update_docs:
+        description: 'Update reference docs (support-matrix, feature-matrix, release-artifacts). Only used with version-bump action.'
+        required: false
+        type: boolean
+        default: true
 
 # Note: workflow_dispatch can only be triggered from release/* branches
 # This is enforced in the prepare-release job via branch validation
@@ -21,10 +50,160 @@ permissions:
   contents: write
 
 jobs:
+  # =========================================================================
+  # Version Bump Job (Phase 1) - Only runs on workflow_dispatch with action=version-bump
+  # Bumps all version references on the release branch before tagging.
+  # Uses automated-release environment to bypass branch protection.
+  # =========================================================================
+  version-bump:
+    name: Version Bump (Release Branch Prep)
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'version-bump'
+    runs-on: ubuntu-latest
+    environment: automated-release
+    steps:
+      - name: Validate branch
+        run: |
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          # Accept release/X.Y.Z or release/X.Y.Z.postN
+          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
+            echo "::error::version-bump can only run on release/* branches (current: $BRANCH_NAME)"
+            exit 1
+          fi
+          VERSION="${BRANCH_NAME#release/}"
+          echo "version=$VERSION" >> $GITHUB_ENV
+          echo "branch=$BRANCH_NAME" >> $GITHUB_ENV
+          echo "Version: $VERSION, Branch: $BRANCH_NAME"
+
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: deploy/operator/go.mod
+
+      - name: Install tools (yq, controller-gen, helm-docs)
+        run: |
+          # yq
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+          # controller-gen
+          cd deploy/operator && make controller-gen && cd ../..
+
+          # helm-docs
+          HELM_DOCS_VERSION="1.14.2"
+          curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xzf - helm-docs
+          sudo mv helm-docs /usr/local/bin/
+
+      - name: Extract backend metadata from context.yaml
+        id: metadata
+        run: |
+          set -euo pipefail
+          CTX="container/context.yaml"
+
+          VLLM_VER=$(yq '.vllm.vllm_ref' "$CTX" | sed 's/^v//')
+          echo "vllm_version=$VLLM_VER" >> $GITHUB_OUTPUT
+
+          SGLANG_TAG=$(yq '.sglang."cuda12.9".runtime_image_tag // .sglang.runtime_image_tag // ""' "$CTX")
+          SGLANG_VER=$(echo "$SGLANG_TAG" | sed 's/^v//; s/-cu[0-9]*-runtime$//; s/-runtime$//')
+          echo "sglang_version=$SGLANG_VER" >> $GITHUB_OUTPUT
+
+          TRTLLM_WHEEL=$(yq '.trtllm.pip_wheel' "$CTX")
+          TRTLLM_VER=$(echo "$TRTLLM_WHEEL" | sed 's/.*==//')
+          echo "trtllm_version=$TRTLLM_VER" >> $GITHUB_OUTPUT
+
+          NIXL_VER=$(yq '.dynamo.nixl_ref' "$CTX")
+          echo "nixl_version=$NIXL_VER" >> $GITHUB_OUTPUT
+
+          CUDA_VLLM=$(yq '[.vllm | keys | .[] | select(test("^cuda"))] | map(sub("^cuda"; "")) | join(",")' "$CTX")
+          echo "cuda_versions_vllm=$CUDA_VLLM" >> $GITHUB_OUTPUT
+
+          CUDA_SGLANG=$(yq '[.sglang | keys | .[] | select(test("^cuda"))] | map(sub("^cuda"; "")) | join(",")' "$CTX")
+          echo "cuda_versions_sglang=$CUDA_SGLANG" >> $GITHUB_OUTPUT
+
+          TRTLLM_RUNTIME_TAG=$(yq '.trtllm.runtime_image_tag' "$CTX")
+          CUDA_TRTLLM=$(echo "$TRTLLM_RUNTIME_TAG" | grep -oP 'cuda\K[\d.]+')
+          echo "cuda_versions_trtllm=$CUDA_TRTLLM" >> $GITHUB_OUTPUT
+
+          RELEASE_DATE=$(date "+%b %d, %Y")
+          echo "release_date=$RELEASE_DATE" >> $GITHUB_OUTPUT
+
+          echo "=== Backend Metadata ==="
+          echo "  vLLM: $VLLM_VER | SGLang: $SGLANG_VER | TRT-LLM: $TRTLLM_VER | NIXL: $NIXL_VER"
+
+      - name: Build skip flags
+        id: flags
+        run: |
+          SKIP_FLAGS=""
+          if [ "${{ inputs.update_core }}" = "false" ]; then
+            SKIP_FLAGS="$SKIP_FLAGS --skip-core"
+          fi
+          if [ "${{ inputs.update_containers }}" = "false" ]; then
+            SKIP_FLAGS="$SKIP_FLAGS --skip-containers"
+          fi
+          if [ "${{ inputs.update_helm }}" = "false" ]; then
+            SKIP_FLAGS="$SKIP_FLAGS --skip-helm"
+          fi
+          if [ "${{ inputs.update_docs }}" = "false" ]; then
+            SKIP_FLAGS="$SKIP_FLAGS --skip-docs"
+          fi
+          echo "skip_flags=$SKIP_FLAGS" >> $GITHUB_OUTPUT
+          echo "Skip flags: ${SKIP_FLAGS:-none (full update)}"
+
+      - name: Run version bump script
+        run: |
+          python3 .github/scripts/bump_version.py \
+            --new-version "${{ env.version }}" \
+            --vllm-version "${{ steps.metadata.outputs.vllm_version }}" \
+            --sglang-version "${{ steps.metadata.outputs.sglang_version }}" \
+            --trtllm-version "${{ steps.metadata.outputs.trtllm_version }}" \
+            --nixl-version "${{ steps.metadata.outputs.nixl_version }}" \
+            --cuda-versions-vllm "${{ steps.metadata.outputs.cuda_versions_vllm }}" \
+            --cuda-versions-sglang "${{ steps.metadata.outputs.cuda_versions_sglang }}" \
+            --cuda-versions-trtllm "${{ steps.metadata.outputs.cuda_versions_trtllm }}" \
+            --release-date "${{ steps.metadata.outputs.release_date }}" \
+            ${{ steps.flags.outputs.skip_flags }}
+
+      - name: Regenerate CRDs
+        working-directory: deploy/operator
+        run: |
+          make generate
+          make manifests
+
+      - name: Regenerate Helm docs
+        working-directory: deploy/helm/charts/platform
+        run: helm-docs
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -s -m "chore: bump version references to ${{ env.version }}"
+            git push
+            echo "✅ Version bump committed to ${{ env.branch }}"
+          fi
+
+  # =========================================================================
+  # Existing Release CI/Publish Jobs (unchanged, gated to skip version-bump)
+  # =========================================================================
+
   # Gate job for manual triggers - requires automated-release approval
   manual-approval:
     name: Approve Manual Run
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.action != 'version-bump'
     runs-on: ubuntu-latest
     environment: automated-release
     steps:
@@ -48,17 +227,17 @@ jobs:
 
           # Enforce workflow_dispatch only runs on release/* branches
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
               echo "Error: workflow_dispatch can only be triggered from release/* branches"
               echo "Current branch: $BRANCH_NAME"
-              echo "Expected pattern: release/X.Y.Z (e.g., release/0.7.0)"
+              echo "Expected pattern: release/X.Y.Z or release/X.Y.Z.postN (e.g., release/0.7.0)"
               exit 1
             fi
           fi
 
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
             echo "Error: Invalid version format: $VERSION"
-            echo "Expected format: X.Y.Z (e.g., 0.7.0)"
+            echo "Expected format: X.Y.Z or X.Y.Z.postN (e.g., 0.7.0, 0.9.0.post1)"
             exit 1
           fi
 
@@ -71,10 +250,12 @@ jobs:
     name: Release CI
     needs: [prepare-release, manual-approval]
     # Run if: prepare-release succeeded AND (push event OR manual-approval succeeded)
+    # Skip if version-bump action was selected
     if: |
       always() &&
       needs.prepare-release.result == 'success' &&
-      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+      (github.event_name == 'push' || needs.manual-approval.result == 'success') &&
+      (github.event_name != 'workflow_dispatch' || inputs.action != 'version-bump')
     uses: ./.github/workflows/ci-test-suite.yml
     with:
       pipeline_type: release
@@ -103,7 +284,8 @@ jobs:
     if: |
       always() &&
       needs.prepare-release.result == 'success' &&
-      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+      (github.event_name == 'push' || needs.manual-approval.result == 'success') &&
+      (github.event_name != 'workflow_dispatch' || inputs.action != 'version-bump')
     uses: ./.github/workflows/build-frontend-image.yaml
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
