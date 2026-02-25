@@ -622,8 +622,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register the DGDR conversion webhook using the hub version (v1beta1).
 	if err = ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}).
+		For(&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 		Complete(); err != nil {
 		setupLog.Error(err, "unable to register conversion webhook", "webhook", "DynamoGraphDeploymentRequest-conversion")
 		os.Exit(1)
