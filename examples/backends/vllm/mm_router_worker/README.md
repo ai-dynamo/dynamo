@@ -45,7 +45,7 @@ Throughout this README, assume:
 
 ```bash
 export DYNAMO_ROOT=/path/to/dynamo
-export MODEL_NAME=Qwen/Qwen3-VL-8B-Instruct
+export MODEL_NAME=Qwen/Qwen3-VL-2B-Instruct
 ```
 
 This guide assumes Dynamo is already installed in your current Python environment.
@@ -113,7 +113,7 @@ MODEL="$MODEL_NAME" HTTP_PORT=8001 ./launch.sh
 
 ### Quick Try (Manual, Step-by-Step)
 
-Open 4 terminals.
+Open 5 terminals.
 
 ### Terminal 1: Start `etcd` + `NATS`
 
@@ -124,7 +124,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ### Common Environment (all runtime terminals)
 
-Use the same environment in terminals 2/3/4:
+Use the same environment in terminals 2/3/4/5:
 
 ```bash
 cd "$DYNAMO_ROOT"
@@ -135,7 +135,7 @@ export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
 ```
 
-### Terminal 2: Start vLLM Worker (backend)
+### Terminal 2: Start vLLM Worker #1 (backend)
 
 Use the same model string here and in the MM router.
 
@@ -146,9 +146,12 @@ export DYN_NAMESPACE=dynamo
 export DYN_REQUEST_PLANE=nats
 export NATS_SERVER=nats://127.0.0.1:4222
 export ETCD_ENDPOINTS=http://127.0.0.1:2379
+export DYN_SYSTEM_PORT=18081
+export DYN_VLLM_KV_EVENT_PORT=20080
 
 python -m dynamo.vllm \
   --model "$MODEL_NAME" \
+  --served-model-name "${MODEL_NAME}__internal_1" \
   --enable-multimodal \
   --enforce-eager \
   --gpu-memory-utilization 0.85 \
@@ -158,12 +161,50 @@ python -m dynamo.vllm \
 Notes:
 - Current `dynamo.vllm` default component name is `backend` (used below by the MM router).
 - MM-aware routing depends on KV events from the vLLM worker. In current Dynamo builds, KV events are auto-configured when prefix caching is enabled (you may see a deprecation warning suggesting explicit `--kv-events-config` in future versions).
+- When running multiple vLLM workers on the same host, each worker must use a unique KV events port (for example `20080`, `20081`) via `DYN_VLLM_KV_EVENT_PORT`; otherwise the second worker can fail with `Address already in use (addr='tcp://*:20080')`.
 
-### Terminal 3: Start MM Router Worker (vLLM)
+### Terminal 3: Start vLLM Worker #2 (backend)
+
+Start a second backend worker so we can verify the MM router picks the same
+worker again for a repeated multimodal request (instead of just having a single
+backend to choose from).
+
+```bash
+cd "$DYNAMO_ROOT"
+
+export DYN_NAMESPACE=dynamo
+export DYN_REQUEST_PLANE=nats
+export NATS_SERVER=nats://127.0.0.1:4222
+export ETCD_ENDPOINTS=http://127.0.0.1:2379
+export DYN_SYSTEM_PORT=18083
+export DYN_VLLM_KV_EVENT_PORT=20081
+
+python -m dynamo.vllm \
+  --model "$MODEL_NAME" \
+  --served-model-name "${MODEL_NAME}__internal_2" \
+  --enable-multimodal \
+  --enforce-eager \
+  --gpu-memory-utilization 0.85 \
+  --max-model-len 8192
+```
+
+If you are running both workers on a single ~48 GB GPU with `Qwen/Qwen3-VL-2B-Instruct`, replace the resource-related flags in both worker commands with smaller limits, for example:
+
+```bash
+  --gpu-memory-utilization 0.45 \
+  --max-model-len 1024 \
+  --max-num-seqs 1 \
+  --max-num-batched-tokens 512
+```
+
+### Terminal 4: Start MM Router Worker (vLLM)
 
 Important:
-- `--downstream-component backend` must match the vLLM worker component name.
-- `--block-size` must match the vLLM KV cache block size (tested configs here use `16`).
+- The quickstart command below uses defaults for namespace/component/endpoint wiring
+  (`dynamo`, `mm_router`, `generate`, `backend`, `generate`) to keep the first run simple.
+- If you customize backend/MM router component names, update the MM router CLI args to match.
+- `--block-size` defaults to `16`; if your vLLM backend uses a different KV cache block size,
+  pass the same value to the MM router.
 
 ```bash
 cd "$DYNAMO_ROOT"
@@ -175,16 +216,10 @@ export ETCD_ENDPOINTS=http://127.0.0.1:2379
 export DYN_LOG=debug
 
 python -m examples.backends.vllm.mm_router_worker \
-  --model "$MODEL_NAME" \
-  --namespace dynamo \
-  --component mm_router \
-  --endpoint generate \
-  --downstream-component backend \
-  --downstream-endpoint generate \
-  --block-size 16
+  --model "$MODEL_NAME"
 ```
 
-### Terminal 4: Start Frontend
+### Terminal 5: Start Frontend
 
 Use `round-robin` here so the frontend routes to the MM router worker; the MM router itself performs KV-aware routing to vLLM backends.
 
@@ -203,7 +238,10 @@ python -m dynamo.frontend \
 
 ## Test Request
 
-Send the same multimodal request twice. The second request should show much higher overlap in MM router logs.
+Send the same multimodal request twice. With two backend workers running, the
+second request should typically be routed to the same backend and show higher
+cache reuse in scheduler logs (and possibly higher overlap in debug routing
+logs, if enabled).
 
 ```bash
 MODEL="$MODEL_NAME"
@@ -213,7 +251,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   --data @- <<EOF
 {
-  "model": "${MODEL}",
+  "model": "${MODEL_NAME}",
   "messages": [{
     "role": "user",
     "content": [
@@ -226,15 +264,24 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 EOF
 ```
 
-Run the same `curl` command again. In the MM router worker logs (terminal 3), look for lines like:
-
-```text
-[ROUTING] Best: worker_... with X/Y blocks overlap
-```
+Run the same `curl` command again. In the MM router worker logs (terminal 4),
+look for scheduler logs that show cached-block reuse. Depending on log level /
+build, the `[ROUTING] ... overlap` debug line may not be visible.
 
 Expected behavior:
-- First request: overlap near `0/Y`
-- Repeated identical request: overlap jumps close to `Y`
+- First request: selected worker typically has low / zero `cached blocks`
+- Repeated identical request: scheduler selects a worker with higher `cached blocks`
+
+Example (second identical request; values will vary by run):
+
+```text
+INFO dynamo_llm::kv_router::scheduler: Formula for worker_id=... with 0 cached blocks: 34.375 = 1.0 * prefill_blocks + decode_blocks = 1.0 * 17.375 + 17.000
+INFO dynamo_llm::kv_router::scheduler: Formula for worker_id=... with 17 cached blocks: 17.375 = 1.0 * prefill_blocks + decode_blocks = 1.0 * 0.375 + 17.000
+INFO dynamo_llm::kv_router::scheduler: Selected worker: worker_id=... dp_rank=0, logit: 17.375, cached blocks: 17, tree size: ..., total blocks: ...
+DEBUG kv_router.select_worker: dynamo_llm::kv_router::push_router: [ROUTING] Best: worker_... dp_rank=0 with 17/18 blocks overlap request_id=... worker_id=... dp_rank=0 overlap_blocks=17 total_blocks=18
+```
+
+The key signal is `cached blocks: 17` on the selected worker.
 
 ### Example: Send the Same Request Twice
 
@@ -242,6 +289,7 @@ This is the exact shape you can use (same payload twice):
 
 ```bash
 MODEL="$MODEL_NAME"
+IMAGE_URL="http://images.cocodataset.org/test2017/000000000001.jpg"
 
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -252,7 +300,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
       "role": "user",
       "content": [
         {"type": "text", "text": "Describe this image"},
-        {"type": "image_url", "image_url": {"url": "http://images.cocodataset.org/test2017/000000000001.jpg"}}
+        {"type": "image_url", "image_url": {"url": "${IMAGE_URL}"}}
       ]
     }],
     "max_tokens": 100
@@ -262,7 +310,8 @@ EOF
 
 If MM-aware routing and prefix reuse are working, after sending the same request twice you should typically observe:
 
-- MM router logs show a large overlap jump on the second request
+- Scheduler logs show the selected backend has higher `cached blocks` on the second request
+- If debug routing logs are enabled, they may also show a large overlap jump on the second request
 - Response metadata may show prompt cache reuse on the second request (for example `usage.prompt_tokens_details.cached_tokens`)
 - End-to-end latency may drop on the second request (for example lower `nvext.timing.total_time_ms`)
 
