@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	dto "github.com/prometheus/client_model/go"
@@ -519,11 +520,63 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	require.Equal(t, info1, info2)
 }
 
-// ---- Test constants (ensure these match your real ones) ----
-// LabelApp
-// LabelValueNvidiaDCGMExporter
-// LabelValueDCGMExporter
-// LabelAppKubernetesName
+func TestDiscoverGPUsFromDCGM_GPUOperatorInstalled_DCgmNotEnabled(t *testing.T) {
+	ctx := context.Background()
+
+	// Fake running GPU Operator pod
+	gpuOperatorPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gpu-operator-abc",
+			Namespace: "gpu-operator",
+			Labels: map[string]string{
+				LabelApp: LabelValueGPUOperator,
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gpuOperatorPod).
+		Build()
+
+	cache := NewGPUDiscoveryCache()
+
+	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+
+	require.Nil(t, info)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "DCGM is not enabled in the GPU Operator")
+}
+
+func TestDiscoverGPUsFromDCGM_NoGPUOperator_NoDCGM(t *testing.T) {
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	cache := NewGPUDiscoveryCache()
+
+	info, err := DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+
+	require.Nil(t, info)
+	require.Error(t, err)
+
+	require.True(
+		t,
+		strings.Contains(err.Error(), "no DCGM exporter pods found"),
+		"expected no DCGM exporter pods error",
+	)
+}
 
 func TestListDCGMExporterPods(t *testing.T) {
 	scheme := runtime.NewScheme()

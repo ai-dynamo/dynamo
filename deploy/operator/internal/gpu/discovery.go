@@ -45,6 +45,8 @@ const (
 	LabelAppKubernetesName       = "app.kubernetes.io/name"
 	LabelValueNvidiaDCGMExporter = "nvidia-dcgm-exporter"
 	LabelValueDCGMExporter       = "dcgm-exporter"
+	LabelValueGPUOperator        = "gpu-operator"
+	GPUOperatorNamespace         = "gpu-operator"
 )
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
@@ -66,7 +68,6 @@ type GPUDiscoveryCache struct {
 }
 
 var scrapeMetricsFunc = scrapeMetricsEndpoint
-var ensureDCGMFunc = EnsureDCGMEnabled
 
 // NewGPUDiscoveryCache creates a new GPUDiscoveryCache instance.
 //
@@ -156,7 +157,10 @@ func DiscoverGPUsFromDCGM(ctx context.Context, k8sClient client.Client, cache *G
 
 	// If no pods found
 	if len(dcgmPods) == 0 {
-		err := ensureDCGMFunc(ctx)
+		gpuPods, err := listGPUOperatorRunningPods(ctx, k8sClient)
+		if len(gpuPods) > 0 {
+			return nil, fmt.Errorf("DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)")
+		}
 		return nil, err
 	}
 
@@ -244,6 +248,70 @@ func listDCGMExporterPods(ctx context.Context, k8sClient client.Client) ([]corev
 	}
 
 	return nil, fmt.Errorf("no DCGM exporter pods found")
+}
+
+// listGPUOperatorRunningPods lists GPU Operator pods in the given namespace
+// and returns only those that are in Running phase.
+//
+// It uses common GPU Operator label selectors and deduplicates results
+// across selectors. If no running pods are found, an error is returned.
+// listGPUOperatorRunningPods lists GPU Operator pods in the GPUOperatorNamespace
+// and returns only those that are in Running phase.
+//
+// It uses known GPU Operator label selectors and deduplicates results
+// across selectors. If no running pods are found, an error is returned.
+func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Client) ([]corev1.Pod, error) {
+
+	var result []corev1.Pod
+	seen := make(map[string]struct{})
+
+	selectors := []client.MatchingLabels{
+		{LabelApp: LabelValueGPUOperator},
+		{LabelAppKubernetesName: LabelValueGPUOperator},
+	}
+
+	var lastErr error
+
+	for _, selector := range selectors {
+		podList := &corev1.PodList{}
+
+		err := k8sClient.List(
+			ctx,
+			podList,
+			client.InNamespace(GPUOperatorNamespace),
+			selector,
+		)
+		if err != nil {
+			lastErr = fmt.Errorf("list gpu operator pods: %w", err)
+			continue
+		}
+
+		for _, pod := range podList.Items {
+			if pod.Status.Phase != corev1.PodRunning {
+				continue
+			}
+
+			key := pod.Namespace + "/" + pod.Name
+
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				result = append(result, pod)
+			}
+		}
+	}
+
+	if len(result) > 0 {
+		return result, nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	return nil, fmt.Errorf(
+		"gpu operator is not installed %s",
+		GPUOperatorNamespace,
+	)
 }
 
 // scrapeMetricsEndpoint retrieves and parses Prometheus metrics from a
