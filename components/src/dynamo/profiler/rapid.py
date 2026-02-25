@@ -44,11 +44,18 @@ def _generate_dgd_from_pick(
     if best_config_df is None or best_config_df.empty:
         return None
 
+    row = best_config_df.iloc[0]
+
     tc = task_configs.get(chosen_exp)
+    # TODO: temporary workaround — when backend="auto", AIC's
+    # merge_experiment_results_by_mode collapses e.g. "agg_vllm" into "agg",
+    # but task_configs retains the original keys. Reconstruct the key from
+    # the winning row's backend column. Proper fix: AIC should return the
+    # original task config key alongside the merged chosen experiment name.
+    if tc is None and "backend" in row.index:
+        tc = task_configs.get(f"{chosen_exp}_{row['backend']}")
     if tc is None:
         return None
-
-    row = best_config_df.iloc[0]
 
     original_total_gpus = tc.total_gpus
     if "total_gpus_needed" in row.index and row["total_gpus_needed"] > 0:
@@ -87,6 +94,10 @@ def _generate_dgd_from_pick(
     return None
 
 
+# in naive mode, use vllm as the default backend
+_DEFAULT_NAIVE_BACKEND = "vllm"
+
+
 def _run_naive_fallback(
     dgdr: DynamoGraphDeploymentRequestSpec,
     model: str,
@@ -95,6 +106,12 @@ def _run_naive_fallback(
     backend: str,
 ) -> dict:
     """Handle the AIC-unsupported path via naive config generation."""
+    if backend == "auto":
+        backend = _DEFAULT_NAIVE_BACKEND
+        logger.info(
+            "Auto backend resolved to '%s' for naive fallback.",
+            backend,
+        )
     logger.info(
         "AIC does not support this combo — falling back to naive config generation."
     )

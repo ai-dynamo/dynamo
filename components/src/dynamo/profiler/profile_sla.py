@@ -33,7 +33,10 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import generate_dgd_config_with_planner
-from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    BackendType,
+    DynamoGraphDeploymentRequestSpec,
+)
 from dynamo.profiler.utils.dgdr_validate import (
     run_gate_checks,
     validate_dgdr_for_profiler,
@@ -51,11 +54,23 @@ from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler
 
 logger = logging.getLogger(__name__)
 
+_CONCRETE_BACKENDS = ["trtllm", "sglang", "vllm"]
+
+
+def _check_auto_backend_support(model: str, system: str) -> bool:
+    """
+    Return True if *any* concrete backend is AIC-supported for this model/system.
+    TODO: move this function to AIC and handle partially supported model x backend x hardware
+    """
+    return any(
+        check_model_hardware_support(model, system, b) for b in _CONCRETE_BACKENDS
+    )
+
 
 def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
     """Pull all profiler parameters from dgdr and log them."""
     model = dgdr.model
-    backend = dgdr.backend.value.lower()
+    backend = BackendType(dgdr.backend).value.lower()
     system = dgdr.hardware.gpuSku.lower()
     total_gpus = dgdr.hardware.totalGpus
     isl = dgdr.workload.isl
@@ -313,7 +328,10 @@ async def run_profile(
             picking_mode,
         ) = _extract_profiler_params(dgdr)
 
-        aic_supported = check_model_hardware_support(model, system, backend)
+        if backend == "auto":
+            aic_supported = _check_auto_backend_support(model, system)
+        else:
+            aic_supported = check_model_hardware_support(model, system, backend)
         run_gate_checks(dgdr, aic_supported, search_strategy, backend)
 
         (
