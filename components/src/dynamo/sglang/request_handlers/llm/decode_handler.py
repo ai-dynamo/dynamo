@@ -110,7 +110,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return_routed_experts = self.config.server_args.enable_return_routed_experts
         priority = (request.get("routing") or {}).get("priority")
 
-
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
