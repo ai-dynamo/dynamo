@@ -347,7 +347,9 @@ ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     --mount=type=cache,target=/root/.cache/uv \
+    python -c "import torch; print(f'torch=={torch.__version__}')" > /tmp/torch-constraint.txt 2>/dev/null || : > /tmp/torch-constraint.txt && \
     UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 uv pip install \
+        --constraint /tmp/torch-constraint.txt \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \

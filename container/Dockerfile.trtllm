@@ -820,8 +820,10 @@ RUN uv pip install \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    python -c "import torch; print(f'torch=={torch.__version__}')" > /tmp/torch-constraint.txt && \
     UV_GIT_LFS=1 uv pip install \
         --no-cache \
+        --constraint /tmp/torch-constraint.txt \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
