@@ -23,18 +23,42 @@ Note on imports:
 """
 
 import logging
+import random
+from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 import torch
 
 if TYPE_CHECKING:
     from tensorrt_llm._torch.visual_gen import DiffusionArgs
+    from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
     from tensorrt_llm._torch.visual_gen.output import MediaOutput
     from tensorrt_llm._torch.visual_gen.pipeline import BasePipeline
 
     from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 
 logger = logging.getLogger(__name__)
+
+
+class DiffusionModality(str, Enum):
+    """Output modality of a diffusion pipeline."""
+
+    VIDEO = "video_diffusion"
+    IMAGE = "image_diffusion"
+
+
+# Explicit mapping from TRT-LLM pipeline class names to their output modality.
+# This replaces brittle substring matching and must be updated when new
+# pipelines are registered in TRT-LLM's PIPELINE_REGISTRY.
+_PIPELINE_MODALITY_MAP: dict[str, DiffusionModality] = {
+    "WanPipeline": DiffusionModality.VIDEO,
+    "WanImageToVideoPipeline": DiffusionModality.VIDEO,
+    "FluxPipeline": DiffusionModality.IMAGE,
+    "LTX2Pipeline": DiffusionModality.VIDEO,
+}
+
+# Default when the pipeline is not yet loaded or the class name is unknown.
+_DEFAULT_MODALITY = DiffusionModality.VIDEO
 
 
 class DiffusionEngine:
@@ -230,11 +254,14 @@ class DiffusionEngine:
             f"size={width}x{height}, frames={num_frames}, steps={num_inference_steps}"
         )
 
-        # Build a DiffusionRequest-like SimpleNamespace for pipeline.infer()
-        # The pipeline's infer() method expects a request object with named attributes.
-        from types import SimpleNamespace
+        # Use TRT-LLM's DiffusionRequest dataclass so that all defaults
+        # (including pipeline-specific fields like max_sequence_length,
+        # guidance_scale_2, boundary_ratio) are owned by TRT-LLM rather
+        # than hardcoded here.
+        from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
 
-        req = SimpleNamespace(
+        req = DiffusionRequest(
+            request_id=0,
             prompt=prompt,
             negative_prompt=negative_prompt,
             height=height,
@@ -242,11 +269,7 @@ class DiffusionEngine:
             num_frames=num_frames,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
-            seed=seed if seed is not None else 42,
-            # Additional fields expected by WanPipeline.infer()
-            max_sequence_length=512,
-            guidance_scale_2=None,
-            boundary_ratio=None,
+            seed=seed if seed is not None else random.randint(0, 2**32 - 1),
         )
 
         # Run the pipeline — infer() wraps forward() with torch.no_grad()
@@ -281,16 +304,24 @@ class DiffusionEngine:
     def supported_modalities(self) -> list[str]:
         """Get the modalities supported by this engine's pipeline.
 
-        Inferred from the pipeline class name — AutoPipeline handles the
-        actual type detection from model_index.json.
+        Uses an explicit mapping from pipeline class names to modalities
+        (see ``_PIPELINE_MODALITY_MAP``).  The pipeline class is determined
+        at load time by AutoPipeline from model_index.json.
         """
         if self._pipeline is None:
-            return ["video_diffusion"]  # Default assumption
+            return [_DEFAULT_MODALITY.value]
 
         class_name = self._pipeline.__class__.__name__
-        if "Image" in class_name or "Flux" in class_name:
-            return ["image_diffusion"]
-        return ["video_diffusion"]
+        modality = _PIPELINE_MODALITY_MAP.get(class_name)
+        if modality is None:
+            logger.warning(
+                "Unknown pipeline class '%s' — defaulting to %s. "
+                "Please add it to _PIPELINE_MODALITY_MAP.",
+                class_name,
+                _DEFAULT_MODALITY.value,
+            )
+            modality = _DEFAULT_MODALITY
+        return [modality.value]
 
     @property
     def device(self) -> str:
