@@ -41,6 +41,12 @@ products:
       - display-name: v0.8.0
         path: ./versions/v0.8.0.yml
         availability: stable
+      - display-name: v0.7.1
+        path: ./versions/v0.7.1.yml
+        availability: stable
+      - display-name: v0.7.0
+        path: ./versions/v0.7.0.yml
+        availability: stable
 redirects:
   - source: "/dynamo/index.html"
     destination: "/dynamo/"
