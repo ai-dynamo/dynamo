@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Docker Compose for AFD testing
+
+version: '3.8'
+
+services:
+  afd-test:
+    build:
+      context: .
+      dockerfile: docker/afd-test/Dockerfile
+    volumes:
+      # Mount Dynamo source code
+      - ..:/workspace/dynamo:ro
+    working_dir: /workspace/dynamo
+    command: pytest -v components/src/dynamo/sglang/tests/test_afd.py --tb=short
+    environment:
+      - PYTHONPATH=/workspace/dynamo/components/src
+      - PYTHONUNBUFFERED=1
+
+  afd-test-cov:
+    build:
+      context: .
+      dockerfile: docker/afd-test/Dockerfile
+    volumes:
+      - ..:/workspace/dynamo:ro
+    working_dir: /workspace/dynamo
+    command: pytest -v components/src/dynamo/sglang/tests/test_afd.py --cov=dynamo.sglang.afd --cov-report=term-missing
+    environment:
+      - PYTHONPATH=/workspace/dynamo/components/src
+
+  afd-test-quick:
+    build:
+      context: .
+      dockerfile: docker/afd-test/Dockerfile
+    volumes:
+      - ..:/workspace/dynamo:ro
+    working_dir: /workspace/dynamo
+    command: pytest -v -x components/src/dynamo/sglang/tests/test_afd.py
+    environment:
+      - PYTHONPATH=/workspace/dynamo/components/src
