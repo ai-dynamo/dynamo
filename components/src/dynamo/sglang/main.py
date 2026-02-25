@@ -100,6 +100,12 @@ async def worker():
     if checkpoint_cfg is not None:
         logging.info("Checkpoint mode enabled (watcher-driven signals)")
 
+        # Checkpoint mode requires memory saver with CPU backup for weights,
+        # mirroring vLLM's enable_sleep_mode. This ensures weights are offloaded
+        # to CPU (preserved) while KV cache is just freed.
+        config.server_args.enable_memory_saver = True
+        config.server_args.enable_weights_cpu_backup = True
+
         start_time = time.time()
         engine = sgl.Engine(server_args=config.server_args)
         load_time = time.time() - start_time
