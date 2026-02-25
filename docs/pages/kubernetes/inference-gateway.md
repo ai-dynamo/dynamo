@@ -123,11 +123,22 @@ make info # Check image tag
 ### 5. Deploy
 
 We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
-you could deploy it as a standalone pod
+you could deploy it as a standalone pod.
+Note that when deploying Dynamo with the Inference Gateway Extension each worker must have the FrontEnd as a sidecar.
 
 #### 5.a. Deploy as a DGD component (recommended)
 
 We provide an example for the Qwen vLLM below.
+You have to deploy the Dynamo Graph and the HttpRoute service.
+For the HttpRoute service make sure to specify the namespace where your gateway (i.e. kGateway was deployed) as shown below.
+```bash
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+      namespace: my-model # the namespace where your gateway is deployed.
+```
+
 ```bash
 cd <dynamo-source-root>
 kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
