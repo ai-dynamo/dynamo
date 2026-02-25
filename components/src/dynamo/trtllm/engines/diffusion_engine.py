@@ -159,18 +159,11 @@ class DiffusionEngine:
                 "dynamic": self.config.quant_dynamic,
             }
 
-        # Build skip_components list
-        skip_components = (
-            [c for c in self.config.skip_components]
-            if self.config.skip_components
-            else []
-        )
-
         args_kwargs: dict = dict(
             checkpoint_path=self.config.model_path,
             device=self.device,
             dtype=self.config.torch_dtype,
-            skip_components=skip_components,
+            skip_components=self.config.skip_components,
             pipeline=PipelineConfig(
                 enable_torch_compile=not self.config.disable_torch_compile,
                 torch_compile_mode=self.config.torch_compile_mode,
