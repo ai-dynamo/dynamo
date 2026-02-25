@@ -640,6 +640,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(operatorVersion)
+	if err = dgdrDefaulter.RegisterWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest-defaulting")
+		os.Exit(1)
+	}
+
 	setupLog.Info("Defaulting webhooks registered successfully")
 	//+kubebuilder:scaffold:builder
 
