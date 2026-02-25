@@ -9,7 +9,9 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter},
+    kv_router::{
+        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+    },
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
@@ -280,6 +282,10 @@ where
         )
         .await?;
 
+    // Eagerly register router request metrics so they appear (as zeros) on port 8081
+    // regardless of router mode. In KV mode they get populated by KvPushRouter::generate().
+    RouterRequestMetrics::from_component(client.endpoint.component());
+
     let service_backend = match router_mode {
         RouterMode::Direct => {
             ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
@@ -291,8 +297,7 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router = KvPushRouter::new(router, chooser);
-            ServiceBackend::from_engine(Arc::new(kv_push_router))
+            ServiceBackend::from_engine(Arc::new(KvPushRouter::new(router, chooser)))
         }
     };
 
