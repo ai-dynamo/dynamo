@@ -166,6 +166,7 @@ graph TD
 
 ## See Also
 
+- **[Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403)**: Community API standardization for KV cache indexers
 - **[Router Guide](router-guide.md)**: Full KV router configuration and tuning
 - **[Router Design](../../design-docs/router-design.md)**: Architecture and event transport modes
 - **[Standalone Router](../../../../components/src/dynamo/router/README.md)**: Full routing service (routes requests to workers)
