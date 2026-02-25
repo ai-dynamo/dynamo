@@ -29,6 +29,18 @@ if TYPE_CHECKING:
     from tests.fault_tolerance.deploy.base_checker import BaseChecker
 
 
+# Lazy import to avoid kubernetes dependency during module import
+def _get_gpu_helpers():
+    """Lazily import GPU helper functions to avoid kubernetes dependency at module level."""
+    from tests.fault_tolerance.hardware.fault_injection_service.helpers import (
+        get_available_gpu_ids,
+        get_gpu_info,
+        get_processes_on_gpu,
+    )
+
+    return get_available_gpu_ids, get_gpu_info, get_processes_on_gpu
+
+
 # Import checker factory (actual import, not TYPE_CHECKING)
 def _get_checkers_for_scenario(
     scenario_name: str, scenario: "Scenario"
@@ -274,6 +286,194 @@ class TerminateProcessFailure(Failure):
         self.process_name = process_name
         self.signal = signal
 
+    def _log_process_list(self, pod, logger: logging.Logger):
+        """Log filtered process list from ps aux."""
+        try:
+            result = pod.exec(["ps", "aux"])
+            ps_output = result.stdout.decode() if result.stdout else ""
+            lines = ps_output.split("\n")
+
+            relevant_processes = [
+                line
+                for line in lines[1:]
+                if any(
+                    keyword in line.lower() for keyword in ["python", "vllm", "dynamo"]
+                )
+            ]
+
+            # Log as single block to avoid [TEST] prefix on each line
+            output_lines = ["\n--- Process List (ps aux) ---", lines[0]]  # Header
+            output_lines.extend(relevant_processes)
+            logger.info("\n".join(output_lines))
+
+        except Exception as e:
+            logger.warning(f"Failed to get ps aux: {e}")
+
+    def _get_process_details(self, pod, pid: int, logger: logging.Logger):
+        """Get detailed information for a specific PID."""
+        try:
+            ps_result = pod.exec(["ps", "-p", str(pid), "-o", "pid,comm,args"])
+            ps_line = ps_result.stdout.decode().strip()
+            ps_lines = ps_line.split("\n")
+
+            if len(ps_lines) > 1:
+                logger.info(f"    PID {pid}: {ps_lines[1]}")
+        except Exception as e:
+            logger.debug(f"Could not get details for PID {pid}: {e}")
+
+    def _get_process_details_string(self, pod, pid: int) -> str:
+        """Get detailed information for a specific PID as a string."""
+        try:
+            ps_result = pod.exec(["ps", "-p", str(pid), "-o", "pid,comm,args"])
+            ps_line = ps_result.stdout.decode().strip()
+            ps_lines = ps_line.split("\n")
+
+            if len(ps_lines) > 1:
+                return f"    PID {pid}: {ps_lines[1]}"
+        except Exception:
+            pass
+        return ""
+
+    def _log_gpu_discovery_info(self, pod, logger: logging.Logger):
+        """Log GPU information using gpu_discovery utilities."""
+        try:
+            (
+                get_available_gpu_ids,
+                get_gpu_info,
+                get_processes_on_gpu,
+            ) = _get_gpu_helpers()
+            gpu_ids = get_available_gpu_ids(pod)
+
+            if not gpu_ids:
+                logger.warning("No GPUs found in pod")
+                return
+
+            # Build output as single message
+            output_lines = [
+                "\n--- GPU Information ---",
+                f"Available GPUs: {gpu_ids}",
+                "\n--- Per-GPU Process Mapping (from query-compute-apps) ---",
+            ]
+
+            for gpu_id in gpu_ids:
+                gpu_info_lines = self._get_single_gpu_info(pod, gpu_id)
+                output_lines.extend(gpu_info_lines)
+
+            logger.info("\n".join(output_lines))
+
+        except Exception as e:
+            logger.warning(f"Failed to get GPU information: {e}")
+
+    def _get_single_gpu_info(self, pod, gpu_id: int) -> list[str]:
+        """Get information for a single GPU as list of strings."""
+        (
+            get_available_gpu_ids,
+            get_gpu_info,
+            get_processes_on_gpu,
+        ) = _get_gpu_helpers()
+        lines = []
+        gpu_info = get_gpu_info(pod, gpu_id)
+
+        if gpu_info:
+            lines.append(
+                f"\nGPU {gpu_id}: {gpu_info.get('name', 'Unknown')} "
+                f"(Memory: {gpu_info.get('memory_total', 'Unknown')})"
+            )
+        else:
+            lines.append(f"\nGPU {gpu_id}:")
+
+        pids = get_processes_on_gpu(pod, gpu_id)
+
+        if pids:
+            lines.append(f"  Processes (PIDs): {pids}")
+            for pid in pids:
+                proc_details = self._get_process_details_string(pod, pid)
+                if proc_details:
+                    lines.append(proc_details)
+        else:
+            lines.append(
+                "  No processes running (note: small memory footprints may not appear)"
+            )
+
+        return lines
+
+    def _parse_nvidia_smi_process_line(self, line: str):
+        """Parse a single line from nvidia-smi processes section.
+
+        Returns:
+            Tuple of (gpu_id, pid, process_name, memory) or None if parsing fails
+        """
+        parts = [p.strip() for p in line.split("|") if p.strip()]
+        if not parts:
+            return None
+
+        fields = parts[0].split()
+        if len(fields) < 6:
+            return None
+
+        try:
+            gpu_id = fields[0]
+            pid = fields[3]
+            process_name = " ".join(fields[5:-1])
+            memory = fields[-1]
+            return (gpu_id, pid, process_name, memory)
+        except (ValueError, IndexError):
+            return None
+
+    def _log_nvidia_smi_output(self, pod, logger: logging.Logger):
+        """Log complete nvidia-smi output with parsed process mapping."""
+        try:
+            result = pod.exec(["nvidia-smi"])
+            gpu_status = result.stdout.decode() if result.stdout else ""
+
+            output_lines = [
+                "\n--- Complete GPU->Process Mapping (from full nvidia-smi) ---"
+            ]
+
+            if "Processes:" in gpu_status:
+                output_lines.extend(self._get_parsed_nvidia_smi_processes(gpu_status))
+
+            output_lines.append("\n--- Full nvidia-smi Output (for reference) ---")
+            output_lines.append(gpu_status)
+
+            logger.info("\n".join(output_lines))
+
+        except Exception as e:
+            logger.warning(f"Failed to get nvidia-smi: {e}")
+
+    def _get_parsed_nvidia_smi_processes(self, gpu_status: str) -> list[str]:
+        """Parse nvidia-smi processes section and return as list of strings."""
+        lines = ["GPU -> PID -> Process Name -> Memory:"]
+
+        try:
+            processes_section = gpu_status.split("Processes:")[1]
+            processes_lines = processes_section.split("\n")
+
+            for line in processes_lines:
+                if "MiB" in line and "|" in line:
+                    parsed = self._parse_nvidia_smi_process_line(line)
+                    if parsed:
+                        gpu_id, pid, process_name, memory = parsed
+                        lines.append(
+                            f"  GPU {gpu_id}: PID {pid} ({process_name}) - {memory}"
+                        )
+        except Exception:
+            pass
+
+        return lines
+
+    def _log_pod_diagnostics(self, pod, logger: logging.Logger, phase: str):
+        """Log comprehensive pod diagnostics including process list, GPU info, and nvidia-smi."""
+        logger.info(
+            f"\n{'=' * 80}\nPOD DIAGNOSTICS - {phase}\nPod: {pod.name}\n{'=' * 80}"
+        )
+
+        self._log_process_list(pod, logger)
+        self._log_gpu_discovery_info(pod, logger)
+        self._log_nvidia_smi_output(pod, logger)
+
+        logger.info("=" * 80)
+
     async def execute(
         self, deployment: ManagedDeployment, logger: logging.Logger
     ) -> list[str]:
@@ -282,6 +482,9 @@ class TerminateProcessFailure(Failure):
         pod_names: list[str] = []
         for service_name, pods in service_pod_dict.items():
             for pod in pods:
+                # Log diagnostics before termination
+                self._log_pod_diagnostics(pod, logger, "BEFORE PROCESS TERMINATION")
+
                 processes = deployment.get_processes(pod)
                 for process in processes:
                     if self.process_name in process.command:
@@ -289,6 +492,14 @@ class TerminateProcessFailure(Failure):
                             f"Terminating {service_name} pod {pod} Pid {process.pid} Command {process.command}"
                         )
                         process.kill(self.signal)
+
+                # Wait for potential restart and log diagnostics after
+                logger.info(
+                    "\nWaiting 30 seconds for vLLM to restart after process termination..."
+                )
+                await asyncio.sleep(30)
+                self._log_pod_diagnostics(pod, logger, "AFTER RESTART (30s wait)")
+
                 pod_names.append(pod.name)
 
         return pod_names

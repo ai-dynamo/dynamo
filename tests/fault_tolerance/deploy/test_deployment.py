@@ -506,7 +506,7 @@ async def test_fault_scenario(
 
         with _clients(
             logger,
-            request.node.name,
+            resolve_test_output_path(request.node.name),
             scenario.deployment,
             namespace,
             model,
