@@ -198,7 +198,7 @@ def run_aiperf(
     output_dir: Path,
     logger: logging.Logger,
     max_retries: int = 1,
-    retry_delay: float = 1,
+    max_request_rate: float = 1.0,
     continuous_load: bool = False,
 ) -> bool:
     """
@@ -216,7 +216,7 @@ def run_aiperf(
         output_dir: Directory for AI-Perf artifacts
         logger: Logger instance
         max_retries: Maximum number of retry attempts (default: 1)
-        retry_delay: Delay in seconds between retries (default: 1)
+        max_request_rate: Maximum requests per second for rate limiting (default: 1.0)
         continuous_load: If True, use continuous load instead of fixed request count
 
     Returns:
@@ -248,6 +248,10 @@ def run_aiperf(
         # Request parameters
         "--concurrency",
         "1",  # Optional: we set to 1 for sequential
+        "--request-rate",
+        str(max_request_rate),  # Rate limiting (requests/sec)
+        "--request-rate-mode",
+        "constant",  # Use constant arrival pattern for predictable rate
         # Token configuration
         "--synthetic-input-tokens-mean",
         str(input_token_length),
@@ -279,11 +283,14 @@ def run_aiperf(
     logger.info(f"Starting AI-Perf for Pod {pod_name} Local Port {port}")
     logger.info(f"Using model name: {model}")
 
-    # Wait for model to be available
+    # Wait for model to be available initially
+    # Note: We only check once at start, then clients continue sending requests
+    # regardless of service health. This mimics real-world scenarios where clients
+    # don't know the server is down and continue retrying.
     model_ready = wait_for_model_availability(url, endpoint, model, logger)
     if not model_ready:
         logger.warning("Model not ready, but proceeding with AI-Perf test anyway")
-        # This might result in all requests failing, but the retry logic will handle it
+        # Clients will continue attempting - measuring failure/recovery is the point
 
     logger.info(f"Command: {' '.join(cmd)}")
 
@@ -338,13 +345,11 @@ def run_aiperf(
             ## TODO: bug with aiperf git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75
             ## where sending a SIGINT on Mac can sometimes have an error code of -9 (SIGABRT) which results in profile_export_aiperf.json not being created
             elif result.returncode == -9 and continuous_load:
-                logger.warning(
-                    f"""
+                logger.warning(f"""
                     Attempt {attempt + 1} failed with return code {result.returncode}
                     This is a known bug with aiperf on Mac where sending a SIGINT can sometimes have an error code of -9 (SIGABRT)
                     which results in profile_export_aiperf.json not being created
-                    """
-                )
+                    """)
                 logger.debug(
                     f"Stderr: {result.stderr[:500] if result.stderr else 'No stderr'}"
                 )
@@ -360,6 +365,7 @@ def run_aiperf(
 
         # Sleep before next attempt (if not the last attempt and not continuous load)
         if not success and attempt < max_attempts - 1 and not continuous_load:
+            retry_delay = 5  # Hardcoded delay between retry attempts
             time.sleep(retry_delay)
 
     if success and not continuous_load:
@@ -510,7 +516,7 @@ def client(
     input_token_length: int,
     output_token_length: int,
     max_retries: int,
-    retry_delay: float = 1,
+    max_request_rate: float = 1.0,
     continuous_load: bool = False,
 ):
     """
@@ -530,7 +536,7 @@ def client(
         input_token_length: Number of input tokens per request
         output_token_length: Number of output tokens per request
         max_retries: Maximum retry attempts for AI-Perf execution
-        retry_delay: Delay in seconds between retry attempts
+        max_request_rate: Maximum requests per second for rate limiting (default: 1.0)
         continuous_load: If True, use continuous load instead of fixed request count
     """
     logger = logging.getLogger(f"CLIENT: {index}")
@@ -577,7 +583,7 @@ def client(
             output_dir=client_output_dir,
             logger=logger,
             max_retries=max_retries,
-            retry_delay=retry_delay,
+            max_request_rate=max_request_rate,
             continuous_load=continuous_load,
         )
 
