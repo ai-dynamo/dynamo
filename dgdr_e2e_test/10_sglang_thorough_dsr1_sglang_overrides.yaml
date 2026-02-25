@@ -5,7 +5,7 @@ metadata:
 spec:
   model: "deepseek-ai/DeepSeek-R1"
   backend: sglang
-  image: "hongkuanz196/sglang-runtime:hzhou-0224"
+  image: "hongkuanz196/dynamo-frontend:hzhou-0224"
   hardware:
     gpuSku: h200_sxm
     totalGpus: 16

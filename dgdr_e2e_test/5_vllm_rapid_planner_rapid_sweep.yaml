@@ -5,7 +5,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-32B"
   backend: vllm
-  image: "hongkuanz196/vllm-runtime:hzhou-0224"
+  image: "hongkuanz196/dynamo-frontend:hzhou-0224"
   hardware:
     gpuSku: h200_sxm
     totalGpus: 8
