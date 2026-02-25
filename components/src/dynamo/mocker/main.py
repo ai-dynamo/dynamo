@@ -149,9 +149,12 @@ async def launch_workers(args, extra_engine_args_path):
             f"(estimated total: {total_time:.1f}s)"
         )
 
-    # Load base engine args if we need to create per-worker files with bootstrap_port
+    # Load base engine args if we need to create per-worker files
+    needs_per_worker_args = bool(
+        args.bootstrap_ports_list or args.zmq_kv_events_ports_list
+    )
     base_engine_args = None
-    if args.bootstrap_ports_list:
+    if needs_per_worker_args:
         with open(extra_engine_args_path) as f:
             base_engine_args = json.load(f)
 
@@ -167,19 +170,21 @@ async def launch_workers(args, extra_engine_args_path):
         runtimes.append(runtime)
 
         # Determine which engine args file to use
-        if args.bootstrap_ports_list:
-            # Create per-worker temp file with this worker's bootstrap_port
+        if needs_per_worker_args:
             worker_args = base_engine_args.copy()
-            worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
+            if args.bootstrap_ports_list:
+                worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
+            if args.zmq_kv_events_ports_list:
+                worker_args["zmq_kv_events_port"] = args.zmq_kv_events_ports_list[
+                    worker_id
+                ]
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".json", delete=False
             ) as f:
                 json.dump(worker_args, f)
                 worker_engine_args_path = Path(f.name)
             per_worker_temp_files.append(worker_engine_args_path)
-            logger.debug(
-                f"Worker {worker_id}: using bootstrap_port {args.bootstrap_ports_list[worker_id]}"
-            )
+            logger.debug(f"Worker {worker_id}: per-worker args {worker_args}")
         else:
             worker_engine_args_path = extra_engine_args_path
 
