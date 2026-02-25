@@ -154,77 +154,78 @@ impl MediaLoader {
 
 #[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
-    use super::super::decoders::ImageDecoder;
-    use super::super::rdma::DataType;
-    use super::*;
-    use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
-
     #[cfg(feature = "testing-cuda")]
-    #[tokio::test]
-    async fn test_fetch_and_decode() {
-        let test_image_bytes =
-            include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");
+    mod cuda_tests {
+        use super::super::super::decoders::ImageDecoder;
+        use super::super::super::rdma::DataType;
+        use super::super::*;
+        use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/llm-optimize-deploy-graphic.png")
-            .with_status(200)
-            .with_header("content-type", "image/png")
-            .with_body(&test_image_bytes[..])
-            .create_async()
-            .await;
+        #[tokio::test]
+        async fn test_fetch_and_decode() {
+            let test_image_bytes =
+                include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");
 
-        let media_decoder = MediaDecoder {
-            image: Some(ImageDecoder::default()),
-            #[cfg(feature = "media-ffmpeg")]
-            video: None,
-        };
-        let fetcher = MediaFetcher {
-            allow_direct_ip: true,
-            allow_direct_port: true,
-            ..Default::default()
-        };
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("GET", "/llm-optimize-deploy-graphic.png")
+                .with_status(200)
+                .with_header("content-type", "image/png")
+                .with_body(&test_image_bytes[..])
+                .create_async()
+                .await;
 
-        let loader: MediaLoader =
-            MediaLoader::new(media_decoder, Some(fetcher)).expect("Failed to create MediaLoader");
+            let media_decoder = MediaDecoder {
+                image: Some(ImageDecoder::default()),
+                #[cfg(feature = "media-ffmpeg")]
+                video: None,
+            };
+            let fetcher = MediaFetcher {
+                allow_direct_ip: true,
+                allow_direct_port: true,
+                ..Default::default()
+            };
 
-        let image_url = ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
-        let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
-            ChatCompletionRequestMessageContentPartImage { image_url },
-        );
+            let loader: MediaLoader =
+                MediaLoader::new(media_decoder, Some(fetcher)).expect("Failed to create MediaLoader");
 
-        let result = loader
-            .fetch_and_decode_media_part(&content_part, None)
-            .await;
+            let image_url =
+                ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
+            let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage { image_url },
+            );
 
-        let descriptor = result.expect("Failed to fetch and decode image");
-        mock.assert_async().await;
-        assert_eq!(descriptor.tensor_info.dtype, DataType::UINT8);
+            let result = loader.fetch_and_decode_media_part(&content_part, None).await;
 
-        // Verify image dimensions: 1,999px × 1,125px (width × height)
-        // Shape format is [height, width, channels]
-        assert_eq!(descriptor.tensor_info.shape.len(), 3);
-        assert_eq!(
-            descriptor.tensor_info.shape[0], 1125,
-            "Height should be 1125"
-        );
-        assert_eq!(
-            descriptor.tensor_info.shape[1], 1999,
-            "Width should be 1999"
-        );
-        assert_eq!(
-            descriptor.tensor_info.shape[2], 4,
-            "RGBA channels should be 4"
-        );
+            let descriptor = result.expect("Failed to fetch and decode image");
+            mock.assert_async().await;
+            assert_eq!(descriptor.tensor_info.dtype, DataType::UINT8);
 
-        assert!(
-            descriptor.source_storage.is_some(),
-            "Source storage should be present"
-        );
-        assert!(
-            descriptor.source_storage.unwrap().is_registered(),
-            "Source storage should be registered with NIXL"
-        );
+            // Verify image dimensions: 1,999px × 1,125px (width × height)
+            // Shape format is [height, width, channels]
+            assert_eq!(descriptor.tensor_info.shape.len(), 3);
+            assert_eq!(
+                descriptor.tensor_info.shape[0], 1125,
+                "Height should be 1125"
+            );
+            assert_eq!(
+                descriptor.tensor_info.shape[1], 1999,
+                "Width should be 1999"
+            );
+            assert_eq!(
+                descriptor.tensor_info.shape[2], 4,
+                "RGBA channels should be 4"
+            );
+
+            assert!(
+                descriptor.source_storage.is_some(),
+                "Source storage should be present"
+            );
+            assert!(
+                descriptor.source_storage.unwrap().is_registered(),
+                "Source storage should be registered with NIXL"
+            );
+        }
     }
 }
 
