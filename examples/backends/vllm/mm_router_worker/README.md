@@ -28,7 +28,7 @@ Frontend (standard)      MM Router Worker (this)         vLLM Worker (standard)
 └──────────────┘        │ 4. KvRouter route    │        └─────────────────────┘
                         └──────────────────────┘
                                    │
-                                   │ 
+                                   │
                                    v
                              ┌──────────┐
                              │   NATS   │
@@ -262,7 +262,7 @@ EOF
 
 If MM-aware routing and prefix reuse are working, after sending the same request twice you should typically observe:
 
-- MM router logs show a large overlap jump on the second request 
+- MM router logs show a large overlap jump on the second request
 - Response metadata may show prompt cache reuse on the second request (for example `usage.prompt_tokens_details.cached_tokens`)
 - End-to-end latency may drop on the second request (for example lower `nvext.timing.total_time_ms`)
 
@@ -334,4 +334,4 @@ For repeated identical images, multiple entries may appear in the same block whe
 
 ## Known Limitations
 
-- `mm_processor.py` currently only supports Qwen-style multimodal processors for per-image visual token counting (`Qwen2-VL`, `Qwen2.5-VL`, `Qwen3-VL` style processors). 
+- `mm_processor.py` currently only supports Qwen-style multimodal processors for per-image visual token counting (`Qwen2-VL`, `Qwen2.5-VL`, `Qwen3-VL` style processors).
