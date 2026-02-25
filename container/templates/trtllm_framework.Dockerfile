@@ -29,7 +29,6 @@ FROM ${TRTLLM_WHEEL_IMAGE} AS trtllm_wheel_image
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
-ARG ARCH_ALT
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 # Install minimal dependencies needed for TensorRT-LLM installation
@@ -147,6 +146,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         # TRTLLM 1.2.0rc6.post2 has issues installing from pypi with uv, installing from direct wheel link works best
         # explicitly installing triton 3.5.1 as trtllm only lists triton as dependency on x64_64 for some reason
         if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
+            ARCH_ALT=$(uname -m); \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
             PYTHON_TAG="cp$(echo ${PYTHON_VERSION} | tr -d '.')"; \
             DIRECT_URL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-${TRTLLM_VERSION}-${PYTHON_TAG}-${PYTHON_TAG}-linux_${ARCH_ALT}.whl"; \

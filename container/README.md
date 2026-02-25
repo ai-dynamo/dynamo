@@ -33,7 +33,7 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/rustup/ | Installed via rustup-init (→ wheel_builder, dev) |
 |  /usr/local/cargo/ | Installed via rustup-init (→ wheel_builder, dev) |
 |  /usr/local/cuda/ | Inherited from BASE_IMAGE (→ wheel_builder, runtime) |
-| **STAGE: wheel_builder** | **FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}** |
+| **STAGE: wheel_builder** | **FROM quay.io/pypa/manylinux_2_28_{x86_64\|aarch64} (auto-selected via BuildKit TARGETARCH)** |
 |  /usr/local/ucx/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/lib64/ | Built from source (→ runtime)

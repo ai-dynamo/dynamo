@@ -68,7 +68,6 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-ARG ARCH_ALT
 ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
@@ -119,7 +118,7 @@ ENV HOME=/home/dynamo
 SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Site-packages path derived from PYTHON_VERSION ARG
@@ -163,6 +162,11 @@ COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+
+# Create arch-qualified symlink so libraries that expect lib/<arch>-linux-gnu find NIXL
+RUN ARCH_ALT=$(uname -m) && \
+    mkdir -p ${NIXL_PREFIX}/lib && \
+    ln -sf ${NIXL_PREFIX}/lib64 ${NIXL_PREFIX}/lib/${ARCH_ALT}-linux-gnu
 
 # Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
 COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws* /usr/local/lib/

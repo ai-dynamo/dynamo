@@ -9,7 +9,6 @@
 
 FROM dynamo_base AS runtime
 
-ARG ARCH_ALT
 ARG PYTHON_VERSION
 
 # Create dynamo user with group 0 for OpenShift compatibility
@@ -24,10 +23,10 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-# NIXL environment variables
+# NIXL environment variables — use lib64 (the canonical install path from wheel_builder)
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
     CARGO_TARGET_DIR=/opt/dynamo/target
 
 ENV LD_LIBRARY_PATH=\
@@ -43,6 +42,11 @@ COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+
+# Create arch-qualified symlink so libraries that expect lib/<arch>-linux-gnu find NIXL
+RUN ARCH_ALT=$(uname -m) && \
+    mkdir -p ${NIXL_PREFIX}/lib && \
+    ln -sf ${NIXL_PREFIX}/lib64 ${NIXL_PREFIX}/lib/${ARCH_ALT}-linux-gnu
 
 {% if context.dynamo.enable_media_ffmpeg == "true" %}
 # Copy ffmpeg
