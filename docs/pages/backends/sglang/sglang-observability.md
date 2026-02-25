@@ -172,7 +172,7 @@ Key implementation files:
 | Flag | Description |
 |------|-------------|
 | `--enable-trace` | Enable W3C trace header propagation into SGLang engine |
-| `--otlp-traces-endpoint` | OTLP endpoint for SGLang's internal trace export |
+| `--otlp-traces-endpoint` | OTLP gRPC endpoint for SGLang's internal trace export (bare `host:port` format, e.g. `localhost:4317`) |
 
 Both flags are required for end-to-end tracing through the SGLang engine. Without `--enable-trace`, the Dynamo handler still creates spans, but SGLang's internal engine spans will not be linked.
 
