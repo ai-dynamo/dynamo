@@ -7124,12 +7124,17 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				assert.Equal(t, envFromSecret, sidecar.EnvFrom[0].SecretRef.Name, "sidecar envFromSecret name")
 			}
 
-			if tt.wantSidecarProbes {
-				assert.NotNil(t, sidecar.LivenessProbe, "sidecar should have liveness probe")
-				assert.NotNil(t, sidecar.ReadinessProbe, "sidecar should have readiness probe")
-				assert.Equal(t, "/live", sidecar.LivenessProbe.HTTPGet.Path)
-				assert.Equal(t, "/health", sidecar.ReadinessProbe.HTTPGet.Path)
-			}
+		if tt.wantSidecarProbes {
+			assert.NotNil(t, sidecar.LivenessProbe, "sidecar should have liveness probe")
+			assert.NotNil(t, sidecar.ReadinessProbe, "sidecar should have readiness probe")
+			assert.Equal(t, "/live", sidecar.LivenessProbe.HTTPGet.Path)
+			assert.Equal(t, "/health", sidecar.ReadinessProbe.HTTPGet.Path)
+
+			assert.NotNil(t, sidecar.StartupProbe, "sidecar should have startup probe")
+			assert.Equal(t, "/live", sidecar.StartupProbe.HTTPGet.Path)
+			assert.Equal(t, int32(5), sidecar.StartupProbe.PeriodSeconds)
+			assert.Equal(t, int32(60), sidecar.StartupProbe.FailureThreshold)
+		}
 
 			if tt.wantSidecarPorts {
 				assert.NotEmpty(t, sidecar.Ports, "sidecar should have ports")

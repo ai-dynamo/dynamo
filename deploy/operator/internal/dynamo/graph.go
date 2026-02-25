@@ -1256,6 +1256,22 @@ func generateFrontendSidecar(
 	container.Name = commonconsts.FrontendSidecarContainerName
 	container.Image = spec.Image
 
+	// As a sidecar the frontend shares a pod with a worker that may take minutes
+	// to load a model.  Without a startup probe Kubernetes would run the
+	// liveness probe immediately and could restart the frontend container before
+	// the worker (and therefore the pod) is even close to ready.
+	container.StartupProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/live",
+				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
+			},
+		},
+		PeriodSeconds:    5,
+		TimeoutSeconds:   2,
+		FailureThreshold: 60, // 5s × 60 = 300s — generous for a process that starts in seconds
+	}
+
 	if len(spec.Args) > 0 {
 		container.Args = append(container.Args, spec.Args...)
 	}
