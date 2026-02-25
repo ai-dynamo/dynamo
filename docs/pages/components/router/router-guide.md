@@ -264,7 +264,7 @@ The `router_temperature` parameter controls routing randomness:
 
 ## Prometheus Metrics
 
-The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`. All router metrics require `--router-mode kv` and will not appear when using `round-robin` or `random` routing.
+The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`. Router metrics (`dynamo_router_*`) are registered whenever DRT discovery (etcd/NATS) is available, regardless of router mode. They are actively populated only when `--router-mode kv` is used; with other modes they appear but remain at zero.
 
 For the full list of router metrics (`dynamo_router_*`, `dynamo_router_overhead_*`, per-worker gauges), see the [Metrics reference](../../observability/metrics.md#router-metrics).
 

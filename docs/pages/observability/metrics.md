@@ -219,13 +219,13 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 
 ### Router Metrics
 
-When using the KV cache router (`--router-mode kv`), the frontend exposes additional metrics for monitoring routing decisions and overhead. These metrics are not registered when using `round-robin` or `random` routing, so they will not appear in `/metrics` output at all. Defined in `lib/llm/src/kv_router/metrics.rs`.
+The frontend exposes metrics for monitoring routing decisions and overhead. These metrics are registered whenever DRT discovery (etcd/NATS) is available, regardless of router mode. With `--router-mode kv`, the metrics will be actively populated as requests are routed; with other modes (`round-robin`, `random`, `direct`), they will appear on `/metrics` but remain at zero. Defined in `lib/llm/src/kv_router/metrics.rs`.
 
 For router configuration and tuning, see the [Router Guide](../components/router/router-guide.md).
 
 #### Router Request Metrics (`dynamo_router_*`)
 
-Histograms and counters for aggregate request-level statistics. Only registered when `--router-mode kv` is used. If no requests have been routed yet, the metrics will exist but show zero values. Exposed on the frontend port (default 8000) at `/metrics`.
+Histograms and counters for aggregate request-level statistics. Registered when DRT discovery is available (etcd/NATS). Only populated when `--router-mode kv` is active; otherwise they exist with zero values. Exposed on the frontend port (default 8000) at `/metrics`.
 
 All metrics carry a `router_id` constant label (the frontend's discovery instance ID). Filter in Prometheus with:
 

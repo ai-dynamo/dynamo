@@ -221,6 +221,95 @@ pub struct RouterRequestMetrics {
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
 impl RouterRequestMetrics {
+    fn init(instance_id: u64) -> Arc<Self> {
+        ROUTER_REQUEST_METRICS
+            .get_or_init(|| {
+                let router_id = instance_id.to_string();
+                let requests_total = IntCounter::with_opts(
+                    Opts::new(
+                        format!(
+                            "{}_{}",
+                            name_prefix::ROUTER,
+                            frontend_service::REQUESTS_TOTAL
+                        ),
+                        "Total number of requests processed by the router",
+                    )
+                    .const_label(labels::ROUTER_ID, &router_id),
+                )
+                .expect("dynamo_router_requests_total");
+                let time_to_first_token_seconds = prometheus::Histogram::with_opts(
+                    HistogramOpts::new(
+                        format!(
+                            "{}_{}",
+                            name_prefix::ROUTER,
+                            frontend_service::TIME_TO_FIRST_TOKEN_SECONDS
+                        ),
+                        "Time to first token observed at the router",
+                    )
+                    .const_label(labels::ROUTER_ID, &router_id)
+                    .buckets(generate_log_buckets(0.001, 480.0, 18)),
+                )
+                .expect("dynamo_router_time_to_first_token_seconds");
+                let inter_token_latency_seconds = prometheus::Histogram::with_opts(
+                    HistogramOpts::new(
+                        format!(
+                            "{}_{}",
+                            name_prefix::ROUTER,
+                            frontend_service::INTER_TOKEN_LATENCY_SECONDS
+                        ),
+                        "Average inter-token latency observed at the router",
+                    )
+                    .const_label(labels::ROUTER_ID, &router_id)
+                    .buckets(generate_log_buckets(0.001, 2.0, 13)),
+                )
+                .expect("dynamo_router_inter_token_latency_seconds");
+                let input_sequence_tokens = prometheus::Histogram::with_opts(
+                    HistogramOpts::new(
+                        format!(
+                            "{}_{}",
+                            name_prefix::ROUTER,
+                            frontend_service::INPUT_SEQUENCE_TOKENS
+                        ),
+                        "Input sequence length in tokens observed at the router",
+                    )
+                    .const_label(labels::ROUTER_ID, &router_id)
+                    .buckets(generate_log_buckets(50.0, 128000.0, 12)),
+                )
+                .expect("dynamo_router_input_sequence_tokens");
+                let output_sequence_tokens = prometheus::Histogram::with_opts(
+                    HistogramOpts::new(
+                        format!(
+                            "{}_{}",
+                            name_prefix::ROUTER,
+                            frontend_service::OUTPUT_SEQUENCE_TOKENS
+                        ),
+                        "Output sequence length in tokens observed at the router",
+                    )
+                    .const_label(labels::ROUTER_ID, &router_id)
+                    .buckets(generate_log_buckets(50.0, 32000.0, 10)),
+                )
+                .expect("dynamo_router_output_sequence_tokens");
+                let kv_hit_rate = prometheus::Histogram::with_opts(
+                    HistogramOpts::new(
+                        format!("{}_{}", name_prefix::ROUTER, frontend_service::KV_HIT_RATE),
+                        "Predicted KV cache hit rate at routing time (0.0-1.0)",
+                    )
+                    .const_label(labels::ROUTER_ID, &router_id)
+                    .buckets(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+                )
+                .expect("dynamo_router_kv_hit_rate");
+                Arc::new(Self {
+                    requests_total,
+                    time_to_first_token_seconds,
+                    inter_token_latency_seconds,
+                    input_sequence_tokens,
+                    output_sequence_tokens,
+                    kv_hit_rate,
+                })
+            })
+            .clone()
+    }
+
     /// Register router request metrics with the given registry and store for later use.
     /// Metric names: `dynamo_router_*` with const label `router_id=instance_id`.
     /// Call once during HTTP service setup when `--router-mode kv` is used.
@@ -228,90 +317,7 @@ impl RouterRequestMetrics {
         registry: &prometheus::Registry,
         instance_id: u64,
     ) -> Result<(), prometheus::Error> {
-        let m = ROUTER_REQUEST_METRICS.get_or_init(|| {
-            let router_id = instance_id.to_string();
-            let requests_total = IntCounter::with_opts(
-                Opts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::ROUTER,
-                        frontend_service::REQUESTS_TOTAL
-                    ),
-                    "Total number of requests processed by the router",
-                )
-                .const_label(labels::ROUTER_ID, &router_id),
-            )
-            .expect("dynamo_router_requests_total");
-            let time_to_first_token_seconds = prometheus::Histogram::with_opts(
-                HistogramOpts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::ROUTER,
-                        frontend_service::TIME_TO_FIRST_TOKEN_SECONDS
-                    ),
-                    "Time to first token observed at the router",
-                )
-                .const_label(labels::ROUTER_ID, &router_id)
-                .buckets(generate_log_buckets(0.001, 480.0, 18)),
-            )
-            .expect("dynamo_router_time_to_first_token_seconds");
-            let inter_token_latency_seconds = prometheus::Histogram::with_opts(
-                HistogramOpts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::ROUTER,
-                        frontend_service::INTER_TOKEN_LATENCY_SECONDS
-                    ),
-                    "Average inter-token latency observed at the router",
-                )
-                .const_label(labels::ROUTER_ID, &router_id)
-                .buckets(generate_log_buckets(0.001, 2.0, 13)),
-            )
-            .expect("dynamo_router_inter_token_latency_seconds");
-            let input_sequence_tokens = prometheus::Histogram::with_opts(
-                HistogramOpts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::ROUTER,
-                        frontend_service::INPUT_SEQUENCE_TOKENS
-                    ),
-                    "Input sequence length in tokens observed at the router",
-                )
-                .const_label(labels::ROUTER_ID, &router_id)
-                .buckets(generate_log_buckets(50.0, 128000.0, 12)),
-            )
-            .expect("dynamo_router_input_sequence_tokens");
-            let output_sequence_tokens = prometheus::Histogram::with_opts(
-                HistogramOpts::new(
-                    format!(
-                        "{}_{}",
-                        name_prefix::ROUTER,
-                        frontend_service::OUTPUT_SEQUENCE_TOKENS
-                    ),
-                    "Output sequence length in tokens observed at the router",
-                )
-                .const_label(labels::ROUTER_ID, &router_id)
-                .buckets(generate_log_buckets(50.0, 32000.0, 10)),
-            )
-            .expect("dynamo_router_output_sequence_tokens");
-            let kv_hit_rate = prometheus::Histogram::with_opts(
-                HistogramOpts::new(
-                    format!("{}_{}", name_prefix::ROUTER, frontend_service::KV_HIT_RATE),
-                    "Predicted KV cache hit rate at routing time (0.0-1.0)",
-                )
-                .const_label(labels::ROUTER_ID, &router_id)
-                .buckets(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-            )
-            .expect("dynamo_router_kv_hit_rate");
-            Arc::new(Self {
-                requests_total,
-                time_to_first_token_seconds,
-                inter_token_latency_seconds,
-                input_sequence_tokens,
-                output_sequence_tokens,
-                kv_hit_rate,
-            })
-        });
+        let m = Self::init(instance_id);
         registry.register(Box::new(m.requests_total.clone()))?;
         registry.register(Box::new(m.time_to_first_token_seconds.clone()))?;
         registry.register(Box::new(m.inter_token_latency_seconds.clone()))?;
@@ -321,9 +327,10 @@ impl RouterRequestMetrics {
         Ok(())
     }
 
-    /// Returns the registered metrics if `register()` was called earlier.
-    pub fn get() -> Option<Arc<Self>> {
-        ROUTER_REQUEST_METRICS.get().cloned()
+    /// Returns the metrics singleton, lazily initializing with the given `instance_id`
+    /// if `register()` was not called earlier.
+    pub fn get_or_init(instance_id: u64) -> Arc<Self> {
+        Self::init(instance_id)
     }
 }
 
