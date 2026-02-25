@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -117,6 +118,11 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		return nil, err
 	}
 
+	// Validate failover constraints
+	if err := v.validateFailover(); err != nil {
+		return nil, err
+	}
+
 	return warnings, nil
 }
 
@@ -200,6 +206,43 @@ func (v *SharedSpecValidator) validateEPPConfig(ctx context.Context) error {
 		if v.spec.EPPConfig.ConfigMapRef.Name == "" {
 			return fmt.Errorf("%s.eppConfig.configMapRef.name is required", v.fieldPath)
 		}
+	}
+
+	return nil
+}
+
+// validateFailover validates failover configuration constraints.
+func (v *SharedSpecValidator) validateFailover() error {
+	if v.spec.Failover == nil || !v.spec.Failover.Enabled {
+		return nil
+	}
+
+	isWorker := v.spec.ComponentType == consts.ComponentTypeWorker ||
+		v.spec.ComponentType == consts.ComponentTypePrefill ||
+		v.spec.ComponentType == consts.ComponentTypeDecode
+	if !isWorker {
+		return fmt.Errorf(
+			"%s.failover: failover is only supported for worker components (componentType must be worker, prefill, or decode)",
+			v.fieldPath)
+	}
+
+	if v.spec.IsMultinode() {
+		return fmt.Errorf(
+			"%s: failover is not supported with multinode deployments",
+			v.fieldPath)
+	}
+
+	if v.spec.Resources == nil || v.spec.Resources.Limits == nil || v.spec.Resources.Limits.GPU == "" {
+		return fmt.Errorf(
+			"%s.failover: failover requires resources.limits.gpu >= 1",
+			v.fieldPath)
+	}
+
+	gpuCount, err := strconv.Atoi(v.spec.Resources.Limits.GPU)
+	if err != nil || gpuCount < 1 {
+		return fmt.Errorf(
+			"%s.failover: failover requires resources.limits.gpu >= 1",
+			v.fieldPath)
 	}
 
 	return nil

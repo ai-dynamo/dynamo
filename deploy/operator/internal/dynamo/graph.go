@@ -1184,6 +1184,12 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
 	}
 
+	if isFailoverEnabled(component) {
+		if err := buildFailoverPod(&podSpec, component, parentGraphDeploymentName, serviceName); err != nil {
+			return nil, fmt.Errorf("failed to build failover pod: %w", err)
+		}
+	}
+
 	return &podSpec, nil
 }
 

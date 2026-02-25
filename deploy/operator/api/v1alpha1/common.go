@@ -166,6 +166,16 @@ type ScalingAdapter struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
+// FailoverSpec configures active-passive failover for a worker component.
+// For the POC only Enabled is defined; future fields (e.g. custom lock
+// timeout, GMS image override, standby count) will be added here.
+type FailoverSpec struct {
+	// Enabled activates failover mode. Two engine containers are created
+	// in the same pod, sharing GPUs via DRA and coordinating via a
+	// file-based lock on a shared emptyDir volume.
+	Enabled bool `json:"enabled"`
+}
+
 // CheckpointMode defines how checkpoint creation is handled
 // +kubebuilder:validation:Enum=Auto;Manual
 type CheckpointMode string
