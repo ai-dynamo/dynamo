@@ -33,9 +33,10 @@ impl WorkerRegistry {
     }
 
     pub fn register(&self, worker_id: WorkerId, zmq_addresses: HashMap<u32, String>) -> Result<()> {
-        if self.workers.contains_key(&worker_id) {
+        let entry = self.workers.entry(worker_id);
+        let dashmap::mapref::entry::Entry::Vacant(vacant) = entry else {
             bail!("worker {worker_id} already registered");
-        }
+        };
 
         let cancel = CancellationToken::new();
 
@@ -50,13 +51,10 @@ impl WorkerRegistry {
             });
         }
 
-        self.workers.insert(
-            worker_id,
-            WorkerEntry {
-                zmq_addresses,
-                cancel,
-            },
-        );
+        vacant.insert(WorkerEntry {
+            zmq_addresses,
+            cancel,
+        });
         Ok(())
     }
 
