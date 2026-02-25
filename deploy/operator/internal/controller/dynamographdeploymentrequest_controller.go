@@ -107,10 +107,9 @@ const (
 	// Messages
 	MessageInitialized               = "DGDR initialized successfully"
 	MessageProfilingJobCreated       = "Profiling job created"
-	MessageAICProfilingJobCreated    = "AIC profiling job created"
 	MessageProfilingInProgress       = "Profiling is in progress"
 	MessageSpecGenerated             = "DynamoGraphDeployment spec generated successfully"
-	MessageSpecAvailable             = "Generated spec is available in status.generatedDeployment"
+	MessageSpecAvailable             = "Generated spec is available in annotation nvidia.com/generated-dgd-spec"
 	MessageDeploymentCreated         = "DynamoGraphDeployment %s created successfully"
 	MessageDeploymentReady           = "DynamoGraphDeployment %s is ready"
 	MessageDeploymentDegraded        = "DynamoGraphDeployment %s degraded from Ready to %s"
@@ -377,12 +376,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
 
-	// Record event with appropriate message
-	if isOnlineProfiling(dgdr) {
-		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageProfilingJobCreated)
-	} else {
-		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageAICProfilingJobCreated)
-	}
+	// Record event — all profiling runs through the online path in v1beta1.
+	r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageProfilingJobCreated)
 
 	// Update to Profiling phase with Running status
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
@@ -1369,10 +1364,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		}
 	}
 
-	// Store the generated DGD name in status and cache the spec in an annotation for createDGD
-	dgdr.Status.DGDName = dgd.Name
-
-	// Serialize the DGD spec to an annotation so createDGD can retrieve it
+	// Serialize the DGD spec to an annotation so createDGD can retrieve it.
+	// DGDName is set only after createDGD() successfully creates the DGD object.
 	dgdBytes, err := sigsyaml.Marshal(dgd)
 	if err != nil {
 		return fmt.Errorf("failed to marshal generated DGD: %w", err)

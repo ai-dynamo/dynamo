@@ -18,7 +18,13 @@
 package defaulting
 
 import (
+	"context"
 	"testing"
+
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
@@ -55,6 +61,71 @@ func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
 			got := d.defaultImageFor()
 			if got != tt.expectedImage {
 				t.Errorf("defaultImageFor() = %q, want %q", got, tt.expectedImage)
+			}
+		})
+	}
+}
+
+func makeAdmissionCtx(op admissionv1.Operation) context.Context {
+	req := admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: op,
+		},
+	}
+	return admission.NewContextWithRequest(context.Background(), req)
+}
+
+func TestDGDRDefaulter_Default(t *testing.T) {
+	tests := []struct {
+		name          string
+		version       string
+		operation     admissionv1.Operation
+		initialImage  string
+		expectedImage string
+	}{
+		{
+			name:          "CREATE with empty image defaults to operator version",
+			version:       "1.0.0",
+			operation:     admissionv1.Create,
+			initialImage:  "",
+			expectedImage: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0",
+		},
+		{
+			name:          "CREATE with preset image is not overwritten",
+			version:       "1.0.0",
+			operation:     admissionv1.Create,
+			initialImage:  "my-registry/my-image:custom",
+			expectedImage: "my-registry/my-image:custom",
+		},
+		{
+			name:          "CREATE with unknown operator version leaves image empty",
+			version:       "unknown",
+			operation:     admissionv1.Create,
+			initialImage:  "",
+			expectedImage: "",
+		},
+		{
+			name:          "UPDATE does not default image",
+			version:       "1.0.0",
+			operation:     admissionv1.Update,
+			initialImage:  "",
+			expectedImage: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := NewDGDRDefaulter(tt.version)
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec:       nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{Image: tt.initialImage},
+			}
+			ctx := makeAdmissionCtx(tt.operation)
+			if err := d.Default(ctx, dgdr); err != nil {
+				t.Fatalf("Default() unexpected error: %v", err)
+			}
+			if dgdr.Spec.Image != tt.expectedImage {
+				t.Errorf("after Default(): spec.image = %q, want %q", dgdr.Spec.Image, tt.expectedImage)
 			}
 		})
 	}

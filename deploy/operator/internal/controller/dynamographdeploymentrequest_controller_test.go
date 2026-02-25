@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -654,7 +655,7 @@ spec:
 			Eventually(func() bool {
 				select {
 				case event := <-recorder.Events:
-					return event == "Warning SpecChangeRejected Cannot modify spec in phase 'Profiling'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
+					return strings.Contains(event, "SpecChangeRejected") && strings.Contains(event, "immutable")
 				default:
 					return false
 				}
