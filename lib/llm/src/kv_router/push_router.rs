@@ -178,6 +178,10 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
+        // Eagerly register router request metrics (as zeros) so they are
+        // scrapeable before any requests arrive. Both the frontend pipeline
+        // and the standalone router create KvPushRouter, so this covers both.
+        RouterRequestMetrics::from_component(chooser.client().endpoint.component());
         KvPushRouter { inner, chooser }
     }
 

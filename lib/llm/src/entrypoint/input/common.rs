@@ -282,8 +282,10 @@ where
         )
         .await?;
 
-    // Eagerly register router request metrics so they appear (as zeros) on port 8081
-    // regardless of router mode. In KV mode they get populated by KvPushRouter::generate().
+    // Eagerly register router request metrics so they appear as zeros even in
+    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
+    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
+    // OnceLock), which covers the standalone router path as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let service_backend = match router_mode {

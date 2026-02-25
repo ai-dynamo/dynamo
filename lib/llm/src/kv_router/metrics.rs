@@ -4,9 +4,37 @@
 //! Prometheus metrics for the KV router.
 //!
 //! This module centralizes all router-side Prometheus metric definitions:
+//!
 //! - [`WorkerLoadMetrics`]: Per-worker active decode blocks and prefill tokens gauges.
+//!   Registered on the frontend's own `prometheus::Registry` (default port 8000).
+//!   Populated by `KvWorkerMonitor` in the frontend when receiving ActiveLoad events.
+//!   - Frontend (aggregated and disaggregated): available on default port 8000
+//!   - Standalone router (`python -m dynamo.router`): not created (frontend-only)
+//!
 //! - [`RoutingOverheadMetrics`]: Per-request routing phase latency histograms.
+//!   Registered on the frontend's own `prometheus::Registry` (default port 8000).
+//!   Populated by `KvPushRouter` in the frontend during routing decisions.
+//!   - Frontend (aggregated and disaggregated): available on default port 8000
+//!   - Standalone router: not created (frontend-only)
+//!
 //! - [`RouterRequestMetrics`]: Per-request aggregate histograms (TTFT, ITL, tokens, KV hit rate).
+//!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
+//!   Eagerly created so they appear as zeros before any requests arrive.
+//!   Populated by `KvPushRouter::generate()` and its `RequestGuard` as it observes
+//!   the streaming response (TTFT on first token, ITL per output block,
+//!   ISL/OSL/kv_hit_rate at routing and completion).
+//!   - Frontend, non-KV modes (direct/random/round-robin): always zero (registered
+//!     on default port 8000, but never populated since KvPushRouter is not used)
+//!   - Frontend, KV mode (aggregated and disaggregated): available on default port
+//!     8000 via the `drt_metrics` bridge, populated per-request
+//!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
+//!     when set (default is `-1`, disabled), populated per-request
+//!
+//! The standalone router does not create `WorkerLoadMetrics` or
+//! `RoutingOverheadMetrics` (those are frontend-only). It only exposes
+//! `RouterRequestMetrics` and standard DRT transport metrics
+//! (`dynamo_component_inflight_requests`, `dynamo_component_requests_total`, etc.)
+//! via the system status server when `DYN_SYSTEM_PORT` is explicitly set.
 //!
 //! See also: `docs/pages/observability/metrics.md` (Router Metrics section).
 
@@ -94,6 +122,7 @@ pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(|| W
 });
 
 /// Register the worker load gauges with the given Prometheus registry.
+/// Called during frontend HTTP service setup (`service_v2.rs`), served on port 8000.
 pub fn register_worker_load_metrics(
     registry: &prometheus::Registry,
 ) -> Result<(), prometheus::Error> {
@@ -121,7 +150,9 @@ static ROUTING_OVERHEAD_METRICS: OnceLock<Arc<RoutingOverheadMetrics>> = OnceLoc
 impl RoutingOverheadMetrics {
     /// Register routing overhead histograms with the given registry and store for later use.
     /// Metric names: `dynamo_router_overhead_*` with const label `router_id=instance_id`.
-    /// Call once during HTTP service setup when `--router-mode kv` is used.
+    /// Called during frontend HTTP service setup (`service_v2.rs`), so these metrics
+    /// are served on the frontend's own port (default 8000). Not available in the
+    /// standalone router, which has no frontend HTTP server.
     pub fn register(
         registry: &prometheus::Registry,
         instance_id: u64,
@@ -216,9 +247,27 @@ impl RoutingOverheadMetrics {
 // ---------------------------------------------------------------------------
 
 /// Aggregate per-request metrics observed at the router level.
+///
 /// Component-scoped via `from_component()` to get automatic `dynamo_component_` prefix,
 /// `dynamo_namespace`/`dynamo_component`/`dynamo_endpoint` labels, and registration
-/// with the component's prometheus registry (scrapeable at port 8081).
+/// with the DRT `MetricsRegistry` hierarchy.
+///
+/// # Scrapeability
+///
+/// - **Frontend, non-KV modes**: Always zero (registered but never populated).
+/// - **Frontend, KV mode (aggregated and disaggregated)**: Available on the
+///   frontend's `/metrics` endpoint (default port 8000) via the `drt_metrics`
+///   bridge, populated per-request.
+/// - **Standalone router** (`python -m dynamo.router`): Available on the system
+///   status server when `DYN_SYSTEM_PORT` is set, populated per-request.
+///
+/// # When these metrics are created
+///
+/// Eagerly in `KvPushRouter::new()`, so they appear as zeros before any requests.
+/// Both the frontend pipeline and the standalone router (via Python bindings)
+/// create a `KvPushRouter`, so both get these metrics registered automatically.
+///
+/// # Why component-scoped
 ///
 /// These metrics MUST be registered through the Component hierarchy (not a standalone
 /// registry). In hierarchical planner deployments, the frontend's router is the global
@@ -240,8 +289,10 @@ static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::n
 impl RouterRequestMetrics {
     /// Create from a Component, memoized in a static OnceLock.
     /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
-    /// injects hierarchy labels, and registers with the component's registry.
+    /// injects hierarchy labels, and registers with the DRT `MetricsRegistry`.
     /// Also adds `router_id` (discovery instance_id) to distinguish router instances.
+    ///
+    /// Called eagerly by `KvPushRouter::new()` so metrics appear as zeros at startup.
     pub fn from_component(component: &Component) -> Arc<Self> {
         ROUTER_REQUEST_METRICS
             .get_or_init(|| {
