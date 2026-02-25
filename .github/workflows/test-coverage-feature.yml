@@ -23,7 +23,7 @@ jobs:
       image_prefix: test-coverage
       enable_slack_notification: false
       enable_coverage: true  # Enable coverage collection
-      skip_heavy_jobs: true  # Skip builds and Python tests for fast coverage iteration
+      skip_heavy_jobs: false  # Skip builds and Python tests for fast coverage iteration
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
