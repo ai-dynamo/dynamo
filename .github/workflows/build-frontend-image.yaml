@@ -142,9 +142,10 @@ jobs:
         id: calculate-target-tag
         shell: bash
         run: |
+          ECR_IMAGE_BASE="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}"
           TARGET_TAG="${{ github.sha }}-${{ env.TARGET }}-${{ matrix.arch }}"
-          DEFAULT_TARGET_IMAGE_URI="${{ env.ECR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}"
-          echo "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "ecr_image_base=${ECR_IMAGE_BASE}" >> $GITHUB_OUTPUT
+          echo "default_target_image_uri=${ECR_IMAGE_BASE}:${TARGET_TAG}" >> $GITHUB_OUTPUT
           echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${{ needs.build-epp-image.outputs.epp_image_ref }}" >> $GITHUB_OUTPUT
           echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
           echo "azure_target_image_uri=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TARGET_TAG}" >> $GITHUB_OUTPUT
@@ -192,9 +193,9 @@ jobs:
           extra_build_args: |
             EPP_IMAGE=${{ steps.calculate-target-tag.outputs.epp_image_uri }}
           extra_tags: |
-            ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}
-            ${{ github.ref_name == 'main' && format('main-frontend-{0}', matrix.arch) || '' }}
-            ${{ github.ref_name == 'main' && format('main-frontend-{0}-{1}', github.sha, matrix.arch) || '' }}
+            ${{ matrix.arch == 'amd64' && steps.calculate-target-tag.outputs.azure_target_image_uri || '' }}
+            ${{ github.ref_name == 'main' && format('{0}:main-frontend-{1}', steps.calculate-target-tag.outputs.ecr_image_base, matrix.arch) || '' }}
+            ${{ github.ref_name == 'main' && format('{0}:main-frontend-{1}-{2}', steps.calculate-target-tag.outputs.ecr_image_base, github.sha, matrix.arch) || '' }}
 
       - name: Show summary
         shell: bash
