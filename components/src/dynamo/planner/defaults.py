@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from dynamo.planner.utils.exceptions import (
     DuplicateSubComponentError,
+    ServiceNotFoundError,
     SubComponentNotFoundError,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -229,19 +230,36 @@ class Service(BaseModel):
 # Should be deprecated in favor of service subComponentType
 def get_service_from_sub_component_type_or_name(
     deployment: dict,
-    sub_component_type: SubComponentType,
+    sub_component_type: Optional[SubComponentType] = None,
     component_name: Optional[str] = None,
 ) -> Service:
     """
-    Get the current replicas for a component in a graph deployment
+    Get the current replicas for a component in a graph deployment.
+
+    Lookup order:
+    1. If sub_component_type is None, look up by component_name directly.
+    2. If sub_component_type is set, match by subComponentType first,
+       falling back to component_name if no match is found.
 
     Returns: Service object
 
     Raises:
+        ServiceNotFoundError: If component_name is not found in spec.services
         SubComponentNotFoundError: If no service with the specified subComponentType is found
         DuplicateSubComponentError: If multiple services with the same subComponentType are found
+        ValueError: If neither sub_component_type nor component_name is provided
     """
     services = deployment.get("spec", {}).get("services", {})
+
+    # Direct name-based lookup when no subComponentType is specified
+    if sub_component_type is None:
+        if not component_name:
+            raise ValueError(
+                "Either sub_component_type or component_name must be provided"
+            )
+        if component_name not in services:
+            raise ServiceNotFoundError(component_name)
+        return Service(name=component_name, service=services[component_name])
 
     # Collect all available subComponentTypes for better error messages
     available_types = []

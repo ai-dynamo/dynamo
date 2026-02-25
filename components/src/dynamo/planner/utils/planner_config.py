@@ -114,6 +114,13 @@ class PlannerConfig(BaseModel):
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
+    # Agg mode: named component targeting (for multi-service DGDs where the
+    # target service doesn't use subComponentType, e.g., mx-target)
+    component_name: Optional[str] = None
+
+    # Max replica cap (0 = no cap, use max_gpu_budget only)
+    max_endpoint: int = 0
+
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
         # global-planner environment requires a namespace

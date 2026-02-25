@@ -31,6 +31,7 @@ __all__ = [
     "UserProvidedModelNameMismatchError",
     "BackendFrameworkNotFoundError",
     "BackendFrameworkInvalidError",
+    "ServiceNotFoundError",
     "SubComponentNotFoundError",
     "DuplicateSubComponentError",
     "DeploymentValidationError",
@@ -135,6 +136,24 @@ class BackendFrameworkInvalidError(PlannerError):
 
         message = f"Backend framework {backend_framework} is invalid"
         super().__init__(message)
+
+
+class ServiceNotFoundError(ComponentError):
+    """Raised when a service name is not found in the deployment.
+
+    This occurs when targeting a service by name and the name
+    does not exist in DynamoGraphDeployment spec.services.
+    """
+
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        message = (
+            f"Service '{service_name}' not found in DynamoGraphDeployment spec.services"
+        )
+        super().__init__(message)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(service_name={self.service_name!r})"
 
 
 class SubComponentNotFoundError(ComponentError):
