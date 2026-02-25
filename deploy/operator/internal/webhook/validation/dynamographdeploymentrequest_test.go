@@ -216,6 +216,7 @@ func TestDynamoGraphDeploymentRequestValidator_ValidateUpdate(t *testing.T) {
 		oldRequest   *nvidiacomv1beta1.DynamoGraphDeploymentRequest
 		newRequest   *nvidiacomv1beta1.DynamoGraphDeploymentRequest
 		wantErr      bool
+		errMsg       string
 		wantWarnings bool
 	}{
 		{
@@ -237,12 +238,120 @@ func TestDynamoGraphDeploymentRequestValidator_ValidateUpdate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "changing model name is allowed",
+			name: "changing model name is allowed when not in immutable phase",
 			oldRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "llama-3-8b",
 					Backend: nvidiacomv1beta1.BackendTypeVllm,
 					Image:   "profiler:latest",
+				},
+			},
+			newRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-70b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "spec change rejected during Profiling phase",
+			oldRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+				Status: nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{
+					Phase: nvidiacomv1beta1.DGDRPhaseProfiling,
+				},
+			},
+			newRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-70b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec updates are forbidden while the resource is in phase",
+		},
+		{
+			name: "spec change rejected during Deploying phase",
+			oldRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+				Status: nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{
+					Phase: nvidiacomv1beta1.DGDRPhaseDeploying,
+				},
+			},
+			newRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-70b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec updates are forbidden while the resource is in phase",
+		},
+		{
+			name: "spec change rejected during Deployed phase",
+			oldRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+				Status: nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{
+					Phase: nvidiacomv1beta1.DGDRPhaseDeployed,
+				},
+			},
+			newRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-70b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec updates are forbidden while the resource is in phase",
+		},
+		{
+			name: "no spec change during immutable phase is allowed",
+			oldRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+				Status: nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{
+					Phase: nvidiacomv1beta1.DGDRPhaseProfiling,
+				},
+			},
+			newRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "spec change allowed during Failed phase",
+			oldRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+				},
+				Status: nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{
+					Phase: nvidiacomv1beta1.DGDRPhaseFailed,
 				},
 			},
 			newRequest: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
@@ -266,8 +375,17 @@ func TestDynamoGraphDeploymentRequestValidator_ValidateUpdate(t *testing.T) {
 				return
 			}
 
+			if tt.wantErr && tt.errMsg != "" {
+				if !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("ValidateUpdate() error %q does not contain %q", err.Error(), tt.errMsg)
+				}
+			}
+
 			if tt.wantWarnings && len(warnings) == 0 {
 				t.Errorf("ValidateUpdate() expected warnings but got none")
+			}
+			if !tt.wantWarnings && len(warnings) > 0 {
+				t.Errorf("ValidateUpdate() unexpected warnings: %v", warnings)
 			}
 		})
 	}

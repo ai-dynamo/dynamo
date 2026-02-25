@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"text/template"
@@ -125,7 +126,7 @@ const (
 	MessageProfilingCheckFailed      = "ProfilingCheckFailed"
 	MessageConfigMapNotFound         = "ConfigMap %s not found in namespace %s"
 	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
-	MessageModelCachePVCNotFound = "model cache PVC %s not found in namespace %s"
+	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
 )
 
 // shell script template for the output copier sidecar
@@ -496,22 +497,35 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	}
 
 	// Check if DGD is Ready
+	var condStatus metav1.ConditionStatus
+	var condReason, condMessage string
+
 	if dgd.Status.State == dgdv1alpha1.DGDStateSuccessful {
 		logger.Info("DGD is Ready, transitioning to Deployed phase")
 		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 		setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseDeployed)
-		updateDeploymentInfo(dgdr, dgd)
 
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonDeploymentReady,
 			fmt.Sprintf(MessageDeploymentReady, dgd.Name))
 
-		meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
-			Type:    nvidiacomv1beta1.ConditionTypeDeploymentReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  nvidiacomv1beta1.EventReasonDeploymentReady,
-			Message: fmt.Sprintf(MessageDeploymentReady, dgd.Name),
-		})
+		condStatus = metav1.ConditionTrue
+		condReason = nvidiacomv1beta1.EventReasonDeploymentReady
+		condMessage = fmt.Sprintf(MessageDeploymentReady, dgd.Name)
+	} else {
+		logger.Info("DGD not yet ready", "name", dgd.Name, "state", dgd.Status.State)
+
+		condStatus = metav1.ConditionFalse
+		condReason = "DeploymentInProgress"
+		condMessage = fmt.Sprintf("DGD %s is in %s state", dgd.Name, string(dgd.Status.State))
 	}
+
+	updateDeploymentInfo(dgdr, dgd)
+	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
+		Type:    nvidiacomv1beta1.ConditionTypeDeploymentReady,
+		Status:  condStatus,
+		Reason:  condReason,
+		Message: condMessage,
+	})
 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 }
@@ -556,8 +570,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 			Message: fmt.Sprintf("Deployment degraded to %s", string(dgd.Status.State)),
 		})
 	} else {
-		// DGD is healthy — update replica info
-		updateDeploymentInfo(dgdr, dgd)
+		// DGD is healthy — update replica info only if changed
+		if !updateDeploymentInfo(dgdr, dgd) {
+			// Nothing changed, skip the status write
+			return ctrl.Result{}, nil
+		}
 	}
 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
@@ -775,6 +792,25 @@ func isOnlineProfiling(_ *nvidiacomv1beta1.DynamoGraphDeploymentRequest) bool {
 
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
+	var errs []error
+
+	// Validate image is specified (required for the profiling job container).
+	// Mirrors the webhook admission check so controller-side writes cannot bypass it.
+	if dgdr.Spec.Image == "" {
+		errs = append(errs, fmt.Errorf("spec.image is required"))
+	}
+
+	// Disallow searchStrategy: thorough with backend: auto.
+	// Mirrors the webhook admission check so controller-side writes cannot bypass it.
+	if dgdr.Spec.SearchStrategy == nvidiacomv1beta1.SearchStrategyThorough &&
+		dgdr.Spec.Backend == nvidiacomv1beta1.BackendTypeAuto {
+		errs = append(errs, fmt.Errorf(
+			"spec.searchStrategy %q is incompatible with spec.backend %q: set spec.backend to a specific backend (sglang, trtllm, or vllm)",
+			nvidiacomv1beta1.SearchStrategyThorough,
+			nvidiacomv1beta1.BackendTypeAuto,
+		))
+	}
+
 	// Validate model cache PVC if provided
 	if dgdr.Spec.ModelCache != nil && dgdr.Spec.ModelCache.PVCName != "" {
 		pvc := &corev1.PersistentVolumeClaim{}
@@ -785,18 +821,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				return fmt.Errorf(MessageModelCachePVCNotFound, dgdr.Spec.ModelCache.PVCName, dgdr.Namespace)
+				errs = append(errs, fmt.Errorf(MessageModelCachePVCNotFound, dgdr.Spec.ModelCache.PVCName, dgdr.Namespace))
+			} else {
+				return err
 			}
-			return err
 		}
 	}
 
 	if err := r.validateGPUHardwareInfo(ctx, dgdr); err != nil {
-		return err
+		errs = append(errs, err)
 	}
 
 	// The profiler will validate the rest of the configuration
-	return nil
+	return errors.Join(errs...)
 }
 
 // validateGPUHardwareInfo ensures GPU hardware information is available when required for profiling
@@ -804,10 +841,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 	logger := log.FromContext(ctx)
 
 	// Check if user provided hardware info in the typed spec
-	hasManualConfig := dgdr.Spec.Hardware != nil && (
-		dgdr.Spec.Hardware.GPUSKU != "" ||
-			dgdr.Spec.Hardware.VRAMMB != nil ||
-			dgdr.Spec.Hardware.NumGPUsPerNode != nil)
+	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
+		dgdr.Spec.Hardware.VRAMMB != nil ||
+		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
 
 	// If manual config is provided, validation passes
 	if hasManualConfig {
@@ -1412,6 +1448,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		return fmt.Errorf("failed to update DGDR with generated DGD annotation: %w", err)
 	}
 
+	// Refetch the DGDR after the annotation update to get the latest resourceVersion
+	// and avoid conflicts with concurrent modifications before updating status.
+	if err := r.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, dgdr); err != nil {
+		return fmt.Errorf("failed to refetch DGDR after annotation update: %w", err)
+	}
+
 	return r.Status().Update(ctx, dgdr)
 }
 
@@ -1498,7 +1540,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent 
 }
 
 // updateDeploymentInfo populates status.deploymentInfo from DGD service replica counts.
-func updateDeploymentInfo(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, dgd *dgdv1alpha1.DynamoGraphDeployment) {
+func updateDeploymentInfo(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, dgd *dgdv1alpha1.DynamoGraphDeployment) bool {
 	var totalReplicas, totalAvailable int32
 	for _, svc := range dgd.Status.Services {
 		totalReplicas += svc.Replicas
@@ -1506,10 +1548,19 @@ func updateDeploymentInfo(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, d
 			totalAvailable += *svc.AvailableReplicas
 		}
 	}
+
+	// Short-circuit if nothing changed
+	if cur := dgdr.Status.DeploymentInfo; cur != nil &&
+		cur.Replicas != nil && *cur.Replicas == totalReplicas &&
+		cur.AvailableReplicas != nil && *cur.AvailableReplicas == totalAvailable {
+		return false
+	}
+
 	dgdr.Status.DeploymentInfo = &nvidiacomv1beta1.DeploymentInfoStatus{
 		Replicas:          &totalReplicas,
 		AvailableReplicas: &totalAvailable,
 	}
+	return true
 }
 
 // setSucceededCondition sets the aggregate Succeeded condition based on the current phase.
