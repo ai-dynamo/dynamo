@@ -2905,8 +2905,8 @@ mod tests {
             "id": "rs_1",
             "summary": [{"text": "thinking", "type": "summary_text"}]
         }"#;
-        let item: InputItem = serde_json::from_str(json)
-            .expect("reasoning item should deserialize");
+        let item: InputItem =
+            serde_json::from_str(json).expect("reasoning item should deserialize");
         match &item {
             InputItem::Item(Item::Reasoning(r)) => {
                 assert_eq!(r.id, "rs_1");

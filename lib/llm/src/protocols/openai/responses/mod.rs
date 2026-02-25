@@ -1209,5 +1209,4 @@ thinking
         assert!(!stripped.contains("<tool_call>"));
         assert!(!stripped.contains("<think>"));
     }
-
 }
