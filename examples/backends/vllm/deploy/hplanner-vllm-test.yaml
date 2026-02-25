@@ -17,7 +17,7 @@
 #       --from-literal=HF_TOKEN=<your-token> -n ${K8S_NAMESPACE}
 #
 # Usage:
-#   export K8S_NAMESPACE=... DYNAMO_IMAGE=... DYNAMO_VLLM_IMAGE=... MODEL_NAME=...
+#   export K8S_NAMESPACE=... DYNAMO_IMAGE=... DYNAMO_VLLM_IMAGE=... MODEL_NAME=... STORAGE_CLASS_NAME=...
 #   envsubst < hplanner-vllm-test.yaml | kubectl apply   -n ${K8S_NAMESPACE} -f -
 #   envsubst < hplanner-vllm-test.yaml | kubectl delete  -n ${K8S_NAMESPACE} -f -
 apiVersion: rbac.authorization.k8s.io/v1
@@ -61,8 +61,10 @@ data:
       }
     }
 ---
-# Shared model cache — ReadWriteMany Azure Files PVC mounted into all vLLM worker pods.
+# Shared model cache — ReadWriteMany PVC mounted into all vLLM worker pods.
 # The model is downloaded once and reused across pods and restarts.
+# Set storageClassName to a RWX-capable storage class available in your cluster
+# (e.g. azurefile-csi-premium on AKS, nfs-csi on Nebius, efs-sc on EKS).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -70,7 +72,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteMany
-  storageClassName: azurefile-csi-premium
+  storageClassName: ${STORAGE_CLASS_NAME}
   resources:
     requests:
       storage: 50Gi
