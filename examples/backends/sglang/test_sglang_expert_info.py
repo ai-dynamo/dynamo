@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 
+import pybase64
 import requests
 
 # Configuration
@@ -110,15 +111,16 @@ def start_sglang_backend():
 
 
 def validate_routed_experts(routed_experts):
-    """Check that routed_experts is a non-empty nested list of ints."""
+    """Check that routed_experts is a base64-encoded string of int32 expert IDs."""
+    import numpy as np
+
     assert isinstance(
-        routed_experts, list
-    ), f"Expected list, got {type(routed_experts)}"
-    assert len(routed_experts) > 0, "routed_experts is empty"
-    # Shape should be (num_layers, seq_len, top_k)
-    assert isinstance(routed_experts[0], list), "Expected nested list (layers)"
-    assert isinstance(routed_experts[0][0], list), "Expected nested list (tokens)"
-    assert isinstance(routed_experts[0][0][0], int), "Expected int expert IDs"
+        routed_experts, str
+    ), f"Expected base64 string, got {type(routed_experts)}"
+    decoded = np.frombuffer(
+        pybase64.b64decode(routed_experts.encode("utf-8")), dtype=np.int32
+    )
+    assert len(decoded) > 0, "routed_experts decoded to empty array"
 
 
 def test_completions_non_streaming():

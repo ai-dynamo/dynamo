@@ -6,6 +6,7 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
 
+import pybase64
 import sglang as sgl
 
 from dynamo._core import Context
@@ -107,7 +108,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        return_routed_experts = self.config.server_args.enable_return_routed_experts
+        return_routed_experts = getattr(
+            self.config.server_args, "enable_return_routed_experts", False
+        )
         priority = (request.get("routing") or {}).get("priority")
 
         if self.serving_mode == DisaggregationMode.DECODE:
@@ -247,9 +250,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out["token_ids"] = output_ids
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
-                    # Convert tensor to list for JSON serialization over RPC.
-                    if hasattr(routed_experts, "tolist"):
-                        routed_experts = routed_experts.tolist()
+                    # Base64-encode tensor bytes to match sglang's output format.
+                    routed_experts = pybase64.b64encode(
+                        routed_experts.numpy().tobytes()
+                    ).decode("utf-8")
                     # Internal transport field consumed by frontend nvext mapping.
                     out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
@@ -328,9 +332,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 }
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
-                    # Convert tensor to list for JSON serialization over RPC.
-                    if hasattr(routed_experts, "tolist"):
-                        routed_experts = routed_experts.tolist()
+                    # Base64-encode tensor bytes to match sglang's output format.
+                    routed_experts = pybase64.b64encode(
+                        routed_experts.numpy().tobytes()
+                    ).decode("utf-8")
                     response["nvext"] = {"routed_experts": routed_experts}
                 if not context.is_stopped():
                     yield response
