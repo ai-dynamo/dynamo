@@ -2175,17 +2175,20 @@ def _test_router_decisions(
                     assert resp.status == 200, f"POST /score failed: {resp.status}"
                     scores = (await resp.json())["scores"]
 
-                    key_a = f"{worker_a_id}:{_dp_a}"
-                    key_b = f"{worker_b_id}:{_dp_b}"
-                    score_a = scores[key_a]
-                    score_b = scores[key_b]
+                    id_a = str(worker_a_id)
+                    id_b = str(worker_b_id)
+                    dp_a = str(_dp_a)
+                    dp_b = str(_dp_b)
+                    score_a = scores[id_a][dp_a]
+                    score_b = scores[id_b][dp_b]
 
                     logger.info(
-                        f"Standalone indexer /score: {key_a}={score_a}, {key_b}={score_b}"
+                        f"Standalone indexer /score: {id_a}[{dp_a}]={score_a}, "
+                        f"{id_b}[{dp_b}]={score_b}"
                     )
                     assert score_a > score_b, (
-                        f"Expected worker_a ({key_a}) score {score_a} > "
-                        f"worker_b ({key_b}) score {score_b} for req4 tokens"
+                        f"Expected instance {id_a} dp_rank {dp_a} score {score_a} > "
+                        f"instance {id_b} dp_rank {dp_b} score {score_b} for req4 tokens"
                     )
 
         asyncio.run(_verify_scores())

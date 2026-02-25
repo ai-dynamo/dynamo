@@ -68,11 +68,9 @@ async fn main() -> anyhow::Result<()> {
     let registry = WorkerRegistry::new(indexer, cli.block_size);
 
     if let Some(ref workers_str) = cli.workers {
-        for (worker_id, zmq_address) in parse_workers(workers_str) {
-            tracing::info!(worker_id, zmq_address, "Registering initial worker");
-            let mut addrs = std::collections::HashMap::new();
-            addrs.insert(0, zmq_address);
-            registry.register(worker_id, addrs)?;
+        for (instance_id, endpoint) in parse_workers(workers_str) {
+            tracing::info!(instance_id, endpoint, "Registering initial worker");
+            registry.register(instance_id, endpoint, 0)?;
         }
     }
 

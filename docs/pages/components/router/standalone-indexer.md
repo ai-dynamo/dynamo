@@ -47,19 +47,28 @@ dynamo-kv-indexer --block-size 16 --port 8090 [--threads 1] [--workers "1=tcp://
 
 ## HTTP API
 
-### `POST /workers` — Register a worker
+### `POST /workers` — Register an endpoint
 
-Register a worker with its ZMQ addresses (one per dp_rank for data-parallel workers):
+Register a ZMQ endpoint for an instance. Call once per dp_rank for data-parallel workers:
 
 ```bash
+# Single dp_rank (dp_rank defaults to 0)
 curl -X POST http://localhost:8090/workers \
   -H 'Content-Type: application/json' \
-  -d '{"worker_id": 1, "zmq_addresses": {"0": "tcp://127.0.0.1:5557", "1": "tcp://127.0.0.1:5558"}}'
+  -d '{"instance_id": 1, "endpoint": "tcp://127.0.0.1:5557"}'
+
+# Multiple dp_ranks — register each separately
+curl -X POST http://localhost:8090/workers \
+  -H 'Content-Type: application/json' \
+  -d '{"instance_id": 1, "endpoint": "tcp://127.0.0.1:5557", "dp_rank": 0}'
+curl -X POST http://localhost:8090/workers \
+  -H 'Content-Type: application/json' \
+  -d '{"instance_id": 1, "endpoint": "tcp://127.0.0.1:5558", "dp_rank": 1}'
 ```
 
-The indexer spawns a ZMQ SUB listener for each address and begins consuming KV events.
+The indexer spawns a ZMQ SUB listener for each endpoint and begins consuming KV events.
 
-### `GET /workers` — List registered workers
+### `GET /workers` — List registered instances
 
 ```bash
 curl http://localhost:8090/workers
@@ -67,16 +76,16 @@ curl http://localhost:8090/workers
 
 Returns:
 ```json
-[{"worker_id": 1, "zmq_addresses": {"0": "tcp://127.0.0.1:5557", "1": "tcp://127.0.0.1:5558"}}]
+[{"instance_id": 1, "endpoints": {"0": "tcp://127.0.0.1:5557", "1": "tcp://127.0.0.1:5558"}}]
 ```
 
-### `DELETE /workers/{worker_id}` — Deregister a worker
+### `DELETE /workers/{instance_id}` — Deregister an instance
 
 ```bash
 curl -X DELETE http://localhost:8090/workers/1
 ```
 
-Cancels ZMQ listeners and removes the worker's blocks from the radix tree.
+Cancels all ZMQ listeners for the instance and removes its blocks from the radix tree.
 
 ### `POST /score` — Score overlap for tokens
 
@@ -91,13 +100,13 @@ curl -X POST http://localhost:8090/score \
 Returns:
 ```json
 {
-  "scores": {"1:0": 2, "2:1": 0},
+  "scores": {"1": {"0": 2}, "2": {"1": 0}},
   "frequencies": [1, 1],
-  "tree_sizes": {"1:0": 5, "2:1": 3}
+  "tree_sizes": {"1": {"0": 5}, "2": {"1": 3}}
 }
 ```
 
-Score keys are `worker_id:dp_rank`. Higher score means more cached prefix blocks on that worker.
+Scores are nested by `instance_id` then `dp_rank`. Higher score means more cached prefix blocks on that worker.
 
 ### `POST /score_hashed` — Score overlap for pre-computed hashes
 

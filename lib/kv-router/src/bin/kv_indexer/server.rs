@@ -22,14 +22,16 @@ pub struct AppState {
 
 #[derive(Deserialize)]
 pub struct RegisterWorkerRequest {
-    pub worker_id: WorkerId,
-    pub zmq_addresses: HashMap<u32, String>,
+    pub instance_id: WorkerId,
+    pub endpoint: String,
+    #[serde(default)]
+    pub dp_rank: Option<u32>,
 }
 
 #[derive(Serialize)]
 struct WorkerInfo {
-    worker_id: WorkerId,
-    zmq_addresses: HashMap<u32, String>,
+    instance_id: WorkerId,
+    endpoints: HashMap<u32, String>,
 }
 
 #[derive(Deserialize)]
@@ -46,16 +48,19 @@ pub struct ScoreHashedRequest {
 
 #[derive(Serialize)]
 struct ScoreResponse {
-    scores: std::collections::HashMap<String, u32>,
+    scores: HashMap<String, HashMap<String, u32>>,
     frequencies: Vec<usize>,
-    tree_sizes: std::collections::HashMap<String, usize>,
+    tree_sizes: HashMap<String, HashMap<String, usize>>,
 }
 
 async fn register_worker(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterWorkerRequest>,
 ) -> impl IntoResponse {
-    match state.registry.register(req.worker_id, req.zmq_addresses) {
+    match state
+        .registry
+        .register(req.instance_id, req.endpoint, req.dp_rank.unwrap_or(0))
+    {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"status": "ok"})),
@@ -69,9 +74,9 @@ async fn register_worker(
 
 async fn deregister_worker(
     State(state): State<Arc<AppState>>,
-    Path(worker_id): Path<WorkerId>,
+    Path(instance_id): Path<WorkerId>,
 ) -> impl IntoResponse {
-    match state.registry.deregister(worker_id).await {
+    match state.registry.deregister(instance_id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         Err(e) => (
             StatusCode::NOT_FOUND,
@@ -85,12 +90,34 @@ async fn list_workers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .registry
         .list()
         .into_iter()
-        .map(|(worker_id, zmq_addresses)| WorkerInfo {
-            worker_id,
-            zmq_addresses,
+        .map(|(instance_id, endpoints)| WorkerInfo {
+            instance_id,
+            endpoints,
         })
         .collect();
     Json(workers)
+}
+
+fn build_score_response(overlap: dynamo_kv_router::protocols::OverlapScores) -> ScoreResponse {
+    let mut scores: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    for (k, v) in &overlap.scores {
+        scores
+            .entry(k.worker_id.to_string())
+            .or_default()
+            .insert(k.dp_rank.to_string(), *v);
+    }
+    let mut tree_sizes: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for (k, v) in &overlap.tree_sizes {
+        tree_sizes
+            .entry(k.worker_id.to_string())
+            .or_default()
+            .insert(k.dp_rank.to_string(), *v);
+    }
+    ScoreResponse {
+        scores,
+        frequencies: overlap.frequencies,
+        tree_sizes,
+    }
 }
 
 async fn score(
@@ -104,22 +131,10 @@ async fn score(
         req.lora_name.as_deref(),
     );
     match state.registry.indexer().find_matches(block_hashes).await {
-        Ok(overlap) => {
-            let resp = ScoreResponse {
-                scores: overlap
-                    .scores
-                    .iter()
-                    .map(|(k, v)| (format!("{}:{}", k.worker_id, k.dp_rank), *v))
-                    .collect(),
-                frequencies: overlap.frequencies,
-                tree_sizes: overlap
-                    .tree_sizes
-                    .iter()
-                    .map(|(k, v)| (format!("{}:{}", k.worker_id, k.dp_rank), *v))
-                    .collect(),
-            };
-            (StatusCode::OK, Json(serde_json::json!(resp)))
-        }
+        Ok(overlap) => (
+            StatusCode::OK,
+            Json(serde_json::json!(build_score_response(overlap))),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -137,22 +152,10 @@ async fn score_hashed(
         .map(|h| LocalBlockHash(*h as u64))
         .collect();
     match state.registry.indexer().find_matches(block_hashes).await {
-        Ok(overlap) => {
-            let resp = ScoreResponse {
-                scores: overlap
-                    .scores
-                    .iter()
-                    .map(|(k, v)| (format!("{}:{}", k.worker_id, k.dp_rank), *v))
-                    .collect(),
-                frequencies: overlap.frequencies,
-                tree_sizes: overlap
-                    .tree_sizes
-                    .iter()
-                    .map(|(k, v)| (format!("{}:{}", k.worker_id, k.dp_rank), *v))
-                    .collect(),
-            };
-            (StatusCode::OK, Json(serde_json::json!(resp)))
-        }
+        Ok(overlap) => (
+            StatusCode::OK,
+            Json(serde_json::json!(build_score_response(overlap))),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -174,7 +177,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/workers", post(register_worker))
         .route("/workers", get(list_workers))
-        .route("/workers/{worker_id}", delete(deregister_worker))
+        .route("/workers/{instance_id}", delete(deregister_worker))
         .route("/score", post(score))
         .route("/score_hashed", post(score_hashed))
         .route("/dump", get(dump_events))

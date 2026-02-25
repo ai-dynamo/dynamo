@@ -12,8 +12,12 @@ use dynamo_kv_router::protocols::WorkerId;
 use super::indexer::Indexer;
 use super::listener::run_zmq_listener;
 
+pub struct EndpointEntry {
+    pub endpoint: String,
+}
+
 pub struct WorkerEntry {
-    pub zmq_addresses: HashMap<u32, String>,
+    pub endpoints: HashMap<u32, EndpointEntry>,
     cancel: CancellationToken,
 }
 
@@ -32,47 +36,63 @@ impl WorkerRegistry {
         }
     }
 
-    pub fn register(&self, worker_id: WorkerId, zmq_addresses: HashMap<u32, String>) -> Result<()> {
-        let entry = self.workers.entry(worker_id);
-        let dashmap::mapref::entry::Entry::Vacant(vacant) = entry else {
-            bail!("worker {worker_id} already registered");
-        };
-
-        let cancel = CancellationToken::new();
-
-        for (&dp_rank, addr) in &zmq_addresses {
-            let indexer = self.indexer.clone();
-            let block_size = self.block_size;
-            let addr = addr.clone();
-            let cancel_clone = cancel.clone();
-
-            tokio::spawn(async move {
-                run_zmq_listener(worker_id, dp_rank, addr, block_size, indexer, cancel_clone).await;
+    pub fn register(&self, instance_id: WorkerId, endpoint: String, dp_rank: u32) -> Result<()> {
+        let mut entry = self
+            .workers
+            .entry(instance_id)
+            .or_insert_with(|| WorkerEntry {
+                endpoints: HashMap::new(),
+                cancel: CancellationToken::new(),
             });
+
+        if entry.endpoints.contains_key(&dp_rank) {
+            bail!("instance {instance_id} dp_rank {dp_rank} already registered");
         }
 
-        vacant.insert(WorkerEntry {
-            zmq_addresses,
-            cancel,
+        let child_cancel = entry.cancel.child_token();
+        let indexer = self.indexer.clone();
+        let block_size = self.block_size;
+        let addr = endpoint.clone();
+
+        tokio::spawn(async move {
+            run_zmq_listener(
+                instance_id,
+                dp_rank,
+                addr,
+                block_size,
+                indexer,
+                child_cancel,
+            )
+            .await;
         });
+
+        entry.endpoints.insert(dp_rank, EndpointEntry { endpoint });
         Ok(())
     }
 
-    pub async fn deregister(&self, worker_id: WorkerId) -> Result<()> {
+    pub async fn deregister(&self, instance_id: WorkerId) -> Result<()> {
         let (_, entry) = self
             .workers
-            .remove(&worker_id)
-            .ok_or_else(|| anyhow::anyhow!("worker {worker_id} not found"))?;
+            .remove(&instance_id)
+            .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
 
         entry.cancel.cancel();
-        self.indexer.remove_worker(worker_id).await;
+        self.indexer.remove_worker(instance_id).await;
         Ok(())
     }
 
     pub fn list(&self) -> Vec<(WorkerId, HashMap<u32, String>)> {
         self.workers
             .iter()
-            .map(|entry| (*entry.key(), entry.value().zmq_addresses.clone()))
+            .map(|entry| {
+                let endpoints: HashMap<u32, String> = entry
+                    .value()
+                    .endpoints
+                    .iter()
+                    .map(|(&dp_rank, e)| (dp_rank, e.endpoint.clone()))
+                    .collect();
+                (*entry.key(), endpoints)
+            })
             .collect()
     }
 

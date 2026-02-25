@@ -373,28 +373,29 @@ class MockerProcess:
                     f"(known_ids={known_ids})"
                 )
 
-            # Build ZMQ address map for this worker
+            # Register each dp_rank endpoint with the standalone indexer
             zmq_addresses = {}
-            for dp_rank in range(dp_size):
-                port = self._zmq_kv_events_ports[i * dp_size + dp_rank]
-                zmq_addresses[str(dp_rank)] = f"tcp://127.0.0.1:{port}"
+            register_url = f"{self.standalone_indexer_url}/workers"
+            async with aiohttp.ClientSession() as session:
+                for dp_rank in range(dp_size):
+                    port = self._zmq_kv_events_ports[i * dp_size + dp_rank]
+                    endpoint = f"tcp://127.0.0.1:{port}"
+                    zmq_addresses[str(dp_rank)] = endpoint
+
+                    payload = {
+                        "instance_id": new_worker_id,
+                        "endpoint": endpoint,
+                        "dp_rank": dp_rank,
+                    }
+                    async with session.post(register_url, json=payload) as resp:
+                        if resp.status != 201:
+                            body = await resp.text()
+                            raise RuntimeError(
+                                f"Failed to register instance {new_worker_id} "
+                                f"dp_rank {dp_rank}: {resp.status} {body}"
+                            )
 
             self.worker_id_to_zmq_ports[new_worker_id] = zmq_addresses
-
-            # Register with the standalone indexer
-            register_url = f"{self.standalone_indexer_url}/workers"
-            payload = {
-                "worker_id": new_worker_id,
-                "zmq_addresses": zmq_addresses,
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(register_url, json=payload) as resp:
-                    if resp.status != 201:
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Failed to register worker {new_worker_id}: "
-                            f"{resp.status} {body}"
-                        )
 
             logger.info(
                 f"Mocker {i}: worker_id={new_worker_id}, "
