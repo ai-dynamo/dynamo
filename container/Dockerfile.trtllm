@@ -820,15 +820,24 @@ RUN uv pip install \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    python -c "import torch; print(f'torch=={torch.__version__}')" > /tmp/torch-constraint.txt && \
     UV_GIT_LFS=1 uv pip install \
         --no-cache \
-        --constraint /tmp/torch-constraint.txt \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt \
         cupy-cuda13x
+
+# Restore NGC torch overwritten by the requirements install above.
+# --index-strategy unsafe-best-match re-resolves torch from public indices,
+# replacing the custom NGC pre-release (2.9.0a0+...) with torch 2.9.1 from PyPI.
+ARG TORCH_VER=2.9.0a0+145a3a7bda.nv25.10
+RUN --mount=from=framework,source=/opt/dynamo/venv/lib/python3.12/site-packages,target=/mnt/fw-pkgs \
+    SITE="${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages" && \
+    rm -rf "${SITE}/torch" && \
+    cp -r /mnt/fw-pkgs/torch "${SITE}/" && \
+    find "${SITE}" -maxdepth 1 -name 'torch-*.dist-info' -exec rm -rf {} + && \
+    cp -r "/mnt/fw-pkgs/torch-${TORCH_VER}.dist-info" "${SITE}/"
 
 # Upgrade NCCL to 2.29.3+ which includes ncclAlltoAll (required for KVBM NCCL replicated mode)
 # The base nvidia-nccl-cu13 2.27.7 on ARM64 is missing ncclAlltoAll symbol

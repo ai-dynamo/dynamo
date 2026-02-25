@@ -347,9 +347,7 @@ ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     --mount=type=cache,target=/root/.cache/uv \
-    python -c "import torch; print(f'torch=={torch.__version__}')" > /tmp/torch-constraint.txt 2>/dev/null || : > /tmp/torch-constraint.txt && \
     UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 uv pip install \
-        --constraint /tmp/torch-constraint.txt \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
@@ -357,6 +355,19 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         cupy-cuda13x && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
+    fi
+
+# Restore NGC torch overwritten by the requirements install above (trtllm only).
+# --index-strategy unsafe-best-match re-resolves torch from public indices,
+# replacing the custom NGC pre-release (2.9.0a0+...) with torch 2.9.1 from PyPI.
+ARG TORCH_VER=2.9.0a0+145a3a7bda.nv25.10
+RUN --mount=from=framework,source=/opt/dynamo/venv/lib/python3.12/site-packages,target=/mnt/fw-pkgs \
+    if [ "${FRAMEWORK}" = "trtllm" ]; then \
+        SITE="${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages" && \
+        rm -rf "${SITE}/torch" && \
+        cp -r /mnt/fw-pkgs/torch "${SITE}/" && \
+        find "${SITE}" -maxdepth 1 -name 'torch-*.dist-info' -exec rm -rf {} + && \
+        cp -r "/mnt/fw-pkgs/torch-${TORCH_VER}.dist-info" "${SITE}/"; \
     fi
 
 # Copy entire workspace (old design - simpler for CI)
