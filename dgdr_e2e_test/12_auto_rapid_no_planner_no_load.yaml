@@ -4,6 +4,7 @@ metadata:
   name: qwen3-32b-auto-rapid-no-planner-no-load
 spec:
   model: "Qwen/Qwen3-32B"
+  image: "hongkuanz196/trtllm-runtime:hzhou-0224"
   hardware:
     gpuSku: h200_sxm
     totalGpus: 8
