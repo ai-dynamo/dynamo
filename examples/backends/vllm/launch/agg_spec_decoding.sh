@@ -23,7 +23,6 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
         "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
         "draft_tensor_parallel_size": 1,
         "num_speculative_tokens": 2,
-        "method": "eagle"
+        "method": "eagle3"
     }' \
-    --connector none \
     --gpu-memory-utilization 0.8

@@ -1,6 +1,7 @@
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.29.0
 
@@ -82,6 +83,10 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	for file in config/crd/bases/*.yaml; do \
 		yq eval '(.. | select(has("extraPodSpec")) | .extraPodSpec.required) |= (. - ["containers"])' -i --indent 2 $$file || exit 1; \
 	done
+	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
+	for file in config/crd/bases/*.yaml; do \
+		yq eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
+	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
 		if ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
@@ -124,7 +129,7 @@ generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (req
 	@echo "Generating Pydantic models from v1beta1 DGDR types..."
 	@python3 api/scripts/generate_pydantic_from_go.py
 	@echo "Running Pydantic validation tests..."
-	@python3 api/scripts/test_pydantic_models.py
+	@python3 api/scripts/validate_pydantic_models.py
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.

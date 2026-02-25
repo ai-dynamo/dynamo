@@ -139,8 +139,19 @@ navigation:
         contents:
           - page: vLLM
             path: ../pages/backends/vllm/README.md
-          - page: SGLang
+          - section: SGLang
             path: ../pages/backends/sglang/README.md
+            contents:
+              - page: Reference Guide
+                path: ../pages/backends/sglang/sglang-reference-guide.md
+              - page: Examples
+                path: ../pages/backends/sglang/sglang-examples.md
+              - page: Disaggregation
+                path: ../pages/backends/sglang/sglang-disaggregation.md
+              - page: Diffusion
+                path: ../pages/backends/sglang/sglang-diffusion.md
+              - page: Observability
+                path: ../pages/backends/sglang/sglang-observability.md
           - page: TensorRT-LLM
             path: ../pages/backends/trtllm/README.md
       - section: Frontend
@@ -282,22 +293,6 @@ navigation:
             path: ../pages/backends/vllm/prompt-embeddings.md
           - page: vLLM-Omni
             path: ../pages/backends/vllm/vllm-omni.md
-      - section: SGLang Details
-        contents:
-          - page: Agentic Workloads
-            path: ../pages/backends/sglang/agents.md
-          - page: Expert Distribution (EPLB)
-            path: ../pages/backends/sglang/expert-distribution-eplb.md
-          - page: GPT-OSS
-            path: ../pages/backends/sglang/gpt-oss.md
-          - page: Diffusion LM
-            path: ../pages/backends/sglang/diffusion-lm.md
-          - page: Profiling
-            path: ../pages/backends/sglang/profiling.md
-          - page: Disaggregation
-            path: ../pages/backends/sglang/sglang-disaggregation.md
-          - page: Prometheus
-            path: ../pages/backends/sglang/prometheus.md
       - section: TensorRT-LLM Details
         contents:
           - page: Multinode Examples

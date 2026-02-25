@@ -10,13 +10,14 @@ Every cached KV block in a distributed LLM system needs four pieces of informati
 
 ### 1. Local Block Hash (`LocalBlockHash`, u64)
 
-**What**: Hash of the tokens *within* a single block (e.g., 64 tokens).
+**What**: Hash of the tokens *within* a single block (e.g., 64 tokens), optionally including LoRA adapter name and multimodal metadata.
 
-**Why**: Identifies the content of this specific block, independent of context. Two blocks with the same tokens have the same local hash.
+**Why**: Identifies the content of this specific block, independent of context. Two blocks with the same tokens (and same LoRA adapter) have the same local hash. When a LoRA adapter name is provided, it is length-prefixed and appended to the byte buffer before hashing, ensuring that blocks under different adapters (or the base model) always produce distinct hashes.
 
-```
+```text
 Block at position 5: tokens [101, 102, 103, ...]
-LocalBlockHash = hash(tokens) = 0xABCD1234
+LocalBlockHash = hash(tokens)                          = 0xABCD1234  (base model)
+LocalBlockHash = hash(tokens || len("my-lora") || "my-lora") = 0xDEAD5678  (LoRA adapter)
 ```
 
 ### 2. External Sequence Block Hash (`ExternalSequenceBlockHash`, u64)
@@ -37,7 +38,9 @@ block2 in B: seq_hash = hash(hash(hash(block0') || block1') || block2) = 0x2222
 
 > **Important: Engine-Provided Hashes**
 >
-> In practice, the `ExternalSequenceBlockHash` may come directly from the inference engine (e.g., vLLM, TensorRT-LLM) using a rolling hash algorithm that we don't know or control. The engine computes these hashes internally and reports them via KV cache events.
+> In practice, the `ExternalSequenceBlockHash` may come directly from the inference engine (e.g., TensorRT-LLM, vLLM) using a rolling hash algorithm that we don't know or control. The engine computes these hashes internally and reports them via KV cache events.
+>
+> **LoRA identity**: The engine is responsible for incorporating the LoRA adapter identity into the `ExternalSequenceBlockHash` before emitting KV events. Dynamo does not add LoRA information at the router layer. For example, vLLM does this via `_gen_lora_extra_hash_keys`, which appends the LoRA ID as extra keys when calling `hash_block_tokens(..., extra_keys)`. Any engine integrating with the KV router must follow the same convention to ensure correct cache isolation between LoRA adapters.
 >
 > **Implications for index implementations:**
 >

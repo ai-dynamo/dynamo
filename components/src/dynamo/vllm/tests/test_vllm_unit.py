@@ -3,13 +3,20 @@
 
 """Unit tests for vLLM backend components."""
 
+import json
 import re
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from dynamo.vllm.args import parse_args
+from dynamo.vllm.args import (
+    _connector_to_kv_transfer_json,
+    _uses_dynamo_connector,
+    _uses_nixl_connector,
+    parse_args,
+)
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -179,6 +186,8 @@ def test_endpoint_overrides_with_prefill_worker(mock_vllm_cli):
         "dyn://custom.worker.serve",
         "--disaggregation-mode",
         "prefill",
+        "--kv-transfer-config",
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
     )
     config = parse_args()
     assert config.namespace == "custom"
@@ -196,6 +205,95 @@ def test_endpoint_invalid_format_raises(mock_vllm_cli):
     )
     with pytest.raises(ValueError, match="Invalid endpoint format"):
         parse_args()
+
+
+# --connector removal tests
+
+
+def test_connector_nixl_raises_error_with_migration_hint(mock_vllm_cli):
+    """Test that --connector nixl raises ValueError with --kv-transfer-config hint."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "nixl")
+    with pytest.raises(ValueError, match="--connector is no longer supported"):
+        parse_args()
+
+
+def test_connector_none_raises_error(mock_vllm_cli):
+    """Test that --connector none raises ValueError telling user it's no longer needed."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "none")
+    with pytest.raises(ValueError, match="no longer needed"):
+        parse_args()
+
+
+def test_env_var_dyn_connector_raises_error(monkeypatch, mock_vllm_cli):
+    """Test that DYN_CONNECTOR env var raises error for vLLM backend."""
+    monkeypatch.setenv("DYN_CONNECTOR", "nixl")
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    with pytest.raises(ValueError, match="no longer supported"):
+        parse_args()
+
+
+def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
+    """Test that --disaggregation-mode prefill without --kv-transfer-config raises ValueError."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill")
+    with pytest.raises(ValueError, match="--kv-transfer-config"):
+        parse_args()
+
+
+def test_connector_to_kv_transfer_json_single():
+    """Test _connector_to_kv_transfer_json returns valid JSON for a single connector."""
+    result = json.loads(_connector_to_kv_transfer_json(["nixl"]))
+    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+
+
+def test_connector_to_kv_transfer_json_multi():
+    """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
+    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"]))
+    assert result["kv_connector"] == "PdConnector"
+    nested = result["kv_connector_extra_config"]["connectors"]
+    nested_names = [c["kv_connector"] for c in nested]
+    assert "DynamoConnector" in nested_names
+    assert "NixlConnector" in nested_names
+
+
+# _uses_nixl_connector / _uses_dynamo_connector tests
+
+
+def _make_engine_cfg(kv_connector=None, extra_config=None):
+    """Build a minimal fake engine config for connector detection tests."""
+    if kv_connector is None:
+        return SimpleNamespace(kv_transfer_config=None)
+    return SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector=kv_connector,
+            kv_connector_extra_config=extra_config,
+        )
+    )
+
+
+_PD_KVBM_NIXL = {
+    "connectors": [
+        {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
+        {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
+    ]
+}
+
+
+def test_uses_nixl_connector_direct_and_nested():
+    """Test _uses_nixl_connector for direct, nested-in-PdConnector, and absent cases."""
+    assert _uses_nixl_connector(_make_engine_cfg("NixlConnector")) is True
+    assert _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
+    assert _uses_nixl_connector(_make_engine_cfg("LMCacheConnectorV1")) is False
+    assert _uses_nixl_connector(_make_engine_cfg()) is False
+
+
+def test_uses_dynamo_connector_direct_and_nested():
+    """Test _uses_dynamo_connector for direct, nested-in-PdConnector, and absent cases."""
+    assert _uses_dynamo_connector(_make_engine_cfg("DynamoConnector")) is True
+    assert (
+        _uses_dynamo_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
+    )
+    assert _uses_dynamo_connector(_make_engine_cfg("NixlConnector")) is False
+    assert _uses_dynamo_connector(_make_engine_cfg()) is False
 
 
 def test_headless_namespace_has_required_fields(mock_vllm_cli):
@@ -235,7 +333,14 @@ def test_disaggregation_mode_default(mock_vllm_cli):
 
 def test_disaggregation_mode_prefill(mock_vllm_cli):
     """Test --disaggregation-mode prefill sets correct state."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill")
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disaggregation-mode",
+        "prefill",
+        "--kv-transfer-config",
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+    )
     config = parse_args()
     assert config.disaggregation_mode == DisaggregationMode.PREFILL
     assert config.is_prefill_worker is True
@@ -254,7 +359,13 @@ def test_disaggregation_mode_decode(mock_vllm_cli):
 
 def test_legacy_is_prefill_worker_emits_deprecation(mock_vllm_cli):
     """Test that --is-prefill-worker still works but emits DeprecationWarning."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--is-prefill-worker")
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--is-prefill-worker",
+        "--kv-transfer-config",
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+    )
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         config = parse_args()

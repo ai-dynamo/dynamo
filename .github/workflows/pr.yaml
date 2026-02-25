@@ -126,7 +126,7 @@ jobs:
         working-directory: ./deploy/operator
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "pydantic>=2,<3" "black==23.1.0"
+          python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
       - name: Check for uncommitted changes
         shell: bash
         working-directory: ./deploy/operator
@@ -364,7 +364,7 @@ jobs:
     # Run if core, vllm, or deploy is changed
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     runs-on: prod-default-small-v2
-    needs: [deploy-operator, vllm-pipeline]
+    needs: [changed-files, deploy-operator, vllm-pipeline]
     permissions:
       contents: read
     strategy:

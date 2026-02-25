@@ -21,6 +21,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
+from .utils.kv_cache import compute_kv_bytes_per_token
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -80,6 +81,20 @@ async def worker():
     # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
     if args.num_workers > 1 and args.model_path:
         await prefetch_model(args.model_path)
+
+    # Auto-compute kv_bytes_per_token from model config if not explicitly set
+    if args.kv_bytes_per_token is None and args.model_path:
+        args.kv_bytes_per_token = compute_kv_bytes_per_token(
+            args.model_path, args.kv_cache_dtype
+        )
+
+    # Inject kv_bytes_per_token into engine args JSON (computed after model prefetch)
+    if args.kv_bytes_per_token is not None and not args.extra_engine_args:
+        with open(extra_engine_args_path) as f:
+            engine_args = json.load(f)
+        engine_args["kv_bytes_per_token"] = args.kv_bytes_per_token
+        with open(extra_engine_args_path, "w") as f:
+            json.dump(engine_args, f, indent=2)
 
     try:
         logger.info(
@@ -149,9 +164,12 @@ async def launch_workers(args, extra_engine_args_path):
             f"(estimated total: {total_time:.1f}s)"
         )
 
-    # Load base engine args if we need to create per-worker files with bootstrap_port
+    # Load base engine args if we need to create per-worker files
+    needs_per_worker_args = bool(
+        args.bootstrap_ports_list or args.zmq_kv_events_ports_list
+    )
     base_engine_args = None
-    if args.bootstrap_ports_list:
+    if needs_per_worker_args:
         with open(extra_engine_args_path) as f:
             base_engine_args = json.load(f)
 
@@ -167,19 +185,21 @@ async def launch_workers(args, extra_engine_args_path):
         runtimes.append(runtime)
 
         # Determine which engine args file to use
-        if args.bootstrap_ports_list:
-            # Create per-worker temp file with this worker's bootstrap_port
+        if needs_per_worker_args:
             worker_args = base_engine_args.copy()
-            worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
+            if args.bootstrap_ports_list:
+                worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
+            if args.zmq_kv_events_ports_list:
+                worker_args["zmq_kv_events_port"] = args.zmq_kv_events_ports_list[
+                    worker_id
+                ]
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".json", delete=False
             ) as f:
                 json.dump(worker_args, f)
                 worker_engine_args_path = Path(f.name)
             per_worker_temp_files.append(worker_engine_args_path)
-            logger.debug(
-                f"Worker {worker_id}: using bootstrap_port {args.bootstrap_ports_list[worker_id]}"
-            )
+            logger.debug(f"Worker {worker_id}: per-worker args {worker_args}")
         else:
             worker_engine_args_path = extra_engine_args_path
 
