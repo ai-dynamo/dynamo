@@ -145,6 +145,7 @@ class GMSRPCClient:
             )
             send_message_sync(self._socket, request)
 
+            # May block waiting for lock
             response, _, self._recv_buffer = recv_message_sync(
                 self._socket, self._recv_buffer
             )

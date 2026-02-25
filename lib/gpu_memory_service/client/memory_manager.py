@@ -67,11 +67,11 @@ class StaleMemoryLayoutError(Exception):
 
     IMPORTANT: This is a LAYOUT check, NOT a CONTENT check.
     - Detected: Allocation sizes changed, tensors added/removed, metadata structure changed
-    - NOT detected: Weight values modified in-place
+    - NOT detected: Data values modified in-place
 
     This design is intentional: unmap/remap enables use cases like RL training
     where another process can write to the same memory locations (e.g., updating
-    weights) while preserving the structure. As long as the layout (allocation
+    data) while preserving the structure. As long as the layout (allocation
     and metadata table hashes) remains identical, remap() succeeds.
     """
 
@@ -290,6 +290,10 @@ class GMSClientMemoryManager:
             map_to_va(va, aligned_size, handle)
             set_access(va, aligned_size, self.device, self._granted_lock_type)
         except Exception:
+            try:
+                unmap(va, aligned_size)
+            except Exception:
+                pass
             release_handle(handle)
             raise
         self._track_mapping(

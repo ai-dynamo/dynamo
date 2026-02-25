@@ -58,7 +58,8 @@ class GMSWorker(Worker):
         device = self.local_rank
         current_platform.set_device(torch.device(f"cuda:{device}"))
 
-        # Establish weights GMS connection (so MemorySnapshot can query committed bytes)
+        # Establish weights GMS connection (so MemorySnapshot can query committed bytes).
+        # Fetch extra config from vLLM load_config to determine RW/RO lock mode.
         extra = (
             getattr(self.vllm_config.load_config, "model_loader_extra_config", {}) or {}
         )
