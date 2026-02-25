@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional, Union
@@ -876,9 +877,16 @@ class HandlerBase(BaseGenerativeHandler):
         # doesn't know about (e.g. Rust's "backend"/"choice" vs TRT-LLM's fields).
         guided_decoding = overrides.pop("guided_decoding", None)
         if guided_decoding is not None and isinstance(guided_decoding, dict):
+            # TRT-LLM's GuidedDecodingParams doesn't have a "choice" field.
+            # Convert choice list to a regex pattern: (choice1|choice2|...)
+            regex = guided_decoding.get("regex")
+            choice = guided_decoding.get("choice")
+            if choice and not regex:
+                regex = "(" + "|".join(re.escape(c) for c in choice) + ")"
+
             overrides["guided_decoding"] = GuidedDecodingParams(
                 json=guided_decoding.get("json"),
-                regex=guided_decoding.get("regex"),
+                regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
                 structural_tag=guided_decoding.get("structural_tag"),
