@@ -809,15 +809,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 			dgdr.Spec.Hardware.VRAMMB != nil ||
 			dgdr.Spec.Hardware.NumGPUsPerNode != nil)
 
-	// Validate min/max GPU range consistency
-	if dgdr.Spec.Hardware != nil &&
-		dgdr.Spec.Hardware.MinNumGpusPerEngine != nil &&
-		dgdr.Spec.Hardware.MaxNumGpusPerEngine != nil &&
-		*dgdr.Spec.Hardware.MinNumGpusPerEngine > *dgdr.Spec.Hardware.MaxNumGpusPerEngine {
-		return fmt.Errorf("invalid GPU range: minNumGpusPerEngine (%d) > maxNumGpusPerEngine (%d)",
-			*dgdr.Spec.Hardware.MinNumGpusPerEngine, *dgdr.Spec.Hardware.MaxNumGpusPerEngine)
-	}
-
 	// If manual config is provided, validation passes
 	if hasManualConfig {
 		return nil
