@@ -142,7 +142,7 @@ This section shows how trace and span information appears in JSONL logs. These l
 
 When viewing the corresponding trace in Grafana, you should be able to see something like the following:
 
-![Disaggregated Trace Example](grafana-disagg-trace.png)
+![Disaggregated Trace Example](../../assets/img/grafana-disagg-trace.png)
 
 ### Trace Overview
 
