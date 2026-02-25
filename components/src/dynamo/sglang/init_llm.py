@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
 
@@ -61,7 +61,7 @@ async def init_decode(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-    pre_created_engine: sgl.Engine | None = None,
+    pre_created_engine: Optional[sgl.Engine] = None,
 ):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -151,7 +151,7 @@ async def init_prefill(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
-    pre_created_engine: sgl.Engine | None = None,
+    pre_created_engine: Optional[sgl.Engine] = None,
 ):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
