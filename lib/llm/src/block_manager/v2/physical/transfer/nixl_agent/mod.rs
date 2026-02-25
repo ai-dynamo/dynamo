@@ -220,8 +220,10 @@ impl std::ops::Deref for NixlAgent {
 #[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::*;
+    #[cfg(feature = "testing-cuda")]
     use std::path::Path;
 
+    #[cfg(feature = "testing-cuda")]
     fn is_gpu_environment() -> bool {
         Path::new("/dev/nvidiactl").exists() || Path::new("/dev/nvgpu").exists()
     }
@@ -238,6 +240,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing-cuda")]
     #[test]
     fn test_require_backend() {
         if !is_gpu_environment() {
@@ -253,6 +256,7 @@ mod tests {
         assert!(agent.require_backend("GDS_MT").is_err());
     }
 
+    #[cfg(feature = "testing-cuda")]
     #[test]
     fn test_require_backends_strict() {
         if !is_gpu_environment() {
