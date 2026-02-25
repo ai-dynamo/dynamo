@@ -379,7 +379,7 @@ For Slurm or other distributed deployments (and KV-aware routing):
 
 To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
 
-See [SGLang on Slurm](examples/backends/sglang/slurm_jobs/README.md) and [TRT-LLM on Slurm](examples/basics/multinode/trtllm/README.md) for deployment examples.
+See [TRT-LLM on Slurm](examples/basics/multinode/trtllm/README.md) for deployment examples.
 
 ## More News
 
