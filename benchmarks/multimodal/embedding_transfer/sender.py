@@ -36,10 +36,8 @@ class Sender:
         self.config = SenderConfig(num_requests=100, tensor_count_per_request=30)
 
     async def async_init(self):
-        self.receiver_endpoint = (
-            self.runtime.namespace("embedding_transfer")
-            .component("receiver")
-            .endpoint("generate")
+        self.receiver_endpoint = self.runtime.endpoint(
+            "embedding_transfer.receiver.generate"
         )
         self.client = await self.receiver_endpoint.client()
         await self.client.wait_for_instances()
@@ -75,11 +73,9 @@ async def worker(runtime: DistributedRuntime):
     sender = Sender(runtime)
     await sender.async_init()
 
-    component = runtime.namespace(namespace_name).component(component_name)
-
     logger.info(f"Created service {namespace_name}/{component_name}")
 
-    endpoint = component.endpoint(endpoint_name)
+    endpoint = runtime.endpoint(f"{namespace_name}.{component_name}.{endpoint_name}")
 
     logger.info(f"Serving endpoint {endpoint_name}")
     await endpoint.serve_endpoint(sender.generate)

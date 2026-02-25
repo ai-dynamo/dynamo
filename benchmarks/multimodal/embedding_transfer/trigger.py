@@ -24,9 +24,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Get endpoint
-    endpoint = (
-        runtime.namespace("embedding_transfer").component("sender").endpoint("generate")
-    )
+    endpoint = runtime.endpoint("embedding_transfer.sender.generate")
 
     # Create client and wait for service to be ready
     client = await endpoint.client()
