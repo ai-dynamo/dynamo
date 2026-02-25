@@ -108,7 +108,6 @@ impl RequestGuard {
                 if let Err(e) = self
                     .chooser
                     .add_output_block(&self.context_id, decay_fraction)
-                    .await
                 {
                     tracing::warn!(
                         "Failed to add output block for request {}: {e}",
@@ -147,10 +146,10 @@ impl RequestGuard {
         if let Some(ref tracker) = self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
-            self.request_metrics
-                .output_sequence_tokens
-                .observe(self.cumulative_osl as f64);
         }
+        self.request_metrics
+            .output_sequence_tokens
+            .observe(self.cumulative_osl as f64);
         self.request_metrics.requests_total.inc();
     }
 }
@@ -179,6 +178,10 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
+        // Eagerly register router request metrics (as zeros) so they are
+        // scrapeable before any requests arrive. Both the frontend pipeline
+        // and the standalone router create KvPushRouter, so this covers both.
+        RouterRequestMetrics::from_component(chooser.client().endpoint.component());
         KvPushRouter { inner, chooser }
     }
 
@@ -197,6 +200,7 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
+        let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
 
         // Get pre-selected worker based on phase, with backend_instance_id as fallback
@@ -221,6 +225,7 @@ impl KvPushRouter {
                     !is_query_only,
                     lora_name,
                     priority_jump,
+                    allowed_worker_ids,
                 )
                 .await?;
 
@@ -262,7 +267,7 @@ impl KvPushRouter {
         let worker = WorkerWithDpRank::new(id, dp_rank);
         let overlap_blocks = self
             .chooser
-            .get_overlap_blocks(routing_token_ids, worker)
+            .get_overlap_blocks(routing_token_ids, worker, lora_name.as_deref())
             .await?;
 
         if !is_query_only {

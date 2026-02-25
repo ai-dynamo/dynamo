@@ -116,10 +116,10 @@ class ZmqKvEventPublisher:
         token_ids: list[int],
         num_block_tokens: list[int],
         block_hashes: list[int],
-        lora_id: int = 0,
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[list[dict | None]] = None,
         attention_dp_rank: int = 0,
+        lora_name: Optional[str] = None,
     ):
         """Publish a BlockStored event.
 
@@ -139,8 +139,9 @@ class ZmqKvEventPublisher:
             "parent_block_hash": parent_hash_signed,
             "token_ids": token_ids,
             "block_size": self.kv_block_size,
-            "lora_id": lora_id if lora_id != 0 else None,
         }
+        if lora_name is not None:
+            event["lora_name"] = lora_name
 
         # Add multimodal info if present
         if block_mm_infos is not None:
@@ -597,17 +598,14 @@ class Publisher:
                 else:
                     block_mm_infos.append(None)
 
-            # Note: Currently data does not have lora_id.
-            # Using 0 as default value. If later data has
-            # lora_id, we need to verify if this is correct.
-            lora_id = data.get("lora_id", 0)
+            lora_name = data.get("lora_name")
 
             # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
             # Default to 0 for backwards compatibility with older TRT-LLM versions
             attention_dp_rank = event.get("attention_dp_rank", 0)
 
             logging.debug(
-                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
+                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_name: {lora_name}, parent_hash: {parent_hash}"
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
@@ -617,10 +615,10 @@ class Publisher:
                     token_ids,
                     num_block_tokens,
                     block_hashes,
-                    lora_id,
                     parent_hash,
                     block_mm_infos,
                     attention_dp_rank,
+                    lora_name,
                 )
             elif self.kv_event_publishers:
                 # No consolidator: publish to NATS (router subscribes directly)
@@ -631,9 +629,9 @@ class Publisher:
                         token_ids,
                         num_block_tokens,
                         block_hashes,
-                        lora_id,
                         parent_hash,
                         block_mm_infos,
+                        lora_name=lora_name,
                     )
                 else:
                     logging.warning(

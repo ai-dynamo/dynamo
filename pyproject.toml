@@ -51,7 +51,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 trtllm =[
     "uvloop",
     "msgpack==1.1.2",
-    "tensorrt-llm==1.3.0rc3",
+    "tensorrt-llm==1.3.0rc5",
 ]
 
 vllm = [
@@ -63,7 +63,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.8",
+    "sglang[diffusion]==0.5.9",
     "nixl[cu12]<=0.9.0",
     "cupy-cuda12x>=13.0.0",
 ]
