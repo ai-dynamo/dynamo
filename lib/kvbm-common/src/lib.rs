@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub type BlockId = usize;
 pub type SequenceHash = dynamo_tokens::PositionalLineageHash;
 
+pub use dynamo_tokens as tokens;
+
 /// Logical layout handle type encoding the layout ID.
 ///
 /// KVBM manages G1, G2 and G3 layouts directly. G4 is managed by an external service.
