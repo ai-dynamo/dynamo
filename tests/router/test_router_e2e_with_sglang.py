@@ -416,9 +416,7 @@ def test_router_decisions_sglang_multiple_workers(
         logger.info(f"All SGLang workers using namespace: {sglang_workers.namespace}")
 
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(sglang_workers.namespace)
-        component = namespace.component("backend")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{sglang_workers.namespace}.backend.generate")
 
         _test_router_decisions(
             sglang_workers,
@@ -426,6 +424,7 @@ def test_router_decisions_sglang_multiple_workers(
             MODEL_NAME,
             request,
             test_dp_rank=False,
+            block_size=PAGE_SIZE,
             router_event_threads=router_event_threads,
         )
 
@@ -465,12 +464,15 @@ def test_router_decisions_sglang_dp(
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the SGLang workers
-        namespace = runtime.namespace(sglang_workers.namespace)
-        component = namespace.component("backend")  # endpoint is backend.generate
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{sglang_workers.namespace}.backend.generate")
 
         _test_router_decisions(
-            sglang_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
+            sglang_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=True,
+            block_size=PAGE_SIZE,
         )
 
 

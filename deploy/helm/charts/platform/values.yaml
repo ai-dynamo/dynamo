@@ -14,6 +14,13 @@
 # limitations under the License.
 # Used to generate top-level secrets (overridden by custom-values.yaml)
 
+global:
+  etcd:
+    # -- Whether this chart should install the bundled etcd subchart.
+    # When true, deploys etcd and auto-configures the operator with its address.
+    # When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd.
+    install: false
+
 # Subcharts configuration
 
 # Dynamo operator configuration
@@ -21,10 +28,14 @@ dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
+  # -- Whether to manage CRDs via a pre-install/pre-upgrade hook Job.
+  # The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
+  upgradeCRD: true
+
   # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
   natsAddr: ""
 
-  # -- etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port"
+  # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port"
   etcdAddr: ""
 
   nats:
@@ -45,6 +56,13 @@ dynamo-operator:
       duration: 30s
       # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
       renewInterval: 10s
+
+  # -- GPU discovery configuration (only applies when namespaceRestriction.enabled=true)
+  gpuDiscovery:
+    # -- Whether to provision a ClusterRole for the namespace-scoped operator to read GPU node labels.
+    # When true (default), Helm creates a ClusterRole/ClusterRoleBinding granting node read access.
+    # Set to false if your installer lacks ClusterRole creation permissions.
+    enabled: true
 
   # -- The Dynamo discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery. --
   discoveryBackend: "kubernetes"
@@ -88,14 +106,6 @@ dynamo-operator:
   dynamo:
     # -- How long to wait before forcefully terminating Grove instances
     groveTerminationDelay: 4h
-
-    # Internal utility images used by the platform
-    internalImages:
-      # -- Debugger image for troubleshooting deployments
-      debugger: python:3.12-slim
-
-    # -- Whether to enable restricted security contexts for enhanced security
-    enableRestrictedSecurityContext: false
 
     # Docker registry configuration for private repositories
     dockerRegistry:
@@ -150,9 +160,6 @@ dynamo-operator:
 
   # Webhook configuration for admission control and validation
   webhook:
-    # -- Whether to enable admission webhooks for resource validation. When enabled, the operator will validate DynamoComponentDeployment and DynamoGraphDeployment resources before they are created or updated in the cluster. Enabled by default for production-ready validation and better error reporting.
-    enabled: true
-
     # Certificate configuration for webhook TLS
     certificateSecret:
       # -- Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate).
@@ -216,14 +223,8 @@ dynamo-operator:
     # -- Whether to enable checkpoint/restore functionality
     enabled: false
 
-    # -- Image used for init containers in checkpoint jobs (e.g., signal file cleanup)
-    initContainerImage: "busybox:latest"
-
     # -- Path written by worker when model is loaded and ready for checkpointing
     readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
-    # -- Path written by restore-entrypoint after successful CRIU restore
-    restoreMarkerFilePath: "/tmp/dynamo-restored"
 
     # Storage configuration
     # These settings tell the operator where to find checkpoint storage
@@ -231,9 +232,6 @@ dynamo-operator:
     storage:
       # -- Storage backend type: pvc, s3, or oci
       type: pvc
-
-      # -- Host path for signal files (communication between checkpoint pod and DaemonSet)
-      signalHostPath: "/var/lib/chrek/signals"
 
       # PVC storage configuration (used when type=pvc)
       pvc:
@@ -276,12 +274,9 @@ kai-scheduler:
     # -- Affinity for kai-scheduler pods
     affinity: {}
 
-# etcd configuration - distributed key-value store for operator state
+# etcd configuration - distributed key-value store
+# Installation is controlled by global.etcd.install above.
 etcd:
-
-  # -- Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd."
-  enabled: true
-
   image:
     # -- following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository
     repository: bitnamilegacy/etcd

@@ -81,7 +81,7 @@ When `--router-queue-threshold` is set and the queue is active, this value shift
 
 Expected output sequence length — the estimated number of output tokens the request will generate. The router uses this hint in two ways:
 
-1. **Output block tracking**: When `--track-output-blocks` is enabled, the router adds placeholder blocks during generation and applies fractional decay based on progress toward `osl`.
+1. **Output block tracking**: When `--router-track-output-blocks` is enabled, the router adds placeholder blocks during generation and applies fractional decay based on progress toward `osl`.
 2. **Resource estimation**: Helps the router estimate total resource requirements when making routing decisions.
 
 ```json
@@ -121,10 +121,10 @@ Backend engine scheduling priority forwarded to the engine's `generate` call. In
 
 The semantics of the priority value differ between backends:
 
-- **vLLM**: Smaller values = higher priority. A request with `priority: 0` is scheduled before `priority: 10`. Ties are broken by arrival time. Requires `--scheduling-policy priority` on the engine.
 - **SGLang**: By default, larger values = higher priority. This can be inverted with `--schedule-low-priority-values-first` to match vLLM's convention. Requires `--enable-priority-scheduling` on the engine.
+- **vLLM**: Smaller values = higher priority. A request with `priority: 0` is scheduled before `priority: 10`. Ties are broken by arrival time. Requires `--scheduling-policy priority` on the engine.
 
-When omitted, vLLM defaults to `0`; SGLang defaults to `None` (engine default). TensorRT-LLM does not currently support per-request priority.
+When omitted, SGLang defaults to `None` (engine default); vLLM defaults to `0`. TensorRT-LLM does not currently support per-request priority.
 
 ```json
 {

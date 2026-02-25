@@ -64,7 +64,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
       replicas: 1
     TrtllmWorker:
-      componentType: main
+      componentType: worker
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache

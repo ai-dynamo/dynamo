@@ -141,9 +141,9 @@ spec:
           args:
           - --endpoint
           - ${K8S_NAMESPACE}-prefill-pool-0.prefill.generate
-          - --block-size
+          - --router-block-size
           - "16"
-          - --no-track-active-blocks
+          - --no-router-track-active-blocks
           command:
           - python
           - -m
@@ -161,7 +161,8 @@ spec:
           args:
           - --model
           - Qwen/Qwen3-0.6B
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           - --tensor-parallel-size
           - "1"
           - --gpu-memory-utilization
@@ -206,9 +207,9 @@ spec:
           args:
           - --endpoint
           - ${K8S_NAMESPACE}-prefill-pool-1.prefill.generate
-          - --block-size
+          - --router-block-size
           - "16"
-          - --no-track-active-blocks
+          - --no-router-track-active-blocks
           command:
           - python
           - -m
@@ -226,7 +227,8 @@ spec:
           args:
           - --model
           - Qwen/Qwen3-0.6B
-          - --is-prefill-worker
+          - --disaggregation-mode
+          - prefill
           - --tensor-parallel-size
           - "1"
           - --gpu-memory-utilization
@@ -271,9 +273,9 @@ spec:
           args:
           - --endpoint
           - ${K8S_NAMESPACE}-decode-pool-0.backend.generate
-          - --block-size
+          - --router-block-size
           - "16"
-          - --kv-overlap-score-weight
+          - --router-kv-overlap-score-weight
           - "0"
           command:
           - python

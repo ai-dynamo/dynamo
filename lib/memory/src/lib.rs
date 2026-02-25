@@ -14,6 +14,7 @@
 pub mod actions;
 pub mod arena;
 pub mod nixl;
+#[cfg(target_os = "linux")]
 pub mod numa;
 
 /// Offset-based buffer views into underlying storage.
@@ -41,6 +42,7 @@ pub use device::DeviceStorage;
 #[cfg(target_os = "linux")]
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
+#[cfg(target_os = "linux")]
 pub use numa::{NumaNode, is_numa_enabled};
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;

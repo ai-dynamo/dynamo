@@ -9,9 +9,12 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter},
+    kv_router::{
+        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+    },
     migration::Migration,
     model_card::ModelDeploymentCard,
+    namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -82,8 +85,14 @@ pub async fn prepare_engine(
                 )
                 .await?;
             let inner_watch_obj = watch_obj.clone();
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+                local_model.namespace(),
+                local_model.namespace_prefix(),
+            );
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj.watch(discovery_stream, None).await;
+                inner_watch_obj
+                    .watch(discovery_stream, namespace_filter)
+                    .await;
             });
             tracing::info!("Waiting for remote model..");
 
@@ -180,7 +189,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     chooser: Option<Arc<KvRouter>>,
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
-    enforce_disagg: bool,
+    decode_fallback: bool,
     migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
@@ -209,7 +218,7 @@ where
         preprocessor,
         hf_tokenizer,
         prefill_chooser,
-        enforce_disagg,
+        decode_fallback,
         migration_limit,
         metrics,
     )
@@ -227,7 +236,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     preprocessor: Arc<OpenAIPreprocessor>,
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
-    enforce_disagg: bool,
+    decode_fallback: bool,
     migration_limit: u32,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
@@ -273,6 +282,12 @@ where
         )
         .await?;
 
+    // Eagerly register router request metrics so they appear as zeros even in
+    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
+    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
+    // OnceLock), which covers the standalone router path as well.
+    RouterRequestMetrics::from_component(client.endpoint.component());
+
     let service_backend = match router_mode {
         RouterMode::Direct => {
             ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
@@ -284,14 +299,13 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router = KvPushRouter::new(router, chooser);
-            ServiceBackend::from_engine(Arc::new(kv_push_router))
+            ServiceBackend::from_engine(Arc::new(KvPushRouter::new(router, chooser)))
         }
     };
 
     // Use the provided prefill chooser, or create a disabled one if not provided
     let prefill_chooser = prefill_chooser
-        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
+        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, decode_fallback));
     let prefill_op = prefill_chooser.into_operator();
 
     // Link with prefill chooser including backward edge for response flow

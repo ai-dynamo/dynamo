@@ -55,7 +55,6 @@ class RequestHandlerConfig:
     Configuration for the request handler
     """
 
-    component: object
     engine: TensorRTLLMEngine
     default_sampling_params: SamplingParams
     publisher: Publisher
@@ -72,6 +71,7 @@ class RequestHandlerConfig:
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
+    disable_request_abort: bool = True
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -88,7 +88,6 @@ class HandlerBase(BaseGenerativeHandler):
 
     def __init__(self, config: RequestHandlerConfig):
         self.engine = config.engine
-        self.component = config.component
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
@@ -101,6 +100,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
+        self.disable_request_abort = config.disable_request_abort
 
     def check_error(self, result: dict):
         """
@@ -208,13 +208,15 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Abort the generation
-            # Temporary:
-            #   Disable calling abort() on the engine, which may get stuck if a
-            #   sufficiently large number of concurrent requests is cancelled.
-            # Note to restore:
-            #   call `generation_result.abort()`; and then
-            #   log `logging.debug(f"Aborted Request ID: {context.id()}")`
+            # Abort the generation unless disabled
+            if self.disable_request_abort:
+                logging.debug(
+                    f"Request ID {context.id()} cancelled but abort() skipped "
+                    "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
+                )
+            else:
+                generation_result.abort()
+                logging.debug(f"Aborted Request ID: {context.id()}")
 
             # Clean up any remaining background task
             for task in pending:
@@ -520,7 +522,16 @@ class HandlerBase(BaseGenerativeHandler):
             if processed_input:
                 return processed_input
 
-        # Fallback: text-only flow
+            # If multimodal processing returned None but request has multimodal data,
+            # this is an error (not a text-only request). Raise instead of falling back.
+            if request.get("multi_modal_data"):
+                raise RuntimeError(
+                    "Failed to process multimodal request. Check server logs for details. "
+                    "Common issues: missing allowed_local_media_path configuration, "
+                    "file not found, or file outside allowed directory."
+                )
+
+        # Fallback: text-only flow (no multimodal processor or no multimodal data)
         return request.get("token_ids")
 
     def _normalize_request_format(self, request: dict) -> None:
@@ -791,13 +802,24 @@ class HandlerBase(BaseGenerativeHandler):
                         )
 
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
                     if (
                         res.finished
                         and self.metrics_collector
                         and hasattr(res, "metrics_dict")
                     ):
                         try:
-                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                            if hasattr(
+                                self.metrics_collector,
+                                "log_request_metrics_dict",
+                            ):
+                                self.metrics_collector.log_request_metrics_dict(
+                                    res.metrics_dict
+                                )
+                            else:
+                                self.metrics_collector.log_metrics_dict(
+                                    res.metrics_dict
+                                )
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 

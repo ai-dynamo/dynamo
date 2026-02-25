@@ -58,9 +58,7 @@ from dynamollm import DistributedRuntime, KvRouter, KvRouterConfig
 async def main():
     # Get runtime and create endpoint
     runtime = DistributedRuntime.detached()
-    namespace = runtime.namespace("dynamo")
-    component = namespace.component("backend")
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("dynamo.backend.generate")
 
     # Create KV router
     kv_router_config = KvRouterConfig()
@@ -135,7 +133,7 @@ spec:
           value: kv
         - name: DYN_ROUTER_TEMPERATURE
           value: "0.5"  # Add some randomness to prevent worker saturation
-        - name: DYN_KV_OVERLAP_SCORE_WEIGHT
+        - name: DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT
           value: "1.5"  # Prioritize TTFT over ITL
         - name: DYN_KV_CACHE_BLOCK_SIZE
           value: "16"
@@ -227,9 +225,7 @@ from dynamo.llm import DistributedRuntime, KvRouter, KvRouterConfig
 async def minimize_ttft_routing():
     # Setup router
     runtime = DistributedRuntime.detached()
-    namespace = runtime.namespace("dynamo")
-    component = namespace.component("backend")
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("dynamo.backend.generate")
 
     router = KvRouter(
         endpoint=endpoint,
@@ -279,7 +275,7 @@ See [Router Design](../../design-docs/router-design.md) for architecture details
 For full documentation on implementing KV event publishing for custom inference engines, see the dedicated [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md) guide. It covers:
 
 - **Direct publishing**: Call `publish_stored()` / `publish_removed()` to push events over the Dynamo event plane
-- **ZMQ relay**: For engines that emit raw KV events over ZMQ (like vLLM and SGLang), the same `KvEventPublisher` subscribes to the ZMQ socket and relays events automatically
+- **ZMQ relay**: For engines that emit raw KV events over ZMQ (like SGLang and vLLM), the same `KvEventPublisher` subscribes to the ZMQ socket and relays events automatically
 - API reference, event structure, ZMQ wire format, and best practices
 
 ## Global Router (Hierarchical Routing)

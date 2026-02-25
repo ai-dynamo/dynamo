@@ -18,7 +18,7 @@ use super::metrics;
 use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
-use crate::kv_router::metrics::{register_routing_overhead_metrics, register_worker_load_metrics};
+use crate::kv_router::metrics::{RoutingOverheadMetrics, register_worker_load_metrics};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -208,6 +208,19 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     discovery: Option<Arc<dyn Discovery>>,
+
+    #[builder(default = "None")]
+    cancel_token: Option<CancellationToken>,
+
+    /// When set, the `/metrics` endpoint will also expose metrics from the
+    /// DRT's registry tree (anything created via `metrics().create*()`).
+    #[builder(default = "None")]
+    drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
+
+    /// When set (e.g. DRT discovery), router metrics (dynamo_router_* with router_id label)
+    /// are registered using discovery.instance_id() and exposed on /metrics.
+    #[builder(default = "None")]
+    drt_discovery: Option<Arc<dyn Discovery>>,
 }
 
 impl HttpService {
@@ -369,22 +382,17 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        // Create a temporary cancel token for building - will be replaced in spawn/run
-        let temp_cancel_token = CancellationToken::new();
+        let cancel_token = config.cancel_token.unwrap_or_default();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
         let discovery_client = config.discovery.unwrap_or_else(|| {
             use dynamo_runtime::discovery::KVStoreDiscovery;
             Arc::new(KVStoreDiscovery::new(
                 dynamo_runtime::storage::kv::Manager::memory(),
-                temp_cancel_token.child_token(),
+                cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(
-            model_manager,
-            discovery_client,
-            temp_cancel_token,
-        ));
+        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -418,10 +426,11 @@ impl HttpServiceConfigBuilder {
             tracing::warn!("Failed to register worker timing metrics: {}", e);
         }
 
-        // Register routing overhead metrics (block hashing, find matches, scheduling latencies)
-        // These are updated by KvRouter::find_best_match on every routing decision
-        if let Err(e) = register_routing_overhead_metrics(&registry) {
-            tracing::warn!("Failed to register routing overhead metrics: {}", e);
+        if let Some(ref discovery) = config.drt_discovery {
+            let instance_id = discovery.instance_id();
+            if let Err(e) = RoutingOverheadMetrics::register(&registry, instance_id) {
+                tracing::warn!("Failed to register routing overhead metrics: {}", e);
+            }
         }
 
         let mut router = axum::Router::new();
@@ -429,7 +438,11 @@ impl HttpServiceConfigBuilder {
         let mut all_docs = Vec::new();
 
         let mut routes = vec![
-            metrics::router(registry, var(HTTP_SVC_METRICS_PATH_ENV).ok()),
+            metrics::router(
+                registry,
+                var(HTTP_SVC_METRICS_PATH_ENV).ok(),
+                config.drt_metrics,
+            ),
             super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),

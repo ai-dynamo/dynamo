@@ -21,6 +21,7 @@ import (
 	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -404,7 +405,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -467,7 +468,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -544,7 +545,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -618,7 +619,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -673,10 +674,11 @@ func Test_reconcileGroveResources(t *testing.T) {
 
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:      fakeKubeClient,
-				Recorder:    recorder,
-				Config:      controller_common.Config{},
-				ScaleClient: &mockScaleClient{},
+				Client:        fakeKubeClient,
+				Recorder:      recorder,
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1485,10 +1487,9 @@ func Test_computeRestartStatus(t *testing.T) {
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:   fakeKubeClient,
 				Recorder: recorder,
-				Config: controller_common.Config{
-					Grove: controller_common.GroveConfig{
-						Enabled: tt.groveEnabled,
-					},
+				Config:   &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{
+					GroveEnabled: tt.groveEnabled,
 				},
 			}
 
@@ -1559,7 +1560,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1619,7 +1620,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1749,7 +1750,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStateReady,
+				State:   v1alpha1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1895,7 +1896,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-decode-e1f2a6fe: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -2006,7 +2007,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   DGDStatePending,
+				State:   v1alpha1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-decode-5f3d46ba: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -2059,9 +2060,10 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 
 			recorder := record.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:   fakeKubeClient,
-				Recorder: recorder,
-				Config:   controller_common.Config{},
+				Client:        fakeKubeClient,
+				Recorder:      recorder,
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 
 			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd, nil)

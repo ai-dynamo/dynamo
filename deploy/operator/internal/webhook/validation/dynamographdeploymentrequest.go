@@ -28,7 +28,7 @@ import (
 
 // toFloat64 converts a numeric value (int or float64) to float64.
 // Returns 0 if the value is neither int nor float64.
-func toFloat64(val interface{}) float64 {
+func toFloat64(val any) float64 {
 	switch v := val.(type) {
 	case float64:
 		return v
@@ -44,14 +44,17 @@ func toFloat64(val interface{}) float64 {
 type DynamoGraphDeploymentRequestValidator struct {
 	request               *nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 	isClusterWideOperator bool
+	gpuDiscoveryEnabled   bool
 }
 
 // NewDynamoGraphDeploymentRequestValidator creates a new validator for DynamoGraphDeploymentRequest.
-// The isClusterWide parameter indicates whether the operator is running in cluster-wide or namespace-restricted mode.
-func NewDynamoGraphDeploymentRequestValidator(request *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, isClusterWide bool) *DynamoGraphDeploymentRequestValidator {
+// isClusterWide indicates whether the operator has cluster-wide permissions.
+// gpuDiscoveryEnabled indicates whether Helm provisioned node read access for the operator.
+func NewDynamoGraphDeploymentRequestValidator(request *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, isClusterWide bool, gpuDiscoveryEnabled bool) *DynamoGraphDeploymentRequestValidator {
 	return &DynamoGraphDeploymentRequestValidator{
 		request:               request,
 		isClusterWideOperator: isClusterWide,
+		gpuDiscoveryEnabled:   gpuDiscoveryEnabled,
 	}
 }
 
@@ -81,17 +84,17 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 
 	// Parse config to validate structure (only if config is present)
 	if v.request.Spec.ProfilingConfig.Config != nil && len(v.request.Spec.ProfilingConfig.Config.Raw) > 0 {
-		var config map[string]interface{}
+		var config map[string]any
 		if parseErr := yaml.Unmarshal(v.request.Spec.ProfilingConfig.Config.Raw, &config); parseErr != nil {
 			err = errors.Join(err, fmt.Errorf("failed to parse spec.profilingConfig.config: %w", parseErr))
 		} else {
 			// Warn if deployment.model or engine.backend are specified in config (they will be overwritten by spec fields)
-			if engineConfig, ok := config["engine"].(map[string]interface{}); ok {
+			if engineConfig, ok := config["engine"].(map[string]any); ok {
 				if backend, ok := engineConfig["backend"].(string); ok && backend != "" && backend != v.request.Spec.Backend {
 					warnings = append(warnings, fmt.Sprintf("spec.profilingConfig.config.engine.backend (%s) will be overwritten by spec.backend (%s)", backend, v.request.Spec.Backend))
 				}
 			}
-			if deployment, ok := config["deployment"].(map[string]interface{}); ok {
+			if deployment, ok := config["deployment"].(map[string]any); ok {
 				if model, ok := deployment["model"].(string); ok && model != "" && model != v.request.Spec.Model {
 					warnings = append(warnings, fmt.Sprintf("spec.profilingConfig.config.deployment.model (%s) will be overwritten by spec.model (%s)", model, v.request.Spec.Model))
 				}
@@ -108,24 +111,24 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 }
 
 // validateGPUHardwareInfo ensures GPU hardware information will be available for profiling.
-// This validation happens at admission time to fail fast before the DGDR is persisted to etcd.
+// Returns an error at admission time if GPU discovery is disabled and no manual hardware config is provided.
 func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error {
 	// Parse profiling config
-	var config map[string]interface{}
+	var config map[string]any
 	if v.request.Spec.ProfilingConfig.Config != nil {
 		if err := yaml.Unmarshal(v.request.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
 			// Config parse errors will be caught by other validators
 			return nil
 		}
 	} else {
-		config = make(map[string]interface{})
+		config = make(map[string]any)
 	}
 
 	// Check if manual hardware config is provided
 	hardwareVal, hasHardware := config["hardware"]
 	var hasManualHardwareConfig bool
 	if hasHardware && hardwareVal != nil {
-		if hardwareConfig, ok := hardwareVal.(map[string]interface{}); ok {
+		if hardwareConfig, ok := hardwareVal.(map[string]any); ok {
 			// Check if essential hardware fields are provided
 			_, hasGPUModel := hardwareConfig["gpuModel"]
 			_, hasGPUVram := hardwareConfig["gpuVramMib"]
@@ -137,7 +140,7 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error 
 	// Check if explicit GPU ranges are provided
 	var hasExplicitGPURanges bool
 	if engineVal, hasEngine := config["engine"]; hasEngine && engineVal != nil {
-		if engineConfig, ok := engineVal.(map[string]interface{}); ok {
+		if engineConfig, ok := engineVal.(map[string]any); ok {
 			minGPUs, hasMin := engineConfig["minNumGpusPerEngine"]
 			maxGPUs, hasMax := engineConfig["maxNumGpusPerEngine"]
 			// Validate explicit GPU ranges
@@ -156,42 +159,17 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error 
 		}
 	}
 
-	// If manual config or explicit ranges provided, validation passes
 	if hasManualHardwareConfig || hasExplicitGPURanges {
 		return nil
 	}
 
-	// Neither manual config nor explicit ranges provided
-	// GPU discovery will be attempted at reconcile time, but if it's unavailable
-	// (e.g., namespace-scoped operator), the DGDR will fail
-	//
-	// Fail at admission time to give users immediate feedback
-	if v.isClusterWideOperator {
-		// Cluster-wide operator should have GPU discovery available
-		// Allow DGDR to be created - GPU discovery will provide hardware info
+	// No manual hardware config provided. Cluster-wide operators always have GPU discovery via node
+	// permissions. Namespace-scoped operators rely on Helm-provisioned GPU discovery (gpuDiscovery.enabled).
+	if v.isClusterWideOperator || v.gpuDiscoveryEnabled {
 		return nil
 	}
 
-	// Namespace-scoped operator likely doesn't have node read permissions
-	// Require manual hardware config or explicit GPU ranges
-	return errors.New(`GPU hardware configuration required for namespace-scoped operators.
-
-Namespace-scoped operators typically lack node read permissions for GPU auto-discovery.
-
-Provide hardware configuration in one of these ways:
-
-1. Add hardware config in spec.profilingConfig.config:
-   hardware:
-     numGpusPerNode: 8
-     gpuModel: "H100-SXM5-80GB"
-     gpuVramMib: 81920
-
-2. Or specify explicit GPU search ranges:
-   engine:
-     minNumGpusPerEngine: 2
-     maxNumGpusPerEngine: 8
-
-See: https://github.com/ai-dynamo/dynamo/issues/6257`)
+	return errors.New("GPU hardware configuration required: GPU discovery is disabled (set dynamo-operator.gpuDiscovery.enabled=true in Helm values, or provide hardware config in spec.profilingConfig.config)")
 }
 
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeploymentRequest.

@@ -28,8 +28,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
-
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -66,7 +64,7 @@ type ProfilingConfigSpec struct {
 
 	// ProfilerImage specifies the container image to use for profiling jobs.
 	// This image contains the profiler code and dependencies needed for SLA-based profiling.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
 	// +kubebuilder:validation:Required
 	ProfilerImage string `json:"profilerImage"`
 
@@ -96,6 +94,19 @@ type ProfilingConfigSpec struct {
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
+// +kubebuilder:validation:Enum=Initializing;Pending;Profiling;Deploying;Ready;DeploymentDeleted;Failed
+type DGDRState string
+
+const (
+	DGDRStateInitializing      DGDRState = "Initializing"
+	DGDRStatePending           DGDRState = "Pending"
+	DGDRStateProfiling         DGDRState = "Profiling"
+	DGDRStateDeploying         DGDRState = "Deploying"
+	DGDRStateReady             DGDRState = "Ready"
+	DGDRStateDeploymentDeleted DGDRState = "DeploymentDeleted"
+	DGDRStateFailed            DGDRState = "Failed"
+)
+
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
 // When autoApply is enabled, these overrides are applied to the generated DGD resource.
 type DeploymentOverridesSpec struct {
@@ -121,7 +132,7 @@ type DeploymentOverridesSpec struct {
 	// WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
 	// This image is used for both temporary DGDs created during online profiling and the final DGD.
 	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
 	// +kubebuilder:validation:Optional
 	WorkersImage string `json:"workersImage,omitempty"`
 }
@@ -197,7 +208,8 @@ type DeploymentStatus struct {
 
 	// State is the current state of the DynamoGraphDeployment.
 	// This value is mirrored from the DGD's status.state field.
-	State string `json:"state,omitempty"`
+	// +kubebuilder:default=initializing
+	State DGDState `json:"state"`
 
 	// Created indicates whether the DGD has been successfully created.
 	// Used to prevent recreation if the DGD is manually deleted by users.
@@ -208,9 +220,8 @@ type DeploymentStatus struct {
 // The controller updates this status as the DGDR progresses through its lifecycle.
 type DynamoGraphDeploymentRequestStatus struct {
 	// State is a high-level textual status of the deployment request lifecycle.
-	// Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"
-	// Empty string ("") represents the initial state before initialization.
-	State string `json:"state,omitempty"`
+	// +kubebuilder:default=Initializing
+	State DGDRState `json:"state"`
 
 	// Backend is extracted from profilingConfig.config.engine.backend for display purposes.
 	// This field is populated by the controller and shown in kubectl output.
@@ -252,7 +263,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // specific performance and resource constraints, enabling SLA-driven deployments.
 //
 // Lifecycle:
-//  1. Initial → Pending: Validates spec and prepares for profiling
+//  1. Initializing → Pending: Validates spec and prepares for profiling
 //  2. Pending → Profiling: Creates and runs profiling job (online or AIC)
 //  3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
 //  4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
@@ -262,9 +273,15 @@ type DynamoGraphDeploymentRequestStatus struct {
 // The spec becomes immutable once profiling starts. Users must delete and recreate
 // the DGDR to modify configuration after this point.
 //
+// DEPRECATION NOTICE: v1alpha1 DynamoGraphDeploymentRequest is deprecated.
+// Please migrate to nvidia.com/v1beta1 DynamoGraphDeploymentRequest.
+// v1alpha1 will be removed in a future release.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeploymentRequest is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentRequest"
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.status.backend`
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
@@ -282,16 +299,13 @@ type DynamoGraphDeploymentRequest struct {
 }
 
 // SetState updates the State field in the DGDR status.
-func (s *DynamoGraphDeploymentRequest) SetState(state string) {
+func (s *DynamoGraphDeploymentRequest) SetState(state DGDRState) {
 	s.Status.State = state
 }
 
 // GetState returns the current lifecycle state
 func (d *DynamoGraphDeploymentRequest) GetState() string {
-	if d.Status.State == "" {
-		return consts.ResourceStateUnknown
-	}
-	return d.Status.State
+	return string(d.Status.State)
 }
 
 // GetSpec returns the spec of this DGDR as a generic interface.

@@ -19,6 +19,7 @@ all:
 docs:
   - 'docs/**'
   - 'fern/**'
+  - '.github/workflows/fern-docs.yml'
   - '**/*.md'
   - '**/*.txt'
   - '**/.gitignore'
