@@ -68,6 +68,7 @@ Options:
   --partition PARTITION     Slurm partition (default: batch)
   --time TIME               Slurm time limit (default: 04:00:00)
   --output-dir DIR          Results output directory (default: $PWD/bench_results)
+  --concurrencies "C1 C2.." Space-separated concurrency levels (default: "1 2 4 8 16 32 64 128 256 512 1024")
   --scenario {1,2,3,all}    Which scenario(s) to run (default: all)
   --sqsh PATH               Container sqsh image path
   --dry-run                 Lightweight validation run (small model, concurrency 1)
@@ -87,6 +88,7 @@ while [[ $# -gt 0 ]]; do
         --partition)    PARTITION="$2"; shift 2 ;;
         --time)         TIME_LIMIT="$2"; shift 2 ;;
         --output-dir)   OUTPUT_DIR="$2"; shift 2 ;;
+        --concurrencies) CONCURRENCIES="$2"; shift 2 ;;
         --sqsh)         SQSH="$2"; shift 2 ;;
         --scenario)
             if [[ "$2" == "all" ]]; then
@@ -133,6 +135,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     [[ -n "$RUN_NAME" ]] && RERUN_ARGS+=(--name "$RUN_NAME")
     [[ -n "$OUTPUT_DIR" ]] && RERUN_ARGS+=(--output-dir "$OUTPUT_DIR")
     RERUN_ARGS+=(--sqsh "$SQSH")
+    RERUN_ARGS+=(--concurrencies "$CONCURRENCIES")
     RERUN_ARGS+=(--scenario "$SCENARIOS")
     [[ "$DRY_RUN" == "true" ]] && RERUN_ARGS+=(--dry-run)
 
