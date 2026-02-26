@@ -18,7 +18,7 @@ FLEXKV_SERVER_RECV_PORT="ipc:///tmp/flexkv_server_0" \
 CUDA_VISIBLE_DEVICES=0 \
 python -m dynamo.vllm \
     --model $MODEL \
-    --connector flexkv \
+    --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}' \
     --gpu-memory-utilization 0.2 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
@@ -28,6 +28,6 @@ FLEXKV_SERVER_RECV_PORT="ipc:///tmp/flexkv_server_1" \
 CUDA_VISIBLE_DEVICES=1 \
 python -m dynamo.vllm \
     --model $MODEL \
-    --connector flexkv \
+    --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}' \
     --gpu-memory-utilization 0.2 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
