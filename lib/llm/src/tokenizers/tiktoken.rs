@@ -150,10 +150,15 @@ fn detect_bpe_pattern(directory: &Path) -> Result<&'static str> {
     })?;
 
     match model_type.as_str() {
-        "kimi" | "kimi_k2" | "kimi_k25" => Ok(KIMI_PATTERN),
+        // baseten-admin/Kimi-2.5-text-nvfp4-v3 model has model_type: "deepseek_v3" in its config.json
+        // because Kimi K2.5 is built on the DeepSeek V3 architecture.
+        // it still ships the Kimi tiktoken tokenizer file, so the KIMI_PATTERN BPE regex is the
+        // correct pattern to use.  No pure DeepSeek V3 model uses tiktoken.model files
+        // (they use tokenizer.json instead) so this match is safe.
+        "kimi" | "kimi_k2" | "kimi_k25" | "deepseek_v3" => Ok(KIMI_PATTERN),
         _ => Err(Error::msg(format!(
             "Unsupported tiktoken model_type '{model_type}'. \
-             Currently supported: kimi, kimi_k2, kimi_k25. \
+             Currently supported: kimi, kimi_k2, kimi_k25, deepseek_v3. \
              To add a new model type, extend detect_bpe_pattern() in tokenizers/tiktoken.rs \
              with the appropriate BPE regex pattern. \
              Alternatively, provide a tokenizer.json (HuggingFace format) instead."
