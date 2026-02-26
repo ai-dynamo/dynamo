@@ -2,22 +2,27 @@
 """
 TCP Request Plane benchmark sweep.
 
-Sweeps num_requests x mocker_count x ISL/OSL profile at fixed concurrency,
-builds HEAD via maturin, launches mocker+frontend, runs aiperf, collects
+Sweeps num_requests x worker_count x ISL/OSL profile at fixed concurrency,
+builds HEAD via maturin, launches backend+frontend, runs aiperf, collects
 results into a single CSV, and prints a saturation analysis table.
 
-Dimensions:
-  A) --num-requests  : total requests sent per run (16k / 32k / 48k)
-  B) --mocker-counts : backend workers via --data-parallel-size (1 / 2 / 4 / 8)
+Supports two backends:
+  - mocker : fast synthetic backend (no real inference, no TTFT/ITL)
+  - vllm   : real vLLM inference server (produces TTFT/ITL metrics)
 
-Services are restarted between mocker-count changes, not between num-requests
+Dimensions:
+  A) --num-requests  : total requests sent per run
+  B) --mocker-counts : backend workers (mocker: --data-parallel-size, vllm: single worker)
+
+Services are restarted between worker-count changes, not between num-requests
 changes (no service restart needed for that).
 
 Usage:
-    python3 tasks/sweep.py                  # full sweep
-    python3 tasks/sweep.py --dry-run        # print plan without executing
-    python3 tasks/sweep.py --mocker-counts 1 4 8  # subset of mocker counts
-    python3 tasks/sweep.py --num-requests 16384 32768  # subset of req counts
+    python3 tasks/sweep.py                          # mocker sweep (default)
+    python3 tasks/sweep.py --backend vllm           # vllm sweep
+    python3 tasks/sweep.py --dry-run                # print plan without executing
+    python3 tasks/sweep.py --mocker-counts 1 4 8    # subset of worker counts
+    python3 tasks/sweep.py --num-requests 1024 2048 # subset of req counts
 """
 
 import argparse
@@ -28,19 +33,22 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-# Fixed concurrency for this sweep
-CONCURRENCY = 4096
-
-# (A) Total requests sent per aiperf run
-NUM_REQUESTS_LIST = [16_384, 32_768, 49_152]
-
-# (B) Backend worker count — maps to mocker --data-parallel-size
+# Mocker defaults
+MOCKER_CONCURRENCY = 4096
+MOCKER_NUM_REQUESTS = [16_384, 32_768, 49_152]
 MOCKER_COUNTS = [1, 2, 4, 8]
+
+# vLLM defaults (real inference — lower load)
+VLLM_CONCURRENCY = 128
+VLLM_NUM_REQUESTS = [1024, 2048, 4096]
+VLLM_WORKER_COUNTS = [1]
 
 COMMITS = {
     "head": "HEAD",
@@ -66,7 +74,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 VENV_ACTIVATE = REPO_ROOT / "dynamo" / "bin" / "activate"
 RESULTS_DIR = REPO_ROOT / "tasks" / "sweep_results"
 
-SETTLE_SECS = 8  # wait after launching mocker/frontend
+MOCKER_SETTLE_SECS = 8  # wait after launching mocker/frontend
+VLLM_READY_TIMEOUT = 120  # max seconds to wait for vllm readiness
 COOLDOWN_SECS = 5  # wait between runs
 KILL_WAIT_SECS = 5  # wait after killing processes
 
@@ -104,8 +113,8 @@ def run(
 
 
 def kill_services():
-    """Kill any running mocker/frontend processes."""
-    for pattern in ["dynamo.mocker", "dynamo.frontend"]:
+    """Kill any running mocker/frontend/vllm processes."""
+    for pattern in ["dynamo.mocker", "dynamo.frontend", "dynamo.vllm"]:
         subprocess.run(
             f"pkill -f '{pattern}'",
             shell=True,
@@ -162,7 +171,29 @@ def build_head() -> str:
     return sha
 
 
-def start_services(num_mockers: int):
+def wait_for_ready(
+    url: str = "http://localhost:8000/v1/models", timeout: int = VLLM_READY_TIMEOUT
+):
+    """Poll endpoint until it returns a successful response or timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    body = json.loads(resp.read())
+                    # /v1/models returns {"data": [...]} — ready when data is non-empty
+                    if body.get("data"):
+                        print(f"  Ready! ({url})")
+                        return True
+        except (urllib.error.URLError, OSError, json.JSONDecodeError):
+            pass
+        time.sleep(2)
+    print(f"  WARNING: readiness timeout after {timeout}s", file=sys.stderr)
+    return False
+
+
+def start_mocker_services(num_mockers: int):
     """Launch mocker and frontend in background, wait for readiness."""
     print(f"  Starting mocker (data-parallel-size={num_mockers})...")
     subprocess.Popen(
@@ -174,7 +205,7 @@ def start_services(num_mockers: int):
         cwd=str(REPO_ROOT),
         preexec_fn=os.setsid,
     )
-    time.sleep(SETTLE_SECS)
+    time.sleep(MOCKER_SETTLE_SECS)
 
     print("  Starting frontend...")
     subprocess.Popen(
@@ -186,7 +217,39 @@ def start_services(num_mockers: int):
         cwd=str(REPO_ROOT),
         preexec_fn=os.setsid,
     )
-    time.sleep(SETTLE_SECS)
+    time.sleep(MOCKER_SETTLE_SECS)
+
+
+def start_vllm_services(model: str):
+    """Launch vLLM worker and frontend, wait for model readiness."""
+    print("  Starting frontend...")
+    subprocess.Popen(
+        f"source {VENV_ACTIVATE} && python3 -m dynamo.frontend",
+        shell=True,
+        executable="/bin/bash",
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=str(REPO_ROOT),
+        preexec_fn=os.setsid,
+    )
+    time.sleep(3)
+
+    print(f"  Starting vLLM worker (model={model})...")
+    env = os.environ.copy()
+    env["DYN_SYSTEM_PORT"] = "8081"
+    subprocess.Popen(
+        f"source {VENV_ACTIVATE} && python3 -m dynamo.vllm --model {model} --enforce-eager",
+        shell=True,
+        executable="/bin/bash",
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=str(REPO_ROOT),
+        preexec_fn=os.setsid,
+        env=env,
+    )
+
+    print("  Waiting for vLLM readiness...")
+    wait_for_ready()
 
 
 def run_aiperf(profile: Profile, concurrency: int, num_requests: int) -> dict | None:
@@ -342,6 +405,12 @@ def parse_aiperf_output(output: str) -> dict | None:
 def main():
     parser = argparse.ArgumentParser(description="TCP request plane benchmark sweep")
     parser.add_argument(
+        "--backend",
+        choices=["mocker", "vllm"],
+        default="mocker",
+        help="Backend type: mocker (synthetic) or vllm (real inference)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Print plan without executing"
     )
     parser.add_argument(
@@ -354,22 +423,27 @@ def main():
         "--num-requests",
         nargs="+",
         type=int,
-        default=NUM_REQUESTS_LIST,
+        default=None,
         dest="num_requests_list",
-        help="Total request counts to sweep (dimension A)",
+        help="Total request counts to sweep (default depends on backend)",
     )
     parser.add_argument(
         "--mocker-counts",
         nargs="+",
         type=int,
-        default=MOCKER_COUNTS,
-        help="Mocker data-parallel-size values to sweep (dimension B)",
+        default=None,
+        help="Worker counts to sweep (default depends on backend)",
     )
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=CONCURRENCY,
-        help=f"Fixed concurrency level (default: {CONCURRENCY})",
+        default=None,
+        help="Fixed concurrency level (default depends on backend)",
+    )
+    parser.add_argument(
+        "--model",
+        default=MODEL,
+        help=f"Model name/path (default: {MODEL})",
     )
     parser.add_argument(
         "--profiles",
@@ -378,6 +452,15 @@ def main():
         help="Profile names to run",
     )
     args = parser.parse_args()
+
+    # Apply backend-specific defaults
+    is_vllm = args.backend == "vllm"
+    if args.concurrency is None:
+        args.concurrency = VLLM_CONCURRENCY if is_vllm else MOCKER_CONCURRENCY
+    if args.num_requests_list is None:
+        args.num_requests_list = VLLM_NUM_REQUESTS if is_vllm else MOCKER_NUM_REQUESTS
+    if args.mocker_counts is None:
+        args.mocker_counts = VLLM_WORKER_COUNTS if is_vllm else MOCKER_COUNTS
 
     selected_profiles = [p for p in PROFILES if p.name in args.profiles]
     selected_commits = {k: v for k, v in COMMITS.items() if k in args.commits}
@@ -392,17 +475,19 @@ def main():
     )
     print(
         f"Sweep plan: {len(selected_commits)} commits x {len(selected_profiles)} profiles "
-        f"x {len(mocker_counts)} mocker-counts x {len(num_requests_list)} num-requests "
+        f"x {len(mocker_counts)} worker-counts x {len(num_requests_list)} num-requests "
         f"= {total_runs} runs"
     )
+    print(f"  Backend:        {args.backend}")
+    print(f"  Model:          {args.model}")
     print(f"  Commits:        {list(selected_commits.keys())}")
     print(f"  Profiles:       {[p.name for p in selected_profiles]}")
     print(f"  Concurrency:    {args.concurrency} (fixed)")
-    print(f"  Mocker counts:  {mocker_counts}  (--data-parallel-size)")
+    print(f"  Worker counts:  {mocker_counts}")
     print(f"  Num requests:   {num_requests_list}")
     print(
         f"  Service restarts: {len(selected_commits) * len(mocker_counts)} "
-        f"(once per commit x mocker-count)"
+        f"(once per commit x worker-count)"
     )
 
     resolved_shas = {}
@@ -429,6 +514,7 @@ def main():
     csv_path = RESULTS_DIR / f"sweep_{sha_tag}_{timestamp}.csv"
 
     fieldnames = [
+        "backend",
         "commit_name",
         "commit_sha",
         "profile",
@@ -471,9 +557,12 @@ def main():
             sha = build_head()
 
             for nm in mocker_counts:
-                # Restart services for each mocker count change
+                # Restart services for each worker count change
                 kill_services()
-                start_services(nm)
+                if args.backend == "vllm":
+                    start_vllm_services(args.model)
+                else:
+                    start_mocker_services(nm)
 
                 for profile in selected_profiles:
                     for nr in num_requests_list:
@@ -488,6 +577,7 @@ def main():
                         metrics = run_aiperf(profile, args.concurrency, nr)
 
                         row = {
+                            "backend": args.backend,
                             "commit_name": commit_name,
                             "commit_sha": sha,
                             "profile": profile.name,
