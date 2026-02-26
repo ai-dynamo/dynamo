@@ -39,6 +39,7 @@ Parser to Model Mapping
 | llama3_json | meta-llama/Llama-3.1-*, meta-llama/Llama-3.2-* |
 | harmony | openai/gpt-oss-* |
 | nemotron_deci | nvidia/nemotron-* |
+| nemotron_nano | nvidia/NVIDIA-Nemotron-3-Nano-* |
 | phi4 | Phi-4-* |
 | deepseek_v3 | deepseek-ai/DeepSeek-V3, deepseek-ai/DeepSeek-R1, deepseek-ai/DeepSeek-R1-0528 |
 | deepseek_v3_1 | deepseek-ai/DeepSeek-V3.1 |

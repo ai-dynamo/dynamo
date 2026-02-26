@@ -4,8 +4,6 @@
 title: Architecture Flow
 ---
 
-# Dynamo Architecture Flow
-
 This diagram shows the NVIDIA Dynamo disaggregated inference system. Color-coded flows indicate different types of operations.
 
 ## 🔵 Main Request Flow (Blue)

@@ -4,8 +4,6 @@
 title: Mocker
 ---
 
-# Mocker: LLM Engine Simulation in Rust
-
 The Mocker is a lightweight, high-fidelity simulation of an LLM inference engine, implemented entirely in Rust. It replicates the core scheduling, memory management, and timing behaviors of production engines without requiring a GPU, making it invaluable for testing Dynamo's routing, KV cache events, disaggregated serving, and planner components.
 
 ## Overview

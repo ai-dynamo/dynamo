@@ -141,6 +141,8 @@ tokenizers = { version = "0.21.4", default-features = false, features = [
   "esaxx_fast",
   "rustls-tls",
 ] }
+tiktoken-rs = { version = "0.9", default-features = false }
+rustc-hash = "1.1"
 
 # backend
 galil-seiferas = { version = "0.1" }

@@ -6,7 +6,9 @@ use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::queue::SchedulerQueue;
-use super::sequence::{ActiveSequencesMultiWorker, SequenceError, SequenceRequest};
+use super::sequence::{
+    ActiveSequencesMulti, SequenceError, SequenceRequest, create_multi_worker_sequences,
+};
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
@@ -82,7 +84,7 @@ impl SchedulingRequest {
 
 pub struct KvScheduler {
     request_tx: tokio::sync::mpsc::Sender<SchedulingRequest>,
-    slots: Arc<ActiveSequencesMultiWorker>,
+    slots: Arc<ActiveSequencesMulti>,
     queue: Arc<SchedulerQueue>,
 }
 
@@ -103,18 +105,16 @@ impl KvScheduler {
             workers_with_configs.borrow().clone();
 
         let router_id = component.drt().discovery().instance_id();
-        let slots = Arc::new(
-            ActiveSequencesMultiWorker::new(
-                component.clone(),
-                block_size as usize,
-                initial_workers,
-                kv_router_config.router_replica_sync,
-                router_id,
-                worker_type,
-            )
-            .await
-            .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
-        );
+        let slots = create_multi_worker_sequences(
+            component.clone(),
+            block_size as usize,
+            initial_workers,
+            kv_router_config.router_replica_sync,
+            router_id,
+            worker_type,
+        )
+        .await
+        .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
         // Spawn background task to sync slots when the watch value changes.
         let slots_monitor = slots.clone();
@@ -141,7 +141,11 @@ impl KvScheduler {
                 let current_workers = monitor_rx.borrow_and_update().clone();
 
                 if current_workers != last_workers {
-                    slots_monitor.update_workers(current_workers.clone());
+                    let dp_sizes: HashMap<u64, u32> = current_workers
+                        .iter()
+                        .map(|(&id, c)| (id, c.data_parallel_size))
+                        .collect();
+                    slots_monitor.update_workers(dp_sizes);
                     last_workers = current_workers;
                 }
             }

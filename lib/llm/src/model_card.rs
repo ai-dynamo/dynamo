@@ -61,24 +61,29 @@ impl ModelInfoType {
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerKind {
     HfTokenizerJson(CheckedFile),
+    TikTokenModel(CheckedFile),
 }
 
 impl TokenizerKind {
     pub fn checksum(&self) -> String {
         match self {
-            TokenizerKind::HfTokenizerJson(c) => c.checksum().to_string(),
+            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => {
+                c.checksum().to_string()
+            }
         }
     }
 
     pub fn is_local(&self) -> bool {
         match self {
-            TokenizerKind::HfTokenizerJson(c) => c.is_local(),
+            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => c.is_local(),
         }
     }
 
     pub fn update_dir(&mut self, dir: &Path) {
         match self {
-            TokenizerKind::HfTokenizerJson(c) => c.update_dir(dir),
+            TokenizerKind::HfTokenizerJson(c) | TokenizerKind::TikTokenModel(c) => {
+                c.update_dir(dir)
+            }
         }
     }
 }
@@ -371,13 +376,15 @@ impl ModelDeploymentCard {
         self.tokenizer.is_some()
     }
 
-    pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
+    /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
+    /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
+    pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
                 })?;
-                HfTokenizer::from_file(p)
+                let hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
                             && let Ok(contents) = std::fs::read_to_string(p)
@@ -386,7 +393,23 @@ impl ModelDeploymentCard {
                         }
                     })
                     .map_err(anyhow::Error::msg)
-                    .with_context(|| p.display().to_string())
+                    .with_context(|| p.display().to_string())?;
+                Ok(crate::tokenizers::Tokenizer::from(Arc::new(
+                    crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf),
+                )))
+            }
+            Some(TokenizerKind::TikTokenModel(checked_file)) => {
+                let p = checked_file.path().ok_or_else(|| {
+                    anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
+                })?;
+                let path_str = p.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("Tokenizer path contains invalid UTF-8: {}", p.display())
+                })?;
+                let tokenizer = crate::tokenizers::TikTokenTokenizer::from_file_auto(path_str)
+                    .with_context(|| {
+                        format!("Failed to load tiktoken tokenizer from {}", p.display())
+                    })?;
+                Ok(crate::tokenizers::Tokenizer::from(Arc::new(tokenizer)))
             }
             None => {
                 anyhow::bail!(
@@ -480,8 +503,9 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::HfTokenizerConfigJson
         );
 
-        // tokenizer.json
+        // tokenizer.json or tiktoken.model
         change!(self.tokenizer, TokenizerKind::HfTokenizerJson);
+        change!(self.tokenizer, TokenizerKind::TikTokenModel);
 
         // We only "move" the chat template if it came form the repo. If we have a custom template
         // file we cannot download that from HF.
@@ -945,13 +969,44 @@ impl PromptFormatterArtifact {
 
 impl TokenizerKind {
     pub fn from_disk(directory: &Path) -> Result<Self> {
-        let f = CheckedFile::from_disk(directory.join("tokenizer.json")).with_context(|| {
-            format!(
-                "unable to extract tokenizer kind from directory {}",
-                directory.display()
-            )
-        })?;
-        Ok(Self::HfTokenizerJson(f))
+        // 1. Try tokenizer.json (HuggingFace)
+        if let Ok(f) = CheckedFile::from_disk(directory.join("tokenizer.json")) {
+            return Ok(Self::HfTokenizerJson(f));
+        }
+
+        // 2. Try tiktoken.model
+        if let Ok(f) = CheckedFile::from_disk(directory.join("tiktoken.model")) {
+            return Ok(Self::TikTokenModel(f));
+        }
+
+        // 3. Search for any *.tiktoken file
+        let tiktoken_files: Vec<_> = std::fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "tiktoken"))
+            .collect();
+
+        if tiktoken_files.len() == 1 {
+            if let Ok(f) = CheckedFile::from_disk(tiktoken_files[0].path()) {
+                return Ok(Self::TikTokenModel(f));
+            }
+        } else if tiktoken_files.len() > 1 {
+            let names: Vec<_> = tiktoken_files
+                .iter()
+                .map(|e| e.path().display().to_string())
+                .collect();
+            anyhow::bail!(
+                "Multiple .tiktoken files found in {}: {:?}. Cannot determine which to use.",
+                directory.display(),
+                names
+            );
+        }
+
+        anyhow::bail!(
+            "No tokenizer.json or tiktoken model file found in {}",
+            directory.display()
+        )
     }
 }
 

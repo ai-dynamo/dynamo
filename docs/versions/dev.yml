@@ -58,8 +58,6 @@ navigation:
             contents:
               - page: Integration with Dynamo
                 path: ../pages/kubernetes/chrek/dynamo.md
-              - page: Standalone Usage
-                path: ../pages/kubernetes/chrek/standalone.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -132,28 +130,30 @@ navigation:
       - page: Writing Python Workers in Dynamo
         path: ../pages/development/backend-guide.md
 
+  # ==================== Backends ====================
+  - section: Backends
+    contents:
+      - section: SGLang
+        path: ../pages/backends/sglang/README.md
+        contents:
+          - page: Reference Guide
+            path: ../pages/backends/sglang/sglang-reference-guide.md
+          - page: Examples
+            path: ../pages/backends/sglang/sglang-examples.md
+          - page: Disaggregation
+            path: ../pages/backends/sglang/sglang-disaggregation.md
+          - page: Diffusion
+            path: ../pages/backends/sglang/sglang-diffusion.md
+          - page: Observability
+            path: ../pages/backends/sglang/sglang-observability.md
+      - page: TensorRT-LLM
+        path: ../pages/backends/trtllm/README.md
+      - page: vLLM
+        path: ../pages/backends/vllm/README.md
+
   # ==================== Components ====================
   - section: Components
     contents:
-      - section: Backends
-        contents:
-          - page: vLLM
-            path: ../pages/backends/vllm/README.md
-          - section: SGLang
-            path: ../pages/backends/sglang/README.md
-            contents:
-              - page: Reference Guide
-                path: ../pages/backends/sglang/sglang-reference-guide.md
-              - page: Examples
-                path: ../pages/backends/sglang/sglang-examples.md
-              - page: Disaggregation
-                path: ../pages/backends/sglang/sglang-disaggregation.md
-              - page: Diffusion
-                path: ../pages/backends/sglang/sglang-diffusion.md
-              - page: Observability
-                path: ../pages/backends/sglang/sglang-observability.md
-          - page: TensorRT-LLM
-            path: ../pages/backends/trtllm/README.md
       - section: Frontend
         path: ../pages/components/frontend/README.md
         contents:

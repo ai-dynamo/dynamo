@@ -4,21 +4,11 @@
 title: vLLM
 ---
 
-# LLM Deployment using vLLM
-
 This directory contains reference implementations for deploying Large Language Models (LLMs) in various configurations using vLLM. For Dynamo integration, we leverage vLLM's native KV cache events, NIXL based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
 ## Use the Latest Release
 
-We recommend using the latest stable release of Dynamo to avoid breaking changes:
-
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-
-You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
-
-```bash
-git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
-```
+We recommend using the [latest stable release](https://github.com/ai-dynamo/dynamo/releases/latest) of Dynamo to avoid breaking changes.
 
 ---
 
