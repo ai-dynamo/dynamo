@@ -13,7 +13,7 @@ repository.workspace = true
 [features]
 default = []
 metrics = []
-bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:uuid", "dep:plotters"]
+bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:plotters"]
 
 [dependencies]
 # repo
