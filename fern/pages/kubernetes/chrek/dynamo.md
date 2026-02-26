@@ -8,22 +8,17 @@ title: Integration with Dynamo
 
 > ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. The ChReK DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
 
-Reduce cold start times for LLM inference workers from ~3 minutes to ~30 seconds using container checkpointing.
-
-## Overview
-
 Checkpointing captures the complete state of a running worker pod (including GPU memory) and saves it to storage. New pods can restore from this checkpoint instead of performing a full cold start.
 
 | Startup Type | Time | What Happens |
 |--------------|------|--------------|
-| **Cold Start** | ~3 min | Download model, load to GPU, initialize engine |
-| **Warm Start** (checkpoint) | ~30 sec | Restore from checkpoint tar |
+| **Cold Start** | ~1 min | Download model, load to GPU, initialize engine |
+| **Warm Start** (checkpoint) | < 10 sec | Restore from checkpoint tar |
 
 ## Prerequisites
 
-- Dynamo Platform installed (v0.4.0+)
+- Dynamo Platform installed (v0.4.0+) on k8s cluster with GPU nodes
 - ChReK Helm chart installed (separate from platform)
-- GPU nodes with containerd runtime (CRIU is bundled in ChReK images)
 - RWX PVC storage (PVC is currently the only supported backend)
 
 ## Quick Start
@@ -63,7 +58,9 @@ dynamo-operator:
 
 ### 2. Configure Your DGD
 
-Add checkpoint configuration to your service:
+Add checkpoint configuration to your worker service. Both vLLM and SGLang are supported — use the appropriate `backendFramework`, command, and CLI flags.
+
+#### vLLM Example
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -72,27 +69,94 @@ metadata:
   name: my-llm
 spec:
   services:
-    VllmWorker:
+    worker:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm:latest
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm-placeholder:latest
+          command: ["python3"]
           args:
-            - python3 -m dynamo.vllm --model meta-llama/Llama-3-8B
+            - "-m"
+            - "dynamo.vllm"
+            - "--model"
+            - "meta-llama/Llama-3-8B"
+            - "--max-model-len"
+            - "4096"
+            - "--gpu-memory-utilization"
+            - "0.90"
+          env:
+            # Required for cross-node checkpoint/restore
+            - name: GLOO_SOCKET_IFNAME
+              value: "lo"
+            - name: NCCL_SOCKET_IFNAME
+              value: "lo"
       resources:
         limits:
           nvidia.com/gpu: "1"
-
-      # Checkpoint configuration
       checkpoint:
         enabled: true
-        mode: auto  # Automatically create checkpoint if not found
+        mode: auto
         identity:
           model: "meta-llama/Llama-3-8B"
           backendFramework: "vllm"
           tensorParallelSize: 1
           dtype: "bfloat16"
+          maxModelLen: 4096
 ```
+
+#### SGLang Example
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-sglang-llm
+spec:
+  services:
+    worker:
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sglang-placeholder:latest
+          command: ["python3"]
+          args:
+            - "-m"
+            - "dynamo.sglang"
+            - "--model"
+            - "meta-llama/Llama-3-8B"
+            - "--mem-fraction-static"
+            - "0.90"
+          env:
+            # Required for cross-node checkpoint/restore
+            - name: GLOO_SOCKET_IFNAME
+              value: "lo"
+            - name: NCCL_SOCKET_IFNAME
+              value: "lo"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+      checkpoint:
+        enabled: true
+        mode: auto
+        identity:
+          model: "meta-llama/Llama-3-8B"
+          backendFramework: "sglang"
+          tensorParallelSize: 1
+          dtype: "bfloat16"
+          maxModelLen: 4096
+```
+
+**Key differences between backends:**
+
+| Setting | vLLM | SGLang |
+|---------|------|--------|
+| Module | `dynamo.vllm` | `dynamo.sglang` |
+| Max context (optional) | `--max-model-len` | `--context-length` |
+| GPU memory | `--gpu-memory-utilization` | `--mem-fraction-static` |
+| Placeholder image | `dynamo-vllm-placeholder` | `dynamo-sglang-placeholder` |
+| Identity `backendFramework` | `"vllm"` | `"sglang"` |
+
+> **Note:** Do **not** set `DYN_READY_FOR_CHECKPOINT_FILE` or `DYN_CHECKPOINT_READY_FILE` in the DGD worker env vars. These are injected automatically by the operator's checkpoint controller into checkpoint job pods only. Setting them on worker pods causes all workers to enter checkpoint mode instead of cold-starting normally.
 
 ### 3. Deploy
 
@@ -104,61 +168,6 @@ On first deployment:
 1. A checkpoint job runs to create the checkpoint
 2. Worker pods start with cold start (checkpoint not ready yet)
 3. Once checkpoint is ready, new pods (scale-up, restarts) restore from checkpoint
-
-## Storage Backends
-
-### PVC (Currently Supported)
-
-Use when you have RWX storage available (e.g., NFS, EFS, Filestore).
-
-```yaml
-checkpoint:
-  storage:
-    type: pvc
-    pvc:
-      pvcName: "chrek-pvc"
-      basePath: "/checkpoints"
-```
-
-**Requirements:**
-- RWX (ReadWriteMany) PVC for multi-node access
-- Sufficient storage (checkpoints are ~10-50GB per model)
-
-### S3 / MinIO (Planned - Not Yet Implemented)
-
-> ⚠️ **Note:** S3 storage backend is defined in the API but not yet fully implemented.
-
-Object storage support is planned for a future release. The configuration will look like:
-
-```yaml
-checkpoint:
-  storage:
-    type: s3  # Not yet supported
-    s3:
-      # AWS S3
-      uri: "s3://my-bucket/checkpoints"
-
-      # Or MinIO / custom S3
-      uri: "s3://minio.example.com/my-bucket/checkpoints"
-
-      # Optional: credentials secret
-      credentialsSecretRef: "s3-creds"
-```
-
-### OCI Registry (Planned - Not Yet Implemented)
-
-> ⚠️ **Note:** OCI registry storage backend is defined in the API but not yet fully implemented.
-
-Container registry storage support is planned for a future release. The configuration will look like:
-
-```yaml
-checkpoint:
-  storage:
-    type: oci  # Not yet supported
-    oci:
-      uri: "oci://myregistry.io/checkpoints"
-      credentialsSecretRef: "registry-creds"  # Docker config secret
-```
 
 ## Checkpoint Modes
 
@@ -172,8 +181,10 @@ checkpoint:
   mode: auto
   identity:
     model: "meta-llama/Llama-3-8B"
-    backendFramework: "vllm"
+    backendFramework: "vllm"  # or "sglang"
     tensorParallelSize: 1
+    dtype: "bfloat16"
+    maxModelLen: 4096
 ```
 
 ### Reference Mode
@@ -347,26 +358,12 @@ Or use `auto` mode and the operator will find/create it automatically.
 
 ## Limitations
 
-⚠️ **Important**: ChReK has significant limitations that impact production readiness:
-
-### Security Considerations
-- **🔴 Privileged DaemonSet**: The ChReK DaemonSet runs in privileged mode with `hostPID`, `hostIPC`, and `hostNetwork` to perform CRIU operations externally
-- Workload pods (checkpoint jobs, restore pods) do **not** need privileged mode — all CRIU privilege lives in the DaemonSet
-- The privileged DaemonSet has elevated host access, which may violate security policies in many production environments
-
-### Technical Limitations
-- **vLLM backend only**: Currently only the vLLM backend supports checkpoint/restore. SGLang and TensorRT-LLM support is planned.
-- **Single-node only**: Checkpoints must be created and restored on the same node
-- **Single-GPU only**: Multi-GPU configurations are not yet supported
+- **vLLM and SGLang backends only**: TensorRT-LLM support is planned.
+- **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
+- **Single-GPU only**: Multi-GPU configurations are not yet supported (planned)
 - **Network state**: Active TCP connections are closed during restore (handled with `tcp-close` CRIU option)
 - **Storage**: Only PVC backend currently implemented (S3/OCI planned)
-
-### Recommendation
-ChReK is **experimental/beta** and best suited for:
-- ✅ Development and testing environments
-- ✅ Research and experimentation
-- ✅ Controlled production environments with appropriate security controls
-- ❌ Security-sensitive production workloads without proper risk assessment
+- **Security**: ChReK runs as a **privileged DaemonSet** which is required to run CRIU
 
 ## Troubleshooting
 
@@ -399,9 +396,6 @@ ChReK is **experimental/beta** and best suited for:
    ```bash
    # For PVC
    kubectl exec -it <any-pod-with-pvc> -- ls -la /checkpoints/
-
-   # For S3
-   aws s3 ls s3://my-bucket/checkpoints/
    ```
 
 3. Check environment variables:
@@ -418,18 +412,11 @@ Pods fall back to cold start if:
 
 Check logs for "Falling back to cold start" message.
 
-## Best Practices
-
-1. **Use RWX PVCs** for multi-node deployments (currently the only supported backend)
-2. **Pre-warm checkpoints** before scaling up
-3. **Monitor checkpoint size** - large models create large checkpoints
-4. **Clean up old checkpoints** to save storage
-
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `DYN_CHECKPOINT_STORAGE_TYPE` | Backend: `pvc`, `s3`, `oci` |
+| `DYN_CHECKPOINT_STORAGE_TYPE` | Backend: `pvc`, `s3`, `oci` (`s3` and `oci` are currently no-ops) |
 | `DYN_CHECKPOINT_LOCATION` | Full checkpoint location (checkpoint jobs) |
 | `DYN_CHECKPOINT_PATH` | Base checkpoint directory (restore pods, PVC) |
 | `DYN_CHECKPOINT_HASH` | Identity hash |
@@ -459,21 +446,27 @@ spec:
       spec:
         containers:
           - name: main
-            image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm:latest
-            command: ["python3", "-m", "dynamo.vllm"]
+            image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm-placeholder:latest
+            command: ["python3"]
             args:
+              - "-m"
+              - "dynamo.vllm"
               - "--model"
               - "meta-llama/Meta-Llama-3-8B-Instruct"
-              - "--tensor-parallel-size"
-              - "1"
-              - "--dtype"
-              - "bfloat16"
+              - "--max-model-len"
+              - "4096"
+              - "--gpu-memory-utilization"
+              - "0.90"
             env:
               - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
                     name: hf-token-secret
                     key: HF_TOKEN
+              - name: GLOO_SOCKET_IFNAME
+                value: "lo"
+              - name: NCCL_SOCKET_IFNAME
+                value: "lo"
             resources:
               limits:
                 nvidia.com/gpu: "1"
@@ -489,11 +482,26 @@ metadata:
   namespace: dynamo-system
 spec:
   services:
-    VllmWorker:
+    worker:
       replicas: 2
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm:latest
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm-placeholder:latest
+          command: ["python3"]
+          args:
+            - "-m"
+            - "dynamo.vllm"
+            - "--model"
+            - "meta-llama/Meta-Llama-3-8B-Instruct"
+            - "--max-model-len"
+            - "4096"
+            - "--gpu-memory-utilization"
+            - "0.90"
+          env:
+            - name: GLOO_SOCKET_IFNAME
+              value: "lo"
+            - name: NCCL_SOCKET_IFNAME
+              value: "lo"
       resources:
         limits:
           nvidia.com/gpu: "1"
@@ -505,7 +513,6 @@ spec:
 ## Related Documentation
 
 - [ChReK Overview](README.md) - ChReK architecture and use cases
-- [ChReK Standalone Usage Guide](standalone.md) - Use ChReK without Dynamo Platform
 - [ChReK Helm Chart README](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/chrek/README.md) - Chart configuration
 - [Installation Guide](../installation-guide.md) - Platform installation
 - [API Reference](../api-reference.md) - Complete CRD specifications
