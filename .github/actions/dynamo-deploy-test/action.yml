@@ -126,6 +126,8 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ steps.ns-check.outputs.ns }}
+        FRAMEWORK: ${{ inputs.framework }}
+        PROFILE: ${{ inputs.profile }}
       run: |
         set -x
         export KUBECONFIG=${{ github.workspace }}/.kubeconfig
@@ -141,8 +143,15 @@ runs:
               kubectl describe dynamographdeployments "$dep_name" -n $NAMESPACE
           done || true
 
-        echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE"
-        kubectl delete dynamographdeployments --all -n $NAMESPACE --timeout=60s || true
+        # Extract the deployment name from the example YAML
+        DEPLOY_YAML="examples/backends/${FRAMEWORK}/deploy/${PROFILE}.yaml"
+        if [ -f "$DEPLOY_YAML" ]; then
+          GRAPH_NAME=$(grep '^  name:' "$DEPLOY_YAML" | head -1 | awk '{print $2}')
+          echo "Deleting DynamoGraphDeployment: ${GRAPH_NAME}"
+          kubectl delete dynamographdeployments "${GRAPH_NAME}" -n $NAMESPACE --timeout=60s || true
+        else
+          echo "Warning: deployment YAML not found at ${DEPLOY_YAML}, skipping targeted delete"
+        fi
 
     - name: Teardown namespace (self-cleanup on rerun)
       if: always() && steps.ns-check.outputs.exists != 'true'
