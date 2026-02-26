@@ -186,7 +186,7 @@ func TestApplyProfilingJobOverrides_Annotations(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{
 					"prometheus.io/scrape": "true",
-					"custom/note":         "profiling-test",
+					"custom/note":          "profiling-test",
 				},
 			},
 		},
