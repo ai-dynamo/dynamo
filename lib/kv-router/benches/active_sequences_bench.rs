@@ -11,7 +11,6 @@ use dynamo_mocker::common::protocols::{DirectRequest, OutputSignal};
 use dynamo_mocker::scheduler::Scheduler;
 use dynamo_tokens::SequenceHash;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
@@ -341,10 +340,20 @@ async fn run_benchmark(
     inference_worker_duplication_factor: usize,
 ) -> anyhow::Result<BenchmarkResults> {
     let scaled = rescale_traces(traces, benchmark_duration_ms);
-    let scaled: Vec<Arc<Vec<SequenceTrace>>> = scaled.into_iter().map(Arc::new).collect();
 
     let total_entries: u64 = scaled.iter().map(|t| t.len() as u64).sum::<u64>()
         * inference_worker_duplication_factor as u64;
+
+    // Count blocks before consuming traces
+    let total_blocks: usize = scaled
+        .iter()
+        .flat_map(|t| t.iter())
+        .map(|entry| match &entry.entry {
+            SequenceTraceEntry::Add { block_hashes, .. } => block_hashes.len(),
+            _ => 0,
+        })
+        .sum::<usize>()
+        * inference_worker_duplication_factor;
 
     let progress = make_progress_bar(Some(total_entries));
 
@@ -355,18 +364,19 @@ async fn run_benchmark(
             let progress = progress.clone();
 
             tasks.push(tokio::spawn(async move {
+                let capacity = trace.len();
                 let mut seq = ActiveSequences::new(block_size as usize);
-                let mut latencies: Vec<u64> = Vec::with_capacity(trace.len());
+                let mut latencies: Vec<u64> = Vec::with_capacity(capacity);
 
                 let mut target = Instant::now();
-                let mut iter = trace.iter().peekable();
+                let mut iter = trace.into_iter().peekable();
                 let mut local_count: u64 = 0;
 
                 while let Some(entry) = iter.next() {
                     let entry_ts = entry.timestamp_us;
 
                     let start = minstant::Instant::now();
-                    apply_entry(&mut seq, &entry.entry);
+                    apply_entry(&mut seq, entry.entry);
                     latencies.push(start.elapsed().as_nanos() as u64);
                     local_count += 1;
 
@@ -374,7 +384,7 @@ async fn run_benchmark(
                     while iter.peek().is_some_and(|e| e.timestamp_us == entry_ts) {
                         let e = iter.next().unwrap();
                         let start = minstant::Instant::now();
-                        apply_entry(&mut seq, &e.entry);
+                        apply_entry(&mut seq, e.entry);
                         latencies.push(start.elapsed().as_nanos() as u64);
                         local_count += 1;
                     }
@@ -414,17 +424,6 @@ async fn run_benchmark(
     let total_duration = progress.elapsed();
     let total_ops = all_latencies.len();
 
-    // Count blocks for block throughput
-    let total_blocks: usize = scaled
-        .iter()
-        .flat_map(|t| t.iter())
-        .map(|entry| match &entry.entry {
-            SequenceTraceEntry::Add { block_hashes, .. } => block_hashes.len(),
-            _ => 0,
-        })
-        .sum::<usize>()
-        * inference_worker_duplication_factor;
-
     let offered_ops_throughput = total_ops as f32 / benchmark_duration_ms as f32 * 1000.0;
     let ops_throughput = total_ops as f32 / total_duration.as_millis() as f32 * 1000.0;
     let offered_block_throughput = total_blocks as f32 / benchmark_duration_ms as f32 * 1000.0;
@@ -453,7 +452,7 @@ async fn run_benchmark(
     })
 }
 
-fn apply_entry(seq: &mut ActiveSequences, entry: &SequenceTraceEntry) {
+fn apply_entry(seq: &mut ActiveSequences, entry: SequenceTraceEntry) {
     match entry {
         SequenceTraceEntry::Add {
             request_id,
@@ -462,18 +461,18 @@ fn apply_entry(seq: &mut ActiveSequences, entry: &SequenceTraceEntry) {
             output_length,
         } => {
             seq.add_request(
-                request_id.clone(),
-                Some(block_hashes.clone()),
-                *isl,
+                request_id,
+                Some(block_hashes),
+                isl,
                 0,
-                Some(*output_length as u32),
+                Some(output_length as u32),
             );
         }
         SequenceTraceEntry::PrefillComplete { request_id } => {
-            seq.mark_prefill_completed(request_id);
+            seq.mark_prefill_completed(&request_id);
         }
         SequenceTraceEntry::Free { request_id } => {
-            seq.free(request_id);
+            seq.free(&request_id);
         }
     }
 }
