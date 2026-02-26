@@ -287,6 +287,7 @@ pub fn make_progress_bar(total: Option<u64>) -> ProgressBar {
 }
 
 /// Results from a single benchmark run.
+#[derive(Serialize)]
 pub struct BenchmarkResults {
     pub offered_ops_throughput: f32,
     pub ops_throughput: f32,

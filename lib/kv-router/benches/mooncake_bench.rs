@@ -15,6 +15,7 @@ use dynamo_kv_router::{
     ConcurrentRadixTree, InvertedIndex, NaiveNestedMap, PositionalIndexer, ThreadPoolIndexer,
 };
 use std::sync::Arc;
+use serde::Serialize;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -90,6 +91,14 @@ impl IndexerArgs {
             IndexerArgs::NaiveNestedMap {} => Arc::new(NaiveNestedMap::new()),
             IndexerArgs::InvertedIndex { .. } => Arc::new(InvertedIndex::new()),
         }
+    }
+
+    fn supports_remove(name: &str) -> bool {
+        !matches!(name, "naive-nested-map" | "inverted-index")
+    }
+
+    fn is_multi_threaded(name: &str) -> bool {
+        matches!(name, "nested-map" | "concurrent-radix-tree")
     }
 
     /// Construct an indexer from a short name string.
@@ -250,6 +259,14 @@ fn prepare_worker_traces(
         .collect()
 }
 
+#[derive(Serialize)]
+struct SweepStepResult {
+    duration_ms: u64,
+    #[serde(flatten)]
+    results: BenchmarkResults,
+}
+
+
 /// Run the benchmark: replay each worker's merged trace against the indexer,
 /// measuring find_matches latency and event processing throughput.
 ///
@@ -262,6 +279,7 @@ async fn run_benchmark(
     events: Vec<Vec<(KvCacheEvent, Instant)>>,
     args: &Args,
     benchmark_duration_ms: u64,
+    count_events: bool,
 ) -> anyhow::Result<BenchmarkResults> {
     let worker_traces = prepare_worker_traces(
         traces,
@@ -411,9 +429,11 @@ async fn run_benchmark(
         .sum::<usize>()
         * args.common.inference_worker_duplication_factor;
 
-    let total_blocks = total_request_blocks + total_event_blocks;
+    let counted_events = if count_events { total_events } else { 0 };
+    let counted_event_blocks = if count_events { total_event_blocks } else { 0 };
 
-    let total_ops = total_requests + total_events;
+    let total_blocks = total_request_blocks + counted_event_blocks;
+    let total_ops = total_requests + counted_events;
     let offered_ops_throughput = total_ops as f32 / benchmark_duration_ms as f32 * 1000.0;
     let ops_throughput = total_ops as f32 / total_duration.as_millis() as f32 * 1000.0;
     let offered_block_throughput = total_blocks as f32 / benchmark_duration_ms as f32 * 1000.0;
@@ -548,11 +568,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if args.common.sweep {
-        let durations = compute_sweep_durations(
+        let durations_low_to_high = compute_sweep_durations(
             args.common.sweep_min_ms,
             args.common.sweep_max_ms,
             args.common.sweep_steps,
         );
+        let durations_high_to_low: Vec<u64> =
+            durations_low_to_high.iter().copied().rev().collect();
 
         let mut all_results: Vec<(&str, Vec<(u64, BenchmarkResults)>)> = Vec::new();
 
@@ -561,26 +583,88 @@ async fn main() -> anyhow::Result<()> {
             println!("Benchmarking indexer: {}", name);
             println!("{}", "=".repeat(60));
 
-            let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
+            let multi_threaded = IndexerArgs::is_multi_threaded(name);
+            let durations = if multi_threaded {
+                &durations_high_to_low
+            } else {
+                &durations_low_to_high
+            };
 
-            for &dur_ms in &durations {
+            let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
+            let mut consecutive_keeping_up = 0u32;
+
+            for &dur_ms in durations {
                 println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
                 let indexer = if args.compare.is_empty() {
                     args.get_indexer().build(args.common.block_size)
                 } else {
                     IndexerArgs::from_name(name, args.common.block_size, args.num_event_workers)?
                 };
-                let result =
-                    run_benchmark(indexer, traces.clone(), events.clone(), &args, dur_ms).await?;
-                results.push((dur_ms, result));
+                let count_events = IndexerArgs::supports_remove(name);
+                let result = run_benchmark(
+                    indexer,
+                    traces.clone(),
+                    events.clone(),
+                    &args,
+                    dur_ms,
+                    count_events,
+                )
+                .await?;
+
+                if multi_threaded {
+                    if result.block_throughput >= result.offered_block_throughput * 0.95 {
+                        consecutive_keeping_up += 1;
+                    } else {
+                        consecutive_keeping_up = 0;
+                    }
+                    results.push((dur_ms, result));
+                    if consecutive_keeping_up >= 5 {
+                        println!("Early stop: achieved >= 95% offered for 5 consecutive steps");
+                        break;
+                    }
+                } else {
+                    let saturated = result.offered_block_throughput > result.block_throughput * 5.0;
+                    results.push((dur_ms, result));
+                    if saturated {
+                        println!("Early stop: offered throughput >5x achieved throughput");
+                        break;
+                    }
+                }
             }
 
+            results.sort_by_key(|(dur, _)| std::cmp::Reverse(*dur));
             print_sweep_summary(name, &results);
 
             all_results.push((name, results));
         }
 
         plot_sweep(&all_results, &args.sweep_output)?;
+
+        let json_path = args
+            .sweep_output
+            .replace(".png", ".json")
+            .replace(".svg", ".json");
+        let json_map: std::collections::BTreeMap<&str, Vec<SweepStepResult>> = all_results
+            .iter()
+            .map(|(name, results)| {
+                let steps = results
+                    .iter()
+                    .map(|(dur, r)| SweepStepResult {
+                        duration_ms: *dur,
+                        results: BenchmarkResults {
+                            offered_ops_throughput: r.offered_ops_throughput,
+                            ops_throughput: r.ops_throughput,
+                            offered_block_throughput: r.offered_block_throughput,
+                            block_throughput: r.block_throughput,
+                            latency_p99_us: r.latency_p99_us,
+                        },
+                    })
+                    .collect();
+                (*name, steps)
+            })
+            .collect();
+        std::fs::write(&json_path, serde_json::to_string_pretty(&json_map)?)?;
+        println!("Sweep results saved to {}", json_path);
     } else {
         for name in &indexer_names {
             println!("\nBenchmarking indexer: {}", name);
@@ -589,12 +673,14 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 IndexerArgs::from_name(name, args.common.block_size, args.num_event_workers)?
             };
+            let count_events = IndexerArgs::supports_remove(name);
             run_benchmark(
                 indexer,
                 traces.clone(),
                 events.clone(),
                 &args,
                 args.common.benchmark_duration_ms,
+                count_events,
             )
             .await?;
         }

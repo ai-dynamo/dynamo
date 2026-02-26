@@ -58,6 +58,9 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
+> [!WARNING]
+> **v0.9.0 Helm Chart Issue:** The initial v0.9.0 `dynamo-platform` Helm chart sets the operator image to v0.7.1 instead of v0.9.0. Use `RELEASE_VERSION=0.9.0-post1` or add `--set dynamo-operator.controllerManager.manager.image.tag=0.9.0` to your helm install command.
+
 **For Shared/Multi-Tenant Clusters:**
 
 If your cluster has namespace-restricted Dynamo operators, add this flag to step 2:
