@@ -622,3 +622,101 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
         }
     }
 }
+
+mod context_length_validation {
+    use dynamo_llm::http::service::error::HttpError;
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+    // mock-llama has a chat_template in tokenizer_config.json (required for preprocessing)
+    const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+
+    fn make_chat_request(message: &str, model: &str) -> NvCreateChatCompletionRequest {
+        let messages: Vec<dynamo_async_openai::types::ChatCompletionRequestMessage> =
+            serde_json::from_str(message).unwrap();
+        let inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+            .model(model)
+            .messages(messages)
+            .build()
+            .unwrap();
+        NvCreateChatCompletionRequest {
+            inner,
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+            media_io_kwargs: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prompt_exceeding_context_length_returns_400() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        // Set a very small context length so even a short prompt exceeds it
+        mdc.context_length = 5;
+
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request(
+            r#"[{"role": "user", "content": "What is deep learning?"}]"#,
+            "test-model",
+        );
+
+        let result = preprocessor.preprocess_request(&request, None).await;
+
+        // Should fail with an HttpError containing code 400
+        let err = result.expect_err("should reject prompt exceeding context_length");
+        let http_err = err
+            .downcast_ref::<HttpError>()
+            .expect("error should be HttpError");
+        assert_eq!(http_err.code, 400);
+        assert!(
+            http_err.message.contains("maximum context length is 5 tokens"),
+            "error message should state the context limit, got: {}",
+            http_err.message
+        );
+        assert!(
+            http_err.message.contains("Please reduce the length"),
+            "error message should tell user what to do, got: {}",
+            http_err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_within_context_length_succeeds() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        // Large context length — a short prompt should pass
+        mdc.context_length = 131072;
+
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request(
+            r#"[{"role": "user", "content": "Hi"}]"#,
+            "test-model",
+        );
+
+        let result = preprocessor.preprocess_request(&request, None).await;
+        assert!(
+            result.is_ok(),
+            "short prompt should pass context_length validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_context_length_zero_skips_validation() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        // context_length = 0 means unconfigured, should skip validation
+        mdc.context_length = 0;
+
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request(
+            r#"[{"role": "user", "content": "What is deep learning?"}]"#,
+            "test-model",
+        );
+
+        let result = preprocessor.preprocess_request(&request, None).await;
+        assert!(
+            result.is_ok(),
+            "context_length=0 should skip validation"
+        );
+    }
+}
