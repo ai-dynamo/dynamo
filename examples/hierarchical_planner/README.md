@@ -158,3 +158,86 @@ Example: To always route to pool 0 regardless of request characteristics:
 ```json
 "prefill_pool_mapping": [[0, 0], [0, 0]]
 ```
+
+## SLA Planner with GlobalPlanner
+
+Each pool can run an SLA Planner that reads throughput metrics and delegates autoscaling decisions
+to a central **GlobalPlanner** service. The GlobalPlanner arbitrates across pools and executes
+scaling via the Dynamo operator.
+
+### Architecture with SLA Planners
+
+```
+Frontend (round-robin)
+     |
+     v
+Global Router ─── GlobalPlanner  ◄─── scale decisions from pool planners
+     |
+     +──────────────────────────────────────+
+     |                |                     |
+Prefill Pool 0    Prefill Pool 1       Decode Pool 0
+LocalRouter       LocalRouter          LocalRouter
+Worker            Worker               Worker
+Planner ──────►   Planner ──────►      Planner ──────►  (all → GlobalPlanner)
+```
+
+### SLA Planner configuration
+
+The SLA Planner is configured via a JSON blob passed to `--config`. Key fields for the
+global-planner environment:
+
+| Field | Description |
+|---|---|
+| `environment` | `"global-planner"` to delegate scaling to GlobalPlanner |
+| `global_planner_namespace` | Dynamo namespace of the DGD running GlobalPlanner |
+| `mode` | `"prefill"` or `"decode"` |
+| `throughput_metrics_source` | `"frontend"` (default) or `"router"` — see below |
+
+### `throughput_metrics_source`
+
+Controls where the SLA Planner reads aggregate throughput metrics (TTFT, ITL, request rate):
+
+- **`frontend`** (default): reads `dynamo_frontend_*` histograms from the frontend service. Works
+  for single-DGD disagg deployments where the planner and frontend share a namespace.
+
+- **`router`**: reads `dynamo_component_router_*` histograms emitted by LocalRouter pods and
+  scraped by cluster Prometheus. Required for hierarchical (multi-DGD) disagg deployments where
+  the SLA Planner runs in a pool DGD namespace that is different from the frontend DGD namespace.
+
+Use `throughput_metrics_source: "router"` whenever the planner is co-located with a pool
+(not the frontend), i.e. in any GlobalPlanner setup.
+
+### Prometheus scraping for router metrics
+
+The Dynamo operator Helm chart includes a PodMonitor that scrapes LocalRouter pods on port 9090.
+LocalRouter pods must expose metrics on that port via:
+
+```yaml
+env:
+  - name: DYN_SYSTEM_PORT
+    value: "9090"
+```
+
+No standalone Prometheus is needed — the cluster-wide Prometheus picks up the PodMonitor
+automatically.
+
+### GlobalPlanner `--no-operation` mode
+
+Pass `--no-operation` to GlobalPlanner to receive and log scale requests without executing them.
+Useful for observing planner behaviour before enabling live scaling:
+
+```yaml
+command: [python3, -m, dynamo.global_planner]
+args: [--no-operation]
+```
+
+### Example deployments
+
+Complete end-to-end examples are in `examples/backends/`:
+
+| File | Description |
+|---|---|
+| `mocker/deploy/hplanner-mocker-test.yaml` | 2 prefill + 2 decode pools with Mocker workers; GlobalPlanner in no-op mode |
+| `vllm/deploy/hplanner-vllm-test.yaml` | 2 prefill (TP1, TP2) + 1 decode pool with real vLLM workers |
+
+Both use `envsubst` for substituting `${K8S_NAMESPACE}`, `${DYNAMO_IMAGE}`, etc.

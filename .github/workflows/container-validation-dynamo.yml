@@ -121,7 +121,7 @@ jobs:
   rust-checks:
     needs: [changed-files, build]
     if: needs.changed-files.outputs.core == 'true'
-    runs-on: prod-builder-amd-v1
+    runs-on: prod-tester-amd-gpu-v1
     name: Rust Checks
     timeout-minutes: 30
     env:
@@ -139,7 +139,7 @@ jobs:
         run: docker pull ${{ env.IMAGE_TAG }}
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
-          docker run --rm --user root -w /workspace/lib/llm \
+          docker run --rm --runtime=nvidia --gpus all --user root -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             -e SCCACHE_BUCKET=${{ secrets.SCCACHE_S3_BUCKET }} \
             -e SCCACHE_REGION=${{ secrets.AWS_DEFAULT_REGION }} \

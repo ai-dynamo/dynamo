@@ -4,8 +4,6 @@
 title: Disaggregation
 ---
 
-# SGLang Disaggregated Serving
-
 This document explains how SGLang's disaggregated prefill-decode architecture works, both standalone and within Dynamo.
 
 ## Overview

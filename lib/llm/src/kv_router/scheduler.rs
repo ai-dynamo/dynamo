@@ -6,7 +6,9 @@ use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::queue::SchedulerQueue;
-use super::sequence::{ActiveSequencesMultiWorker, SequenceError, SequenceRequest};
+use super::sequence::{
+    ActiveSequencesMulti, SequenceError, SequenceRequest, create_multi_worker_sequences,
+};
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
@@ -63,6 +65,8 @@ pub struct SchedulingRequest {
     pub lora_name: Option<String>,
     /// Priority jump in seconds; decreases effective arrival time in the queue.
     pub priority_jump: f64,
+    /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
 }
 
@@ -80,7 +84,7 @@ impl SchedulingRequest {
 
 pub struct KvScheduler {
     request_tx: tokio::sync::mpsc::Sender<SchedulingRequest>,
-    slots: Arc<ActiveSequencesMultiWorker>,
+    slots: Arc<ActiveSequencesMulti>,
     queue: Arc<SchedulerQueue>,
 }
 
@@ -101,18 +105,16 @@ impl KvScheduler {
             workers_with_configs.borrow().clone();
 
         let router_id = component.drt().discovery().instance_id();
-        let slots = Arc::new(
-            ActiveSequencesMultiWorker::new(
-                component.clone(),
-                block_size as usize,
-                initial_workers,
-                kv_router_config.router_replica_sync,
-                router_id,
-                worker_type,
-            )
-            .await
-            .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
-        );
+        let slots = create_multi_worker_sequences(
+            component.clone(),
+            block_size as usize,
+            initial_workers,
+            kv_router_config.router_replica_sync,
+            router_id,
+            worker_type,
+        )
+        .await
+        .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
         // Spawn background task to sync slots when the watch value changes.
         let slots_monitor = slots.clone();
@@ -139,7 +141,11 @@ impl KvScheduler {
                 let current_workers = monitor_rx.borrow_and_update().clone();
 
                 if current_workers != last_workers {
-                    slots_monitor.update_workers(current_workers.clone());
+                    let dp_sizes: HashMap<u64, u32> = current_workers
+                        .iter()
+                        .map(|(&id, c)| (id, c.data_parallel_size))
+                        .collect();
+                    slots_monitor.update_workers(dp_sizes);
                     last_workers = current_workers;
                 }
             }
@@ -204,7 +210,8 @@ impl KvScheduler {
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
-    ) -> Result<WorkerWithDpRank, KvSchedulerError> {
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
         #[cfg(feature = "bench")]
         let start = Instant::now();
 
@@ -220,6 +227,7 @@ impl KvScheduler {
             update_states,
             lora_name,
             priority_jump,
+            allowed_worker_ids,
             resp_tx: Some(resp_tx),
         };
 
@@ -245,7 +253,7 @@ impl KvScheduler {
             "scheduler.schedule completed"
         );
 
-        Ok(response.best_worker)
+        Ok(response)
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
@@ -272,17 +280,16 @@ impl KvScheduler {
         self.slots.worker_type()
     }
 
-    pub async fn add_output_block(
+    pub fn add_output_block(
         &self,
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
         self.slots
             .add_output_block(&request_id.to_string(), decay_fraction)
-            .await
     }
 
-    pub async fn get_potential_loads(
+    pub fn get_potential_loads(
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
@@ -290,8 +297,7 @@ impl KvScheduler {
     ) -> Vec<PotentialLoad> {
         let (decode_blocks, prefill_tokens) = self
             .slots
-            .potential_blocks_and_tokens(token_seq, isl_tokens, overlaps)
-            .await;
+            .potential_blocks_and_tokens(token_seq, isl_tokens, overlaps);
 
         // Get all unique WorkerWithDpRank from both hashmaps
         let mut workers: HashSet<WorkerWithDpRank> = HashSet::new();
@@ -406,7 +412,11 @@ impl WorkerSelector for DefaultWorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
 
-        if workers.is_empty() {
+        let allowed_ids = request.allowed_worker_ids.as_ref();
+
+        if allowed_ids.map_or(workers.is_empty(), |ids| {
+            !workers.keys().any(|wid| ids.contains(wid))
+        }) {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
@@ -426,10 +436,10 @@ impl WorkerSelector for DefaultWorkerSelector {
             .and_then(|cfg| cfg.overlap_score_weight)
             .unwrap_or(self.kv_router_config.overlap_score_weight);
 
-        // Calculate logits for each worker with dp_rank
-        // Outer loop: iterate over all workers from runtime config
-        // Inner loop: iterate over all dp_ranks for each worker
-        for (worker_id, config) in workers.iter() {
+        for (worker_id, config) in workers
+            .iter()
+            .filter(|(wid, _)| allowed_ids.is_none_or(|ids| ids.contains(wid)))
+        {
             let data_parallel_size = config.data_parallel_size;
 
             for dp_rank in 0..data_parallel_size {

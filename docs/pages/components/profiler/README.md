@@ -4,20 +4,18 @@
 title: Profiler
 ---
 
-# Profiler
-
 The Dynamo Profiler is an automated performance analysis tool that measures model inference characteristics to optimize deployment configurations. It determines optimal tensor parallelism (TP) settings for prefill and decode phases, generates performance interpolation data, and enables SLA-driven autoscaling through the Planner.
 
 ## Feature Matrix
 
-| Feature | vLLM | SGLang | TensorRT-LLM |
-|---------|------|--------|--------------|
+| Feature | SGLang | TensorRT-LLM | vLLM |
+|---------|--------|--------------|------|
 | Dense Model Profiling | ✅ | ✅ | ✅ |
-| MoE Model Profiling | 🚧 | ✅ | 🚧 |
-| AI Configurator (Offline) | ❌ | ❌ | ✅ |
+| MoE Model Profiling | ✅ | 🚧 | 🚧 |
+| AI Configurator (Offline) | ❌ | ✅ | ❌ |
 | Online Profiling (AIPerf) | ✅ | ✅ | ✅ |
 | Interactive WebUI | ✅ | ✅ | ✅ |
-| Runtime Profiling Endpoints | ❌ | ✅ | ❌ |
+| Runtime Profiling Endpoints | ✅ | ❌ | ❌ |
 
 ## Quick Start
 

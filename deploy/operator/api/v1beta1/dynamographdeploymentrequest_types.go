@@ -357,9 +357,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (frontend image).
-	// Example: "nvcr.io/nvidia/dynamo-runtime:latest"
-	// TODO: In a future MR, the operator will derive the backend inference image from the
-	// backend type automatically; backend images can be overridden via overrides.dgd.
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".
 	// +optional
 	Image string `json:"image,omitempty"`
 
@@ -496,6 +494,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
@@ -537,6 +536,13 @@ func (d *DynamoGraphDeploymentRequest) SetPhase(phase DGDRPhase) {
 // GetPhase returns the current lifecycle phase.
 func (d *DynamoGraphDeploymentRequest) GetPhase() DGDRPhase {
 	return d.Status.Phase
+}
+
+// GetState implements the observability.StateProvider interface, returning the
+// phase as a string so v1beta1 DGDRs can be counted by the resource counter
+// without registering a v1alpha1 cache informer.
+func (d *DynamoGraphDeploymentRequest) GetState() string {
+	return string(d.Status.Phase)
 }
 
 // SetProfilingPhase updates the profiling sub-phase.

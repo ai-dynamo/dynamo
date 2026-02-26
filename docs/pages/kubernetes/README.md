@@ -4,8 +4,6 @@
 title: Deployment Guide
 ---
 
-# Deploying Dynamo on Kubernetes
-
 High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
 
 ## Important Terminology
