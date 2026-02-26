@@ -12,7 +12,7 @@ use super::WorkerDiscoveryMode;
 use super::WorkerSelector;
 use super::protocols::{WorkerId, WorkerWithDpRank};
 use super::scheduler::{SchedulingRequest, SchedulingResponse};
-use super::sequence::{ActiveSequencesMultiWorker, SequenceRequest};
+use super::sequence::{ActiveSequencesMulti, SequenceRequest};
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
@@ -53,7 +53,7 @@ impl PartialOrd for QueueEntry {
 /// If queueing is disabled (threshold_frac is None), requests are scheduled immediately.
 pub struct SchedulerQueue {
     pending: Mutex<BinaryHeap<QueueEntry>>,
-    slots: Arc<ActiveSequencesMultiWorker>,
+    slots: Arc<ActiveSequencesMulti>,
     workers_with_configs: RuntimeConfigWatch,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
@@ -66,7 +66,7 @@ pub struct SchedulerQueue {
 
 impl SchedulerQueue {
     pub fn new(
-        slots: Arc<ActiveSequencesMultiWorker>,
+        slots: Arc<ActiveSequencesMulti>,
         workers_with_configs: RuntimeConfigWatch,
         threshold_frac: Option<f64>,
         block_size: u32,
