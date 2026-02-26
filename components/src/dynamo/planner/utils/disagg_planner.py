@@ -226,6 +226,10 @@ class DisaggPlanner:
                 final_p = max(final_p, self.shared_state.throughput_lower_bound_p)
                 final_d = max(final_d, self.shared_state.throughput_lower_bound_d)
 
+            # Enforce minimum endpoints
+            final_p = max(final_p, self.config.min_endpoint)
+            final_d = max(final_d, self.config.min_endpoint)
+
             # Apply GPU budget
             final_p, final_d = _apply_global_gpu_budget(final_p, final_d, self.config)
 
