@@ -411,7 +411,11 @@ async fn run_benchmark(
     let block_throughput = total_blocks as f32 / total_duration.as_millis() as f32 * 1000.0;
 
     latencies.sort_unstable();
-    let latency_p99_us = latencies[latencies.len() * 99 / 100] as f32 / 1000.0;
+    let latency_p99_us = if latencies.is_empty() {
+        0.0
+    } else {
+        latencies[latencies.len() * 99 / 100] as f32 / 1000.0
+    };
 
     println!(
         "Ops Throughput: {} ops/s (requests + events)",
