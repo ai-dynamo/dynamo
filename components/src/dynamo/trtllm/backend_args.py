@@ -409,6 +409,17 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="FSDP size for DiT.",
         )
+        # --- Guided Decoding ---
+        add_argument(
+            g,
+            flag_name="--guided-decoding-backend",
+            env_var="DYN_TRTLLM_GUIDED_DECODING_BACKEND",
+            default=None,
+            choices=["xgrammar", "llguidance"],
+            help="Backend to use for guided decoding (structured output). "
+            "Options: xgrammar, llguidance.",
+        )
+
         add_negatable_bool_argument(
             diffusion_group,
             flag_name="--enable-async-cpu-offload",
@@ -450,6 +461,7 @@ class DynamoTrtllmConfig(ConfigBase):
     override_engine_args: str
     publish_events_and_metrics: bool
     disable_request_abort: bool
+    guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
     modality: Modality
