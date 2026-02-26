@@ -240,11 +240,16 @@ impl SchedulerQueue {
 
 /// Build the effective worker map for a scheduling decision.
 ///
-/// When `provided_worker_ids` is `Some`, those IDs define the worker set.
-/// Configs are looked up from discovery; workers not yet discovered get
-/// `ModelRuntimeConfig::default()` (data_parallel_size=1, no capacity limits).
+/// When `provided_worker_ids` is `Some` (External mode), those IDs define the
+/// worker set. Each worker's `ModelRuntimeConfig` (including `data_parallel_size`,
+/// `max_num_batched_tokens`, etc.) is set by the worker itself at startup and
+/// published via discovery. By the time a request arrives, the config is
+/// typically available in `discovery_workers`. If a worker hasn't registered
+/// yet (e.g., startup race), `ModelRuntimeConfig::default()` is used as a
+/// fallback.
 ///
-/// When `provided_worker_ids` is `None`, the discovery worker map is used as-is.
+/// When `provided_worker_ids` is `None` (Dynamo mode), the discovery worker
+/// map is used as-is.
 fn build_effective_workers(
     provided_worker_ids: &Option<std::collections::HashSet<WorkerId>>,
     discovery_workers: &HashMap<WorkerId, ModelRuntimeConfig>,

@@ -11,12 +11,7 @@ use crate::kv_router::protocols::{compute_block_hash_for_seq, compute_seq_hash_f
 /// How the router discovers its worker set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerDiscoveryMode {
-    /// Workers are discovered via the Dynamo runtime (Kubernetes / NATS).
-    /// The router blocks at startup until at least one worker appears.
     Dynamo,
-
-    /// Workers are provided externally on each routing request (e.g. by the EPP).
-    /// The router starts immediately without waiting for discovery-based workers.
     External,
 }
 

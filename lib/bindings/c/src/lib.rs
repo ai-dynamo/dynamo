@@ -628,21 +628,14 @@ pub unsafe extern "C" fn create_routers(
             }
         };
 
-        // Wait for at least one worker to be discovered before proceeding.
-        // In External mode (EPP provides workers per-request) we still need
-        // discovery for the model card / preprocessor, but we don't require
-        // worker endpoints to be present at startup.
-        let instance_count = wait_for_discovery_sync(&drt).await;
-        if instance_count == 0 {
-            tracing::error!(
-                "Discovery sync failed: no worker instances found. Is the backend running?"
-            );
-            return Err(QueryRouterResult::ErrInitFailed);
-        }
-        tracing::info!(
-            "Discovery sync complete, {} worker(s) found",
-            instance_count
-        );
+        let (preprocessor, block_size, model_name) =
+            match init_preprocessor(&drt, &namespace_str).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize preprocessor");
+                    return Err(QueryRouterResult::ErrInitFailed);
+                }
+            };
 
         let mut kv_router_config = kv_router_config_from_env();
         kv_router_config.worker_discovery_mode = WorkerDiscoveryMode::External;
@@ -664,38 +657,6 @@ pub unsafe extern "C" fn create_routers(
         let endpoint = component_handle.endpoint("generate");
 
         let model_manager = Arc::new(ModelManager::new());
-
-        // Read block_size and model_name from env vars when available (External mode).
-        // Fall back to discovery-based model card if not set.
-        let env_block_size: Option<u32> = std::env::var("DYN_KV_CACHE_BLOCK_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok());
-        let env_model_name: Option<String> = std::env::var("DYN_MODEL_NAME")
-            .ok()
-            .filter(|s| !s.is_empty());
-
-        let (preprocessor, block_size, model_name) =
-            match fetch_preprocessor_from_discovery(&drt, &namespace_str).await {
-                Ok((prep, bs, name)) => {
-                    let block_size = env_block_size.unwrap_or(bs);
-                    let model_name = env_model_name.unwrap_or(name);
-                    tracing::info!(
-                        kv_cache_block_size = block_size,
-                        model_name = model_name,
-                        "Preprocessor created from discovery"
-                    );
-                    (Some(prep), block_size, model_name)
-                }
-                Err(e) => {
-                    // In External mode, block_size and model_name from env vars
-                    // are sufficient; preprocessor is still needed for tokenization.
-                    tracing::error!(
-                        error = %e,
-                        "Failed to fetch model card from discovery - cannot create preprocessor"
-                    );
-                    return Err(QueryRouterResult::ErrInitFailed);
-                }
-            };
 
         // Create decode router
         let decode_router = match model_manager
@@ -1251,6 +1212,47 @@ pub unsafe extern "C" fn route_decode_request(
         }
         Err(code) => code,
     }
+}
+
+/// Initialize the preprocessor, block size, and model name.
+///
+/// Waits for discovery to sync (model card must be available for tokenization),
+/// then creates the preprocessor from the model card. `kv_cache_block_size` and
+/// `model_name` can be overridden via `DYN_KV_CACHE_BLOCK_SIZE` and `DYN_MODEL_NAME`
+/// environment variables; otherwise the values from the model card are used.
+async fn init_preprocessor(
+    drt: &DistributedRuntime,
+    target_namespace: &str,
+) -> anyhow::Result<(Option<Arc<OpenAIPreprocessor>>, u32, String)> {
+    let instance_count = wait_for_discovery_sync(drt).await;
+    if instance_count == 0 {
+        anyhow::bail!("Discovery sync failed: no worker instances found. Is the backend running?");
+    }
+    tracing::info!(
+        "Discovery sync complete, {} worker(s) found",
+        instance_count
+    );
+
+    let (prep, discovered_block_size, discovered_model_name) =
+        fetch_preprocessor_from_discovery(drt, target_namespace).await?;
+
+    let block_size = std::env::var("DYN_KV_CACHE_BLOCK_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(discovered_block_size);
+
+    let model_name = std::env::var("DYN_MODEL_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(discovered_model_name);
+
+    tracing::info!(
+        kv_cache_block_size = block_size,
+        model_name = model_name,
+        "Preprocessor initialized"
+    );
+
+    Ok((Some(prep), block_size, model_name))
 }
 
 /// Fetch model card via discovery and create preprocessor.
