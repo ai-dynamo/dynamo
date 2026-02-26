@@ -4,8 +4,6 @@
 title: SGLang HiCache
 ---
 
-# Enable SGLang Hierarchical Cache (HiCache)
-
 This guide shows how to enable SGLang's Hierarchical Cache (HiCache) inside Dynamo.
 
 ## 1) Start the SGLang worker with HiCache enabled

@@ -4,8 +4,6 @@
 title: GPT-OSS
 ---
 
-# Running gpt-oss-120b Disaggregated with TensorRT-LLM
-
 Dynamo supports disaggregated serving of gpt-oss-120b with TensorRT-LLM. This guide demonstrates how to deploy gpt-oss-120b using disaggregated prefill/decode serving on a single B200 node with 8 GPUs, running 1 prefill worker on 4 GPUs and 1 decode worker on 4 GPUs.
 
 ## Overview
@@ -508,6 +506,22 @@ flowchart TD
    - Verify that the NVIDIA Container Toolkit is properly installed
    - Check Docker daemon is running with GPU support
    - Ensure sufficient disk space for model weights and container images
+
+5. **Token Repetition / Generation Won't Stop**
+   - When using `reasoning_effort: high`, the model may produce repeated tokens and fail to stop
+   - **Solution**: Set `top_p=1` in your request. These are the [recommended sampling parameters from OpenAI](https://huggingface.co/openai/gpt-oss-120b/discussions/21)
+   - Example request with recommended parameters:
+     ```bash
+     curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+       "model": "openai/gpt-oss-120b",
+       "messages": [{"role": "user", "content": "Hello"}],
+       "chat_template_args": {
+          "reasoning_effort": "high"
+        },
+       "top_p": 1,
+       "max_tokens": 300
+     }'
+     ```
 
 ## Next Steps
 

@@ -10,6 +10,7 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
+    "lib/kvbm-kernels",
     "lib/kvbm-logical",
     "lib/async-openai",
     "lib/parsers",
@@ -21,7 +22,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -32,17 +33,17 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.9.0" }
-dynamo-llm = { path = "lib/llm", version = "0.9.0" }
-dynamo-config = { path = "lib/config", version = "0.9.0" }
-dynamo-tokens = { path = "lib/tokens", version = "0.9.0" }
-dynamo-memory = { path = "lib/memory", version = "0.9.0" }
-dynamo-mocker = { path = "lib/mocker", version = "0.9.0" }
-dynamo-kv-router = { path = "lib/kv-router", version = "0.9.0", features = ["metrics"] }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.9.0", features = ["byot"] }
-dynamo-parsers = { path = "lib/parsers", version = "0.9.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "0.9.0" }
-
+dynamo-runtime = { path = "lib/runtime", version = "1.0.0" }
+dynamo-llm = { path = "lib/llm", version = "1.0.0" }
+dynamo-config = { path = "lib/config", version = "1.0.0" }
+dynamo-tokens = { path = "lib/tokens", version = "1.0.0" }
+dynamo-memory = { path = "lib/memory", version = "1.0.0" }
+dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
+dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics"] }
+dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features = ["byot"] }
+dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
 # External dependencies
 anyhow = { version = "1" }
 async-nats = { version = "0.45.0", features = ["service"] }
@@ -58,7 +59,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.17.8", features = ["cuda-12020"] }
+cudarc = { version = "0.19.2", features = ["cuda-12020"] }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }

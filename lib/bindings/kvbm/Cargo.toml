@@ -5,7 +5,7 @@
 
 [package]
 name = "kvbm-py3"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -56,6 +56,6 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
 ] }
 
 dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
-cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
+cudarc = { version = "0.19.2", features = ["cuda-12020"], optional = true }
 
 [dev-dependencies]

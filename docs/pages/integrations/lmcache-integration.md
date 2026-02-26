@@ -4,8 +4,6 @@
 title: LMCache
 ---
 
-# LMCache Integration in Dynamo
-
 ## Introduction
 
 LMCache is a high-performance KV cache layer that supercharges LLM serving by enabling **prefill-once, reuse-everywhere** semantics. As described in the [official documentation](https://docs.lmcache.ai/index.html), LMCache lets LLMs prefill each text only once by storing the KV caches of all reusable texts, allowing reuse of KV caches for any reused text (not necessarily prefix) across any serving engine instance.
@@ -20,10 +18,10 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 
 ### Configuration
 
-LMCache is enabled using the `--connector lmcache` flag:
+LMCache is enabled using the `--kv-transfer-config` flag:
 
 ```bash
-python -m dynamo.vllm --model <model_name> --connector lmcache
+python -m dynamo.vllm --model <model_name> --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 ```
 
 ### Customization
@@ -88,7 +86,7 @@ This will:
 - **Purpose**: Handles prompt processing (prefill phase)
 - **GPU Assignment**: CUDA_VISIBLE_DEVICES=1
 - **LMCache Config**: Uses `MultiConnector` with both LMCache and NIXL connectors. This enables prefill worker to use LMCache for KV offloading and use NIXL for KV transfer between prefill and decode workers.
-- **Flag**: `--is-prefill-worker`
+- **Flag**: `--disaggregation-mode prefill`
 
 ## Architecture
 
@@ -157,11 +155,11 @@ kv_transfer_config = KVTransferConfig(
 
 ## Metrics and Monitoring
 
-When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+When LMCache is enabled with `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
 
 **Requirements to access LMCache metrics:**
 
-- `--connector lmcache` - Enables LMCache
+- `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'` - Enables LMCache
 - `DYN_SYSTEM_PORT=8081` - Enables metrics HTTP endpoint
 - `PROMETHEUS_MULTIPROC_DIR` (optional) - If not set, Dynamo manages it internally
 

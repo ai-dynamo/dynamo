@@ -826,7 +826,7 @@ checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
 dependencies = [
  "glob",
  "libc",
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1124,11 +1124,11 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.17.8"
+version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bf99ab37ee7072d64d906aa2dada9a3422f1d975cdf8c8055a573bc84897ed8"
+checksum = "aed81f178e780f3d5d354d12b4c5c5a484c4a9c329ecd037ac57f2a0e0648397"
 dependencies = [
- "libloading",
+ "libloading 0.9.0",
 ]
 
 [[package]]
@@ -1489,7 +1489,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -1516,18 +1516,19 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-kv-router"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "dashmap 6.1.0",
+ "derive-getters",
  "dynamo-runtime",
  "dynamo-tokens",
  "flume",
@@ -1540,12 +1541,13 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "dynamo-llm"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "aho-corasick",
  "aligned-vec",
@@ -1603,12 +1605,14 @@ dependencies = [
  "rayon",
  "reqwest",
  "rmp-serde",
+ "rustc-hash 1.1.0",
  "rustls",
  "serde",
  "serde_json",
  "strum",
  "tempfile",
  "thiserror 2.0.18",
+ "tiktoken-rs",
  "tmq",
  "tokenizers",
  "tokio",
@@ -1631,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -1647,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
@@ -1672,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -1689,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1713,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1779,7 +1783,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -3339,6 +3343,16 @@ name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if 1.0.4",
+ "windows-link",
+]
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if 1.0.4",
  "windows-link",
@@ -6479,6 +6493,21 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg 0.4.21",
+]
+
+[[package]]
+name = "tiktoken-rs"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a19830747d9034cd9da43a60eaa8e552dfda7712424aebf187b7a60126bae0d"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bstr",
+ "fancy-regex",
+ "lazy_static",
+ "regex",
+ "rustc-hash 1.1.0",
 ]
 
 [[package]]
