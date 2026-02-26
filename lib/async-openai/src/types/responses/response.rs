@@ -368,6 +368,8 @@ pub struct CustomToolCallOutput {
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct EasyInputMessage {
     /// The type of the message input. Always set to `message`.
+    /// Optional in the "easy" format — defaults to `message` when omitted.
+    #[serde(default)]
     pub r#type: MessageType,
     /// The role of the message input. One of `user`, `assistant`, `system`, or `developer`.
     pub role: Role,
@@ -424,6 +426,7 @@ pub enum EasyInputContent {
 }
 
 /// Parts of a message: text, image, file, or audio.
+/// Also accepts `output_text` for replaying assistant turns in the "easy" input format.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputContent {
@@ -438,6 +441,11 @@ pub enum InputContent {
     InputVideo(InputVideoContent),
     /// An audio input to the model.
     InputAudio(InputAudioContent),
+    /// An output text content item, accepted when replaying assistant messages
+    /// in the "easy" input format (role: assistant with output_text content).
+    OutputText(OutputTextContent),
+    /// A refusal content item, accepted when replaying assistant messages.
+    Refusal(RefusalContent),
 }
 
 /// Video content for input messages.
@@ -2914,8 +2922,8 @@ mod tests {
             "id": "rs_1",
             "summary": [{"text": "thinking", "type": "summary_text"}]
         }"#;
-        let item: InputItem = serde_json::from_str(json)
-            .expect("reasoning item should deserialize");
+        let item: InputItem =
+            serde_json::from_str(json).expect("reasoning item should deserialize");
         match &item {
             InputItem::Item(Item::Reasoning(r)) => {
                 assert_eq!(r.id, "rs_1");

@@ -208,18 +208,33 @@ fn convert_input_content_to_user_content(
             InputContent::InputFile(_) => {
                 return Err(anyhow::anyhow!("File input content is not yet supported"));
             }
+            InputContent::OutputText(t) => {
+                chat_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: t.text.clone(),
+                    },
+                ));
+            }
+            InputContent::Refusal(r) => {
+                chat_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: r.refusal.clone(),
+                    },
+                ));
+            }
         }
     }
     Ok(ChatCompletionRequestUserMessageContent::Array(chat_parts))
 }
 
-/// Convert a slice of InputContent to a plain text string (for system/developer messages).
+/// Convert a slice of InputContent to a plain text string (for system/developer/assistant messages).
 fn convert_input_content_to_text(content: &[InputContent]) -> String {
-    // Concatenate all text parts; non-text parts are skipped.
     content
         .iter()
         .filter_map(|p| match p {
             InputContent::InputText(t) => Some(t.text.as_str()),
+            InputContent::OutputText(t) => Some(t.text.as_str()),
+            InputContent::Refusal(r) => Some(r.refusal.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -1467,8 +1482,8 @@ thinking
             InputItem::Item(Item::Message(MessageItem::Output(msg))) => {
                 assert_eq!(msg.role, AssistantRole::Assistant);
                 assert_eq!(msg.content.len(), 1);
-                assert!(msg.id.is_empty());
-                assert_eq!(msg.status, OutputStatus::Completed);
+                assert!(msg.id.is_none());
+                assert_eq!(msg.status, None);
             }
             other => panic!("Expected Item::Message(Output), got {:?}", other),
         }
@@ -1489,8 +1504,8 @@ thinking
         let item: InputItem = serde_json::from_value(json).unwrap();
         match item {
             InputItem::Item(Item::Message(MessageItem::Output(msg))) => {
-                assert_eq!(msg.id, "msg_abc123");
-                assert_eq!(msg.status, OutputStatus::Completed);
+                assert_eq!(msg.id.as_deref(), Some("msg_abc123"));
+                assert_eq!(msg.status, Some(OutputStatus::Completed));
             }
             other => panic!("Expected Item::Message(Output), got {:?}", other),
         }
