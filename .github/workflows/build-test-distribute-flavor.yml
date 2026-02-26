@@ -226,7 +226,7 @@ jobs:
               --cuda-version=${{ inputs.cuda_version }} \
               --show-result \
               --output-short-filename
-      - name: Build Container
+      - name: Build and Push Runtime Image
         id: build-image
         timeout-minutes: ${{ inputs.build_timeout_minutes }}
         uses: ./.github/actions/docker-remote-build

@@ -102,7 +102,7 @@ jobs:
               --cuda-version=${{ env.CUDA_VERSION }} \
               --show-result \
               --output-short-filename
-      - name: Build and Push Container
+      - name: Build and Push Runtime Image
         uses: ./.github/actions/docker-remote-build
         with:
           image_tag: ${{ steps.define_image_tag.outputs.remote_tag }}
@@ -157,7 +157,7 @@ jobs:
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Pull image
+      - name: Pull runtime image
         run: docker pull ${{ env.IMAGE_TAG }}
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         run: |
@@ -192,7 +192,7 @@ jobs:
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Pull image
+      - name: Pull test image
         run: docker pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (parallel tests with xdist)
         uses: ./.github/actions/pytest
@@ -222,7 +222,7 @@ jobs:
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Pull image
+      - name: Pull test image
         run: docker pull ${{ env.IMAGE_TAG }}
       - name: Run pytest (sequential tests)
         uses: ./.github/actions/pytest
