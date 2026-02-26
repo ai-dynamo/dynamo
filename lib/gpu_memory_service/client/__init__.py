@@ -12,6 +12,7 @@ GPU Memory Service:
 For PyTorch integration (MemPool, tensor utilities), see gpu_memory_service.client.torch.
 """
 
+from gpu_memory_service.client.gms_storage_client import GMSStorageClient, SaveManifest
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     StaleMemoryLayoutError,
@@ -22,4 +23,6 @@ __all__ = [
     "GMSClientMemoryManager",
     "StaleMemoryLayoutError",
     "GMSRPCClient",
+    "GMSStorageClient",
+    "SaveManifest",
 ]

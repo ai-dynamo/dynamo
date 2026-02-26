@@ -40,6 +40,7 @@ from gpu_memory_service.client.cuda_vmm_utils import (
 from gpu_memory_service.client.rpc import GMSRPCClient
 from gpu_memory_service.common.cuda_vmm_utils import (
     align_to_granularity,
+    ensure_cuda_initialized,
     get_allocation_granularity,
 )
 from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
@@ -138,6 +139,9 @@ class GMSClientMemoryManager:
         self._last_memory_layout_hash: str = (
             ""  # Hash from server, saved on connect/commit
         )
+
+        # Ensure the CUDA driver is initialized before any driver API calls.
+        ensure_cuda_initialized()
 
         # Set the current CUDA device for subsequent operations.
         set_current_device(self.device)
