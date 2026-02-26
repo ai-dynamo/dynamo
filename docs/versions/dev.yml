@@ -58,8 +58,6 @@ navigation:
             contents:
               - page: Integration with Dynamo
                 path: ../pages/kubernetes/chrek/dynamo.md
-              - page: Standalone Usage
-                path: ../pages/kubernetes/chrek/standalone.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -137,8 +135,19 @@ navigation:
         contents:
           - page: vLLM
             path: ../pages/backends/vllm/README.md
-          - page: SGLang
+          - section: SGLang
             path: ../pages/backends/sglang/README.md
+            contents:
+              - page: Reference Guide
+                path: ../pages/backends/sglang/sglang-reference-guide.md
+              - page: Examples
+                path: ../pages/backends/sglang/sglang-examples.md
+              - page: Disaggregation
+                path: ../pages/backends/sglang/sglang-disaggregation.md
+              - page: Diffusion
+                path: ../pages/backends/sglang/sglang-diffusion.md
+              - page: Observability
+                path: ../pages/backends/sglang/sglang-observability.md
           - page: TensorRT-LLM
             path: ../pages/backends/trtllm/README.md
       - section: Frontend
@@ -213,7 +222,10 @@ navigation:
   - section: Blog
     path: ../blogs/index.mdx
     slug: blog
-    contents: []
+    contents:
+      - page: "Flash Indexer: Inter-Galactic KV Routing"
+        path: ../blogs/flash-indexer/flash-indexer.md
+        slug: flash-indexer
 
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.
@@ -280,20 +292,6 @@ navigation:
             path: ../pages/backends/vllm/prompt-embeddings.md
           - page: vLLM-Omni
             path: ../pages/backends/vllm/vllm-omni.md
-      - section: SGLang Details
-        contents:
-          - page: Expert Distribution (EPLB)
-            path: ../pages/backends/sglang/expert-distribution-eplb.md
-          - page: GPT-OSS
-            path: ../pages/backends/sglang/gpt-oss.md
-          - page: Diffusion LM
-            path: ../pages/backends/sglang/diffusion-lm.md
-          - page: Profiling
-            path: ../pages/backends/sglang/profiling.md
-          - page: Disaggregation
-            path: ../pages/backends/sglang/sglang-disaggregation.md
-          - page: Prometheus
-            path: ../pages/backends/sglang/prometheus.md
       - section: TensorRT-LLM Details
         contents:
           - page: Multinode Examples

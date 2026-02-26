@@ -286,35 +286,6 @@ type OverridesSpec struct {
 	DGD *runtime.RawExtension `json:"dgd,omitempty"`
 }
 
-// PlannerPreDeploymentSweepMode controls pre-deployment sweeping thoroughness for planner profiling.
-// +kubebuilder:validation:Enum=none;rapid;thorough
-type PlannerPreDeploymentSweepMode string
-
-const (
-	PlannerPreDeploymentSweepModeNone     PlannerPreDeploymentSweepMode = "none"
-	PlannerPreDeploymentSweepModeRapid    PlannerPreDeploymentSweepMode = "rapid"
-	PlannerPreDeploymentSweepModeThorough PlannerPreDeploymentSweepMode = "thorough"
-)
-
-// PlannerSpec configures the SLA planner for autoscaling in the generated DGD.
-type PlannerSpec struct {
-	// Enabled indicates whether the planner is enabled.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// PlannerPreDeploymentSweeping controls pre-deployment sweeping mode for planner in-depth profiling.
-	// "none" means no pre-deployment sweep (only load-based scaling).
-	// "rapid" uses AI Configurator to simulate engine performance.
-	// "thorough" uses real GPUs to measure engine performance (takes several hours).
-	// +optional
-	// +kubebuilder:validation:Enum=none;rapid;thorough
-	PlannerPreDeploymentSweeping *PlannerPreDeploymentSweepMode `json:"plannerPreDeploymentSweeping,omitempty"`
-
-	// PlannerArgsList is a list of additional planner arguments.
-	// +optional
-	PlannerArgsList []string `json:"plannerArgsList,omitempty"`
-}
-
 // MockerSpec configures the simulated (mocker) backend.
 type MockerSpec struct {
 	// Enabled indicates whether to deploy mocker workers instead of real inference workers.
@@ -333,9 +304,14 @@ type KVRouterSpec struct {
 
 // FeaturesSpec controls optional Dynamo platform features in the generated deployment.
 type FeaturesSpec struct {
-	// Planner configures the SLA planner for autoscaling in the generated DGD.
+	// Planner is the raw SLA planner configuration passed to the planner service.
+	// Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.
+	// Go treats this as opaque bytes; the Planner service validates it at startup.
+	// The presence of this field (non-null) enables the planner in the generated DGD.
 	// +optional
-	Planner *PlannerSpec `json:"planner,omitempty"`
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Planner *runtime.RawExtension `json:"planner,omitempty"`
 
 	// TODO: KVRouter support is not yet implemented in the operator.
 	// KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
@@ -381,9 +357,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (frontend image).
-	// Example: "nvcr.io/nvidia/dynamo-runtime:latest"
-	// TODO: In a future MR, the operator will derive the backend inference image from the
-	// backend type automatically; backend images can be overridden via overrides.dgd.
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".
 	// +optional
 	Image string `json:"image,omitempty"`
 
@@ -520,6 +494,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dgdr
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`

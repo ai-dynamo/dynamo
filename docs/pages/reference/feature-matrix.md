@@ -16,20 +16,20 @@ This document provides a comprehensive compatibility matrix for key Dynamo featu
 
 ## Quick Comparison
 
-| Feature | vLLM | TensorRT-LLM | SGLang | Source |
+| Feature | SGLang | TensorRT-LLM | vLLM | Source |
 | :--- | :---: | :---: | :---: | :--- |
 | **Disaggregated Serving** | ✅ | ✅ | ✅ | [Design Doc][disagg] |
 | **KV-Aware Routing** | ✅ | ✅ | ✅ | [Router Doc][kv-routing] |
 | **SLA-Based Planner** | ✅ | ✅ | ✅ | [Planner Doc][planner] |
-| **KV Block Manager** | ✅ | ✅ | 🚧 | [KVBM Doc][kvbm] |
+| **KV Block Manager** | 🚧 | ✅ | ✅ | [KVBM Doc][kvbm] |
 | **Multimodal (Image)** | ✅ | ✅ | ✅ | [Multimodal Doc][mm] |
-| **Multimodal (Video)** | ✅ | | | [Multimodal Doc][mm] |
-| **Multimodal (Audio)** | 🚧 | | | [Multimodal Doc][mm] |
+| **Multimodal (Video)** | | | ✅ | [Multimodal Doc][mm] |
+| **Multimodal (Audio)** | | | 🚧 | [Multimodal Doc][mm] |
 | **Request Migration** | ✅ | 🚧 | ✅ | [Migration Doc][migration] |
-| **Request Cancellation** | ✅ | ✅ | 🚧 | Backend READMEs |
-| **LoRA** | ✅ | | | [K8s Guide][lora] |
+| **Request Cancellation** | 🚧 | ✅ | ✅ | Backend READMEs |
+| **LoRA** | | | ✅ | [K8s Guide][lora] |
 | **Tool Calling** | ✅ | ✅ | ✅ | [Tool Calling Doc][tools] |
-| **Speculative Decoding** | ✅ | ✅ | 🚧 | Backend READMEs |
+| **Speculative Decoding** | 🚧 | ✅ | ✅ | Backend READMEs |
 
 ## 1. vLLM Backend
 

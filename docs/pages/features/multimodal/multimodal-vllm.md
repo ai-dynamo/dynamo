@@ -39,7 +39,6 @@ vLLM supports all multimodal deployment patterns. See [Architecture Patterns](RE
 | E/PD (Encode Separate) | ✅ | `agg_multimodal_epd.sh` | Separate encode worker |
 | E/P/D (Full Disaggregation) | ✅ | `disagg_multimodal_epd.sh` | All stages separate |
 | EP/D (Traditional Disaggregated) | ✅ | `disagg_multimodal_llama.sh` | For Llama 4 models |
-| E/PD (EC Connector) | ✅ | `agg_multimodal_ec_connector.sh` | vLLM-native encoder with ECConnector |
 
 ### Component Flags
 
@@ -48,7 +47,7 @@ vLLM supports all multimodal deployment patterns. See [Architecture Patterns](RE
 | Processor | `--multimodal-processor` | HTTP entry, tokenization |
 | Encode Worker | `--multimodal-encode-worker` | Media encoding |
 | PD Worker | `--multimodal-worker` | Prefill + Decode |
-| Prefill Worker | `--multimodal-worker --is-prefill-worker` | Prefill only |
+| Prefill Worker | `--multimodal-worker --disaggregation-mode prefill` | Prefill only |
 | Decode Worker | `--multimodal-decode-worker` | Decode only |
 
 ## Use the Latest Release
@@ -163,34 +162,6 @@ bash launch/disagg_multimodal_epd.sh --model llava-hf/llava-1.5-7b-hf
 <Note>
 Disaggregation is currently only confirmed to work with LLaVA. Qwen2.5-VL is not confirmed to be supported.
 </Note>
-
-## ECConnector Serving
-
-ECConnector is vLLM's native connector for transferring multimodal embeddings via an Embedding Cache. The encoder worker acts as a **producer** (writes embeddings), while the PD worker acts as a **consumer** (reads embeddings).
-
-**Workflow:**
-
-```mermaid
-flowchart LR
-  HTTP --> processor[EC Processor]
-  processor --image_url--> encoder[vLLM Native Encoder<br/>Producer]
-  encoder --writes--> cache[(Embedding Cache)]
-  cache --reads--> pd[PD Worker<br/>Consumer]
-  pd --> processor
-  processor --> HTTP
-```
-
-**Launch:**
-
-```bash
-cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/agg_multimodal_ec_connector.sh --model llava-hf/llava-1.5-7b-hf
-
-# Custom storage path for Embedding Cache
-bash launch/agg_multimodal_ec_connector.sh --ec-storage-path /shared/encoder-cache
-```
-
-**Client:** Same as [E/PD Serving](#epd-serving-encode-separate)
 
 ## Llama 4 Serving
 
@@ -443,6 +414,60 @@ cd $DYNAMO_HOME/examples/multimodal
 bash launch/audio_disagg.sh
 ```
 
+## Embedding Cache
+
+Dynamo supports embedding cache in both aggregated and disaggregated settings:
+
+| Setting | Implementation | Launch Script |
+|---------|---------------|---------------|
+| **Aggregated** | `ec_both` via upstream vLLM (main or v0.17.0+) | `vllm_serve_embedding_cache.sh` |
+| **Disaggregated** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
+
+### ec_both (Aggregated)
+
+A single vLLM instance acts as both **producer** (encodes and saves embeddings to CPU cache) and **consumer** (loads cached embeddings back to GPU). Repeated images skip encoding entirely.
+
+```mermaid
+flowchart LR
+  HTTP --> vllm[vLLM Instance<br/>ec_both]
+  vllm --save--> cache[(CPU Embedding Cache<br/>LRU)]
+  cache --load--> vllm
+  vllm --> HTTP
+```
+
+**Launch:**
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/vllm_serve_embedding_cache.sh --multimodal-embedding-cache-capacity-gb 10
+```
+
+This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector` automatically. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled).
+
+### Disaggregated Embedding Cache
+
+In the disaggregated setting, Dynamo maintains the embedding cache in its own worker layer on top of the vLLM engine. The encode worker computes embeddings and writes them to the cache, while the PD worker reads cached embeddings instead of re-encoding.
+
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --image_url--> encode_worker[Encode Worker]
+  encode_worker --> processor
+  encode_worker --embeddings--> cache[(Dynamo Embedding Cache)]
+  cache --load--> pd_worker[PD Worker]
+  pd_worker --> encode_worker
+```
+
+**Launch:**
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/disagg_multimodal_e_pd.sh --multimodal-embedding-cache-capacity-gb 10
+```
+
+**Client:** Same as [E/PD Serving](#epd-serving-encode-separate)
+
 ## NIXL Usage
 
 | Use Case | Script | NIXL Used? | Data Transfer |
@@ -451,7 +476,7 @@ bash launch/audio_disagg.sh
 | E/PD (Encode Separate) | `agg_multimodal_epd.sh` | Yes | Encoder → PD (embeddings) |
 | E/P/D (Full Disaggregation) | `disagg_multimodal_epd.sh` | Yes | Encoder → Prefill (embeddings), Prefill → Decode (KV cache) |
 | EP/D (Llama 4) | `disagg_multimodal_llama.sh` | Yes | Prefill → Decode (KV cache) |
-| E/PD (EC Connector) | `agg_multimodal_ec_connector.sh` | No | ECConnector via Embedding Cache |
+| EC Both (Local Node) | `vllm_serve_embedding_cache.sh` | No | ECConnector via CPU Embedding Cache |
 
 ## ModelInput Types and Registration
 
@@ -483,6 +508,82 @@ await register_model(
     ...
 )
 ```
+
+## LoRA Adapters on Multimodal Workers
+
+Multimodal workers support dynamic loading and unloading of LoRA adapters at runtime via the management API. This enables serving fine-tuned multimodal models alongside the base model.
+
+### Loading a LoRA Adapter
+
+Load an adapter on a running multimodal worker via the `load_lora` endpoint:
+
+```bash
+# For components workers (URI-based, requires DYN_LORA_ENABLED=true)
+curl -X POST http://<worker-host>:<port>/load_lora \
+  -H "Content-Type: application/json" \
+  -d '{
+    "lora_name": "my-vlm-adapter",
+    "source": {"uri": "s3://my-bucket/adapters/my-vlm-adapter"}
+  }'
+
+# For example workers (path-based)
+curl -X POST http://<worker-host>:<port>/load_lora \
+  -H "Content-Type: application/json" \
+  -d '{
+    "lora_name": "my-vlm-adapter",
+    "lora_path": "/path/to/adapter"
+  }'
+```
+
+### Sending Requests with a LoRA
+
+Set the `model` field in the request to the LoRA adapter name:
+
+```bash
+curl -X POST http://<frontend-host>:<port>/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "my-vlm-adapter",
+    "messages": [
+      {"role": "user", "content": [
+        {"type": "text", "text": "Describe this image"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+      ]}
+    ]
+  }'
+```
+
+Requests without a LoRA name (or with the base model name) will use the base model.
+
+### Unloading a LoRA Adapter
+
+```bash
+curl -X POST http://<worker-host>:<port>/unload_lora \
+  -H "Content-Type: application/json" \
+  -d '{"lora_name": "my-vlm-adapter"}'
+```
+
+### Listing Loaded Adapters
+
+```bash
+curl -X POST http://<worker-host>:<port>/list_loras
+```
+
+### Disaggregated Mode
+
+In disaggregated (prefill/decode) deployments, the **same LoRA adapter must be loaded on both the prefill and decode workers**. The LoRA identity (`model` field) is automatically propagated from the prefill worker to the decode worker in the forwarded request.
+
+```bash
+# Load on prefill worker
+curl -X POST http://<prefill-worker>/load_lora \
+  -d '{"lora_name": "my-adapter", "source": {"uri": "s3://bucket/adapter"}}'
+
+# Load on decode worker (same adapter)
+curl -X POST http://<decode-worker>/load_lora \
+  -d '{"lora_name": "my-adapter", "source": {"uri": "s3://bucket/adapter"}}'
+```
+
+If a LoRA is loaded on the prefill worker but not on the decode worker, the decode worker will fall back to the base model for that request.
 
 ## Known Limitations
 

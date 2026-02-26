@@ -72,7 +72,8 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     python -m dynamo.vllm \
         --enable-multimodal \
         --model $MODEL_NAME \
-        --is-prefill-worker \
+        --disaggregation-mode prefill \
+        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
         $MODEL_SPECIFIC_ARGS \
         --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' \
         "${EXTRA_ARGS[@]}" &
@@ -84,6 +85,7 @@ else
     python -m dynamo.vllm \
         --enable-multimodal \
         --model $MODEL_NAME \
+        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
         $MODEL_SPECIFIC_ARGS \
         --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' \
         "${EXTRA_ARGS[@]}" &

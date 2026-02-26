@@ -51,6 +51,8 @@ OutputProcessorOutput = _output_processor_mod.OutputProcessorOutput
 pytestmark = [
     pytest.mark.vllm,
     pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
 ]
 
 
@@ -356,7 +358,7 @@ class TestVllmRendererApi:
         position. vllm_processor.py constructs EngineCoreOutput by keyword
         and reads fields from EngineCoreRequest positionally.
         """
-        expected_request_fields = (
+        base_request_fields = (
             "request_id",
             "prompt_token_ids",
             "mm_features",
@@ -375,11 +377,15 @@ class TestVllmRendererApi:
             "resumable",
             "external_req_id",
         )
+        # vllm-omni monkey-patches EngineCoreRequest with an extra field
+        # (only installed on amd64, not arm64)
+        omni_fields = base_request_fields + ("additional_information",)
         actual_request_fields = EngineCoreRequest.__struct_fields__
-        assert actual_request_fields == expected_request_fields, (
+        assert actual_request_fields in (base_request_fields, omni_fields), (
             "EngineCoreRequest fields changed!\n"
-            f"Expected: {expected_request_fields}\n"
-            f"Actual:   {actual_request_fields}\n"
+            f"Expected (base): {base_request_fields}\n"
+            f"Expected (omni): {omni_fields}\n"
+            f"Actual:          {actual_request_fields}\n"
             "Update request construction in components/src/dynamo/frontend/vllm_processor.py"
         )
 

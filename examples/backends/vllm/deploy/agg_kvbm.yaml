@@ -41,5 +41,5 @@ spec:
             - --max-model-len
             - "32000"
             - --enforce-eager
-            - --connector
-            - kvbm
+            - --kv-transfer-config
+            - '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}'

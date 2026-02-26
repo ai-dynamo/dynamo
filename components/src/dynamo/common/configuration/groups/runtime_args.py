@@ -9,6 +9,7 @@ from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
 
@@ -35,6 +36,8 @@ class DynamoRuntimeConfig(ConfigBase):
     media_output_http_url: Optional[str] = None
 
     def validate(self) -> None:
+        self.namespace = get_worker_namespace(self.namespace)
+
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events
         self._validate_output_modalities()
@@ -69,7 +72,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--namespace",
             env_var="DYN_NAMESPACE",
             default="dynamo",
-            help="Dynamo namespace",
+            help="Dynamo namespace. If DYN_NAMESPACE_WORKER_SUFFIX is set, "
+            "'-{suffix}' is appended to support multiple worker pools",
         )
         add_argument(
             g,
@@ -106,8 +110,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             g,
             flag_name="--connector",
             env_var="DYN_CONNECTOR",
-            default=["nixl"],
-            help="List of connectors to use in order (e.g., --connector nixl lmcache). Options: nixl, lmcache, kvbm, null, none. Order will be preserved in MultiConnector.",
+            default=[],
+            help="[Deprecated for vLLM] Use --kv-transfer-config instead. For TRT-LLM, options: nixl, lmcache, kvbm, null, none.",
             nargs="*",
         )
 
@@ -116,7 +120,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--durable-kv-events",
             env_var="DYN_DURABLE_KV_EVENTS",
             default=False,
-            help="Enable durable KV events using NATS JetStream instead of the local indexer. By default, local indexer is enabled for lower latency. Use this flag when you need durability and multi-replica router consistency. Requires NATS with JetStream enabled. Can also be set via DYN_DURABLE_KV_EVENTS=true env var.",
+            help="[Deprecated] Enable durable KV events using NATS JetStream instead of the local indexer. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
         )
 
         # Optional: tool/reasoning parsers (choices from dynamo._core when available)

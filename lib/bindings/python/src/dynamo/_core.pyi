@@ -111,19 +111,6 @@ class DistributedRuntime:
         """
         ...
 
-class Component:
-    """
-    A component is a collection of endpoints
-    """
-
-    ...
-
-    def endpoint(self, name: str) -> Endpoint:
-        """
-        Create an endpoint
-        """
-        ...
-
 
 class Endpoint:
     """
@@ -190,25 +177,6 @@ class Endpoint:
         """
         ...
 
-    def component(self) -> Component:
-        """
-        Get the parent Component that this endpoint belongs to.
-
-        Returns:
-            Component: The parent component
-
-        Note:
-            To avoid duplicate metrics registries, reuse the returned Component for
-            multiple endpoints: component.endpoint("ep1"), component.endpoint("ep2")
-
-        Example:
-            endpoint = runtime.endpoint("demo.backend.generate")
-            component = endpoint.component()
-            health_endpoint = component.endpoint("health")  # Reuse component
-        """
-        ...
-
-
 class Client:
     """
     A client capable of calling served instances of an endpoint
@@ -268,7 +236,8 @@ class ModelCardInstanceId:
 def compute_block_hash_for_seq(
     tokens: List[int],
     kv_block_size: int,
-    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
+    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+    lora_name: Optional[str] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -404,14 +373,15 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    async def create_endpoint(self, component: Component) -> None:
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Create the NATS endpoint for metrics publishing. Must be awaited.
+        Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
 
-        Only service created through this method will interact with KV router of the same component.
+        Extracts component information from the endpoint to set up metrics publishing
+        on the correct NATS subject for routing decisions.
 
         Args:
-            component: The component to create the endpoint for
+            endpoint: The endpoint to extract component information from for metrics publishing
         """
 
     def publish(
@@ -575,7 +545,7 @@ class KvIndexer:
 
     ...
 
-    def __init__(self, component: Component, block_size: int) -> None:
+    def __init__(self, endpoint: Endpoint, block_size: int) -> None:
         """
         Create a `KvIndexer` object
         """
@@ -593,7 +563,7 @@ class KvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int], lora_id: int
+        self, token_ids: List[int], lora_name: Optional[str] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
@@ -622,7 +592,7 @@ class ApproxKvIndexer:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: int,
         router_ttl_secs: float = 120.0,
         router_max_tree_size: int = 1048576,
@@ -641,13 +611,14 @@ class ApproxKvIndexer:
         ...
 
     def find_matches_for_request(
-        self, token_ids: List[int]
+        self, token_ids: List[int], lora_name: Optional[str] = None
     ) -> OverlapScores:
         """
         Return the overlapping scores of workers for the given token ids.
 
         Args:
             token_ids: List of token IDs to find matches for
+            lora_name: Optional LoRA adapter name for adapter-aware matching
 
         Returns:
             OverlapScores containing worker matching scores and frequencies
@@ -689,7 +660,7 @@ class KvEventPublisher:
 
     def __init__(
         self,
-        component: Component,
+        endpoint: Endpoint,
         worker_id: int = 0,
         kv_block_size: int = 0,
         dp_rank: int = 0,
@@ -706,8 +677,8 @@ class KvEventPublisher:
         When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
 
         Args:
-            component: The component to publish events for
-            worker_id: The worker ID (unused, inferred from component)
+            endpoint: The endpoint to extract component information from for event publishing
+            worker_id: The worker ID (unused, inferred from endpoint)
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
             enable_local_indexer: Enable worker-local KV indexer
@@ -720,9 +691,9 @@ class KvEventPublisher:
         token_ids: List[int],
         num_block_tokens: List[int],
         block_hashes: List[int],
-        lora_id: int,
         parent_hash: Optional[int] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -733,11 +704,11 @@ class KvEventPublisher:
             token_ids: List of token IDs
             num_block_tokens: Number of tokens per block
             block_hashes: List of block hashes (signed 64-bit integers)
-            lora_id: The LoRA ID
             parent_hash: Optional parent hash (signed 64-bit integer)
             block_mm_infos: Optional list of multimodal info for each block.
                 Each item is either None or a dict with "mm_objects" key containing
                 a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
+            lora_name: Optional LoRA adapter name for adapter-aware block hashing.
         """
         ...
 
@@ -976,7 +947,7 @@ class RouterConfig:
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
-        enforce_disagg: bool = False,
+        decode_fallback: bool = False,
     ) -> None:
         """
         Create a RouterConfig.
@@ -987,7 +958,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            enforce_disagg: Enforce disaggregated prefill-decode mode
+            decode_fallback: Allow falling back to decode-only mode when prefill workers are unavailable
         """
         ...
 
@@ -1019,9 +990,9 @@ class KvRouterConfig:
             overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
             router_temperature: Temperature for worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
-            durable_kv_events: Enable durable KV events using NATS JetStream (default: False).
-                When False, uses NATS Core / generic event plane with local_indexer mode.
-                When True, uses JetStream for durability and multi-replica consistency.
+            durable_kv_events: **Deprecated.** Enable durable KV events using NATS JetStream (default: False).
+                This option will be removed in a future release. The event-plane subscriber
+                (local_indexer mode) is now the recommended path.
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
@@ -1043,6 +1014,12 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool.
         """
         ...
+
+async def start_kv_block_indexer(
+    endpoint: Endpoint,
+    block_size: int,
+    kv_router_config: KvRouterConfig,
+) -> None: ...
 
 async def register_model(
     model_input: ModelInput,
@@ -1413,6 +1390,7 @@ class KvRouter:
         router_config_override: Optional[JsonLike] = None,
         request_id: Optional[str] = None,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -1438,6 +1416,7 @@ class KvRouter:
     async def get_potential_loads(
         self,
         token_ids: List[int],
+        lora_name: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
         Get potential prefill and decode loads for all workers.
@@ -1606,7 +1585,6 @@ class VirtualConnectorClient:
 
 __all__ = [
     "Client",
-    "Component",
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",

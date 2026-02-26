@@ -21,9 +21,9 @@ import (
 	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -38,12 +38,12 @@ const (
 	testNamespace = "default"
 )
 
-func testPVCConfig() *controller_common.CheckpointConfig {
-	return &controller_common.CheckpointConfig{
+func testPVCConfig() *configv1alpha1.CheckpointConfiguration {
+	return &configv1alpha1.CheckpointConfiguration{
 		Enabled: true,
-		Storage: controller_common.CheckpointStorageConfig{
-			Type: controller_common.CheckpointStorageTypePVC,
-			PVC: controller_common.CheckpointPVCConfig{
+		Storage: configv1alpha1.CheckpointStorageConfiguration{
+			Type: configv1alpha1.CheckpointStorageTypePVC,
+			PVC: configv1alpha1.CheckpointPVCConfig{
 				PVCName:  "chrek-pvc",
 				BasePath: "/checkpoints",
 			},
@@ -146,10 +146,10 @@ func TestInjectCheckpointEnvVars(t *testing.T) {
 	t.Run("S3 storage injects LOCATION and HASH", func(t *testing.T) {
 		container := &corev1.Container{}
 		info := &CheckpointInfo{Enabled: true, Hash: testHash, Location: "s3://bucket/" + testHash + ".tar"}
-		config := &controller_common.CheckpointConfig{
-			Storage: controller_common.CheckpointStorageConfig{
-				Type: controller_common.CheckpointStorageTypeS3,
-				S3:   controller_common.CheckpointS3Config{URI: "s3://bucket"},
+		config := &configv1alpha1.CheckpointConfiguration{
+			Storage: configv1alpha1.CheckpointStorageConfiguration{
+				Type: configv1alpha1.CheckpointStorageTypeS3,
+				S3:   configv1alpha1.CheckpointS3Config{URI: "s3://bucket"},
 			},
 		}
 		InjectCheckpointEnvVars(container, info, config)
@@ -294,22 +294,22 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	t.Run("S3 and OCI storage set location", func(t *testing.T) {
 		for _, tc := range []struct {
 			storageType string
-			config      controller_common.CheckpointStorageConfig
+			config      configv1alpha1.CheckpointStorageConfiguration
 			wantLoc     string
 		}{
-			{"s3", controller_common.CheckpointStorageConfig{
-				Type: controller_common.CheckpointStorageTypeS3,
-				S3:   controller_common.CheckpointS3Config{URI: "s3://bucket/prefix"},
+			{"s3", configv1alpha1.CheckpointStorageConfiguration{
+				Type: configv1alpha1.CheckpointStorageTypeS3,
+				S3:   configv1alpha1.CheckpointS3Config{URI: "s3://bucket/prefix"},
 			}, "s3://bucket/prefix/" + testHash + ".tar"},
-			{"oci", controller_common.CheckpointStorageConfig{
-				Type: controller_common.CheckpointStorageTypeOCI,
-				OCI:  controller_common.CheckpointOCIConfig{URI: "oci://registry/repo"},
+			{"oci", configv1alpha1.CheckpointStorageConfiguration{
+				Type: configv1alpha1.CheckpointStorageTypeOCI,
+				OCI:  configv1alpha1.CheckpointOCIConfig{URI: "oci://registry/repo"},
 			}, "oci://registry/repo:" + testHash},
 		} {
 			t.Run(tc.storageType, func(t *testing.T) {
 				podSpec := testPodSpec()
 				info := &CheckpointInfo{Enabled: true, Hash: testHash}
-				require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, info, &controller_common.CheckpointConfig{Storage: tc.config}))
+				require.NoError(t, InjectCheckpointIntoPodSpec(podSpec, info, &configv1alpha1.CheckpointConfiguration{Storage: tc.config}))
 				assert.Equal(t, tc.wantLoc, info.Location)
 			})
 		}
@@ -320,22 +320,22 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			name    string
 			podSpec *corev1.PodSpec
 			info    *CheckpointInfo
-			config  *controller_common.CheckpointConfig
+			config  *configv1alpha1.CheckpointConfiguration
 			errMsg  string
 		}{
 			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, testPVCConfig(), "identity is nil"},
 			{"no containers", &corev1.PodSpec{}, testInfo(), testPVCConfig(), "no container found"},
-			{"PVC name missing", testPodSpec(), testInfo(), &controller_common.CheckpointConfig{
-				Storage: controller_common.CheckpointStorageConfig{Type: "pvc", PVC: controller_common.CheckpointPVCConfig{BasePath: "/checkpoints"}},
+			{"PVC name missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
+				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{BasePath: "/checkpoints"}},
 			}, "no PVC name"},
-			{"PVC base path missing", testPodSpec(), testInfo(), &controller_common.CheckpointConfig{
-				Storage: controller_common.CheckpointStorageConfig{Type: "pvc", PVC: controller_common.CheckpointPVCConfig{PVCName: "chrek-pvc"}},
+			{"PVC base path missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
+				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "pvc", PVC: configv1alpha1.CheckpointPVCConfig{PVCName: "chrek-pvc"}},
 			}, "no PVC base path"},
-			{"S3 URI missing", testPodSpec(), testInfo(), &controller_common.CheckpointConfig{
-				Storage: controller_common.CheckpointStorageConfig{Type: "s3"},
+			{"S3 URI missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
+				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "s3"},
 			}, "S3"},
-			{"OCI URI missing", testPodSpec(), testInfo(), &controller_common.CheckpointConfig{
-				Storage: controller_common.CheckpointStorageConfig{Type: "oci"},
+			{"OCI URI missing", testPodSpec(), testInfo(), &configv1alpha1.CheckpointConfiguration{
+				Storage: configv1alpha1.CheckpointStorageConfiguration{Type: "oci"},
 			}, "OCI"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {

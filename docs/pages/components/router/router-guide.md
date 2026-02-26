@@ -150,7 +150,7 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--no-router-kv-events`: Disables KV event tracking. By default (when this flag is not provided), the router uses KV events to monitor block creation and deletion from workers. When disabled with this flag, the router predicts cache state based on routing decisions with TTL-based expiration (default 120s) and pruning. Use this flag if your backend doesn't support KV events (or you are not confident in the accuracy or responsiveness of the events).
 
-- `--router-durable-kv-events`: Enables JetStream mode for KV event transport. Must be specified on **both** the frontend **and** all workers. When enabled, workers publish to JetStream instead of the local indexer, and the frontend consumes from JetStream as a durable consumer. Without this flag (default), workers use the local indexer with NATS Core or ZMQ event plane. .
+- `--router-durable-kv-events`: **(Deprecated — will be removed in a future release.)** Enables JetStream mode for KV event transport. The event-plane subscriber (local_indexer mode) is now the recommended path. When enabled, workers publish to JetStream instead of the local indexer, and the frontend consumes from JetStream as a durable consumer. Without this flag (default), workers use the local indexer with NATS Core or ZMQ event plane.
 
 - `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - in JetStream mode those are synchronized through JetStream events; in local indexer mode (default) each router queries workers directly.
 
@@ -214,7 +214,7 @@ Dynamo supports several routing strategies when sending requests from one compon
 First, we must create a client tied to a components endpoint, we can do this using the labels defined above. Here we are getting a client tied to the `generate` endpoint of the `VllmWorker` component.
 
 ```python
-client = namespace('dynamo').component('VllmWorker').endpoint('generate').client()
+client = runtime.endpoint("dynamo.VllmWorker.generate").client()
 ```
 
 We can then use the default routing methods exposed by the client class to send requests to the `VllmWorker` component.
@@ -265,6 +265,15 @@ The `router_temperature` parameter controls routing randomness:
    - To reduce ITL: Decrease the weight
 4. If you observe severe load imbalance, increase the temperature setting
 
+## Prometheus Metrics
+
+The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`:
+
+- **Router request metrics** (`dynamo_component_router_*`): Registered via the component's metrics hierarchy and exposed on the frontend via the `drt_metrics` bridge. In KV mode (aggregated and disaggregated) they are populated per-request; in non-KV modes (direct/random/round-robin) they are registered with zero values. The standalone router (`python -m dynamo.router`) also registers these metrics, available on `DYN_SYSTEM_PORT` when set.
+- **Routing overhead metrics** (`dynamo_router_overhead_*`) and **per-worker gauges** (`dynamo_frontend_worker_*`): Registered on the frontend's own Prometheus registry. These are frontend-only and not available on the standalone router.
+
+For the full list of router metrics, see the [Metrics reference](../../observability/metrics.md#router-metrics).
+
 ## Disaggregated Serving
 
 Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../../development/backend-guide.md)), the frontend automatically detects them and activates an internal prefill router.
@@ -286,7 +295,7 @@ When both workers are registered, requests are automatically routed.
 
 ```python
 # Decode worker registration (in your decode worker)
-decode_endpoint = runtime.namespace("dynamo").component("decode").endpoint("generate")
+decode_endpoint = runtime.endpoint("dynamo.decode.generate")
 
 await register_model(
     model_input=ModelInput.Tokens,
@@ -299,7 +308,7 @@ await register_model(
 await decode_endpoint.serve_endpoint(decode_handler.generate)
 
 # Prefill worker registration (in your prefill worker)
-prefill_endpoint = runtime.namespace("dynamo").component("prefill").endpoint("generate")
+prefill_endpoint = runtime.endpoint("dynamo.prefill.generate")
 
 await register_model(
     model_input=ModelInput.Tokens,
@@ -441,3 +450,5 @@ curl http://localhost:8000/busy_threshold
 - **[KV Router Index Data Structures](../../../../lib/kv-router/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing
+- **[Prometheus and Grafana Setup](../../observability/prometheus-grafana.md)**: General Prometheus/Grafana configuration
+- **[Metrics Developer Guide](../../observability/metrics-developer-guide.md)**: How the Dynamo metrics API works
