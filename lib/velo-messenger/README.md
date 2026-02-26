@@ -20,6 +20,7 @@ src/
   client/            ActiveMessageClient, send/unary/typed-unary builders
   handlers/          Handler definitions, builder API, dispatch adapters
   server/            Inbound message dispatch, system handlers (_hello, _list_handlers)
+  events/            Distributed event system (remote subscribe/trigger/poison over AM)
   common/            Wire format (MessageId, encoding, ResponseManager)
 ```
 
@@ -78,6 +79,55 @@ let messenger = Messenger::builder()
 ```
 
 When no discovery backend is configured, peers must be registered manually via `messenger.register_peer(peer_info)`.
+
+## Distributed Events
+
+The `events` module extends `velo-events` with cross-instance event coordination.
+Each `Messenger` owns a `VeloEvents` that routes event operations (await, trigger,
+poison) over active messages when the event belongs to a remote instance.
+
+### How it works
+
+Events carry a `system_id` identifying their owner instance. When an operation
+targets a local event, it goes straight to `velo-events`. When it targets a
+remote event, the messenger layer handles it:
+
+1. **Subscribe** — instance B wants to await an event owned by A. B creates a
+   local proxy event and sends an `_event_subscribe` AM to A. A records the
+   subscription.
+2. **Complete** — when A triggers (or poisons) the event, it sends
+   `_event_trigger` AMs to all subscribers. B receives the completion and
+   triggers its local proxy, waking all local awaiters.
+3. **Caching** — completed remote events are moved into an LRU cache so
+   repeated awaits on recently-finished events resolve immediately without
+   hitting the network.
+
+A 3-tier lookup keeps the fast path fast:
+
+| Tier | Storage | When |
+|------|---------|------|
+| 1 | LRU cache | Event completed recently — instant response |
+| 2 | Active DashMap | Another local task already subscribed — piggyback |
+| 3 | Network | First subscriber — send `_event_subscribe` to owner |
+
+### TOCTOU safety
+
+The subscribe handler on the owner checks if the event is already completed
+before recording the subscriber. If it has, it sends the completion immediately
+so the subscriber never misses a trigger that raced with the subscription.
+
+### Usage
+
+```rust,no_run
+// Events are available on every Messenger instance
+let event = messenger.event_manager().new_event()?;
+let handle = event.handle();
+
+// Any instance that knows the handle can await it
+let awaiter = other_messenger.event_manager().awaiter(handle)?;
+event.trigger()?;
+awaiter.await?;
+```
 
 ## Features
 
