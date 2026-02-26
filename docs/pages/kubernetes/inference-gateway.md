@@ -88,10 +88,6 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
-This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
-Take a note of the model's block size provided in the model card.
-
 ### 4. Build EPP image (Optional)
 
 You can either use the provided Dynamo FrontEnd image for the EPP image or you need to build your own Dynamo EPP custom image following the steps below.
@@ -130,6 +126,7 @@ you could deploy it as a standalone pod
 We provide an example for the Qwen vLLM below.
 ```bash
 cd <dynamo-source-root>
+# kubectl get httproutes -n my-model # Make sure you do not have an incompatible HttpRoute running, delete if so.
 kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
 kubectl apply -f examples/backends/vllm/deploy/gaie/http-route.yaml -n my-model
 ```
@@ -184,7 +181,7 @@ extraPodSpec:
 
 **Gateway Namespace**
 Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
-If you installed it into a different namespace, you need to adjust the HttpRoute entry in http-route.yaml.
+If you installed it into a different namespace, you need to adjust the HttpRoute entry in `http-route.yaml`.
 
 
 #### 5.b. Deploy as a standalone pod
@@ -201,6 +198,7 @@ cd deploy/inference-gateway/standalone
 # Export the EPP image - use the Dynamo FrontEnd image or build your own EPP image (see section 4)
 export EPP_IMAGE=<the-epp-image>
 ```
+Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
 
 ```bash
 helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
