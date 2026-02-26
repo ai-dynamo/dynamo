@@ -75,6 +75,9 @@ aiconfigurator cli default \
   --tpot 25 \
   --backend vllm \
   --backend-version 0.12.0 \
+  --generator-dynamo-version 0.8.0 \
+  --generator-set K8sConfig.k8s_namespace=$YOUR_NAMESPACE \
+  --generator-set K8sConfig.k8s_pvc_name=$YOUR_PVC \
   --save-dir ./results_vllm
 ```
 
@@ -330,7 +333,9 @@ After deployment, validate the predictions against actual performance using [AIP
 
 > ℹ️ Run AIPerf **inside the cluster** to avoid network latency affecting measurements.
 
-AIC automatically generates AIPerf scripts along with Dynamo configs and stores them in the results folder (when `--save-dir ...` is specified). For Kubernetes deployments, you can run benchmarks using `k8s_bench.yaml`; while for bare metal systems, use the `bench_run.sh` script. These scripts execute AIPerf across a concurrency list: the default set (`1 2 8 16 32 64 128`) along with `BenchConfig.estimated_concurrency` and its values within ±5%. You can also customize this concurrency list as needed.
+AIC automatically generates AIPerf scripts along with Dynamo configs and stores them in the results folder (when `--save-dir ...` is specified). For Kubernetes deployments, you can run benchmarks using `k8s_bench.yaml`; while for bare-metal systems, use the `bench_run.sh` script. These scripts execute AIPerf across a concurrency list: the default set (`1 2 8 16 32 64 128`) along with `BenchConfig.estimated_concurrency` and its values within ±5%. You can also customize this concurrency list as needed.
+
+By default, AIPerf results will be saved in `/tmp/bench_artifacts` of the containers. If PVC name is specified in `--generator-set K8sConfig.k8s_pvc_name=$YOUR_PVC`, result artifacts will be saved in the PVC volume mount instead.
 
 ![AIC-to-AIPerf parameter mapping](../../../assets/img/param-mapping.svg)
 
