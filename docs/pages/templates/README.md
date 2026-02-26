@@ -30,7 +30,7 @@ Templates for creating consistent Dynamo documentation.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Backends (vLLM, SGLang, TRT-LLM)
+### Backends (SGLang, TRT-LLM, vLLM)
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -65,9 +65,9 @@ Templates for creating consistent Dynamo documentation.
 ┌─────────────────────────────────────────────────────┐
 │ Tier 2: docs/features/<feature>/                    │ ← User docs
 │   • README.md ← feature_readme.md                   │
-│   • <feature>_vllm.md ← feature_backend.md          │
 │   • <feature>_sglang.md ← feature_backend.md        │
 │   • <feature>_trtllm.md ← feature_backend.md        │
+│   • <feature>_vllm.md ← feature_backend.md          │
 └─────────────────────┬───────────────────────────────┘
                       ▼
 ┌─────────────────────────────────────────────────────┐

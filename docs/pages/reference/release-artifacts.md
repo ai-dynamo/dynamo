@@ -4,8 +4,6 @@
 title: Release Artifacts
 ---
 
-# Dynamo Release Artifacts
-
 This document provides a comprehensive inventory of all Dynamo release artifacts including container images, Python wheels, Helm charts, and Rust crates.
 
 > **See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](feature-matrix.md) for backend feature support
@@ -48,7 +46,7 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 
 | Package | Description | Python | Platform | PyPI |
 |---------|-------------|--------|----------|------|
-| `ai-dynamo==0.8.1` | Main package with backend integrations (vLLM, SGLang, TRT-LLM) | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [link](https://pypi.org/project/ai-dynamo/0.8.1/) |
+| `ai-dynamo==0.8.1` | Main package with backend integrations (SGLang, TRT-LLM, vLLM) | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [link](https://pypi.org/project/ai-dynamo/0.8.1/) |
 | `ai-dynamo-runtime==0.8.1` | Core Python bindings for Dynamo runtime | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [link](https://pypi.org/project/ai-dynamo-runtime/0.8.1/) |
 | `kvbm==0.8.1` | KV Block Manager for disaggregated KV cache | `3.12` | Linux (glibc `v2.28+`) | [link](https://pypi.org/project/kvbm/0.8.1/) |
 
@@ -75,7 +73,7 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 
 ### Container Images (NGC)
 
-> For detailed run instructions, see the [Container README](https://github.com/ai-dynamo/dynamo/tree/main/container/README.md) or backend-specific guides: [vLLM](../backends/vllm/README.md) | [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md)
+> For detailed run instructions, see the [Container README](https://github.com/ai-dynamo/dynamo/tree/main/container/README.md) or backend-specific guides: [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md)
 
 ```bash
 # Runtime containers
@@ -158,7 +156,7 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 - **v0.8.1.post1 Patch**: Updated TRT-LLM to `v1.2.0rc6.post2` (PyPI wheels and TRT-LLM container only)
 - **Standalone Frontend Container**: `dynamo-frontend` added in v0.8.0
-- **CUDA 13 Runtimes**: Experimental CUDA 13 runtime for vLLM and SGLang in v0.8.0
+- **CUDA 13 Runtimes**: Experimental CUDA 13 runtime for SGLang and vLLM in v0.8.0
 - **New Rust Crates**: `dynamo-memory` and `dynamo-config` added in v0.8.0
 
 ### GitHub Releases

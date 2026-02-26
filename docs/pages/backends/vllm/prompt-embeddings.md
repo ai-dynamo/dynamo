@@ -4,8 +4,6 @@
 title: Prompt Embeddings
 ---
 
-# Prompt Embeddings
-
 Dynamo supports prompt embeddings (also known as prompt embeds) as a secure alternative input method to traditional text prompts. By allowing applications to use pre-computed embeddings for inference, this feature not only offers greater flexibility in prompt engineering but also significantly enhances privacy and data security. With prompt embeddings, sensitive user data can be transformed into embeddings before ever reaching the inference server, reducing the risk of exposing confidential information during the AI workflow.
 
 

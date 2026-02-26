@@ -14,7 +14,7 @@ A **DynamoGraphDeploymentRequest (DGDR)** is a Kubernetes Custom Resource that s
 - **What** model you want to deploy (`model`)
 - **How** it should perform (SLA targets: `ttft`, `itl`)
 - **Where** it should run (optional GPU preferences)
-- **Which** backend to use (`backend`: vllm, sglang, or trtllm)
+- **Which** backend to use (`backend`: sglang, trtllm, or vllm)
 - **Which** images to use (`profilingConfig.profilerImage`, `deploymentOverrides.workersImage`)
 
 The Dynamo Operator watches for DGDRs and automatically:
@@ -186,7 +186,7 @@ Profiles your model by creating real test deployments in Kubernetes and measurin
 - **Duration**: 2-4 hours
 - **Accuracy**: Highest (real measurements)
 - **GPU Requirements**: Full access to test different parallelization mappings
-- **Backends**: vLLM, SGLang, TensorRT-LLM
+- **Backends**: SGLang, TensorRT-LLM, vLLM
 
 ```yaml
 profilingConfig:
@@ -202,7 +202,7 @@ Uses performance simulation to rapidly estimate optimal configurations without r
 - **Duration**: 20-30 seconds
 - **Accuracy**: Estimated (may have errors for unusual configurations)
 - **GPU Requirements**: None
-- **Backends**: TensorRT-LLM only (vLLM/SGLang coming soon)
+- **Backends**: TensorRT-LLM only (SGLang/vLLM coming soon)
 
 ```yaml
 profilingConfig:
@@ -401,7 +401,7 @@ The profiler uses the DGD config as a **base template**, then optimizes it based
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--backend` | string | - | Inference backend: vllm, sglang, trtllm |
+| `--backend` | string | - | Inference backend: sglang, trtllm, vllm |
 | `--config` | string | - | Path to DGD YAML config file |
 | `--model` | string | - | HuggingFace model ID |
 | `--ttft` | float | - | Target TTFT in milliseconds |
