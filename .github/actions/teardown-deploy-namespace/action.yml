@@ -49,4 +49,4 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
-        kubectl delete namespace $NAMESPACE || true
+        kubectl delete namespace $NAMESPACE --timeout=120s || true
