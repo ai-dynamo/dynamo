@@ -671,7 +671,9 @@ mod context_length_validation {
             .expect("error should be HttpError");
         assert_eq!(http_err.code, 400);
         assert!(
-            http_err.message.contains("maximum context length is 5 tokens"),
+            http_err
+                .message
+                .contains("maximum context length is 5 tokens"),
             "error message should state the context limit, got: {}",
             http_err.message
         );
@@ -689,10 +691,7 @@ mod context_length_validation {
         mdc.context_length = 131072;
 
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        let request = make_chat_request(
-            r#"[{"role": "user", "content": "Hi"}]"#,
-            "test-model",
-        );
+        let request = make_chat_request(r#"[{"role": "user", "content": "Hi"}]"#, "test-model");
 
         let result = preprocessor.preprocess_request(&request, None).await;
         assert!(
@@ -714,9 +713,6 @@ mod context_length_validation {
         );
 
         let result = preprocessor.preprocess_request(&request, None).await;
-        assert!(
-            result.is_ok(),
-            "context_length=0 should skip validation"
-        );
+        assert!(result.is_ok(), "context_length=0 should skip validation");
     }
 }
