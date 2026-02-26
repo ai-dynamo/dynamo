@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: example-llm-sla
+spec:
+  # Model is a high-level identifier for the model being deployed (required)
+  model: Qwen/Qwen3-0.6B
+
+  # Backend to use for profiling and deployment
+  backend: trtllm
+
+  # Image is the container image reference for the profiling job
+  image: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0"
+
+  # SearchStrategy controls the profiling search depth
+  # "rapid" for fast sweep; "thorough" for deeper exploration
+  searchStrategy: thorough
+
+  # Hardware describes the hardware resources available for profiling and deployment
+  # Note: Operator auto-discovers GPU info from cluster nodes when available
+  hardware:
+    numGpusPerNode: 8       # GPUs per node (optional - auto-discovered if not specified)
+    gpuSku: h200_sxm        # Hardware system (optional - auto-detected if not specified)
+    # vramMb: 141557        # GPU VRAM in MiB (optional - auto-discovered)
+
+  # Workload defines the expected workload characteristics
+  workload:
+    isl: 3000  # Input sequence length
+    osl: 500   # Output sequence length
+
+  # SLA defines service-level agreement targets for profiling optimization
+  sla:
+    ttft: 50.0  # Time To First Token target (milliseconds)
+    itl: 10.0   # Inter-Token Latency target (milliseconds)
+
+  # Optional: Features controls optional Dynamo platform features
+  # features:
+  #   planner:
+  #     plannerMinEndpoint: 2
+  #   mocker:
+  #     enabled: false
+
+  # Optional: Overrides allows customizing the profiling job and generated DGD
+  # overrides:
+  #   profilingJob: { ... }
+  #   dgd: { ... }
+
+  # Optional: Automatically create DynamoGraphDeployment after profiling
+  autoApply: true  # default is true

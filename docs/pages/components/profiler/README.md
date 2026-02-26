@@ -30,25 +30,22 @@ The Dynamo Profiler is an automated performance analysis tool that measures mode
 The recommended way to profile models is through DGDRs, which automate the entire profiling and deployment workflow.
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeploymentRequest
 metadata:
   name: my-model-profiling
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
 
-  profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
-    config:
-      sla:
-        isl: 3000      # Average input sequence length
-        osl: 150       # Average output sequence length
-        ttft: 200.0    # Target Time To First Token (ms)
-        itl: 20.0      # Target Inter-Token Latency (ms)
+  workload:
+    isl: 3000      # Average input sequence length
+    osl: 150       # Average output sequence length
 
-  deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  sla:
+    ttft: 200.0    # Target Time To First Token (ms)
+    itl: 20.0      # Target Inter-Token Latency (ms)
 
   autoApply: true
 ```
@@ -59,17 +56,14 @@ kubectl apply -f my-profiling-dgdr.yaml -n $NAMESPACE
 
 ### Using AI Configurator (Fast Offline Profiling)
 
-For TensorRT-LLM, use AI Configurator for rapid profiling (~30 seconds):
+For TensorRT-LLM, use AI Configurator for rapid profiling (~30 seconds) by setting `searchStrategy: rapid`:
 
 ```yaml
-profilingConfig:
-  config:
-    sweep:
-      useAiConfigurator: true
-      aicSystem: h200_sxm
-      aicHfId: Qwen/Qwen3-32B
-      aicBackendVersion: "0.20.0"
+spec:
+  searchStrategy: rapid
 ```
+
+AIC-specific settings (`aicSystem`, `aicHfId`, `aicBackendVersion`) can be configured via CLI arguments when using [Direct Script Usage](#direct-script-usage-advanced).
 
 ### Direct Script Usage (Advanced)
 
@@ -88,13 +82,12 @@ python -m dynamo.profiler.profile_sla \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `sla.isl` | - | Average input sequence length (tokens) |
-| `sla.osl` | - | Average output sequence length (tokens) |
+| `workload.isl` | 4000 | Average input sequence length (tokens) |
+| `workload.osl` | 1000 | Average output sequence length (tokens) |
 | `sla.ttft` | - | Target Time To First Token (milliseconds) |
 | `sla.itl` | - | Target Inter-Token Latency (milliseconds) |
-| `sweep.useAiConfigurator` | `false` | Use offline simulation instead of real profiling |
-| `hardware.minNumGpusPerEngine` | auto | Minimum GPUs per engine (auto-detected from model size) |
-| `hardware.maxNumGpusPerEngine` | 8 | Maximum GPUs per engine |
+| `hardware.numGpusPerNode` | auto | Number of GPUs per node |
+| `hardware.gpuSku` | auto | GPU SKU identifier |
 
 ## Profiling Methods
 

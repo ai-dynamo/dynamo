@@ -2,27 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # DynamoGraphDeploymentRequest for online profiling (actual deployment testing)
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeploymentRequest
 metadata:
   name: sla-online
 spec:
   model: Qwen/Qwen3-0.6B
   backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag"
+  searchStrategy: thorough
 
-  # ProfilingConfig maps directly to the profile_sla.py config format
-  profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag"
+  workload:
+    isl: 3000
+    osl: 150
 
-    # NOTE: any image built before January 10 and any release prior to 0.8.1
-    # will need to use snake_case within profilingConfig.config
-    config:
-      searchStrategy: thorough
-      sla:
-        isl: 3000
-        osl: 150
-        ttft: 200.0
-        itl: 20.0
-  deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag"
+  sla:
+    ttft: 200.0
+    itl: 20.0
+
   autoApply: true
