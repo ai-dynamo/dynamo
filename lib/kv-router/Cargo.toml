@@ -13,7 +13,7 @@ repository.workspace = true
 [features]
 default = []
 metrics = ["dep:dynamo-runtime"]
-bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:uuid", "dep:plotters"]
+bench = ["dep:clap", "dep:indicatif", "dep:serde_json", "dynamo-runtime/integration", "dep:plotters"]
 indexer-bin = ["metrics", "dep:axum", "dep:clap", "dep:zeromq", "dep:tracing-subscriber", "dep:serde_json"]
 
 [dependencies]
@@ -34,7 +34,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true, optional = true }
+uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 
 # dependencies
