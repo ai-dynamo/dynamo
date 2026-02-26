@@ -92,8 +92,7 @@ const (
 
 	// Volume paths
 	ProfilingOutputPath        = "/data"
-	ProfilingOutputFile        = "config_with_planner.yaml"
-	ProfilingOutputFileMocker  = "mocker_config_with_planner.yaml"
+	ProfilingOutputFile = "final_config.yaml"
 	ProfilingConfigMountPath   = "/config"
 	ProfilingConfigDefaultKey  = "disagg.yaml"
 	DefaultModelCacheMountPath = "/opt/model-cache"
@@ -221,13 +220,6 @@ data:
   {{.OutputFile}}: |
 EOF
 sed 's/^/    /' {{.OutputPath}}/{{.OutputFile}} >> /tmp/cm.yaml
-
-# Add mocker config (profiler always generates both real and mocker configs)
-if [ -f {{.OutputPath}}/{{.MockerOutputFile}} ]; then
-  echo "  {{.MockerOutputFile}}: |" >> /tmp/cm.yaml
-  sed 's/^/    /' {{.OutputPath}}/{{.MockerOutputFile}} >> /tmp/cm.yaml
-  echo "Added mocker config to ConfigMap"
-fi
 
 # Add profiler status file for debugging
 if [ -f {{.OutputPath}}/profiler_status.yaml ]; then
@@ -997,7 +989,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// Profiler args: pass the DGDR spec as JSON via --config
-		profilerArgs := []string{"--config", specJSON}
+		// --output-dir must match ProfilingOutputPath so the sidecar can find profiler_status.yaml
+		profilerArgs := []string{"--config", specJSON, "--output-dir", ProfilingOutputPath}
 
 		// Use image from spec
 		imageName := dgdr.Spec.Image
@@ -1022,9 +1015,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		var scriptBuf bytes.Buffer
 		err = tmpl.Execute(&scriptBuf, map[string]string{
 			"OutputPath":       ProfilingOutputPath,
-			"OutputFile":       ProfilingOutputFile,
-			"MockerOutputFile": ProfilingOutputFileMocker,
-			"ConfigMapName":    outputConfigMapName,
+			"OutputFile":    ProfilingOutputFile,
+			"ConfigMapName": outputConfigMapName,
 			"Namespace":        dgdr.Namespace,
 			"DGDRName":         dgdr.Name,
 		})
@@ -1394,14 +1386,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 
 	// Select the right config file based on mocker feature flag
-	// Profiler always generates both real and mocker configs
-	var outputFile string
-	if dgdr.Spec.Features != nil && dgdr.Spec.Features.Mocker != nil && dgdr.Spec.Features.Mocker.Enabled {
-		outputFile = ProfilingOutputFileMocker
-		logger.Info("Using mocker deployment config")
-	} else {
-		outputFile = ProfilingOutputFile
-	}
+	// Profiler writes the selected config (real or mocker) to a single output file
+	outputFile := ProfilingOutputFile
 
 	// Get YAML content from ConfigMap
 	yamlContent, exists := cm.Data[outputFile]
