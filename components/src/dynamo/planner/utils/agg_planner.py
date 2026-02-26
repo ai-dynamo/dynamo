@@ -66,9 +66,8 @@ class AggPlanner:
             shared_state=self.shared_state,
             prometheus_metrics=prometheus_metrics,
             start_prometheus_server=True,
+            component_type=SubComponentType.DECODE,
         )
-        # Override: agg planner uses component_type DECODE for metrics fetching
-        self.planner.component_type = SubComponentType.DECODE
 
         # Name-based targeting: override decode_component_name for services
         # without subComponentType (e.g., mx-target in multi-service DGDs)

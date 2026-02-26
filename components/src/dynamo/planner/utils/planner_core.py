@@ -257,7 +257,10 @@ class BasePlanner:
         prometheus_engine_client: Optional[DirectRouterMetricsClient] = None,
         connector=None,
         start_prometheus_server: bool = True,
+        component_type: Optional[SubComponentType] = None,
     ):
+        if component_type is not None:
+            self.component_type = component_type
         self.config = config
         self.dryrun = dryrun
         self.shared_state = shared_state or PlannerSharedState()
