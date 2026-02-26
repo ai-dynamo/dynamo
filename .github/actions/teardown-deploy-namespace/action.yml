@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Teardown Deploy Namespace'
+description: 'Clean up Dynamo platform resources and delete the Kubernetes namespace'
+
+inputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for cluster access'
+    required: true
+  namespace:
+    description: 'Namespace to tear down'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Kubeconfig
+      shell: bash
+      run: |
+        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
+        chmod 600 ${{ github.workspace }}/.kubeconfig
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
+
+    - name: Debug - List resources
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        kubectl get dynamographdeployments -n $NAMESPACE || true
+        kubectl get all -n $NAMESPACE || true
+
+    - name: Delete DynamoGraphDeployments
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        kubectl delete dynamographdeployments --all -n $NAMESPACE --timeout=60s || true
+
+    - name: Uninstall Helm chart
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m || true
+
+    - name: Delete namespace
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        kubectl delete namespace $NAMESPACE || true

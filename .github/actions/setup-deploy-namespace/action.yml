@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Setup Deploy Namespace'
+description: 'Create a Kubernetes namespace and install the Dynamo platform operator via Helm'
+
+inputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for cluster access'
+    required: true
+  namespace:
+    description: 'Target namespace name'
+    required: true
+  operator_image:
+    description: 'Full operator image reference (e.g. registry/repo:tag)'
+    required: true
+  hf_token:
+    description: 'HuggingFace token for model access'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Kubeconfig
+      shell: bash
+      run: |
+        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
+        chmod 600 ${{ github.workspace }}/.kubeconfig
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
+
+    - name: Create namespace
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set -x
+        kubectl create namespace $NAMESPACE
+        kubectl label namespaces ${NAMESPACE} \
+          nscleanup/enabled=true \
+          nscleanup/ttl=7200 \
+          gitlab-imagepull=enabled \
+          ngc-api=enabled \
+          nvcr-imagepull=enabled \
+          --overwrite=true
+        kubectl config set-context --current --namespace=$NAMESPACE
+
+    - name: Create HF token secret
+      if: inputs.hf_token != ''
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |
+        kubectl create secret generic hf-token-secret \
+          --from-literal=HF_TOKEN=${HF_TOKEN} \
+          -n $NAMESPACE || true
+
+    - name: Install Dynamo platform via Helm
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        OPERATOR_IMAGE: ${{ inputs.operator_image }}
+      run: |
+        set -x
+        # Split operator image into repository and tag
+        OPERATOR_REPO="${OPERATOR_IMAGE%:*}"
+        OPERATOR_TAG="${OPERATOR_IMAGE##*:}"
+
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/helm/charts/platform/
+        helm dep build .
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+          --skip-crds \
+          --set dynamo-operator.namespaceRestriction.enabled=true \
+          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+          --set dynamo-operator.controllerManager.manager.image.repository=${OPERATOR_REPO} \
+          --set dynamo-operator.controllerManager.manager.image.tag=${OPERATOR_TAG} \
+          --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.upgradeCRD=false \
+          --debug
+
+    - name: Wait for operator rollout
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+
+    - name: Report Unhealthy Pods
+      if: failure()
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        echo "### OPERATOR DEPLOYMENT FAILED: Unhealthy Pods Report" >> $GITHUB_STEP_SUMMARY
+        echo "Unhealthy pods:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        kubectl get pods -n ${NAMESPACE} --no-headers \
+          | grep -v -E '(Running|Completed)' \
+          | awk '{print "- **" $1 "** | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY || true
