@@ -28,13 +28,6 @@ Use ChReK as part of the Dynamo platform for automatic checkpoint management:
 
 📖 **[Read the Dynamo Integration Guide →](dynamo.md)**
 
-### 2. Standalone (Without Dynamo)
-
-Use ChReK independently in your own Kubernetes applications:
-- Manual checkpoint job creation
-- Build your own restore-enabled container images
-- Full control over checkpoint lifecycle
-
 ## Architecture
 
 ChReK consists of two main components:

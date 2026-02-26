@@ -19,7 +19,7 @@ This Helm chart deploys the checkpoint/restore infrastructure for NVIDIA Dynamo,
 - Kubernetes 1.21+
 - GPU nodes with NVIDIA runtime (`nvidia` runtime class)
 - containerd runtime (for container inspection; CRIU is bundled in ChReK images)
-- NVIDIA Dynamo operator installed (cluster-wide or namespace-scoped), **or** manual pod configuration — see [Standalone Usage](../../../../docs/pages/kubernetes/chrek/standalone.md#using-chrek-without-the-dynamo-operator) for required labels, seccomp profiles, command overrides, and deployment strategy when running without the operator
+- NVIDIA Dynamo operator installed (cluster-wide or namespace-scoped)
 - RWX (ReadWriteMany) storage class for multi-node deployments
 - **Security clearance for privileged DaemonSet** (the ChReK agent runs privileged with hostPID/hostIPC/hostNetwork)
 
@@ -168,7 +168,6 @@ Ensure your storage class supports `ReadWriteMany` access mode for multi-node de
 
 - [ChReK Overview](../../../../docs/pages/kubernetes/chrek/README.md) - ChReK architecture and use cases
 - [ChReK with Dynamo Platform](../../../../docs/pages/kubernetes/chrek/dynamo.md) - Integration guide
-- [ChReK Standalone Usage](../../../../docs/pages/kubernetes/chrek/standalone.md) - Use ChReK without Dynamo Platform
 
 ## License
 
