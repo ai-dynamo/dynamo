@@ -152,10 +152,11 @@ impl SchedulerQueue {
         if self.worker_discovery_mode == WorkerDiscoveryMode::External
             && request.allowed_worker_ids.is_none()
         {
-            tracing::warn!(
-                "External discovery mode but no worker IDs provided in request; \
-                 falling back to discovery-based workers"
+            tracing::error!(
+                "External discovery mode requires worker IDs in each request"
             );
+            request.respond(Err(super::scheduler::KvSchedulerError::NoEndpoints));
+            return;
         }
 
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(

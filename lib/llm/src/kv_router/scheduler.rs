@@ -97,15 +97,11 @@ impl KvScheduler {
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
-        let external_discovery =
-            kv_router_config.worker_discovery_mode == WorkerDiscoveryMode::External;
+        let discovery_mode = kv_router_config.worker_discovery_mode;
 
-        // In Dynamo mode the caller has already waited for workers via wait_for.
-        // In External mode workers arrive per-request, so we start with an empty map.
-        let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> = if external_discovery {
-            HashMap::new()
-        } else {
-            workers_with_configs.borrow().clone()
+        let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> = match discovery_mode {
+            WorkerDiscoveryMode::External => HashMap::new(),
+            WorkerDiscoveryMode::Dynamo => workers_with_configs.borrow().clone(),
         };
 
         let router_id = component.drt().discovery().instance_id();
@@ -122,43 +118,44 @@ impl KvScheduler {
             .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
         );
 
-        // In Dynamo mode, spawn background task to sync slots when discovery changes.
-        // In External mode, workers are provided per-request so discovery monitoring
-        // is not needed.
-        if !external_discovery {
-            let slots_monitor = slots.clone();
-            let mut monitor_rx = workers_with_configs.clone();
-            let monitor_cancel_token = component.drt().child_token();
-            tokio::spawn(async move {
-                tracing::trace!("KvScheduler workers monitoring task started");
-                let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
+        match discovery_mode {
+            WorkerDiscoveryMode::Dynamo => {
+                let slots_monitor = slots.clone();
+                let mut monitor_rx = workers_with_configs.clone();
+                let monitor_cancel_token = component.drt().child_token();
+                tokio::spawn(async move {
+                    tracing::trace!("KvScheduler workers monitoring task started");
+                    let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> =
+                        HashMap::new();
 
-                loop {
-                    tokio::select! {
-                        _ = monitor_cancel_token.cancelled() => {
-                            tracing::trace!("KvScheduler workers monitoring task shutting down");
-                            break;
-                        }
-                        result = monitor_rx.changed() => {
-                            if result.is_err() {
-                                tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                    loop {
+                        tokio::select! {
+                            _ = monitor_cancel_token.cancelled() => {
+                                tracing::trace!("KvScheduler workers monitoring task shutting down");
                                 break;
                             }
+                            result = monitor_rx.changed() => {
+                                if result.is_err() {
+                                    tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                                    break;
+                                }
+                            }
+                        }
+
+                        let current_workers = monitor_rx.borrow_and_update().clone();
+
+                        if current_workers != last_workers {
+                            slots_monitor.update_workers(current_workers.clone());
+                            last_workers = current_workers;
                         }
                     }
-
-                    let current_workers = monitor_rx.borrow_and_update().clone();
-
-                    if current_workers != last_workers {
-                        slots_monitor.update_workers(current_workers.clone());
-                        last_workers = current_workers;
-                    }
-                }
-            });
-        } else {
-            tracing::info!(
-                "External worker discovery mode: skipping discovery-based worker monitoring"
-            );
+                });
+            }
+            WorkerDiscoveryMode::External => {
+                tracing::info!(
+                    "External worker discovery mode: skipping discovery-based worker monitoring"
+                );
+            }
         }
 
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
