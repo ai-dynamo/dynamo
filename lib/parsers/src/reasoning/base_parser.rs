@@ -108,6 +108,10 @@ impl ReasoningParser for BasicReasoningParser {
 
         while cursor < text.len() {
             if currently_reasoning {
+                // Skip leading start token if present (handles force_reasoning + explicit <think>)
+                if text[cursor..].starts_with(&self.think_start_token) {
+                    cursor += self.think_start_token.len();
+                }
                 // We're inside a reasoning block — look for end token
                 if let Some(end_offset) = text[cursor..].find(&self.think_end_token) {
                     reasoning_parts.push(&text[cursor..cursor + end_offset]);
@@ -173,6 +177,17 @@ impl ReasoningParser for BasicReasoningParser {
                 self.stripped_think_start = true;
                 self._in_reasoning = true;
                 continue;
+            }
+
+            // Buffer is a prefix of the start token (e.g., "<thi" for "<think>") — wait
+            // for more data before deciding whether to strip it or emit as reasoning.
+            // Only applies when force_reasoning=true and we haven't stripped the tag yet.
+            if !self.stripped_think_start
+                && self._in_reasoning
+                && !current_text.is_empty()
+                && self.think_start_token.starts_with(current_text.as_str())
+            {
+                break;
             }
 
             if self._in_reasoning {

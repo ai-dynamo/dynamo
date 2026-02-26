@@ -361,13 +361,11 @@ class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
         Returns:
             A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
         """
-        # If not staging embedding and embedding is on CPU, we explicitly copy
-        # the tensor as torch.Tensor.cpu() will return original tensor if it's already on CPU
-        if not stage_embeddings and not embeddings.is_cuda:
-            embeddings_cpu = embeddings.clone().detach()
+        if stage_embeddings:
+            transfer_buf = embeddings
         else:
-            embeddings_cpu = embeddings.cpu()
-        descriptor = nixl_connect.Descriptor(embeddings_cpu)
+            transfer_buf = embeddings.clone().detach()
+        descriptor = nixl_connect.Descriptor(transfer_buf)
         readable_op = await self.connector.create_readable(descriptor)
 
         request = TransferRequest(

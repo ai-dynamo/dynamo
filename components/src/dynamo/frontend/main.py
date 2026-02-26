@@ -210,7 +210,7 @@ async def async_main():
         active_decode_blocks_threshold=config.active_decode_blocks_threshold,
         active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        enforce_disagg=config.enforce_disagg,
+        decode_fallback=config.decode_fallback,
     )
     kwargs = {
         "http_host": config.http_host,

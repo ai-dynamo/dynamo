@@ -5,9 +5,6 @@ title: Dynamo Benchmarking
 subtitle: Benchmark and compare performance across Dynamo deployment configurations
 ---
 
-
-# Dynamo Benchmarking Guide
-
 This benchmarking framework lets you compare performance across any combination of:
 - **DynamoGraphDeployments**
 - **External HTTP endpoints** (existing services deployed following standard documentation from vLLM, llm-d, AIBrix, etc.)
@@ -139,7 +136,7 @@ python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-nam
 The benchmarking framework supports various comparative analysis scenarios:
 
 - **Compare multiple DynamoGraphDeployments of a single backend** (e.g., aggregated vs disaggregated configurations)
-- **Compare different backends** (e.g., vLLM vs TensorRT-LLM vs SGLang)
+- **Compare different backends** (e.g., SGLang vs TensorRT-LLM vs vLLM)
 - **Compare Dynamo vs other platforms** (e.g., Dynamo vs llm-d vs AIBrix)
 - **Compare different models** (e.g., Llama-3-8B vs Llama-3-70B vs Qwen-3-0.6B)
 - **Compare different hardware configurations** (e.g., H100 vs A100 vs H200)
@@ -529,6 +526,6 @@ For development and testing purposes, Dynamo provides a [mocker backend](https:/
 - **CI/CD pipelines** that need to validate infrastructure without model execution
 - **Benchmarking framework validation** to ensure your setup works before using real backends
 
-The mocker backend mimics the API and behavior of real backends (vLLM, SGLang, TensorRT-LLM) but generates mock responses instead of running actual inference.
+The mocker backend mimics the API and behavior of real backends (SGLang, TensorRT-LLM, vLLM) but generates mock responses instead of running actual inference.
 
 See the [mocker directory](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker) for usage examples and configuration options.

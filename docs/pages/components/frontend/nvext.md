@@ -4,8 +4,6 @@
 title: NVIDIA Request Extensions (nvext)
 ---
 
-# NVIDIA Request Extensions (`nvext`)
-
 `nvext` is a top-level JSON object on the request body that provides NVIDIA-specific extensions to the OpenAI-compatible API. `nvext` fields are consumed by the Dynamo frontend, preprocessor, router, and backend workers to control routing, preprocessing, response metadata, scheduling, and engine-level priority.
 
 ## Usage
@@ -121,10 +119,10 @@ Backend engine scheduling priority forwarded to the engine's `generate` call. In
 
 The semantics of the priority value differ between backends:
 
-- **vLLM**: Smaller values = higher priority. A request with `priority: 0` is scheduled before `priority: 10`. Ties are broken by arrival time. Requires `--scheduling-policy priority` on the engine.
 - **SGLang**: By default, larger values = higher priority. This can be inverted with `--schedule-low-priority-values-first` to match vLLM's convention. Requires `--enable-priority-scheduling` on the engine.
+- **vLLM**: Smaller values = higher priority. A request with `priority: 0` is scheduled before `priority: 10`. Ties are broken by arrival time. Requires `--scheduling-policy priority` on the engine.
 
-When omitted, vLLM defaults to `0`; SGLang defaults to `None` (engine default). TensorRT-LLM does not currently support per-request priority.
+When omitted, SGLang defaults to `None` (engine default); vLLM defaults to `0`. TensorRT-LLM does not currently support per-request priority.
 
 ```json
 {

@@ -103,6 +103,44 @@ We also supports running lightweight mock engines that simulate vLLM behavior wi
 
 **Note**: The `--speedup-ratio` parameter controls the inference speed of mocker engines. A higher value (e.g., 2.0) makes the mocker engines simulate faster inference, allowing benchmarks to complete more quickly. This is particularly useful for testing router performance without waiting for realistic inference times.
 
+#### Disaggregated Serving with Mockers (No GPU Required)
+
+You can test disaggregated serving entirely with mockers by launching separate prefill and decode mocker groups that share a namespace. This is useful for validating routing logic, metrics, and the prefill-decode handoff without any GPUs.
+
+```bash
+NAMESPACE="test-disagg"
+MODEL="Qwen/Qwen3-0.6B"
+
+# Terminal 1: Decode mockers (2 workers)
+python -m dynamo.mocker --model-path "$MODEL" \
+    --endpoint "dyn://${NAMESPACE}.backend.generate" \
+    --disaggregation-mode decode --num-workers 2 \
+    --speedup-ratio 10 --block-size 16
+
+# Terminal 2: Prefill mockers (2 workers)
+python -m dynamo.mocker --model-path "$MODEL" \
+    --endpoint "dyn://${NAMESPACE}.prefill.generate" \
+    --disaggregation-mode prefill --num-workers 2 \
+    --speedup-ratio 10 --block-size 16
+
+# Terminal 3: Frontend with KV router
+# --model-path must be the on-disk snapshot directory
+MODEL_PATH=$(find ~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots -mindepth 1 -maxdepth 1 -type d | head -1)
+python -m dynamo.frontend --namespace "$NAMESPACE" \
+    --model-name "$MODEL" --model-path "$MODEL_PATH" \
+    --router-mode kv --http-port 8000 --kv-cache-block-size 16
+```
+
+Verify it works:
+```bash
+# Send a request (should show prefill_worker_id and decode_worker_id in nvext)
+curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" \
+    -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":10}' | python3 -m json.tool
+
+# Check router metrics
+curl -s localhost:8000/metrics | grep "^# HELP dynamo_component_router"
+```
+
 ### Step 2: Start the Router
 
 In a **new terminal**, launch the Dynamo router using the Python CLI:

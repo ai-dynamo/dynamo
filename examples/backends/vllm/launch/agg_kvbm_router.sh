@@ -25,7 +25,7 @@ CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
     python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
-    --connector kvbm \
+    --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}' \
     --gpu-memory-utilization 0.4 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
@@ -36,6 +36,6 @@ CUDA_VISIBLE_DEVICES=1 DYN_KVBM_CPU_CACHE_GB=2 \
     python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
-    --connector kvbm \
+    --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}' \
     --gpu-memory-utilization 0.4 \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'

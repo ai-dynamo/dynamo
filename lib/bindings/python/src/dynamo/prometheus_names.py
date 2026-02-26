@@ -28,6 +28,13 @@ Usage (both patterns supported):
 from __future__ import annotations
 
 
+class component_names:
+    """Well-known component names used as values for the `dynamo_component` label."""
+
+    # Component name for the KV router (frontend-side request routing).
+    ROUTER = "router"
+
+
 class distributed_runtime:
     """DistributedRuntime core metrics"""
 
@@ -55,6 +62,8 @@ class frontend_service:
     INPUT_SEQUENCE_TOKENS = "input_sequence_tokens"
     # Output sequence length in tokens
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
+    # Predicted KV cache hit rate at routing time (0.0-1.0)
+    KV_HIT_RATE = "kv_hit_rate"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -164,6 +173,8 @@ class labels:
     # Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
     # It is used by worker/load-style metrics that need to disambiguate per-worker series.
     DP_RANK = "dp_rank"
+    # Label for worker instance ID (etcd lease ID).
+    WORKER_ID = "worker_id"
     # Label for model name/path (OpenAI API standard, injected by Dynamo)
     # This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
     # Ensures compatibility with OpenAI-compatible tooling.
@@ -175,6 +186,8 @@ class labels:
     MODEL_NAME = "model_name"
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     WORKER_TYPE = "worker_type"
+    # Label for router instance (discovery.instance_id() of the frontend)
+    ROUTER_ID = "router_id"
 
 
 class model_info:
@@ -189,6 +202,60 @@ class name_prefix:
     COMPONENT = "dynamo_component"
     # Prefix for frontend service metrics
     FRONTEND = "dynamo_frontend"
+    # Prefix for KV router metrics (used with router_id label)
+    ROUTER = "dynamo_router"
+
+
+class router_request:
+    """Router per-request metrics (component-scoped via `MetricsHierarchy`)."""
+
+    # Prefix prepended to `frontend_service::*` names to form router metric names.
+    # e.g. `"router_"` + `frontend_service::REQUESTS_TOTAL` → `"router_requests_total"`.
+    METRIC_PREFIX = "router_"
+
+
+class router:
+    """Router request metrics (dynamo_component_router_* with dynamo_namespace label).
+
+    These constants are the full suffix portions combined with name_prefix.COMPONENT
+    ("dynamo_component") to form the complete metric name, e.g.
+    dynamo_component_router_requests_total.
+
+    Registered via MetricsHierarchy (from_component()) which auto-injects
+    dynamo_namespace (underscores) and dynamo_component labels and registers
+    with the component's registry (port 9090).
+    """
+
+    # Total number of requests processed by the router
+    REQUESTS_TOTAL = "router_requests_total"
+    # Time to first token observed at the router (seconds)
+    TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
+    # Average inter-token latency observed at the router (seconds)
+    INTER_TOKEN_LATENCY_SECONDS = "router_inter_token_latency_seconds"
+    # Input sequence length in tokens observed at the router
+    INPUT_SEQUENCE_TOKENS = "router_input_sequence_tokens"
+    # Output sequence length in tokens observed at the router
+    OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
+    # TODO: Add REQUEST_DURATION_SECONDS = "router_request_duration_seconds" once
+    #       RouterRequestMetrics in lib/llm/src/kv_router/metrics.rs registers a
+    #       dynamo_component_router_request_duration_seconds histogram. Until then,
+    #       get_avg_request_duration (router path) falls back to the work_handler
+    #       constant and queries a non-existent metric, silently returning 0.
+
+
+class routing_overhead:
+    """Routing overhead phase latency histogram suffixes."""
+
+    # Time spent computing block hashes
+    BLOCK_HASHING_MS = "overhead_block_hashing_ms"
+    # Time spent in indexer find_matches
+    INDEXER_FIND_MATCHES_MS = "overhead_indexer_find_matches_ms"
+    # Time spent computing sequence hashes
+    SEQ_HASHING_MS = "overhead_seq_hashing_ms"
+    # Time spent in scheduler worker selection
+    SCHEDULING_MS = "overhead_scheduling_ms"
+    # Total routing overhead per request
+    TOTAL_MS = "overhead_total_ms"
 
 
 class task_tracker:

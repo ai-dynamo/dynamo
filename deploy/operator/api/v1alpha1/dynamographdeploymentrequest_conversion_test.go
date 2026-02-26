@@ -21,6 +21,9 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,6 +45,9 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 				"modelPathInPvc": "llama-3",
 				"pvcMountPath":   "/data/model",
 			},
+		},
+		"planner": map[string]interface{}{
+			"enable_load_scaling": false,
 		},
 		"extra_key": "preserved",
 	}
@@ -94,6 +100,7 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 	osl := int32(256)
 
 	rawDGD, _ := json.Marshal(map[string]interface{}{"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"})
+	rawPlanner, _ := json.Marshal(map[string]interface{}{"enable_load_scaling": false})
 
 	return &v1beta1.DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{
@@ -119,7 +126,8 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 				PVCMountPath: "/models",
 			},
 			Features: &v1beta1.FeaturesSpec{
-				Mocker: &v1beta1.MockerSpec{Enabled: true},
+				Mocker:  &v1beta1.MockerSpec{Enabled: true},
+				Planner: &runtime.RawExtension{Raw: rawPlanner},
 			},
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
@@ -269,44 +277,9 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	}
 
 	// --- Spec checks ---
-	if restored.Spec.Model != original.Spec.Model {
-		t.Errorf("Spec.Model: got %q, want %q", restored.Spec.Model, original.Spec.Model)
-	}
-	if restored.Spec.Backend != original.Spec.Backend {
-		t.Errorf("Spec.Backend: got %q, want %q", restored.Spec.Backend, original.Spec.Backend)
-	}
-	if restored.Spec.AutoApply != original.Spec.AutoApply {
-		t.Errorf("Spec.AutoApply: got %v, want %v", restored.Spec.AutoApply, original.Spec.AutoApply)
-	}
-	if restored.Spec.UseMocker != original.Spec.UseMocker {
-		t.Errorf("Spec.UseMocker: got %v, want %v", restored.Spec.UseMocker, original.Spec.UseMocker)
-	}
-	if restored.Spec.ProfilingConfig.ProfilerImage != original.Spec.ProfilingConfig.ProfilerImage {
-		t.Errorf("ProfilingConfig.ProfilerImage: got %q, want %q", restored.Spec.ProfilingConfig.ProfilerImage, original.Spec.ProfilingConfig.ProfilerImage)
-	}
-	if restored.Spec.ProfilingConfig.OutputPVC != original.Spec.ProfilingConfig.OutputPVC {
-		t.Errorf("ProfilingConfig.OutputPVC: got %q, want %q", restored.Spec.ProfilingConfig.OutputPVC, original.Spec.ProfilingConfig.OutputPVC)
-	}
-
-	// ConfigMapRef round-trip
-	if restored.Spec.ProfilingConfig.ConfigMapRef == nil {
-		t.Fatal("ProfilingConfig.ConfigMapRef is nil after round-trip")
-	}
-	if restored.Spec.ProfilingConfig.ConfigMapRef.Name != original.Spec.ProfilingConfig.ConfigMapRef.Name {
-		t.Errorf("ConfigMapRef.Name: got %q, want %q", restored.Spec.ProfilingConfig.ConfigMapRef.Name, original.Spec.ProfilingConfig.ConfigMapRef.Name)
-	}
-
-	// EnableGPUDiscovery round-trip
-	if restored.Spec.EnableGPUDiscovery == nil || !*restored.Spec.EnableGPUDiscovery {
-		t.Error("Spec.EnableGPUDiscovery: expected true after round-trip")
-	}
-
-	// DeploymentOverrides round-trip
-	if restored.Spec.DeploymentOverrides == nil {
-		t.Fatal("Spec.DeploymentOverrides is nil after round-trip")
-	}
-	if restored.Spec.DeploymentOverrides.Name != original.Spec.DeploymentOverrides.Name {
-		t.Errorf("DeploymentOverrides.Name: got %q, want %q", restored.Spec.DeploymentOverrides.Name, original.Spec.DeploymentOverrides.Name)
+	// ProfilingConfig.Config (raw JSON blob) is verified separately below.
+	if diff := cmp.Diff(original.Spec, restored.Spec, cmpopts.IgnoreFields(ProfilingConfigSpec{}, "Config")); diff != "" {
+		t.Errorf("Spec mismatch after round-trip (-want +got):\n%s", diff)
 	}
 
 	// JSON blob round-trip: SLA fields re-emerge in ProfilingConfig.Config
@@ -331,28 +304,18 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	if blob["extra_key"] != "preserved" {
 		t.Errorf("extra_key: got %v, want %q", blob["extra_key"], "preserved")
 	}
+	// Planner round-trip via applyPlannerFromBlob / mergePlannerIntoBlob
+	plannerMap, _ := blob["planner"].(map[string]interface{})
+	if plannerMap == nil {
+		t.Fatal("planner key missing in restored JSON blob")
+	}
+	if plannerMap["enable_load_scaling"] != false {
+		t.Errorf("planner.enable_load_scaling: got %v, want false", plannerMap["enable_load_scaling"])
+	}
 
 	// --- Status checks ---
-	if restored.Status.State != original.Status.State {
-		t.Errorf("Status.State: got %q, want %q", restored.Status.State, original.Status.State)
-	}
-	if restored.Status.ObservedGeneration != original.Status.ObservedGeneration {
-		t.Errorf("Status.ObservedGeneration: got %d, want %d", restored.Status.ObservedGeneration, original.Status.ObservedGeneration)
-	}
-	if restored.Status.Backend != original.Status.Backend {
-		t.Errorf("Status.Backend: got %q, want %q", restored.Status.Backend, original.Status.Backend)
-	}
-	if restored.Status.ProfilingResults != original.Status.ProfilingResults {
-		t.Errorf("Status.ProfilingResults: got %q, want %q", restored.Status.ProfilingResults, original.Status.ProfilingResults)
-	}
-	if restored.Status.Deployment == nil {
-		t.Fatal("Status.Deployment is nil after round-trip")
-	}
-	if restored.Status.Deployment.Name != original.Status.Deployment.Name {
-		t.Errorf("Status.Deployment.Name: got %q, want %q", restored.Status.Deployment.Name, original.Status.Deployment.Name)
-	}
-	if restored.Status.Deployment.Created != original.Status.Deployment.Created {
-		t.Errorf("Status.Deployment.Created: got %v, want %v", restored.Status.Deployment.Created, original.Status.Deployment.Created)
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
+		t.Errorf("Status mismatch after round-trip (-want +got):\n%s", diff)
 	}
 }
 
@@ -373,79 +336,17 @@ func TestHubRoundTrip(t *testing.T) {
 	}
 
 	// --- Spec checks ---
-	if restored.Spec.Model != original.Spec.Model {
-		t.Errorf("Spec.Model: got %q, want %q", restored.Spec.Model, original.Spec.Model)
-	}
-	if restored.Spec.Backend != original.Spec.Backend {
-		t.Errorf("Spec.Backend: got %q, want %q", restored.Spec.Backend, original.Spec.Backend)
-	}
-	if restored.Spec.AutoApply != original.Spec.AutoApply {
-		t.Errorf("Spec.AutoApply: got %v, want %v", restored.Spec.AutoApply, original.Spec.AutoApply)
-	}
-	if restored.Spec.Image != original.Spec.Image {
-		t.Errorf("Spec.Image: got %q, want %q", restored.Spec.Image, original.Spec.Image)
-	}
-
-	// UseMocker round-trip via Features.Mocker.Enabled
-	if restored.Spec.Features == nil || restored.Spec.Features.Mocker == nil {
-		t.Fatal("Spec.Features.Mocker is nil after round-trip")
-	}
-	if restored.Spec.Features.Mocker.Enabled != original.Spec.Features.Mocker.Enabled {
-		t.Errorf("Features.Mocker.Enabled: got %v, want %v", restored.Spec.Features.Mocker.Enabled, original.Spec.Features.Mocker.Enabled)
-	}
-
-	// SLA round-trip via JSON blob
-	if restored.Spec.SLA == nil {
-		t.Fatal("Spec.SLA is nil after round-trip")
-	}
-	if restored.Spec.SLA.TTFT == nil || *restored.Spec.SLA.TTFT != *original.Spec.SLA.TTFT {
-		t.Errorf("SLA.TTFT: got %v, want %v", restored.Spec.SLA.TTFT, original.Spec.SLA.TTFT)
-	}
-	if restored.Spec.SLA.ITL == nil || *restored.Spec.SLA.ITL != *original.Spec.SLA.ITL {
-		t.Errorf("SLA.ITL: got %v, want %v", restored.Spec.SLA.ITL, original.Spec.SLA.ITL)
-	}
-
-	// Workload round-trip via JSON blob
-	if restored.Spec.Workload == nil {
-		t.Fatal("Spec.Workload is nil after round-trip")
-	}
-	if restored.Spec.Workload.ISL == nil || *restored.Spec.Workload.ISL != *original.Spec.Workload.ISL {
-		t.Errorf("Workload.ISL: got %v, want %v", restored.Spec.Workload.ISL, original.Spec.Workload.ISL)
-	}
-	if restored.Spec.Workload.OSL == nil || *restored.Spec.Workload.OSL != *original.Spec.Workload.OSL {
-		t.Errorf("Workload.OSL: got %v, want %v", restored.Spec.Workload.OSL, original.Spec.Workload.OSL)
-	}
-
-	// ModelCache round-trip via JSON blob
-	if restored.Spec.ModelCache == nil {
-		t.Fatal("Spec.ModelCache is nil after round-trip")
-	}
-	if restored.Spec.ModelCache.PVCName != original.Spec.ModelCache.PVCName {
-		t.Errorf("ModelCache.PVCName: got %q, want %q", restored.Spec.ModelCache.PVCName, original.Spec.ModelCache.PVCName)
-	}
-	if restored.Spec.ModelCache.PVCModelPath != original.Spec.ModelCache.PVCModelPath {
-		t.Errorf("ModelCache.PVCModelPath: got %q, want %q", restored.Spec.ModelCache.PVCModelPath, original.Spec.ModelCache.PVCModelPath)
-	}
-	if restored.Spec.ModelCache.PVCMountPath != original.Spec.ModelCache.PVCMountPath {
-		t.Errorf("ModelCache.PVCMountPath: got %q, want %q", restored.Spec.ModelCache.PVCMountPath, original.Spec.ModelCache.PVCMountPath)
+	if diff := cmp.Diff(original.Spec, restored.Spec); diff != "" {
+		t.Errorf("Spec mismatch after round-trip (-want +got):\n%s", diff)
 	}
 
 	// --- Status checks ---
-	// Deployed → Ready (lossy: v1alpha1 has no "Deployed" state; maps to "Ready")
-	// then on the way back Ready→Ready
+	// Phase is intentionally lossy: DGDRPhaseDeployed → Ready → Ready
 	if restored.Status.Phase != v1beta1.DGDRPhaseReady {
 		t.Errorf("Status.Phase: got %q, want %q (Deployed→Ready is lossy)", restored.Status.Phase, v1beta1.DGDRPhaseReady)
 	}
-	if restored.Status.ObservedGeneration != original.Status.ObservedGeneration {
-		t.Errorf("Status.ObservedGeneration: got %d, want %d", restored.Status.ObservedGeneration, original.Status.ObservedGeneration)
-	}
-	// DGDName round-trip
-	if restored.Status.DGDName != original.Status.DGDName {
-		t.Errorf("Status.DGDName: got %q, want %q", restored.Status.DGDName, original.Status.DGDName)
-	}
-	// ProfilingJobName round-trip via annotation
-	if restored.Status.ProfilingJobName != original.Status.ProfilingJobName {
-		t.Errorf("Status.ProfilingJobName: got %q, want %q", restored.Status.ProfilingJobName, original.Status.ProfilingJobName)
+	if diff := cmp.Diff(original.Status, restored.Status, cmpopts.IgnoreFields(v1beta1.DynamoGraphDeploymentRequestStatus{}, "Phase")); diff != "" {
+		t.Errorf("Status mismatch after round-trip (-want +got):\n%s", diff)
 	}
 	// GeneratedDeployment round-trip via ProfilingResults.SelectedConfig
 	if restored.Status.ProfilingResults == nil || restored.Status.ProfilingResults.SelectedConfig == nil {

@@ -281,9 +281,7 @@ def test_request_migration_vllm_prefill(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
-    ) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start decode worker first (required for prefill workers to connect)
@@ -360,9 +358,7 @@ def test_request_migration_vllm_kv_transfer(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
-    ) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
@@ -443,9 +439,7 @@ def test_request_migration_vllm_decode(
         )
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
-    ) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first

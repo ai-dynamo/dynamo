@@ -36,7 +36,7 @@ High-throughput, low-latency inference framework designed for serving generative
 
 Large language models exceed single-GPU capacity. Tensor parallelism spreads layers across GPUs but creates coordination challenges. Dynamo closes this orchestration gap.
 
-Dynamo is inference engine agnostic (supports TRT-LLM, vLLM, SGLang) and provides:
+Dynamo is inference engine agnostic (supports SGLang, TRT-LLM, vLLM) and provides:
 
 - **Disaggregated Prefill & Decode** – Maximizes GPU throughput with latency/throughput trade-offs
 - **Dynamic GPU Scheduling** – Optimizes performance based on fluctuating demand
@@ -379,7 +379,7 @@ For Slurm or other distributed deployments (and KV-aware routing):
 
 To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
 
-See [SGLang on Slurm](examples/backends/sglang/slurm_jobs/README.md) and [TRT-LLM on Slurm](examples/basics/multinode/trtllm/README.md) for deployment examples.
+See [TRT-LLM on Slurm](examples/basics/multinode/trtllm/README.md) for deployment examples.
 
 ## More News
 

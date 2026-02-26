@@ -17,25 +17,35 @@
 
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
+# This config uses the same disagg-profile-handler as disaggregated deployments.
+# With no "prefill" profile defined, the handler runs only the "decode" profile
+# and the decode scorer receives isDisaggregated=false, enabling full KV cache
+# overlap scoring for aggregated mode. Adding prefill workers and a prefill
+# profile would automatically switch to disaggregated routing.
 plugins:
-  # Required: tells EPP which profile to use (even if you only have one)
-  - type: single-profile-handler
+  - type: disagg-profile-handler
+
+  # Label filter: restricts pods to decode workers
+  - name: decode-filter
+    type: label-filter
+    parameters:
+      label: "nvidia.com/dynamo-sub-component-type"
+      validValues:
+        - "decode"
+      allowsNoLabel: true
 
   # Picker: chooses the final endpoint after scoring
   - name: picker
     type: max-score-picker
 
-  # Dynamo KV-aware Scorer: calls Dynamo router FFI for worker selection
-  # Implements Scorer, PreRequest, and ResponseComplete:
-  # - Score: Selects workers based on KV cache, sets routing headers
-  # - PreRequest: Registers request with router bookkeeping
-  # - ResponseComplete: Frees router bookkeeping when response completes
-  - name: dyn-kv
-    type: kv-aware-scorer
+  # Dynamo decode scorer: calls Dynamo FFI decode router, handles request lifecycle
+  - name: dyn-decode
+    type: dyn-decode-scorer
 
 schedulingProfiles:
-  - name: default
+  - name: decode
     plugins:
-      - pluginRef: dyn-kv
+      - pluginRef: decode-filter
+      - pluginRef: dyn-decode
         weight: 1
       - pluginRef: picker

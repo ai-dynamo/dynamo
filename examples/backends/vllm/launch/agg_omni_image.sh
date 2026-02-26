@@ -38,7 +38,6 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm \
     --model "$MODEL" \
     --omni \
-    --connector none \
     --output-modalities image \
     --media-output-fs-url file:///tmp/dynamo_media \
     "${EXTRA_ARGS[@]}"

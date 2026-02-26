@@ -34,10 +34,9 @@ pub struct KvRouterConfig {
 
     pub use_kv_events: bool,
 
-    /// Enable durable KV events using NATS JetStream instead of the default event plane.
-    /// When false (default), the router uses the event-plane subscriber and requires
-    /// workers to have local_indexer enabled for gap recovery.
-    /// When true, uses JetStream for durability and multi-replica consistency.
+    /// **Deprecated:** Enable durable KV events using NATS JetStream instead of the default event plane.
+    /// This option will be removed in a future release. The event-plane subscriber
+    /// (local_indexer mode) is now the recommended path.
     pub durable_kv_events: bool,
 
     pub router_replica_sync: bool,
@@ -111,6 +110,12 @@ impl Default for KvRouterConfig {
 }
 
 fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationError> {
+    if config.durable_kv_events {
+        tracing::warn!(
+            "--durable-kv-events is deprecated and will be removed in a future release. \
+             The event-plane subscriber (local_indexer mode) is now the recommended path."
+        );
+    }
     if config.durable_kv_events && !config.use_kv_events {
         return Err(ValidationError::new(
             "durable_kv_events requires use_kv_events=true",
@@ -141,6 +146,7 @@ impl KvRouterConfig {
         tokens: &[u32],
         block_size: u32,
         config_override: Option<&RouterConfigOverride>,
+        lora_name: Option<&str>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -151,17 +157,14 @@ impl KvRouterConfig {
             return Some(Vec::new());
         }
 
-        // Use override if provided, otherwise use default config
         let assume_kv_reuse = config_override
             .and_then(|cfg| cfg.assume_kv_reuse)
             .unwrap_or(self.router_assume_kv_reuse);
 
         if assume_kv_reuse {
-            // Compute actual block hashes and sequence hashes
-            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None);
+            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None, lora_name);
             Some(compute_seq_hash_for_block(&block_hashes))
         } else {
-            // Generate random hashes (no KV reuse assumed)
             let mut rng = rand::rng();
             Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
         }

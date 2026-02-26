@@ -349,7 +349,7 @@ mod tests {
 
         // 1. Before routing decision there should be no matches
         let pre_scores = indexer
-            .find_matches_for_request(&tokens)
+            .find_matches_for_request(&tokens, None)
             .await
             .expect("indexer offline");
         assert!(pre_scores.scores.is_empty());
@@ -366,7 +366,10 @@ mod tests {
 
         // Poll until we observe the match being registered
         spin_until(Duration::from_millis(100), || async {
-            let s = indexer.find_matches_for_request(&tokens).await.unwrap();
+            let s = indexer
+                .find_matches_for_request(&tokens, None)
+                .await
+                .unwrap();
             s.scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_id))
                 .copied()
@@ -376,7 +379,10 @@ mod tests {
 
         // 3. After the TTL has passed the entry should expire automatically
         time::sleep(TTL + Duration::from_millis(50)).await;
-        let post_scores = indexer.find_matches_for_request(&tokens).await.unwrap();
+        let post_scores = indexer
+            .find_matches_for_request(&tokens, None)
+            .await
+            .unwrap();
         assert!(post_scores.scores.is_empty());
     }
 
@@ -413,7 +419,10 @@ mod tests {
 
         // Wait until the worker is registered
         spin_until(Duration::from_millis(100), || async {
-            let s = indexer.find_matches_for_request(&tokens).await.unwrap();
+            let s = indexer
+                .find_matches_for_request(&tokens, None)
+                .await
+                .unwrap();
             s.scores
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_id))
         })
@@ -424,7 +433,10 @@ mod tests {
 
         // Ensure the worker's entries are gone
         spin_until(Duration::from_millis(100), || async {
-            let s = indexer.find_matches_for_request(&tokens).await.unwrap();
+            let s = indexer
+                .find_matches_for_request(&tokens, None)
+                .await
+                .unwrap();
             !s.scores
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_id))
         })
@@ -475,7 +487,10 @@ mod tests {
 
         // Ensure both workers are registered
         spin_until(Duration::from_millis(100), || async {
-            let s = indexer.find_matches_for_request(&tokens).await.unwrap();
+            let s = indexer
+                .find_matches_for_request(&tokens, None)
+                .await
+                .unwrap();
             s.scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_0))
                 .copied()
@@ -492,7 +507,10 @@ mod tests {
 
         // Confirm the removed worker is gone, and the other remains.
         spin_until(Duration::from_millis(100), || async {
-            let s = indexer.find_matches_for_request(&tokens).await.unwrap();
+            let s = indexer
+                .find_matches_for_request(&tokens, None)
+                .await
+                .unwrap();
             !s.scores
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
                 && s.scores
@@ -539,7 +557,10 @@ mod tests {
 
         // Ensure the indexer has registered the block
         spin_until(Duration::from_millis(100), || async {
-            let s = indexer.find_matches_for_request(&seq_a).await.unwrap();
+            let s = indexer
+                .find_matches_for_request(&seq_a, None)
+                .await
+                .unwrap();
             s.scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_a))
                 .copied()
@@ -551,7 +572,10 @@ mod tests {
         let seq_b: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8];
 
         // Query the indexer for overlaps of Sequence B (before it has been routed anywhere)
-        let overlap = indexer.find_matches_for_request(&seq_b).await.unwrap();
+        let overlap = indexer
+            .find_matches_for_request(&seq_b, None)
+            .await
+            .unwrap();
 
         // Expect worker A to have an overlap score of 1 (shared first block)
         assert_eq!(
@@ -606,7 +630,10 @@ mod tests {
 
         // Wait until both workers are reflected in overlap scores
         spin_until(Duration::from_millis(100), || async {
-            let s = indexer.find_matches_for_request(&tokens).await.unwrap();
+            let s = indexer
+                .find_matches_for_request(&tokens, None)
+                .await
+                .unwrap();
             s.scores
                 .get(&WorkerWithDpRank::from_worker_id(worker_0))
                 .copied()
@@ -618,7 +645,10 @@ mod tests {
         })
         .await;
 
-        let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
+        let scores = indexer
+            .find_matches_for_request(&tokens, None)
+            .await
+            .unwrap();
 
         assert_eq!(
             scores
@@ -777,7 +807,10 @@ mod tests {
         // Verify all 5 blocks are present (no pruning yet)
         for i in 0..5 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
-            let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
+            let scores = indexer
+                .find_matches_for_request(&tokens, None)
+                .await
+                .unwrap();
             assert_eq!(
                 scores.scores.get(&worker).copied(),
                 Some(1),
@@ -803,7 +836,10 @@ mod tests {
         // Verify that the 4 oldest blocks are pruned
         for i in 0..4 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
-            let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
+            let scores = indexer
+                .find_matches_for_request(&tokens, None)
+                .await
+                .unwrap();
             assert!(
                 scores.scores.get(&worker).copied().unwrap_or(0) == 0,
                 "Block {} should have been pruned but is still present",
@@ -814,7 +850,10 @@ mod tests {
         // Verify the 2 newest blocks are present
         for i in 4..6 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
-            let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
+            let scores = indexer
+                .find_matches_for_request(&tokens, None)
+                .await
+                .unwrap();
             assert_eq!(
                 scores.scores.get(&worker).copied(),
                 Some(1),

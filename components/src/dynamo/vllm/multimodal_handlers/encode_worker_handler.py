@@ -42,7 +42,7 @@ ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 class EmbeddingItem:
     key: str
     image_grid_thw: list
-    embeddings_cpu: torch.Tensor
+    embeddings: torch.Tensor
 
 
 class EncodeWorkerHandler:
@@ -140,11 +140,11 @@ class EncodeWorkerHandler:
                 if self.embedding_cache is not None and self.embedding_cache.has_key(
                     embedding_key
                 ):
-                    (image_grid_thw, embeddings_cpu) = self.embedding_cache.get(
+                    (image_grid_thw, embeddings) = self.embedding_cache.get(
                         embedding_key
                     )
                     embedding_lists[idx] = EmbeddingItem(
-                        embedding_key, image_grid_thw, embeddings_cpu
+                        embedding_key, image_grid_thw, embeddings
                     )
                 # compute
                 else:
@@ -200,7 +200,7 @@ class EncodeWorkerHandler:
                         // merge_size
                         // merge_size
                     ).tolist()
-                    splitted_embeddings = embeddings.cpu().squeeze(0).split(sizes)
+                    splitted_embeddings = embeddings.squeeze(0).split(sizes)
                     logger.debug(
                         f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
                     )
@@ -209,7 +209,7 @@ class EncodeWorkerHandler:
                     # embeddings already has batch dimension for images, so we can directly
                     # split by batch dimension
                     logger.debug(f"image embedding shape: {embeddings.shape}")
-                    splitted_embeddings = embeddings.cpu()
+                    splitted_embeddings = embeddings
 
                 image_grid_thw = (
                     image_embeds["image_grid_thw"].tolist()
@@ -230,7 +230,7 @@ class EncodeWorkerHandler:
                         embedding_lists[list_idx].key,
                         (
                             embedding_lists[list_idx].image_grid_thw,
-                            embedding_lists[list_idx].embeddings_cpu,
+                            embedding_lists[list_idx].embeddings,
                         ),
                     )
 
@@ -240,7 +240,7 @@ class EncodeWorkerHandler:
             send_tasks = [
                 asyncio.create_task(
                     self.embedding_sender.send_embeddings(
-                        embedding_item.embeddings_cpu, stage_embeddings=True
+                        embedding_item.embeddings, stage_embeddings=True
                     )
                 )
                 for embedding_item in embedding_lists
@@ -252,7 +252,7 @@ class EncodeWorkerHandler:
             for idx, item in enumerate(zip(embedding_lists, transfer_requests)):
                 embedding_item, transfer_request = item
                 logger.debug(
-                    f"{embedding_item.embeddings_cpu.shape} prepared for transfer."
+                    f"{embedding_item.embeddings.shape} prepared for transfer."
                 )
                 # Update request for transfer metadata
                 request.multimodal_inputs[idx].multimodal_input.image_url = None
@@ -260,13 +260,13 @@ class EncodeWorkerHandler:
                     idx
                 ].image_grid_thw = embedding_item.image_grid_thw
                 request.multimodal_inputs[idx].embeddings_shape = tuple(
-                    embedding_item.embeddings_cpu.shape
+                    embedding_item.embeddings.shape
                 )
                 request.multimodal_inputs[idx].serialized_request = transfer_request[0]
 
-                # Keep a reference of the embedding_cpu and only drop reference when the transfer is done
+                # Keep a reference of the embedding and only drop reference when the transfer is done
                 self.send_complete_queue.put_nowait(
-                    (transfer_request[1], embedding_item.embeddings_cpu)
+                    (transfer_request[1], embedding_item.embeddings)
                 )
 
             logger.debug(f"Request: {request.model_dump_json()}")

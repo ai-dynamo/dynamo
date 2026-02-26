@@ -424,6 +424,7 @@ def test_router_decisions_sglang_multiple_workers(
             MODEL_NAME,
             request,
             test_dp_rank=False,
+            block_size=PAGE_SIZE,
             router_event_threads=router_event_threads,
         )
 
@@ -466,7 +467,12 @@ def test_router_decisions_sglang_dp(
         endpoint = runtime.endpoint(f"{sglang_workers.namespace}.backend.generate")
 
         _test_router_decisions(
-            sglang_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
+            sglang_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=True,
+            block_size=PAGE_SIZE,
         )
 
 

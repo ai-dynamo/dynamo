@@ -4,8 +4,6 @@
 title: KV Events for Custom Engines
 ---
 
-# KV Event Publishing for Custom Engines
-
 This document explains how to implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing.
 
 ## Overview
@@ -17,7 +15,7 @@ Events are published over the **Dynamo event plane**, a transport-agnostic pub/s
 `KvEventPublisher` supports two publishing modes:
 
 1. **Direct publishing** — Your engine calls `publish_stored()` / `publish_removed()` to push events directly over the event plane. Simplest approach for custom engines.
-2. **ZMQ relay** — For engines that emit raw KV events over a ZMQ socket (like vLLM and SGLang). The publisher subscribes to the ZMQ endpoint and relays events to the event plane automatically.
+2. **ZMQ relay** — For engines that emit raw KV events over a ZMQ socket (like SGLang and vLLM). The publisher subscribes to the ZMQ endpoint and relays events to the event plane automatically.
 
 ## Event Types
 
@@ -41,7 +39,7 @@ For `BlockStored` events:
 - **`block_hashes`**: List of **sequence block hashes** from the engine's block manager. These are cumulative hashes that incorporate all tokens from the start of the sequence up to and including the current block (not just the tokens within that block). This enables prefix matching across requests.
 - **`num_block_tokens`**: Number of tokens per block (should all equal `kv_block_size`)
 - **`parent_hash`**: Hash of the parent block. Required for all blocks except the first block in a sequence (which has no parent).
-- **`lora_id`**: LoRA adapter ID (0 if not using LoRA)
+- **`lora_name`**: LoRA adapter name string (omit or `None` for base model). When set, the adapter name is incorporated into block hash computation so that blocks for different LoRA adapters (or the base model) are never conflated.
 
 For `BlockRemoved` events:
 - **`block_hashes`**: List of sequence block hashes being evicted
@@ -93,15 +91,16 @@ class CustomEnginePublisher:
         )
 
     def on_blocks_stored(self, token_ids: list[int], block_hashes: list[int],
-                         lora_id: int = 0, parent_hash: int | None = None):
+                         parent_hash: int | None = None,
+                         lora_name: str | None = None):
         """Call after KV cache blocks are allocated."""
         num_block_tokens = [self.block_size] * len(block_hashes)
         self.kv_publisher.publish_stored(
             token_ids=token_ids,
             num_block_tokens=num_block_tokens,
             block_hashes=block_hashes,
-            lora_id=lora_id,
             parent_hash=parent_hash,
+            lora_name=lora_name,
         )
 
     def on_blocks_removed(self, block_hashes: list[int]):
@@ -136,11 +135,11 @@ async def main():
 
 ## ZMQ Relay (For Engines with Raw KV Events)
 
-For engines that already publish raw KV events over a ZMQ socket (like vLLM and SGLang), use the same `KvEventPublisher` with a `zmq_endpoint`. The publisher subscribes to the ZMQ socket and relays events to the event plane automatically.
+For engines that already publish raw KV events over a ZMQ socket (like SGLang and vLLM), use the same `KvEventPublisher` with a `zmq_endpoint`. The publisher subscribes to the ZMQ socket and relays events to the event plane automatically.
 
 ```mermaid
 flowchart LR
-    subgraph Engine["Custom Engine / vLLM / SGLang"]
+    subgraph Engine["Custom Engine / SGLang / vLLM"]
         cache["KV Cache Manager"]
         zmq_pub["ZMQ Publisher"]
     end
@@ -169,7 +168,7 @@ flowchart LR
 ```
 
 **When to use:**
-- Your engine already publishes KV events via ZMQ (like vLLM or SGLang)
+- Your engine already publishes KV events via ZMQ (like SGLang or vLLM)
 - You want to decouple event publishing from your engine's main loop
 
 ### Setup
@@ -191,7 +190,7 @@ No further calls to `publish_stored()` / `publish_removed()` are needed — the 
 
 ### ZMQ Wire Format
 
-The ZMQ message format (compatible with vLLM / SGLang):
+The ZMQ message format (compatible with SGLang / vLLM):
 
 | Frame | Description |
 |-------|-------------|
@@ -209,7 +208,7 @@ For `BlockStored`:
     "parent_block_hash": signed_i64 | None,  # Parent hash
     "token_ids": [int, ...],                 # Token IDs
     "block_size": int,                       # Tokens per block
-    "lora_id": int | None,                   # LoRA adapter ID
+    "lora_name": str | None,                 # LoRA adapter name
 }
 ```
 
@@ -257,12 +256,13 @@ publish_stored(
     token_ids: list[int],
     num_block_tokens: list[int],
     block_hashes: list[int],
-    lora_id: int,
     parent_hash: int | None = None,
+    block_mm_infos: list[dict | None] | None = None,
+    lora_name: str | None = None,
 )
 ```
 
-Publish a block-stored event. Event IDs are managed internally.
+Publish a block-stored event. Event IDs are managed internally. When `lora_name` is provided, the adapter name is mixed into block hash computation so blocks cached under different adapters produce distinct hashes.
 
 #### `publish_removed()`
 

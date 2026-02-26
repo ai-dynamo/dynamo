@@ -145,7 +145,7 @@ impl DistributedRuntime {
                 (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
             }
             DiscoveryBackend::KvStore(kv_selector) => {
-                tracing::info!("Initializing KV store discovery backend");
+                tracing::info!("Initializing KV store discovery backend: {}", kv_selector);
                 let runtime_clone = runtime.clone();
                 let store = match kv_selector {
                     kv::Selector::Etcd(etcd_config) => {
@@ -197,6 +197,18 @@ impl DistributedRuntime {
             .system_health
             .lock()
             .initialize_uptime_gauge(&distributed_runtime)?;
+
+        // Register an update callback so the uptime gauge is refreshed before
+        // every Prometheus scrape (both system status server and frontend).
+        {
+            let system_health = distributed_runtime.system_health.clone();
+            distributed_runtime
+                .metrics_registry
+                .add_update_callback(std::sync::Arc::new(move || {
+                    system_health.lock().update_uptime_gauge();
+                    Ok(())
+                }));
+        }
 
         // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {

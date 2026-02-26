@@ -437,7 +437,7 @@ status:
    - For HuggingFace: Verify token is valid, repo exists and is accessible
 
 2. **Invalid LoRA format**
-   **Solution:** Ensure your LoRA weights are in the format expected by your backend framework (vLLM, SGLang, etc.)
+   **Solution:** Ensure your LoRA weights are in the format expected by your backend framework (SGLang, vLLM, etc.)
 
 3. **Endpoint API errors**
    ```bash

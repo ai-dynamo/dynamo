@@ -50,7 +50,7 @@ type GPUInfo struct {
 //
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
-func DiscoverGPUs(ctx context.Context, k8sClient client.Client) (*GPUInfo, error) {
+func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Starting GPU discovery from cluster nodes")
 

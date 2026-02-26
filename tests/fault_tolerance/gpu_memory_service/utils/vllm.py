@@ -54,7 +54,7 @@ class VLLMWithGMSProcess(ManagedProcess):
                 "gms",
                 "--enable-sleep-mode",
                 "--gpu-memory-utilization",
-                "0.8",
+                "0.9",
                 "--kv-events-config",
                 kv_events_cfg,
             ],

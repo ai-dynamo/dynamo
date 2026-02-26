@@ -66,7 +66,6 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-
   # ── Job Y: Run "echo hello world" inside Container A ──────────────────
   job-y:
     name: Run Hello World on Container A
@@ -78,7 +77,6 @@ jobs:
       credentials:
         username: AWS
         password: ${{ secrets.AWS_ECR_PASSWORD }}
-
     steps:
       - name: Say Hello World
         run: echo hello world
@@ -122,6 +120,7 @@ jobs:
 #   # ============================================================================
 #   # Operator
 #   # ============================================================================
+
 
 #   operator:
 #     needs: changed-files

@@ -129,15 +129,20 @@ class BaseWorkerHandler(BaseGenerativeHandler):
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
         self.enable_trace = config.server_args.enable_trace
 
-        self.input_param_manager = InputParamManager(
-            self.engine.tokenizer_manager.tokenizer
-            if not self.skip_tokenizer_init
-            else None
-        )
-
-        self._engine_supports_priority = (
-            "priority" in inspect.signature(engine.async_generate).parameters
-        )
+        if engine is not None:
+            self.input_param_manager = InputParamManager(
+                self.engine.tokenizer_manager.tokenizer
+                if not self.skip_tokenizer_init
+                else None
+            )
+            self._engine_supports_priority = (
+                "priority" in inspect.signature(engine.async_generate).parameters
+            )
+        else:
+            # Encode-only workers (e.g. MultimodalEncodeWorkerHandler) don't
+            # have an sgl.Engine.
+            self.input_param_manager = InputParamManager(None)
+            self._engine_supports_priority = False
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:

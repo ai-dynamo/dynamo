@@ -5,8 +5,6 @@ title: Router Guide
 subtitle: Enable KV-aware routing using Router for Dynamo deployments
 ---
 
-# Router Guide
-
 ## Overview
 
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
@@ -150,7 +148,7 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--no-router-kv-events`: Disables KV event tracking. By default (when this flag is not provided), the router uses KV events to monitor block creation and deletion from workers. When disabled with this flag, the router predicts cache state based on routing decisions with TTL-based expiration (default 120s) and pruning. Use this flag if your backend doesn't support KV events (or you are not confident in the accuracy or responsiveness of the events).
 
-- `--router-durable-kv-events`: Enables JetStream mode for KV event transport. Must be specified on **both** the frontend **and** all workers. When enabled, workers publish to JetStream instead of the local indexer, and the frontend consumes from JetStream as a durable consumer. Without this flag (default), workers use the local indexer with NATS Core or ZMQ event plane. .
+- `--router-durable-kv-events`: **(Deprecated — will be removed in a future release.)** Enables JetStream mode for KV event transport. The event-plane subscriber (local_indexer mode) is now the recommended path. When enabled, workers publish to JetStream instead of the local indexer, and the frontend consumes from JetStream as a durable consumer. Without this flag (default), workers use the local indexer with NATS Core or ZMQ event plane.
 
 - `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - in JetStream mode those are synchronized through JetStream events; in local indexer mode (default) each router queries workers directly.
 
@@ -180,25 +178,28 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 
 - `--router-event-threads`: Number of event processing threads for the KV indexer. When set to 1 (default), the router uses a single-threaded radix tree with channel-based event processing, which supports TTL-based expiration and pruning. When set to a value greater than 1, the router uses a concurrent radix tree with a thread pool of the specified size for higher event throughput. Note: the concurrent indexer does not support TTL/pruning (`--router-ttl-secs`, `--router-max-tree-size`, `--router-prune-target-ratio` are ignored when `--router-event-threads > 1`). Can be set via `DYN_ROUTER_EVENT_THREADS` env var. For details on the underlying index data structures (`RadixTree`, `ConcurrentRadixTree`, `PositionalIndexer`) and their concurrency model (inline reads, sticky-routed writes via thread pool), see the [KV Router Index documentation](../../../../lib/kv-router/README.md).
 
->[!Note]
-> **State persistence** depends on the event transport mode:
-> - **NATS Core / Event Plane mode** (default): State persists on workers—router rebuilds state by querying workers on startup. This is the default when workers have `local_indexer` enabled (which is the default). Works with both NATS Core and ZMQ event planes.
-> - **JetStream mode** (`--router-durable-kv-events` on **both** frontend **and** workers): State persists across router restarts via JetStream and NATS object store snapshots.
-> - **No KV events** (`--no-router-kv-events`): State persistence is not supported.
->
-> **Request plane is independent of KV event transport.**
-> The request plane (`DYN_REQUEST_PLANE` / `--request-plane`) controls how requests reach workers (TCP/HTTP/NATS), while KV events travel over a separate path. KV events use NATS in JetStream or NATS Core modes, or ZMQ when `--event-plane zmq` is set. With `--event-plane zmq` and `--discovery-backend file` or `mem`, the router can run entirely without etcd or NATS. When using a NATS-based event plane (the default), NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`. Use `--no-router-kv-events` to disable KV event transport entirely.
->
-> When `--router-kv-overlap-score-weight` is set to 0, no KVIndexer is created and prefix matching is disabled (pure load balancing). When `--no-router-kv-events` is set, a KVIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning.
->
-> **Backend Configuration:** When using `--no-router-kv-events`, no additional backend flags are needed — SGLang and TRT-LLM disable KV events by default. For vLLM, KV events are currently enabled by default when prefix caching is active (deprecated — will change in a future release). Use `--kv-events-config` explicitly to control behavior:
-> - **vLLM**: Use `--kv-events-config '{"enable_kv_cache_events": false}'` to disable, or omit (auto-enabled, deprecated)
-> - **SGLang**: Do not use `--kv-events-config`
-> - **TRT-LLM**: Do not use `--publish-events-and-metrics`
->
-> The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When workers are configured to publish KV events (via `--kv-events-config`), the router relies on worker-side eviction events and these parameters are ignored.
->
-> **Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`.
+<Note>
+
+**State persistence** depends on the event transport mode:
+- **NATS Core / Event Plane mode** (default): State persists on workers—router rebuilds state by querying workers on startup. This is the default when workers have `local_indexer` enabled (which is the default). Works with both NATS Core and ZMQ event planes.
+- **JetStream mode** (`--router-durable-kv-events` on **both** frontend **and** workers): State persists across router restarts via JetStream and NATS object store snapshots.
+- **No KV events** (`--no-router-kv-events`): State persistence is not supported.
+
+**Request plane is independent of KV event transport.**
+The request plane (`DYN_REQUEST_PLANE` / `--request-plane`) controls how requests reach workers (TCP/HTTP/NATS), while KV events travel over a separate path. KV events use NATS in JetStream or NATS Core modes, or ZMQ when `--event-plane zmq` is set. With `--event-plane zmq` and `--discovery-backend file` or `mem`, the router can run entirely without etcd or NATS. When using a NATS-based event plane (the default), NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`. Use `--no-router-kv-events` to disable KV event transport entirely.
+
+When `--router-kv-overlap-score-weight` is set to 0, no KVIndexer is created and prefix matching is disabled (pure load balancing). When `--no-router-kv-events` is set, a KVIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning.
+
+**Backend Configuration:** When using `--no-router-kv-events`, no additional backend flags are needed — SGLang and TRT-LLM disable KV events by default. For vLLM, KV events are currently enabled by default when prefix caching is active (deprecated — will change in a future release). Use `--kv-events-config` explicitly to control behavior:
+- **vLLM**: Use `--kv-events-config '{"enable_kv_cache_events": false}'` to disable, or omit (auto-enabled, deprecated)
+- **SGLang**: Do not use `--kv-events-config`
+- **TRT-LLM**: Do not use `--publish-events-and-metrics`
+
+The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When workers are configured to publish KV events (via `--kv-events-config`), the router relies on worker-side eviction events and these parameters are ignored.
+
+**Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`.
+
+</Note>
 
 To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 
@@ -211,7 +212,7 @@ Dynamo supports several routing strategies when sending requests from one compon
 First, we must create a client tied to a components endpoint, we can do this using the labels defined above. Here we are getting a client tied to the `generate` endpoint of the `VllmWorker` component.
 
 ```python
-client = namespace('dynamo').component('VllmWorker').endpoint('generate').client()
+client = runtime.endpoint("dynamo.VllmWorker.generate").client()
 ```
 
 We can then use the default routing methods exposed by the client class to send requests to the `VllmWorker` component.
@@ -262,6 +263,15 @@ The `router_temperature` parameter controls routing randomness:
    - To reduce ITL: Decrease the weight
 4. If you observe severe load imbalance, increase the temperature setting
 
+## Prometheus Metrics
+
+The router exposes Prometheus metrics on the frontend's HTTP port (default 8000) at `/metrics`:
+
+- **Router request metrics** (`dynamo_component_router_*`): Registered via the component's metrics hierarchy and exposed on the frontend via the `drt_metrics` bridge. In KV mode (aggregated and disaggregated) they are populated per-request; in non-KV modes (direct/random/round-robin) they are registered with zero values. The standalone router (`python -m dynamo.router`) also registers these metrics, available on `DYN_SYSTEM_PORT` when set.
+- **Routing overhead metrics** (`dynamo_router_overhead_*`) and **per-worker gauges** (`dynamo_frontend_worker_*`): Registered on the frontend's own Prometheus registry. These are frontend-only and not available on the standalone router.
+
+For the full list of router metrics, see the [Metrics reference](../../observability/metrics.md#router-metrics).
+
 ## Disaggregated Serving
 
 Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../../development/backend-guide.md)), the frontend automatically detects them and activates an internal prefill router.
@@ -283,7 +293,7 @@ When both workers are registered, requests are automatically routed.
 
 ```python
 # Decode worker registration (in your decode worker)
-decode_endpoint = runtime.namespace("dynamo").component("decode").endpoint("generate")
+decode_endpoint = runtime.endpoint("dynamo.decode.generate")
 
 await register_model(
     model_input=ModelInput.Tokens,
@@ -296,7 +306,7 @@ await register_model(
 await decode_endpoint.serve_endpoint(decode_handler.generate)
 
 # Prefill worker registration (in your prefill worker)
-prefill_endpoint = runtime.namespace("dynamo").component("prefill").endpoint("generate")
+prefill_endpoint = runtime.endpoint("dynamo.prefill.generate")
 
 await register_model(
     model_input=ModelInput.Tokens,
@@ -309,8 +319,7 @@ await register_model(
 await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
-> [!Note]
-> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. The standalone router (`python -m dynamo.router`) uses `--router-*`-prefixed flags (e.g., `--router-block-size`, `--router-kv-events`). See the [Standalone Router README](../../../../components/src/dynamo/router/README.md) and example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh).
+<Note>The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. The standalone router (`python -m dynamo.router`) uses `--router-*`-prefixed flags (e.g., `--router-block-size`, `--router-kv-events`). See the [Standalone Router README](../../../../components/src/dynamo/router/README.md) and example script: [`examples/backends/sglang/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh).</Note>
 
 ### Request Flow
 
@@ -390,10 +399,13 @@ Persistence behavior depends on which event transport mode is active:
 python -m dynamo.frontend --router-mode kv --http-port 8002 --router-replica-sync
 ```
 
->[!Note]
-> If you need to start with a fresh state in JetStream mode, you have two options:
-> 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](../../design-docs/distributed-runtime.md)) which will start a new stream and NATS object store path
-> 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
+<Note>
+
+If you need to start with a fresh state in JetStream mode, you have two options:
+1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](../../design-docs/distributed-runtime.md)) which will start a new stream and NATS object store path
+2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
+
+</Note>
 
 ## Dynamic Threshold Configuration
 
@@ -436,3 +448,5 @@ curl http://localhost:8000/busy_threshold
 - **[KV Router Index Data Structures](../../../../lib/kv-router/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals and concurrency model
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes
 - **[KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing
+- **[Prometheus and Grafana Setup](../../observability/prometheus-grafana.md)**: General Prometheus/Grafana configuration
+- **[Metrics Developer Guide](../../observability/metrics-developer-guide.md)**: How the Dynamo metrics API works

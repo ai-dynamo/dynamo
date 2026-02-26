@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Text-to-video generation with Wan2.1 models.
+# GPUs: 1 (--wan-size 1b) or 2 (--wan-size 14b)
 
 set -e
 

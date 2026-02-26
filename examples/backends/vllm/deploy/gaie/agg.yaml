@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen-agg
+spec:
+  backendFramework: vllm
+  services:
+    Epp:
+      envFromSecret: hf-token-secret
+      componentType: epp
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+      eppConfig:
+        config:
+          plugins:
+            - type: disagg-profile-handler
+            - name: decode-filter
+              type: label-filter
+              parameters:
+                label: "nvidia.com/dynamo-sub-component-type"
+                validValues:
+                  - "decode"
+                allowsNoLabel: true
+            - name: picker
+              type: max-score-picker
+            - name: dyn-decode
+              type: dyn-decode-scorer
+          schedulingProfiles:
+            - name: decode
+              plugins:
+                - pluginRef: decode-filter
+                - pluginRef: dyn-decode
+                  weight: 1
+                - pluginRef: picker
+    VllmDecodeWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      sharedMemory:
+        size: 2Gi
+      extraPodSpec:
+        mainContainer:
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
+            - name: MODEL_PATH
+              value: "Qwen/Qwen3-0.6B"
+            - name: DYN_STORE_KV
+              value: "mem"
+          args:
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+        containers:
+          - name: frontend
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            command:
+              - python3
+            args:
+              - -m
+              - dynamo.frontend
+              - --router-mode
+              - direct
+            ports:
+              - containerPort: 8000
+                name: http
+                protocol: TCP
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
+            env:
+              - name: DYNAMO_PORT
+                value: "8000"
+              - name: DYN_HTTP_PORT
+                value: "8000"
+              - name: DYN_NAMESPACE
+                value: my-model-qwen-agg
+              - name: DYN_COMPONENT
+                value: frontend
+              - name: DYN_DISCOVERY_BACKEND
+                value: kubernetes
+              - name: DYN_PARENT_DGD_K8S_NAME
+                value: qwen-agg
+              - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                value: my-model
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: POD_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_UID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.uid
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"

@@ -4,8 +4,6 @@
 title: Discovery Plane
 ---
 
-# Discovery Plane
-
 Dynamo's service discovery layer lets components find each other at runtime. Workers register their endpoints when they start, and frontends discover them automatically.
 The discovery backend adapts to the deployment environment.
 

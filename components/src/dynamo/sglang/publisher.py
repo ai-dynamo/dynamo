@@ -375,3 +375,33 @@ async def setup_sgl_metrics(
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")
     return publisher, task, metrics_labels
+
+
+async def handle_non_leader_node(
+    engine: sgl.Engine,
+    publisher: DynamoSglangPublisher,
+    metrics_task: asyncio.Task,
+) -> None:
+    """
+    Handle non-leader node (node_rank >= 1) in multi-node deployments.
+
+    Non-leader nodes run scheduler processes but don't handle requests directly.
+    They still need:
+    - KV event publishing (subscribe to local DP ranks, forward to NATS)
+    - Metrics collection from local schedulers
+    - Prometheus metrics exposure
+    """
+    logging.info(
+        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
+        "Running with metrics and KV event publishing for local DP ranks."
+    )
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            pass
+        publisher.cleanup()

@@ -19,23 +19,34 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
     LocalBlockHash(compute_hash(data))
 }
 
-/// Compute the hash for a sequence of tokens, optionally including multimodal metadata.
+/// Compute the hash for a sequence of tokens, optionally including multimodal metadata
+/// and LoRA adapter identity.
 ///
 /// When multimodal extra info is provided, the mm_hashes are included in the hash computation
 /// to ensure that blocks with identical tokens but different multimodal objects produce
 /// different hashes.
+///
+/// When `lora_name` is provided, the adapter name is mixed into the XXH3 seed so that
+/// blocks cached under different LoRA adapters (or the base model) produce distinct hashes.
+/// Because LoRA identity applies uniformly to every block in a sequence, encoding it in the
+/// seed is more efficient than appending per-block bytes and matches the approach used by
+/// KVBM's `SaltHash`.
 pub fn compute_block_hash_for_seq(
     tokens: &[u32],
     kv_block_size: u32,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+    lora_name: Option<&str>,
 ) -> Vec<LocalBlockHash> {
+    let seed = match lora_name.filter(|n| !n.is_empty()) {
+        Some(name) => XXH3_SEED.wrapping_add(xxh3::xxh3_64(name.as_bytes())),
+        None => XXH3_SEED,
+    };
     tokens
         .chunks_exact(kv_block_size as usize)
         .enumerate()
         .map(|(block_idx, chunk)| {
             let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
 
-            // Include MM hashes in the block hash computation if present
             if let Some(mm_infos) = block_mm_infos
                 && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
             {
@@ -51,7 +62,7 @@ pub fn compute_block_hash_for_seq(
                 }
             }
 
-            compute_block_hash(&bytes)
+            LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed))
         })
         .collect()
 }
@@ -176,13 +187,13 @@ pub struct ActiveLoad {
     pub active_prefill_tokens: Option<u64>,
 }
 
-/// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
-/// lora_id of a block.
+/// A [`LocalBlockHash`] is a hash computed from the token IDs, optional multimodal metadata,
+/// and optional LoRA adapter name of a block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct LocalBlockHash(pub u64);
 
-/// A sequence aware hash of a block where the hash is computed from the tokens_ids, extra_token_ids
-/// and the optional lora_id of a block, PLUS the hash of the parent block.
+/// A sequence-aware hash of a block computed by the engine from token IDs, optional metadata,
+/// and the hash of the parent block.
 ///
 /// In this case, the hashing function is external and unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -575,6 +586,7 @@ pub struct TokensWithHashes {
     tokens: Vec<u32>,
     block_size: u32,
     block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+    lora_name: Option<String>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     seq_hashes: Option<Vec<SequenceHash>>,
 }
@@ -586,6 +598,7 @@ impl TokensWithHashes {
             tokens,
             block_size,
             block_mm_infos: None,
+            lora_name: None,
             block_hashes: None,
             seq_hashes: None,
         }
@@ -594,6 +607,12 @@ impl TokensWithHashes {
     /// Adds multimodal extra info for blocks.
     pub fn with_mm_infos(mut self, infos: Vec<Option<BlockExtraInfo>>) -> Self {
         self.block_mm_infos = Some(infos);
+        self
+    }
+
+    /// Sets the LoRA adapter name for hash computation.
+    pub fn with_lora_name(mut self, name: String) -> Self {
+        self.lora_name = Some(name);
         self
     }
 
@@ -629,6 +648,7 @@ impl TokensWithHashes {
                 &self.tokens,
                 self.block_size,
                 self.block_mm_infos.as_deref(),
+                self.lora_name.as_deref(),
             ));
         }
         self.block_hashes.as_ref().unwrap()
@@ -708,20 +728,65 @@ mod tests {
     #[case(32)]
     #[case(64)]
     fn test_compute_block_hash_for_seq(#[case] kv_block_size: u32) {
-        // create a sequence of kv_block_size elements
         let sequence = (0..kv_block_size).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
         assert_eq!(hashes.len(), 1);
 
-        // create a sequence of kv_block_size + 1 elements
         let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
         assert_eq!(hashes.len(), 1);
 
-        // create a sequence of 2 * kv_block_size + 1 elements
         let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
         assert_eq!(hashes.len(), 2);
+    }
+
+    #[test]
+    fn test_lora_name_produces_different_hash() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
+        let lora_a = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-a"));
+        let lora_b = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-b"));
+
+        assert_ne!(base[0], lora_a[0]);
+        assert_ne!(base[0], lora_b[0]);
+        assert_ne!(lora_a[0], lora_b[0]);
+    }
+
+    #[test]
+    fn test_lora_name_none_matches_legacy() {
+        let tokens: Vec<u32> = (0..8).collect();
+        let hashes_none = compute_block_hash_for_seq(&tokens, 4, None, None);
+        let hashes_none2 = compute_block_hash_for_seq(&tokens, 4, None, None);
+        assert_eq!(hashes_none, hashes_none2);
+    }
+
+    #[test]
+    fn test_lora_name_empty_string_normalized_to_none() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
+        let empty = compute_block_hash_for_seq(&tokens, 4, None, Some(""));
+        assert_eq!(
+            base, empty,
+            "empty lora_name should be treated as base model"
+        );
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_lora() {
+        let tokens: Vec<u32> = (0..8).collect();
+
+        let mut base = TokensWithHashes::new(tokens.clone(), 4);
+        let base_hashes = base.get_or_compute_block_hashes().to_vec();
+
+        let mut with_lora =
+            TokensWithHashes::new(tokens, 4).with_lora_name("my-adapter".to_string());
+        let lora_hashes = with_lora.get_or_compute_block_hashes().to_vec();
+
+        assert_eq!(base_hashes.len(), lora_hashes.len());
+        for (b, l) in base_hashes.iter().zip(lora_hashes.iter()) {
+            assert_ne!(b, l);
+        }
     }
 
     #[test]

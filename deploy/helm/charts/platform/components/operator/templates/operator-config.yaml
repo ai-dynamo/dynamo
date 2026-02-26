@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-config
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    apiVersion: operator.config.dynamo.nvidia.com/v1alpha1
+    kind: OperatorConfiguration
+    server:
+      metrics:
+        bindAddress: "127.0.0.1"
+    leaderElection:
+      enabled: true
+      id: {{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id | quote }}
+      {{- if .Values.namespaceRestriction.enabled }}
+      namespace: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
+      {{- else }}
+      namespace: {{ default "kube-system" .Values.controllerManager.leaderElection.namespace | quote }}
+      {{- end }}
+    {{- if .Values.namespaceRestriction.enabled }}
+    namespace:
+      restricted: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
+      {{- if .Values.namespaceRestriction.lease }}
+      {{- if or (ne (.Values.namespaceRestriction.lease.duration | toString) "30s") (ne (.Values.namespaceRestriction.lease.renewInterval | toString) "10s") }}
+      scope:
+        {{- if ne (.Values.namespaceRestriction.lease.duration | toString) "30s" }}
+        leaseDuration: {{ .Values.namespaceRestriction.lease.duration | quote }}
+        {{- end }}
+        {{- if ne (.Values.namespaceRestriction.lease.renewInterval | toString) "10s" }}
+        leaseRenewInterval: {{ .Values.namespaceRestriction.lease.renewInterval | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
+    orchestrators:
+      grove:
+        terminationDelay: {{ .Values.dynamo.groveTerminationDelay | quote }}
+    {{- end }}
+    {{- $natsAddr := "" }}
+    {{- if .Values.natsAddr }}
+      {{- $natsAddr = .Values.natsAddr }}
+    {{- else if and .Values.nats .Values.nats.enabled }}
+      {{- $natsAddr = printf "nats://%s-nats.%s.svc.cluster.local:4222" .Release.Name .Release.Namespace }}
+    {{- end }}
+    {{- $etcdAddr := "" }}
+    {{- if .Values.etcdAddr }}
+      {{- $etcdAddr = .Values.etcdAddr }}
+    {{- else if and .Values.global .Values.global.etcd .Values.global.etcd.install }}
+      {{- $etcdAddr = printf "%s-etcd.%s.svc.cluster.local:2379" .Release.Name .Release.Namespace }}
+    {{- end }}
+    {{- if or $natsAddr $etcdAddr .Values.modelExpressURL .Values.dynamo.metrics.prometheusEndpoint }}
+    infrastructure:
+      {{- if $natsAddr }}
+      natsAddress: {{ $natsAddr | quote }}
+      {{- end }}
+      {{- if $etcdAddr }}
+      etcdAddress: {{ $etcdAddr | quote }}
+      {{- end }}
+      {{- if .Values.modelExpressURL }}
+      modelExpressURL: {{ .Values.modelExpressURL | quote }}
+      {{- end }}
+      {{- if .Values.dynamo.metrics.prometheusEndpoint }}
+      prometheusEndpoint: {{ .Values.dynamo.metrics.prometheusEndpoint | quote }}
+      {{- end }}
+    {{- end }}
+    {{- $vsGateway := "" }}
+    {{- if and (hasKey .Values.dynamo "istio") .Values.dynamo.istio .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}
+      {{- $vsGateway = .Values.dynamo.istio.gateway }}
+    {{- end }}
+    {{- $ingressClassName := "" }}
+    {{- $ingressTLSSecret := "" }}
+    {{- if and (hasKey .Values.dynamo "ingress") .Values.dynamo.ingress .Values.dynamo.ingress.enabled }}
+      {{- $ingressClassName = .Values.dynamo.ingress.className }}
+      {{- $ingressTLSSecret = .Values.dynamo.ingress.tlsSecretName }}
+    {{- end }}
+    {{- $ingressHostSuffix := "" }}
+    {{- if and (hasKey .Values.dynamo "ingressHostSuffix") .Values.dynamo.ingressHostSuffix }}
+      {{- $ingressHostSuffix = .Values.dynamo.ingressHostSuffix }}
+    {{- end }}
+    {{- if or $vsGateway $ingressClassName $ingressTLSSecret $ingressHostSuffix }}
+    ingress:
+      {{- if $vsGateway }}
+      virtualServiceGateway: {{ $vsGateway | quote }}
+      {{- end }}
+      {{- if $ingressClassName }}
+      controllerClassName: {{ $ingressClassName | quote }}
+      {{- end }}
+      {{- if $ingressTLSSecret }}
+      controllerTLSSecretName: {{ $ingressTLSSecret | quote }}
+      {{- end }}
+      {{- if $ingressHostSuffix }}
+      hostSuffix: {{ $ingressHostSuffix | quote }}
+      {{- end }}
+    {{- end }}
+    {{- if not .Values.namespaceRestriction.enabled }}
+    rbac:
+      plannerClusterRoleName: {{ include "dynamo-operator.fullname" . }}-planner
+      dgdrProfilingClusterRoleName: {{ include "dynamo-operator.fullname" . }}-dgdr-profiling
+      eppClusterRoleName: {{ include "dynamo-operator.fullname" . }}-epp
+    {{- end }}
+    {{- if .Values.dynamo.mpiRun.secretName }}
+    mpi:
+      sshSecretName: {{ .Values.dynamo.mpiRun.secretName | quote }}
+      sshSecretNamespace: {{ .Release.Namespace | quote }}
+    {{- end }}
+    {{- if .Values.checkpoint.enabled }}
+    checkpoint:
+      enabled: true
+      {{- if ne (.Values.checkpoint.readyForCheckpointFilePath | toString) "/tmp/ready-for-checkpoint" }}
+      readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
+      {{- end }}
+      storage:
+        {{- if ne (.Values.checkpoint.storage.type | toString) "pvc" }}
+        type: {{ .Values.checkpoint.storage.type | quote }}
+        {{- end }}
+        {{- if eq .Values.checkpoint.storage.type "pvc" }}
+        {{- if or (ne (.Values.checkpoint.storage.pvc.pvcName | toString) "chrek-pvc") (ne (.Values.checkpoint.storage.pvc.basePath | toString) "/checkpoints") }}
+        pvc:
+          {{- if ne (.Values.checkpoint.storage.pvc.pvcName | toString) "chrek-pvc" }}
+          pvcName: {{ .Values.checkpoint.storage.pvc.pvcName | quote }}
+          {{- end }}
+          {{- if ne (.Values.checkpoint.storage.pvc.basePath | toString) "/checkpoints" }}
+          basePath: {{ .Values.checkpoint.storage.pvc.basePath | quote }}
+          {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if eq .Values.checkpoint.storage.type "s3" }}
+        s3:
+          uri: {{ .Values.checkpoint.storage.s3.uri | quote }}
+          {{- if .Values.checkpoint.storage.s3.credentialsSecretRef }}
+          credentialsSecretRef: {{ .Values.checkpoint.storage.s3.credentialsSecretRef | quote }}
+          {{- end }}
+        {{- end }}
+        {{- if eq .Values.checkpoint.storage.type "oci" }}
+        oci:
+          uri: {{ .Values.checkpoint.storage.oci.uri | quote }}
+          {{- if .Values.checkpoint.storage.oci.credentialsSecretRef }}
+          credentialsSecretRef: {{ .Values.checkpoint.storage.oci.credentialsSecretRef | quote }}
+          {{- end }}
+        {{- end }}
+    {{- end }}
+    {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}
+    discovery:
+      backend: {{ .Values.discoveryBackend | quote }}
+    {{- end }}
+    {{- if .Values.namespaceRestriction.enabled }}
+    gpu:
+      discoveryEnabled: {{ .Values.gpuDiscovery.enabled }}
+    {{- end }}

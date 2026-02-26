@@ -4,8 +4,6 @@
 title: Planner
 ---
 
-# Planner
-
 The Planner monitors system performance and automatically scales prefill/decode workers to meet latency SLAs. It runs as a component inside the Dynamo inference graph on Kubernetes.
 
 The SLA Planner supports two scaling modes:
@@ -25,9 +23,9 @@ When both modes are enabled, throughput-based scaling provides a lower bound on 
 | Disaggregated | Supported | Supported |
 | Aggregated | Unsupported | Supported |
 | **LLM Framework** | | |
-| vLLM | Supported | Supported |
-| TensorRT-LLM | Supported | Supported |
 | SGLang | Supported | Supported |
+| TensorRT-LLM | Supported | Supported |
+| vLLM | Supported | Supported |
 | **Requires Profiling Data** | Yes | No |
 | **Load Predictors** | ARIMA, Prophet, Kalman, Constant | N/A |
 | **Connectors** | | |
@@ -98,7 +96,7 @@ kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
 |----------|---------|-------------|
 | **Common** | | |
 | `--namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
-| `--backend` | `vllm` | Backend framework (`vllm`, `sglang`, `trtllm`) |
+| `--backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
 | `--mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
 | `--environment` | `kubernetes` | Deployment environment |
 | `--ttft` | `500.0` | Target Time To First Token (ms) |

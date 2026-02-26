@@ -4,8 +4,6 @@
 title: Tuning Disaggregated Performance
 ---
 
-# Disaggregation and Performance Tuning
-
 Disaggregation gains performance by separating the prefill and decode into different engines to reduce interferences between the two.
 However, performant disaggregation requires careful tuning of the inference parameters.
 Specifically, there are three sets of parameters that needs to be tuned:
