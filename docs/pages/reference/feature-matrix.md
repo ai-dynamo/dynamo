@@ -108,9 +108,9 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 
 {/* Backend READMEs — paths relative to rendered URL /getting-started/feature-matrix */}
-[vllm-readme]: ../components/backends/v-llm
-[sglang-readme]: ../components/backends/sg-lang
-[trtllm-readme]: ../components/backends/tensor-rt-llm
+[vllm-readme]: ../backends/v-llm
+[sglang-readme]: ../backends/sg-lang
+[trtllm-readme]: ../backends/tensor-rt-llm
 
 {/* Design Docs */}
 [disagg]: ../design-docs/disaggregated-serving
