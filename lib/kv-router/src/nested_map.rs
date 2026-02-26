@@ -147,6 +147,9 @@ impl SyncIndexer for PositionalIndexer {
                         tracing::warn!("Failed to apply event: {:?}", e);
                     }
                 }
+                WorkerTask::RemoveWorker(worker_id) => {
+                    self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
+                }
                 WorkerTask::DumpEvents(sender) => {
                     let events = self.dump_events(&worker_blocks);
                     if let Err(e) = sender.send(Ok(events)) {
@@ -353,6 +356,13 @@ impl PositionalIndexer {
             if keep_worker {
                 // Re-insert worker with empty map to keep it tracked
                 worker_blocks.insert(worker, FxHashMap::default());
+                // Reset tree size to 0 but keep the entry so scoring remains consistent.
+                if let Some(size) = self.tree_sizes.get(&worker) {
+                    size.store(0, Ordering::Relaxed);
+                }
+            } else {
+                // Fully remove the worker from tree_sizes.
+                self.tree_sizes.remove(&worker);
             }
         }
     }
@@ -374,6 +384,10 @@ impl PositionalIndexer {
             blocks.sort_unstable_by_key(|(pos, _, _)| *pos);
 
             // Track one valid seq_hash per position for parent_hash synthesis.
+            // Note: The synthesized parent_hash doesn't need to be the true logical
+            // parent — during replay it's only used to derive `start_pos = parent.position + 1`,
+            // so any seq_hash at the previous position is sufficient. The PositionalIndexer
+            // is position-based, not tree-topology-based.
             let mut last_at_position: FxHashMap<usize, ExternalSequenceBlockHash> =
                 FxHashMap::default();
 

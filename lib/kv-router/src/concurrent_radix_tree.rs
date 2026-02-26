@@ -121,6 +121,16 @@ impl Drop for ConcurrentRadixTree {
             let mut root = self.root.write();
             stack.extend(root.children.drain().map(|(_, v)| v));
         }
+
+        // Iteratively drop blocks to avoid stack overflow on deep trees.
+        // Without this loop, dropping `stack` would recursively drop each
+        // Arc<RwLock<Block>> through its `children` map.
+        while let Some(block) = stack.pop() {
+            if let Ok(rwlock) = Arc::try_unwrap(block) {
+                let mut inner = rwlock.into_inner();
+                stack.extend(inner.children.drain().map(|(_, v)| v));
+            }
+        }
     }
 }
 
@@ -609,6 +619,9 @@ impl SyncIndexer for ConcurrentRadixTree {
                     if let Err(e) = self.apply_event(&mut lookup, event) {
                         tracing::warn!("Failed to apply event: {:?}", e);
                     }
+                }
+                WorkerTask::RemoveWorker(worker_id) => {
+                    self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
                 }
                 WorkerTask::DumpEvents(sender) => {
                     let events = self.dump_tree_as_events(&lookup);

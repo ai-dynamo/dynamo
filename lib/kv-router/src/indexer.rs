@@ -361,6 +361,8 @@ pub trait KvIndexerInterface {
 
 pub enum WorkerTask {
     Event(RouterEvent),
+    /// Permanently remove a worker from tracking (keep_worker: false).
+    RemoveWorker(WorkerId),
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
     Terminate,
 }
@@ -414,8 +416,8 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Counter for round-robin assignment of new WorkerIds.
     worker_assignment_count: AtomicUsize,
 
-    /// Channels to send events to worker threads (one per thread).
-    /// Sending `None` signals the thread to shut down.
+    /// Channels to send tasks to worker threads (one per thread).
+    /// Sending `WorkerTask::Terminate` signals the thread to shut down.
     worker_event_channels: Vec<flume::Sender<WorkerTask>>,
 
     /// Number of worker threads.
@@ -534,16 +536,32 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
-        let event = KvCacheEvent {
-            event_id: 0,
-            data: KvCacheEventData::Cleared,
-            dp_rank: 0,
-        };
-        self.apply_event(RouterEvent::new(worker_id, event)).await;
+        // Route to the worker's assigned thread (if any), otherwise broadcast
+        // to all threads since dp_ranks may be spread across threads.
+        let thread_idx = self.worker_assignments.get(&worker_id).map(|v| *v);
+        match thread_idx {
+            Some(idx) => {
+                if let Err(e) =
+                    self.worker_event_channels[idx].send(WorkerTask::RemoveWorker(worker_id))
+                {
+                    tracing::error!(
+                        "Failed to send RemoveWorker to worker thread {}: {:?}",
+                        idx,
+                        e
+                    );
+                }
+            }
+            None => {
+                // Worker was never assigned a thread - broadcast to all
+                for channel in &self.worker_event_channels {
+                    let _ = channel.send(WorkerTask::RemoveWorker(worker_id));
+                }
+            }
+        }
     }
 
     fn shutdown(&self) {
-        // Send shutdown signal (None) to all worker threads
+        // Send shutdown signal to all worker threads
         for channel in self.worker_event_channels.iter() {
             let _ = channel.send(WorkerTask::Terminate);
         }
