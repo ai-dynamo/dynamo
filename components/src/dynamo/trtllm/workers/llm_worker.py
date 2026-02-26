@@ -188,6 +188,14 @@ async def init_llm_worker(
         "kv_connector_config": kv_connector_config,
     }
 
+    # Add guided decoding backend if specified
+    if config.guided_decoding_backend is not None:
+        arg_map["guided_decoding_backend"] = config.guided_decoding_backend
+        logging.info(
+            "Guided decoding enabled with backend: %s",
+            config.guided_decoding_backend,
+        )
+
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)

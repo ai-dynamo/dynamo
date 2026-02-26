@@ -106,28 +106,27 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 ---
 
-## Source References
 
 {/* Backend READMEs */}
-[vllm-readme]: docs/backends/vllm/README.md
-[sglang-readme]: docs/backends/sglang/README.md
-[trtllm-readme]: docs/backends/trtllm/README.md
+[vllm-readme]: ../backends/vllm
+[sglang-readme]: ../backends/sglang
+[trtllm-readme]: ../backends/trtllm
 
 {/* Design Docs */}
-[disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/components/router/router_guide.md
-[planner]: docs/components/planner/README.md
-[kvbm]: docs/components/kvbm/README.md
-[migration]: docs/fault_tolerance/request_migration.md
-[tools]: docs/agents/tool-calling.md
+[disagg]: ../design-docs/disagg-serving
+[kv-routing]: ../components/router/router-guide
+[planner]: ../components/planner
+[kvbm]: ../components/kvbm
+[migration]: ../fault-tolerance/request-migration
+[tools]: ../agents/tool-calling
 
 {/* Multimodal */}
-[mm]: docs/features/multimodal/README.md
-[mm-vllm]: docs/features/multimodal/multimodal_vllm.md
-[mm-trtllm]: docs/features/multimodal/multimodal_trtllm.md
-[mm-sglang]: docs/features/multimodal/multimodal_sglang.md
+[mm]: ../features/multimodal
+[mm-vllm]: ../features/multimodal/multimodal-vllm
+[mm-trtllm]: ../features/multimodal/multimodal-trtllm
+[mm-sglang]: ../features/multimodal/multimodal-sglang
 
 {/* Feature-specific */}
-[lora]: docs/kubernetes/deployment/dynamomodel-guide.md
-[vllm-spec]: docs/features/speculative_decoding/speculative_decoding_vllm.md
-[trtllm-eagle]: docs/backends/trtllm/llama4_plus_eagle.md
+[lora]: ../kubernetes/deployment/dynamomodel-guide
+[vllm-spec]: ../features/speculative-decoding/speculative-decoding-vllm
+[trtllm-eagle]: ../backends/trtllm/llama4-plus-eagle

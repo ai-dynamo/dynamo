@@ -214,11 +214,10 @@ Dynamo supports video generation using diffusion models through the `--modality 
 
 ### Requirements
 
-- **visual_gen**: Part of TensorRT-LLM, located at `tensorrt_llm/visual_gen/`. Currently available **only** on the [`feat/visual_gen`](https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen) branch (not yet merged to main or any release). Install from source:
+- **TensorRT-LLM with visual_gen**: The `visual_gen` module is part of TensorRT-LLM (`tensorrt_llm._torch.visual_gen`). Install TensorRT-LLM following the [official instructions](https://github.com/NVIDIA/TensorRT-LLM#installation).
+- **imageio with ffmpeg**: Required for encoding generated frames to MP4 video:
   ```bash
-  git clone https://github.com/NVIDIA/TensorRT-LLM.git
-  cd TensorRT-LLM && git checkout feat/visual_gen
-  cd tensorrt_llm/visual_gen && pip install -e .
+  pip install imageio[ffmpeg]
   ```
 - **dynamo-runtime with video API**: The Dynamo runtime must include `ModelType.Videos` support. Ensure you're using a compatible version.
 
