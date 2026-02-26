@@ -17,6 +17,8 @@ pub mod speculative_prefill;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
+
+use crate::http::service::error::HttpError;
 use dynamo_async_openai::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
@@ -146,6 +148,8 @@ pub struct OpenAIPreprocessor {
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
     media_loader: Option<MediaLoader>,
+    /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
+    context_length: u32,
 }
 
 impl OpenAIPreprocessor {
@@ -185,6 +189,8 @@ impl OpenAIPreprocessor {
             None => None,
         };
 
+        let context_length = mdc.context_length;
+
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -194,6 +200,7 @@ impl OpenAIPreprocessor {
             runtime_config,
             tool_call_parser,
             media_loader,
+            context_length,
         }))
     }
     /// Encode a string to it's tokens
@@ -431,16 +438,19 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> Result<HashMap<String, String>> {
         let mut annotations = HashMap::new();
+        let mut token_count: Option<usize> = None;
         // match request type before any conversion/processing
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
                 if let Some(token_input) = request.extract_tokens() {
                     match token_input {
                         TokenInput::Single(tokens) => {
+                            token_count = Some(tokens.len());
                             builder.token_ids(tokens);
                         }
                         TokenInput::Batch(token_batches) => {
                             if token_batches.len() == 1 {
+                                token_count = Some(token_batches[0].len());
                                 builder.token_ids(token_batches[0].clone());
                             } else {
                                 bail!(
@@ -505,12 +515,15 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
+                            token_count = Some(tokens_vec.len());
                             builder.token_ids(tokens_vec);
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
                                 let encoding = self.encode_with_timing(&texts[0], tracker)?;
-                                builder.token_ids(encoding.token_ids().to_vec());
+                                let tokens = encoding.token_ids().to_vec();
+                                token_count = Some(tokens.len());
+                                builder.token_ids(tokens);
                             } else {
                                 bail!(
                                     "Batch text input not supported for more than one text in requests (got {})",
@@ -522,6 +535,24 @@ impl OpenAIPreprocessor {
                 }
             }
         }
+
+        // Validate prompt token count against model's context length
+        if let Some(count) = token_count {
+            let max_len = self.context_length as usize;
+            if max_len > 0 && count > max_len {
+                return Err(HttpError {
+                    code: 400,
+                    message: format!(
+                        "This model's maximum context length is {} tokens. \
+                         However, your messages resulted in {} tokens. \
+                         Please reduce the length of the messages.",
+                        max_len, count,
+                    ),
+                }
+                .into());
+            }
+        }
+
         Ok(annotations)
     }
 
