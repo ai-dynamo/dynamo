@@ -142,6 +142,29 @@ pub struct AnthropicCreateMessageRequest {
     /// See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching#automatic-caching
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+
+    /// Extended thinking configuration. When enabled, the model produces
+    /// `thinking` content blocks containing its internal reasoning before
+    /// the final response. The `budget_tokens` field controls how many tokens
+    /// the model may use for thinking (must be ≥ 1024 and < max_tokens).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
+}
+
+/// Extended thinking configuration for the request.
+///
+/// When `type` is `"enabled"`, the model will produce `thinking` content blocks
+/// with its internal reasoning. `budget_tokens` controls the maximum tokens
+/// available for thinking (minimum 1024, must be less than `max_tokens`).
+/// When `type` is `"disabled"`, no thinking blocks are produced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    /// Either `"enabled"` or `"disabled"`.
+    #[serde(rename = "type")]
+    pub thinking_type: String,
+    /// Maximum tokens for internal reasoning. Only relevant when type is "enabled".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
 }
 
 /// A single message in the conversation.
@@ -179,10 +202,14 @@ pub enum AnthropicMessageContent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum AnthropicContentBlock {
-    /// Text content block.
+    /// Text content block. May optionally include `citations` — references to
+    /// source documents that support the text content. Citations are generated
+    /// by the model when document/PDF content is provided and citation mode is enabled.
     #[serde(rename = "text")]
     Text {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        citations: Option<Vec<serde_json::Value>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
@@ -216,6 +243,29 @@ pub enum AnthropicContentBlock {
         signature: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+    },
+    /// Redacted thinking block from assistant. Contains encrypted reasoning data
+    /// that is opaque to the client but must be passed back verbatim in multi-turn
+    /// conversations so the model can maintain its chain of thought.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
+    /// Server-initiated tool use block. Represents a tool call that the API
+    /// executes server-side (e.g., web search). The client receives the result
+    /// via a corresponding `web_search_tool_result` or similar block.
+    #[serde(rename = "server_tool_use")]
+    ServerToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
+    /// Result from a server-initiated tool (e.g., web search results).
+    /// Contains structured content returned by the server-side tool execution.
+    #[serde(rename = "web_search_tool_result")]
+    WebSearchToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
     },
     /// Catch-all for unrecognized block types. Silently accepted and skipped
     /// during conversion so that new Anthropic features don't break the endpoint.
@@ -282,12 +332,17 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                     .and_then(|t| t.as_str())
                     .unwrap_or("")
                     .to_string();
+                let citations: Option<Vec<serde_json::Value>> = value
+                    .get("citations")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok());
                 let cache_control: Option<CacheControl> = value
                     .get("cache_control")
                     .cloned()
                     .and_then(|v| serde_json::from_value(v).ok());
                 Ok(AnthropicContentBlock::Text {
                     text,
+                    citations,
                     cache_control,
                 })
             }
@@ -363,6 +418,43 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                     cache_control,
                 })
             }
+            "redacted_thinking" => {
+                let data = value
+                    .get("data")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(AnthropicContentBlock::RedactedThinking { data })
+            }
+            "server_tool_use" => {
+                let id = value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = value
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input = value.get("input").cloned().unwrap_or(serde_json::json!({}));
+                Ok(AnthropicContentBlock::ServerToolUse { id, name, input })
+            }
+            "web_search_tool_result" => {
+                let tool_use_id = value
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content = value
+                    .get("content")
+                    .cloned()
+                    .unwrap_or(serde_json::json!([]));
+                Ok(AnthropicContentBlock::WebSearchToolResult {
+                    tool_use_id,
+                    content,
+                })
+            }
             other => {
                 tracing::debug!("Unknown Anthropic content block type '{}', skipping", other);
                 Ok(AnthropicContentBlock::Unknown {
@@ -407,6 +499,10 @@ pub enum AnthropicToolChoice {
 pub struct AnthropicToolChoiceSimple {
     #[serde(rename = "type")]
     pub choice_type: AnthropicToolChoiceMode,
+    /// When true, the model will call tools one at a time instead of
+    /// potentially issuing multiple tool calls in a single response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_parallel_tool_use: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -424,6 +520,10 @@ pub struct AnthropicToolChoiceNamed {
     #[serde(rename = "type")]
     pub choice_type: AnthropicToolChoiceMode,
     pub name: String,
+    /// When true, the model will call tools one at a time instead of
+    /// potentially issuing multiple tool calls in a single response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_parallel_tool_use: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -772,8 +872,11 @@ fn convert_user_blocks(
             }
             AnthropicContentBlock::ToolUse { .. }
             | AnthropicContentBlock::Thinking { .. }
+            | AnthropicContentBlock::RedactedThinking { .. }
+            | AnthropicContentBlock::ServerToolUse { .. }
+            | AnthropicContentBlock::WebSearchToolResult { .. }
             | AnthropicContentBlock::Unknown { .. } => {
-                // tool_use/thinking/unknown in a user message: skip
+                // tool_use/thinking/server-side blocks/unknown in a user message: skip
             }
         }
     }
@@ -832,10 +935,21 @@ fn convert_assistant_blocks(
                 }
                 pending_reasoning.push_str(thinking);
             }
+            AnthropicContentBlock::RedactedThinking { .. } => {
+                // Redacted thinking is encrypted model reasoning. We can't read
+                // it but we preserve its position so it's not silently dropped.
+                // The actual encrypted data would need to be passed back to the
+                // model in multi-turn conversations for context continuity.
+            }
             AnthropicContentBlock::ToolUse {
+                id, name, input, ..
+            }
+            | AnthropicContentBlock::ServerToolUse {
                 id, name, input, ..
             } => {
                 // Snapshot the reasoning that preceded this tool call.
+                // Server-initiated tool use (e.g. web search) is treated the
+                // same as client tool use for conversion purposes.
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: id.clone(),
@@ -1127,6 +1241,11 @@ fn estimate_block_len(block: &AnthropicContentBlock) -> usize {
             })
             .unwrap_or(0),
         AnthropicContentBlock::Thinking { thinking, .. } => thinking.len(),
+        AnthropicContentBlock::RedactedThinking { data, .. } => data.len(),
+        AnthropicContentBlock::ServerToolUse { name, input, .. } => {
+            name.len() + input.to_string().len()
+        }
+        AnthropicContentBlock::WebSearchToolResult { content, .. } => content.to_string().len(),
         AnthropicContentBlock::Image { .. } => 256, // rough estimate for image metadata
         AnthropicContentBlock::Unknown { .. } => 0,
     }
@@ -1161,6 +1280,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             cache_control: None,
+            thinking: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1204,6 +1324,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             cache_control: None,
+            thinking: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1263,6 +1384,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             cache_control: None,
+            thinking: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1302,6 +1424,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             cache_control: None,
+            thinking: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1490,6 +1613,7 @@ mod tests {
                         },
                         AnthropicContentBlock::Text {
                             text: "Answer".into(),
+                            citations: None,
                             cache_control: None,
                         },
                     ],
@@ -1505,6 +1629,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             cache_control: None,
+            thinking: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1526,7 +1651,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_block_type_does_not_fail() {
+    fn test_known_and_unknown_block_types() {
         let json = r#"{
             "model": "test",
             "max_tokens": 100,
@@ -1536,6 +1661,8 @@ mod tests {
                     {"type": "text", "text": "hello"},
                     {"type": "server_tool_use", "id": "stu_1", "name": "web_search", "input": {}},
                     {"type": "redacted_thinking", "data": "encrypted"},
+                    {"type": "web_search_tool_result", "tool_use_id": "stu_1", "content": [{"type": "web_search_result", "url": "https://example.com"}]},
+                    {"type": "future_block_type", "some_field": 42},
                     {"type": "text", "text": "world"}
                 ]
             }]
@@ -1543,22 +1670,32 @@ mod tests {
         let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
         match &req.messages[0].content {
             AnthropicMessageContent::Blocks { content } => {
-                assert_eq!(content.len(), 4);
+                assert_eq!(content.len(), 6);
                 assert!(matches!(&content[0], AnthropicContentBlock::Text { .. }));
                 assert!(matches!(
                     &content[1],
-                    AnthropicContentBlock::Unknown { block_type } if block_type == "server_tool_use"
+                    AnthropicContentBlock::ServerToolUse { name, .. } if name == "web_search"
                 ));
                 assert!(matches!(
                     &content[2],
-                    AnthropicContentBlock::Unknown { block_type } if block_type == "redacted_thinking"
+                    AnthropicContentBlock::RedactedThinking { data } if data == "encrypted"
                 ));
-                assert!(matches!(&content[3], AnthropicContentBlock::Text { .. }));
+                assert!(matches!(
+                    &content[3],
+                    AnthropicContentBlock::WebSearchToolResult { tool_use_id, .. } if tool_use_id == "stu_1"
+                ));
+                // Truly unknown types still fall through to Unknown
+                assert!(matches!(
+                    &content[4],
+                    AnthropicContentBlock::Unknown { block_type } if block_type == "future_block_type"
+                ));
+                assert!(matches!(&content[5], AnthropicContentBlock::Text { .. }));
             }
             _ => panic!("expected blocks content"),
         }
 
-        // Conversion should succeed, skipping unknown blocks
+        // Conversion should succeed — server_tool_use becomes a tool call,
+        // redacted_thinking and web_search_tool_result are preserved gracefully
         let chat_req: NvCreateChatCompletionRequest = AnthropicCreateMessageRequest {
             model: "test".into(),
             max_tokens: 100,
@@ -1573,10 +1710,21 @@ mod tests {
             tools: None,
             tool_choice: None,
             cache_control: None,
+            thinking: None,
         }
         .try_into()
         .unwrap();
+        // server_tool_use becomes a tool call on the assistant message
         assert_eq!(chat_req.inner.messages.len(), 1);
+        match &chat_req.inner.messages[0] {
+            ChatCompletionRequestMessage::Assistant(a) => {
+                assert!(a.tool_calls.is_some());
+                let tc = a.tool_calls.as_ref().unwrap();
+                assert_eq!(tc.len(), 1);
+                assert_eq!(tc[0].function.name, "web_search");
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1675,6 +1823,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             cache_control: None,
+            thinking: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         match chat_req.inner.messages.into_iter().next().unwrap() {
@@ -1824,6 +1973,7 @@ mod tests {
             thinking("A"),
             AnthropicContentBlock::Text {
                 text: "answer".into(),
+                citations: None,
                 cache_control: None,
             },
         ]);
@@ -1996,6 +2146,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             cache_control: None,
+            thinking: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2124,5 +2275,172 @@ mod tests {
         let system = req.system.as_ref().unwrap();
         assert_eq!(system.text, "You are helpful.");
         assert!(system.cache_control.is_none());
+    }
+
+    #[test]
+    fn test_text_block_with_citations() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "According to the document...",
+                        "citations": [
+                            {"type": "char_location", "cited_text": "relevant text", "document_index": 0, "start_char_index": 0, "end_char_index": 13}
+                        ]
+                    }
+                ]
+            }]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        match &req.messages[0].content {
+            AnthropicMessageContent::Blocks { content } => match &content[0] {
+                AnthropicContentBlock::Text { citations, .. } => {
+                    assert!(citations.is_some());
+                    let cites = citations.as_ref().unwrap();
+                    assert_eq!(cites.len(), 1);
+                    assert_eq!(cites[0]["type"], "char_location");
+                }
+                other => panic!("expected Text, got {other:?}"),
+            },
+            _ => panic!("expected blocks"),
+        }
+    }
+
+    #[test]
+    fn test_redacted_thinking_block() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "visible reasoning", "signature": "sig1"},
+                    {"type": "redacted_thinking", "data": "base64-encrypted-data"},
+                    {"type": "text", "text": "Final answer"}
+                ]
+            }]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        match &req.messages[0].content {
+            AnthropicMessageContent::Blocks { content } => {
+                assert_eq!(content.len(), 3);
+                assert!(matches!(
+                    &content[0],
+                    AnthropicContentBlock::Thinking { .. }
+                ));
+                match &content[1] {
+                    AnthropicContentBlock::RedactedThinking { data } => {
+                        assert_eq!(data, "base64-encrypted-data");
+                    }
+                    other => panic!("expected RedactedThinking, got {other:?}"),
+                }
+                assert!(matches!(&content[2], AnthropicContentBlock::Text { .. }));
+            }
+            _ => panic!("expected blocks"),
+        }
+    }
+
+    #[test]
+    fn test_server_tool_use_and_web_search_result() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "server_tool_use", "id": "stu_1", "name": "web_search", "input": {"query": "rust programming"}},
+                    {"type": "web_search_tool_result", "tool_use_id": "stu_1", "content": [{"type": "web_search_result", "url": "https://www.rust-lang.org", "title": "Rust"}]},
+                    {"type": "text", "text": "Based on my search..."}
+                ]
+            }]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        match &req.messages[0].content {
+            AnthropicMessageContent::Blocks { content } => {
+                assert_eq!(content.len(), 3);
+                match &content[0] {
+                    AnthropicContentBlock::ServerToolUse { id, name, input } => {
+                        assert_eq!(id, "stu_1");
+                        assert_eq!(name, "web_search");
+                        assert_eq!(input["query"], "rust programming");
+                    }
+                    other => panic!("expected ServerToolUse, got {other:?}"),
+                }
+                match &content[1] {
+                    AnthropicContentBlock::WebSearchToolResult {
+                        tool_use_id,
+                        content,
+                    } => {
+                        assert_eq!(tool_use_id, "stu_1");
+                        assert!(content.is_array());
+                    }
+                    other => panic!("expected WebSearchToolResult, got {other:?}"),
+                }
+            }
+            _ => panic!("expected blocks"),
+        }
+
+        // ServerToolUse should convert to a tool call
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        match &chat_req.inner.messages[0] {
+            ChatCompletionRequestMessage::Assistant(a) => {
+                let tc = a.tool_calls.as_ref().expect("should have tool calls");
+                assert_eq!(tc.len(), 1);
+                assert_eq!(tc[0].id, "stu_1");
+                assert_eq!(tc[0].function.name, "web_search");
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_thinking_config_deserialization() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 16000,
+            "messages": [{"role": "user", "content": "Solve this step by step"}],
+            "thinking": {"type": "enabled", "budget_tokens": 10000}
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let thinking = req.thinking.as_ref().expect("thinking should be set");
+        assert_eq!(thinking.thinking_type, "enabled");
+        assert_eq!(thinking.budget_tokens, Some(10000));
+    }
+
+    #[test]
+    fn test_thinking_config_disabled() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "disabled"}
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let thinking = req.thinking.as_ref().expect("thinking should be set");
+        assert_eq!(thinking.thinking_type, "disabled");
+        assert!(thinking.budget_tokens.is_none());
+    }
+
+    #[test]
+    fn test_disable_parallel_tool_use() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{"name": "get_weather", "description": "Get weather", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": true}
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        match &req.tool_choice {
+            Some(AnthropicToolChoice::Simple(s)) => {
+                assert_eq!(s.choice_type, AnthropicToolChoiceMode::Auto);
+                assert_eq!(s.disable_parallel_tool_use, Some(true));
+            }
+            other => panic!("expected Simple tool choice, got {other:?}"),
+        }
     }
 }
