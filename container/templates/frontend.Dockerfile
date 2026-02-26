@@ -47,10 +47,9 @@ WORKDIR /
 COPY --chown=dynamo: --from=epp /epp /epp
 
 COPY --chown=dynamo: container/launch_message/frontend.txt /opt/dynamo/.launch_screen
-# Copy tests, benchmarks, deploy and components with correct ownership
+# Copy tests, deploy and components with correct ownership
 COPY --chown=dynamo: tests /workspace/tests
 COPY --chown=dynamo: examples /workspace/examples
-COPY --chown=dynamo: benchmarks /workspace/benchmarks
 COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: components/ /workspace/components/
 COPY --chown=dynamo: recipes/ /workspace/recipes/
@@ -105,10 +104,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
             exit 1; \
         fi; \
         uv pip install "$KVBM_WHEEL"; \
-    fi && \
-    cd /workspace/benchmarks && \
-    export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install .
+    fi
 
 # Setup environment for all users
 USER root

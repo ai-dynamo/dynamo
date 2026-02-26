@@ -870,7 +870,6 @@ _Appears in:_
 
 ProfilingConfigSpec defines configuration for the profiling process.
 This structure maps directly to the profile_sla.py config format.
-See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
 
 
 

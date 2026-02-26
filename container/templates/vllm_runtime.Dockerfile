@@ -189,8 +189,6 @@ ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
 # Copy attribution files
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -218,12 +216,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
             exit 1; \
         fi; \
         uv pip install "$KVBM_WHEEL"; \
-    fi && \
-    cd /workspace/benchmarks && \
-    export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install . && \
-    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
-    chmod -R g+w /workspace/benchmarks
+    fi
 
 
 # Install ModelExpress for P2P weight transfer (optional)

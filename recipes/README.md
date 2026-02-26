@@ -300,7 +300,6 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 - **[SGLang Backend Guide](../docs/pages/backends/sglang/README.md)** - SGLang-specific features
 - **[TensorRT-LLM Backend Guide](../docs/pages/backends/trtllm/README.md)** - TensorRT-LLM features
 - **[Observability](../docs/pages/kubernetes/observability/)** - Monitoring and logging
-- **[Benchmarking Guide](../docs/pages/benchmarks/benchmarking.md)** - Performance testing
 
 ## Contributing
 

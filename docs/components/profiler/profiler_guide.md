@@ -50,13 +50,7 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 
 ### Kubernetes Deployment (DGDR)
 
-The recommended deployment method is through DGDRs. Sample configurations are provided in `benchmarks/profiler/deploy/`:
-
-| Sample | Description |
-|--------|-------------|
-| `profile_sla_dgdr.yaml` | Standard online profiling with AIPerf |
-| `profile_sla_aic_dgdr.yaml` | Fast offline profiling with AI Configurator |
-| `profile_sla_moe_dgdr.yaml` | MoE model profiling (SGLang) |
+The recommended deployment method is through DGDRs.
 
 #### Container Images
 

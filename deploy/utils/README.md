@@ -104,10 +104,10 @@ kubectl cp ./configs/ $NAMESPACE/pvc-access-pod:/data/configs/
 
 ```bash
 # Download entire results directory
-kubectl cp $NAMESPACE/pvc-access-pod:/data/results ./benchmarks/results
+kubectl cp $NAMESPACE/pvc-access-pod:/data/results ./results
 
 # Download a specific subdirectory
-kubectl cp $NAMESPACE/pvc-access-pod:/data/results/benchmark-name ./benchmarks/results/benchmark-name
+kubectl cp $NAMESPACE/pvc-access-pod:/data/results/benchmark-name ./results/benchmark-name
 ```
 
 **Inspect profiling results (optional, for local inspection):**
@@ -143,8 +143,7 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 
 #### Next Steps
 
-For complete benchmarking and profiling workflows:
-- **Benchmarking Guide**: See [docs/pages/benchmarks/benchmarking.md](../../docs/pages/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
+For profiling workflows:
 - **Pre-Deployment Profiling**: See [docs/pages/components/profiler/profiler-guide.md](../../docs/pages/components/profiler/profiler-guide.md) for optimizing configurations before deployment
 
 ## Notes

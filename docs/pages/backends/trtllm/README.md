@@ -160,9 +160,6 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 
 ### Benchmarking
 
-To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
-
 ## KV Cache Transfer in Disaggregated Serving
 
 Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-transfer.md).
@@ -192,9 +189,6 @@ See [client](../sglang/README.md#testing-the-deployment) section to learn how to
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
 ## Benchmarking
-
-To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
 
 ## Multimodal support
 

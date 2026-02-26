@@ -106,4 +106,3 @@ See [`components/src/dynamo/vllm/handlers.py`](../vllm/handlers.py) for a refere
 - [Router Guide](/docs/pages/components/router/router-guide.md) - Configuration and tuning for KV-aware routing
 - [Router Design](/docs/pages/design-docs/router-design.md) - Architecture details and event transport modes
 - [Frontend Router](../frontend/README.md) - Main HTTP frontend with integrated routing
-- [Router Benchmarking](/benchmarks/router/README.md) - Performance testing and tuning

@@ -74,8 +74,6 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 
 For complete K8s examples and advanced configuration, see [K8s Examples](router-examples.md#k8s-examples).
 
-For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
-
 For more configuration options and tuning guidelines, see the [Router Guide](router-guide.md).
 
 ## Prerequisites and Limitations

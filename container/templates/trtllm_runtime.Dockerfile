@@ -200,7 +200,6 @@ ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -228,11 +227,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
             exit 1; \
         fi; \
         uv pip install "$KVBM_WHEEL"; \
-    fi && \
-    cd /workspace/benchmarks && \
-    UV_GIT_LFS=1 uv pip install --no-cache . && \
-    # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
-    chmod -R g+w /workspace/benchmarks
+    fi
 
 # Install common and test dependencies
 # --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels

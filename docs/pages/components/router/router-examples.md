@@ -110,9 +110,6 @@ For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployme
 - [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/agg_router.yaml)
 - [Distributed inference tutorial](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
 
-**For A/B Testing and Advanced K8s Setup:**
-See the comprehensive [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
-
 ### Example with Advanced Configuration
 
 ```yaml
