@@ -422,7 +422,7 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
                         try:
                             transfer_task = self.transfer_queue.get_nowait()
                         except asyncio.QueueEmpty:
-                            logger.info("No pending transfer task in the queue.")
+                            logger.debug("No pending transfer task in the queue.")
                             transfer_task = None
                             break
 
@@ -601,9 +601,10 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
 
             await asyncio.sleep(0.001)
             # Waited for too long without transfer completion, log for debugging
-            if (time.perf_counter() - start) > 3 and not logged:
-                logger.info(
-                    f"still waiting for transfer completion for tensor_id {tensor_id}"
+            timeout = 3
+            if (time.perf_counter() - start) > timeout and not logged:
+                logger.debug(
+                    f"still waiting for transfer completion for tensor_id {tensor_id} for more than {timeout} seconds"
                 )
                 logged = True
         logger.debug(
