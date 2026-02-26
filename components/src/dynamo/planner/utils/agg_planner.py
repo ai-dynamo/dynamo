@@ -107,6 +107,7 @@ class AggPlanner:
                 self.planner.connector,
                 require_prefill=False,
                 require_decode=True,
+                decode_component_name=self.planner.decode_component_name,
             )
 
             await self.planner.connector.wait_for_deployment_ready()

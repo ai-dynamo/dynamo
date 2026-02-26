@@ -200,6 +200,8 @@ def _initialize_gpu_counts(
     connector,
     require_prefill: bool,
     require_decode: bool,
+    prefill_component_name: Optional[str] = None,
+    decode_component_name: Optional[str] = None,
 ) -> None:
     """Initialize GPU counts from DGD (Kubernetes) or config (virtual).
 
@@ -216,6 +218,8 @@ def _initialize_gpu_counts(
             prefill_gpu, decode_gpu = connector.get_gpu_counts(
                 require_prefill=require_prefill,
                 require_decode=require_decode,
+                prefill_component_name=prefill_component_name,
+                decode_component_name=decode_component_name,
             )
             config.prefill_engine_num_gpu = prefill_gpu
             config.decode_engine_num_gpu = decode_gpu

@@ -172,6 +172,8 @@ class KubernetesConnector(PlannerConnector):
                 deployment,
                 require_prefill=require_prefill,
                 require_decode=require_decode,
+                prefill_component_name=prefill_component_name,
+                decode_component_name=decode_component_name,
             )
         except PlannerError as e:
             errors.append(str(e))
@@ -185,6 +187,8 @@ class KubernetesConnector(PlannerConnector):
         deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> str:
         """Get the model name from the deployment"""
         try:
@@ -201,12 +205,14 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_service_from_sub_component_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
                 )
                 prefill_model_name = prefill_service.get_model_name()
             if require_decode:
                 decode_service = get_service_from_sub_component_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
+                    component_name=decode_component_name,
                 )
                 decode_model_name = decode_service.get_model_name()
 
@@ -251,6 +257,8 @@ class KubernetesConnector(PlannerConnector):
         deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> tuple[int, int]:
         """Get the GPU counts for prefill and decode services from the deployment.
 
@@ -258,6 +266,8 @@ class KubernetesConnector(PlannerConnector):
             deployment: Optional deployment dict, fetched if not provided
             require_prefill: Whether to require prefill service
             require_decode: Whether to require decode service
+            prefill_component_name: Optional fallback service name for prefill
+            decode_component_name: Optional fallback service name for decode
 
         Returns:
             Tuple of (prefill_gpu_count, decode_gpu_count)
@@ -277,6 +287,7 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_service_from_sub_component_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
                 )
                 prefill_gpu_count = prefill_service.get_gpu_count()
             except (PlannerError, ValueError) as e:
@@ -287,6 +298,7 @@ class KubernetesConnector(PlannerConnector):
                 decode_service = get_service_from_sub_component_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
+                    component_name=decode_component_name,
                 )
                 decode_gpu_count = decode_service.get_gpu_count()
             except (PlannerError, ValueError) as e:
