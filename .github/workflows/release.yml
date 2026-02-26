@@ -71,9 +71,9 @@ jobs:
           echo "Detected version: ${VERSION}"
 
   # ============================================================================
-  # FRAMEWORK PIPELINES (Build -> Test -> Copy to ACR for ALL platforms)
-  # Uses build-test-distribute-flavor-matrix.yml directly (same engine as
-  # nightly and post-merge). Release copies both amd64+arm64 to ACR.
+  # FRAMEWORK PIPELINES (Build + Test + Distribute)
+  # Builds amd64+arm64 images, runs tests, copies amd64 to ACR.
+  # release-publish then copies both architectures from ECR to NGC.
   #
   # NOTE: Each job directly depends on [prepare-release, manual-approval] with
   # always() instead of going through an intermediate gate job. This avoids a
@@ -652,7 +652,7 @@ jobs:
           helm repo add "${REPO_ALIAS}" \
             --username='$oauthtoken' \
             --password="${NGC_TOKEN}" \
-            "${NGC_HELM_REPO}"
+            "${NGC_HELM_REPO}" > /dev/null 2>&1
 
           helm repo add nats https://nats-io.github.io/k8s/helm/charts/ || true
           helm repo add bitnami https://charts.bitnami.com/bitnami || true
@@ -675,7 +675,7 @@ jobs:
           CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
           echo "Pushing ${CHART_FILE} to NGC Helm registry..."
           helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
-          echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to \`${NGC_HELM_REPO}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
 
           helm repo remove "${REPO_ALIAS}"
 
