@@ -701,6 +701,40 @@ mod context_length_validation {
     }
 
     #[tokio::test]
+    async fn test_prompt_exactly_at_context_length_returns_400() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        // First, preprocess with a large context_length to discover the token count
+        mdc.context_length = 131072;
+        let preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
+        let request = make_chat_request(
+            r#"[{"role": "user", "content": "What is deep learning?"}]"#,
+            "test-model",
+        );
+        let (preprocessed, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+        let token_count = preprocessed.token_ids.len() as u32;
+
+        // Now set context_length to exactly the token count — no room for output
+        mdc.context_length = token_count;
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request(
+            r#"[{"role": "user", "content": "What is deep learning?"}]"#,
+            "test-model",
+        );
+
+        let result = preprocessor.preprocess_request(&request, None).await;
+
+        // Should reject: prompt fills entire context, no room for output
+        let err = result.expect_err("should reject prompt that fills entire context_length");
+        let http_err = err
+            .downcast_ref::<HttpError>()
+            .expect("error should be HttpError");
+        assert_eq!(http_err.code, 400);
+    }
+
+    #[tokio::test]
     async fn test_context_length_zero_skips_validation() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         // context_length = 0 means unconfigured, should skip validation

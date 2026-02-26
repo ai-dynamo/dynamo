@@ -539,7 +539,7 @@ impl OpenAIPreprocessor {
         // Validate prompt token count against model's context length
         if let Some(count) = token_count {
             let max_len = self.context_length as usize;
-            if max_len > 0 && count > max_len {
+            if max_len > 0 && count >= max_len {
                 return Err(HttpError {
                     code: 400,
                     message: format!(
