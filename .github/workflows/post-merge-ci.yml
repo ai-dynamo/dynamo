@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - 'release/*.*.*'
-      - 'anants/enable-efa'  # TEMP: remove before merge
 
 permissions:
   contents: read
