@@ -250,6 +250,7 @@ markers = [
     "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
     "router: marks tests for router component",
     "planner: marks tests for planner component",
+    "profiler: marks tests for profiler component",
     "kvbm: marks tests for KV behavior and model determinism",
     "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
     "model: model id used by a test or parameter",

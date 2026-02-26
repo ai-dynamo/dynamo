@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Version Pinning Strategy:
+# - Use == for packages that are pure Python and well-tested
+# - Use <= or < for packages that may have platform-specific versions
+# - Never use >= as it allows untested future versions that may introduce breaking changes,
+#   create non-reproducible builds, and cause dependency conflicts. Every installed version
+#   should be explicitly tested, not an unknown future release.
+
+# Dependencies used exclusively by the planner and profiler components.
+# These are installed only in the dynamo-planner image (--target=planner).
+
+aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@7287307c4e3861b90927198da74e1adda53a4caf
+filterpy==1.4.5
+matplotlib==3.10.7
+pmdarima==2.1.1
+prometheus-api-client==0.6.0
+prophet==1.2.1
+scikit-learn==1.7.2
+scipy<1.14.0  # Upper bound for pmdarima compatibility
