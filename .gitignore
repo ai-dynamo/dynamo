@@ -122,6 +122,7 @@ worklogs/
 
 # Benchmarks
 benchmarks/results
+bench_results/
 profiling_results*
 
 # Direnv
