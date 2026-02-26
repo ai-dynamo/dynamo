@@ -42,10 +42,10 @@ vllm:
   cuda13.0:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: 13.0.2-runtime-ubuntu24.04
-  vllm_ref: v0.15.1
-  flashinf_ref: v0.6.1
-  lmcache_ref: 0.3.13
-  vllm_omni_ref: "0.14.0"
+  vllm_ref: v0.16.0
+  flashinf_ref: v0.6.3
+  lmcache_ref: 0.3.14
+  vllm_omni_ref: "v0.16.0rc1"
   max_jobs: "10"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
