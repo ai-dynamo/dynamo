@@ -11,9 +11,13 @@ inputs:
   namespace:
     description: 'Target namespace name'
     required: true
-  operator_image:
-    description: 'Full operator image reference (e.g. registry/repo:tag)'
+  registry:
+    description: 'Container registry hostname (e.g. myregistry.azurecr.io)'
     required: true
+  operator_tag:
+    description: 'Operator image tag (default: main-operator)'
+    required: false
+    default: 'main-operator'
   hf_token:
     description: 'HuggingFace token for model access'
     required: false
@@ -60,12 +64,12 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
-        OPERATOR_IMAGE: ${{ inputs.operator_image }}
+        REGISTRY: ${{ inputs.registry }}
+        OPERATOR_TAG: ${{ inputs.operator_tag }}
       run: |
         set -x
-        # Split operator image into repository and tag
-        OPERATOR_REPO="${OPERATOR_IMAGE%:*}"
-        OPERATOR_TAG="${OPERATOR_IMAGE##*:}"
+        OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
+        echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
 
         helm repo add bitnami https://charts.bitnami.com/bitnami
         cd deploy/helm/charts/platform/

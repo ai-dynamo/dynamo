@@ -277,10 +277,10 @@ jobs:
     needs: [changed-files, operator]
     outputs:
       NAMESPACE: ${{ steps.namespace.outputs.namespace }}
-      OPERATOR_IMAGE: ${{ steps.operator-tag.outputs.image }}
+      OPERATOR_TAG: ${{ steps.operator-tag.outputs.tag }}
     steps:
     - uses: actions/checkout@v4
-    - name: Determine operator image
+    - name: Determine operator tag
       id: operator-tag
       run: |
         if [ "${{ needs.operator.result }}" == "success" ]; then
@@ -288,9 +288,8 @@ jobs:
         else
           TAG="main-operator"
         fi
-        IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${TAG}"
-        echo "image=${IMAGE}" >> $GITHUB_OUTPUT
-        echo "Using operator image: ${IMAGE}"
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+        echo "Using operator tag: ${TAG}"
     - name: Generate namespace name
       id: namespace
       env:
@@ -309,7 +308,8 @@ jobs:
       with:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         namespace: ${{ steps.namespace.outputs.namespace }}
-        operator_image: ${{ steps.operator-tag.outputs.image }}
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ steps.operator-tag.outputs.tag }}
         hf_token: ${{ secrets.HF_TOKEN }}
    # ============================================================================
    #
@@ -344,7 +344,8 @@ jobs:
         with:
           kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          operator_image: ${{ needs.deploy-operator.outputs.OPERATOR_IMAGE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
@@ -378,7 +379,8 @@ jobs:
         with:
           kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          operator_image: ${{ needs.deploy-operator.outputs.OPERATOR_IMAGE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
@@ -416,7 +418,8 @@ jobs:
         with:
           kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          operator_image: ${{ needs.deploy-operator.outputs.OPERATOR_IMAGE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}

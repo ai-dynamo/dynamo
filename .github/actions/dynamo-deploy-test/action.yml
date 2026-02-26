@@ -9,12 +9,14 @@ inputs:
   namespace:
     description: 'Kubernetes namespace for deployment'
     required: true
-
-  # Operator bootstrap (only used when namespace is gone on rerun)
-  operator_image:
-    description: 'Full operator image reference (e.g. registry/repo:tag). Required only for rerun self-bootstrap.'
+  registry:
+    description: 'Container registry hostname. Required for rerun self-bootstrap.'
     required: false
     default: ''
+  operator_tag:
+    description: 'Operator image tag (default: main-operator). Required for rerun self-bootstrap.'
+    required: false
+    default: 'main-operator'
   hf_token:
     description: 'HuggingFace token for model access'
     required: false
@@ -71,7 +73,8 @@ runs:
       with:
         kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
         namespace: ${{ steps.ns-check.outputs.ns }}
-        operator_image: ${{ inputs.operator_image }}
+        registry: ${{ inputs.registry }}
+        operator_tag: ${{ inputs.operator_tag }}
         hf_token: ${{ inputs.hf_token }}
 
     - name: Setup Kubeconfig
@@ -126,8 +129,7 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ steps.ns-check.outputs.ns }}
-        FRAMEWORK: ${{ inputs.framework }}
-        PROFILE: ${{ inputs.profile }}
+        GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
       run: |
         set -x
         export KUBECONFIG=${{ github.workspace }}/.kubeconfig
@@ -143,15 +145,8 @@ runs:
               kubectl describe dynamographdeployments "$dep_name" -n $NAMESPACE
           done || true
 
-        # Extract the deployment name from the example YAML
-        DEPLOY_YAML="examples/backends/${FRAMEWORK}/deploy/${PROFILE}.yaml"
-        if [ -f "$DEPLOY_YAML" ]; then
-          GRAPH_NAME=$(grep '^  name:' "$DEPLOY_YAML" | head -1 | awk '{print $2}')
-          echo "Deleting DynamoGraphDeployment: ${GRAPH_NAME}"
-          kubectl delete dynamographdeployments "${GRAPH_NAME}" -n $NAMESPACE --timeout=60s || true
-        else
-          echo "Warning: deployment YAML not found at ${DEPLOY_YAML}, skipping targeted delete"
-        fi
+        echo "Deleting DynamoGraphDeployment: ${GRAPH_NAME}"
+        kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE --timeout=60s || true
 
     - name: Teardown namespace (self-cleanup on rerun)
       if: always() && steps.ns-check.outputs.exists != 'true'
