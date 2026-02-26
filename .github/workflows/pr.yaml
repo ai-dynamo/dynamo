@@ -341,8 +341,9 @@ jobs:
         cd deploy/helm/charts/platform/
         helm dep build .
         # Install platform with namespace restriction for single profile testing
+        # we manage crds via Velonix so we skip the crds installation
         helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-          --skip-crds \ # we manage crds via Velonix
+          --skip-crds \
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
