@@ -787,14 +787,7 @@ func isOnlineProfiling(_ *nvidiacomv1beta1.DynamoGraphDeploymentRequest) bool {
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	var errs []error
 
-	// Validate image is specified (required for the profiling job container).
-	// Mirrors the webhook admission check so controller-side writes cannot bypass it.
-	if dgdr.Spec.Image == "" {
-		errs = append(errs, fmt.Errorf("spec.image is required"))
-	}
-
 	// Disallow searchStrategy: thorough with backend: auto.
-	// Mirrors the webhook admission check so controller-side writes cannot bypass it.
 	if dgdr.Spec.SearchStrategy == nvidiacomv1beta1.SearchStrategyThorough &&
 		dgdr.Spec.Backend == nvidiacomv1beta1.BackendTypeAuto {
 		errs = append(errs, fmt.Errorf(
@@ -992,8 +985,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		// --output-dir must match ProfilingOutputPath so the sidecar can find profiler_status.yaml
 		profilerArgs := []string{"--config", specJSON, "--output-dir", ProfilingOutputPath}
 
-		// Use image from spec
+		// Use image from spec; the defaulting webhook fills this in for production builds.
+		// Guard against empty image in case the webhook didn't run (e.g. local dev builds).
 		imageName := dgdr.Spec.Image
+		if imageName == "" {
+			return nil, false, fmt.Errorf("spec.image is required but not set; ensure the defaulting webhook ran or set spec.image explicitly")
+		}
 		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{

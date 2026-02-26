@@ -50,11 +50,6 @@ func NewDynamoGraphDeploymentRequestValidator(request *nvidiacomv1beta1.DynamoGr
 func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, error) {
 	var err error
 
-	// Validate image is specified (required for the profiling job container).
-	if v.request.Spec.Image == "" {
-		err = errors.Join(err, errors.New("spec.image is required"))
-	}
-
 	// Disallow searchStrategy: thorough with backend: auto.
 	// "thorough" sweeps more configurations and requires a concrete backend to be selected;
 	// "auto" defers backend selection and is only compatible with the "rapid" search strategy.
