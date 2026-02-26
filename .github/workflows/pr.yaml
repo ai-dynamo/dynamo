@@ -503,9 +503,8 @@ jobs:
     name: Cleanup AKS resources
     runs-on: prod-default-small-v2
     if: >-
-      always() &&
-      needs.deploy-status-check.result == 'success'
-    needs: [deploy-operator, deploy-status-check]
+      always() 
+    needs: [deploy-operator, deploy-test-trtllm]
     steps:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
