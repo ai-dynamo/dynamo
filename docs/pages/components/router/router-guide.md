@@ -211,7 +211,7 @@ Dynamo supports several routing strategies when sending requests from one compon
 First, we must create a client tied to a components endpoint, we can do this using the labels defined above. Here we are getting a client tied to the `generate` endpoint of the `VllmWorker` component.
 
 ```python
-client = namespace('dynamo').component('VllmWorker').endpoint('generate').client()
+client = runtime.endpoint("dynamo.VllmWorker.generate").client()
 ```
 
 We can then use the default routing methods exposed by the client class to send requests to the `VllmWorker` component.
@@ -292,7 +292,7 @@ When both workers are registered, requests are automatically routed.
 
 ```python
 # Decode worker registration (in your decode worker)
-decode_endpoint = runtime.namespace("dynamo").component("decode").endpoint("generate")
+decode_endpoint = runtime.endpoint("dynamo.decode.generate")
 
 await register_model(
     model_input=ModelInput.Tokens,
@@ -305,7 +305,7 @@ await register_model(
 await decode_endpoint.serve_endpoint(decode_handler.generate)
 
 # Prefill worker registration (in your prefill worker)
-prefill_endpoint = runtime.namespace("dynamo").component("prefill").endpoint("generate")
+prefill_endpoint = runtime.endpoint("dynamo.prefill.generate")
 
 await register_model(
     model_input=ModelInput.Tokens,

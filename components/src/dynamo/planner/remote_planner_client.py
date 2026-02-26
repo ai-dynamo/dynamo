@@ -98,10 +98,15 @@ class RemotePlannerClient:
             f"decode={[r.desired_replicas for r in request.target_replicas if r.sub_component_type == SubComponentType.DECODE]}"
         )
 
-        # Send request to single endpoint
+        # Send request via the runtime client's generate method (the correct API for
+        # calling any dynamo endpoint, regardless of its registered name)
         request_json = request.model_dump_json()
+        stream = await self._client.generate(request_json)
 
-        response_data = await self._client.scale_request(request_json)
+        response_data = None
+        async for output in stream:
+            response_data = output.data() if hasattr(output, "data") else output
+            break  # scale_request yields a single response
 
         if response_data is None:
             raise RuntimeError("No response from centralized planner")

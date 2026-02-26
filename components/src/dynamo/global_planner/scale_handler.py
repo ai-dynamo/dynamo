@@ -27,7 +27,11 @@ class ScaleRequestHandler:
     """
 
     def __init__(
-        self, runtime: DistributedRuntime, managed_namespaces: list, k8s_namespace: str
+        self,
+        runtime: DistributedRuntime,
+        managed_namespaces: list,
+        k8s_namespace: str,
+        no_operation: bool = False,
     ):
         """Initialize the scale request handler.
 
@@ -35,6 +39,7 @@ class ScaleRequestHandler:
             runtime: Dynamo runtime instance
             managed_namespaces: List of authorized namespaces (None = accept all)
             k8s_namespace: Kubernetes namespace where GlobalPlanner is running
+            no_operation: If True, log scale requests without executing K8s scaling
         """
         self.runtime = runtime
         # If managed_namespaces is None, accept all namespaces
@@ -42,6 +47,7 @@ class ScaleRequestHandler:
             set(managed_namespaces) if managed_namespaces else None
         )
         self.k8s_namespace = k8s_namespace
+        self.no_operation = no_operation
         self.connectors = {}  # Cache of KubernetesConnector per DGD
 
         if self.managed_namespaces:
@@ -50,6 +56,12 @@ class ScaleRequestHandler:
             )
         else:
             logger.info("ScaleRequestHandler initialized (accepting all namespaces)")
+
+        if self.no_operation:
+            logger.info(
+                "ScaleRequestHandler running in NO-OPERATION mode: "
+                "scale requests will be logged but not executed"
+            )
 
     @dynamo_endpoint(ScaleRequest, ScaleResponse)
     async def scale_request(self, request: ScaleRequest):
@@ -74,6 +86,24 @@ class ScaleRequestHandler:
                 }
                 return
 
+            # No-operation mode: log and return success without touching K8s
+            if self.no_operation:
+                replicas_summary = {
+                    r.sub_component_type.value: r.desired_replicas
+                    for r in request.target_replicas
+                }
+                logger.info(
+                    f"[NO-OP] Scale request from {request.caller_namespace} "
+                    f"for DGD {request.graph_deployment_name} "
+                    f"in K8s namespace {request.k8s_namespace}: {replicas_summary}"
+                )
+                yield {
+                    "status": ScaleStatus.SUCCESS.value,
+                    "message": "[no-operation] Scale request received and logged (not executed)",
+                    "current_replicas": {},
+                }
+                return
+
             logger.info(
                 f"Processing scale request from {request.caller_namespace} "
                 f"for DGD {request.graph_deployment_name} "
@@ -89,7 +119,6 @@ class ScaleRequestHandler:
                     k8s_namespace=request.k8s_namespace,
                     parent_dgd_name=request.graph_deployment_name,
                 )
-                await connector._async_init()
                 self.connectors[connector_key] = connector
                 logger.debug(f"Created new connector for {connector_key}")
             else:
