@@ -26,6 +26,7 @@ from tests.fault_tolerance.deploy.scenarios import (
     scenarios,
 )
 from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+from tests.utils.test_output import resolve_test_output_path
 
 
 @pytest.fixture
@@ -86,13 +87,8 @@ def _clients(
     procs: list[SpawnProcess] = []
     ctx = multiprocessing.get_context("spawn")
 
-    # Determine retry_delay_or_rate based on client type
-    if load_config.client_type == "legacy":
-        # Legacy client uses max_request_rate for rate limiting
-        retry_delay_or_rate = load_config.max_request_rate
-    else:
-        # AI-Perf client uses retry_delay between attempts (default 5s)
-        retry_delay_or_rate = 5
+    # Both client types use max_request_rate for rate limiting (requests/sec)
+    max_request_rate = load_config.max_request_rate
 
     # Check if this is a continuous load test (rolling upgrade scenarios)
     continuous_load = getattr(load_config, "continuous_load", False)
@@ -121,7 +117,7 @@ def _clients(
                     load_config.overflow_token_length,  # 2x max_seq_len tokens
                     load_config.output_token_length,
                     load_config.max_retries,
-                    retry_delay_or_rate,
+                    max_request_rate,
                     continuous_load,
                 ),
             )
@@ -150,7 +146,7 @@ def _clients(
                     load_config.input_token_length,  # Normal token count
                     load_config.output_token_length,
                     load_config.max_retries,
-                    retry_delay_or_rate,
+                    max_request_rate,
                 ),
             )
             proc_normal.start()
@@ -175,7 +171,7 @@ def _clients(
                         load_config.input_token_length,
                         load_config.output_token_length,
                         load_config.max_retries,
-                        retry_delay_or_rate,
+                        max_request_rate,
                         continuous_load,  # Pass continuous_load flag
                     ),
                 )
@@ -271,8 +267,8 @@ def validation_context(request, scenario):  # noqa: F811
 
     if hasattr(scenario.load, "mixed_token_test") and scenario.load.mixed_token_test:
         # For mixed token tests, we have separate overflow and recovery directories
-        overflow_dir = f"{request.node.name}{OVERFLOW_SUFFIX}"
-        recovery_dir = f"{request.node.name}{RECOVERY_SUFFIX}"
+        overflow_dir = resolve_test_output_path(f"{request.node.name}{OVERFLOW_SUFFIX}")
+        recovery_dir = resolve_test_output_path(f"{request.node.name}{RECOVERY_SUFFIX}")
         log_paths = [overflow_dir, recovery_dir]
 
         logging.info("Mixed token test detected. Looking for results in:")
@@ -280,7 +276,7 @@ def validation_context(request, scenario):  # noqa: F811
         logging.info(f"  - Recovery phase: {recovery_dir}")
     else:
         # Standard test with single directory
-        log_paths = [request.node.name]
+        log_paths = [resolve_test_output_path(request.node.name)]
 
     # Use factory to auto-detect and parse results
     try:
@@ -321,7 +317,7 @@ def validation_context(request, scenario):  # noqa: F811
                     # Create ValidationContext for all checkers
                     validation_ctx = ValidationContext(
                         scenario=scenario,
-                        log_dir=test_name,
+                        log_dir=resolve_test_output_path(test_name),
                         metrics=metrics,
                         deployment=context.get("deployment"),
                         namespace=context.get("namespace"),

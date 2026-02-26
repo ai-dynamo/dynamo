@@ -4,7 +4,7 @@
 use derive_builder::Builder;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use crate::kv_router::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 
@@ -17,10 +17,14 @@ pub struct RouterConfigOverride {
     #[builder(default)]
     #[validate(range(min = 0.0))]
     pub router_temperature: Option<f64>,
+
+    #[builder(default)]
+    pub assume_kv_reuse: Option<bool>,
 }
 
 /// KV Router configuration parameters
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub overlap_score_weight: f64,
@@ -30,10 +34,9 @@ pub struct KvRouterConfig {
 
     pub use_kv_events: bool,
 
-    /// Enable durable KV events using NATS JetStream instead of the default event plane.
-    /// When false (default), the router uses the event-plane subscriber and requires
-    /// workers to have local_indexer enabled for gap recovery.
-    /// When true, uses JetStream for durability and multi-replica consistency.
+    /// **Deprecated:** Enable durable KV events using NATS JetStream instead of the default event plane.
+    /// This option will be removed in a future release. The event-plane subscriber
+    /// (local_indexer mode) is now the recommended path.
     pub durable_kv_events: bool,
 
     pub router_replica_sync: bool,
@@ -43,7 +46,7 @@ pub struct KvRouterConfig {
 
     /// Whether to track output blocks during generation (default: false)
     /// When enabled, the router adds placeholder blocks as tokens are generated
-    /// and applies fractional decay based on progress toward expected_output_tokens.
+    /// and applies fractional decay based on progress toward agent_hints.osl.
     pub router_track_output_blocks: bool,
 
     /// Whether to assume KV cache reuse when tracking active blocks (default: true).
@@ -69,6 +72,19 @@ pub struct KvRouterConfig {
     /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
     #[validate(range(min = 0.0, max = 1.0))]
     pub router_prune_target_ratio: f64,
+
+    /// Queue threshold fraction for prefill token capacity.
+    /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
+    /// If None (default), queueing is disabled and all requests go directly to ready.
+    /// Must be > 0.
+    #[validate(range(min = 0.0))]
+    pub router_queue_threshold: Option<f64>,
+
+    /// Number of event processing threads for the KV indexer.
+    /// When > 1, uses ConcurrentRadixTree with a thread pool instead of the
+    /// single-threaded RadixTree. Default: 1.
+    #[validate(range(min = 1))]
+    pub router_event_threads: u32,
 }
 
 impl Default for KvRouterConfig {
@@ -87,8 +103,35 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
+            router_queue_threshold: None,
+            router_event_threads: 1,
         }
     }
+}
+
+fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationError> {
+    if config.durable_kv_events {
+        tracing::warn!(
+            "--durable-kv-events is deprecated and will be removed in a future release. \
+             The event-plane subscriber (local_indexer mode) is now the recommended path."
+        );
+    }
+    if config.durable_kv_events && !config.use_kv_events {
+        return Err(ValidationError::new(
+            "durable_kv_events requires use_kv_events=true",
+        ));
+    }
+    if !config.use_kv_events && config.router_event_threads > 1 {
+        return Err(ValidationError::new(
+            "router_event_threads > 1 requires use_kv_events=true",
+        ));
+    }
+    if config.router_track_output_blocks && !config.router_track_active_blocks {
+        return Err(ValidationError::new(
+            "router_track_output_blocks requires router_track_active_blocks=true",
+        ));
+    }
+    Ok(())
 }
 
 impl KvRouterConfig {
@@ -102,6 +145,8 @@ impl KvRouterConfig {
         &self,
         tokens: &[u32],
         block_size: u32,
+        config_override: Option<&RouterConfigOverride>,
+        lora_name: Option<&str>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -112,12 +157,14 @@ impl KvRouterConfig {
             return Some(Vec::new());
         }
 
-        if self.router_assume_kv_reuse {
-            // Compute actual block hashes and sequence hashes
-            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None);
+        let assume_kv_reuse = config_override
+            .and_then(|cfg| cfg.assume_kv_reuse)
+            .unwrap_or(self.router_assume_kv_reuse);
+
+        if assume_kv_reuse {
+            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None, lora_name);
             Some(compute_seq_hash_for_block(&block_hashes))
         } else {
-            // Generate random hashes (no KV reuse assumed)
             let mut rng = rand::rng();
             Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
         }

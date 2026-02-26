@@ -24,7 +24,7 @@ High-performance deployment with separated prefill and decode workers.
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
 - `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
+- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
@@ -33,7 +33,7 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 **Architecture:**
 - `Frontend`: HTTP API server with KV-aware routing
 - `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--is-prefill-worker`)
+- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
 ## CRD Structure
 
@@ -85,14 +85,14 @@ extraPodSpec:
 **Common vLLM Flags:**
 - `--enable-prompt-embeds`: Enable prompt embeddings feature
 - `--enable-multimodal`: Enable multimodal (vision) support
-- `--is-prefill-worker`: Prefill-only mode for disaggregated serving
-- `--connector [nixl|lmcache|kvbm|none]`: KV transfer backend selection
+- `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
+- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`)
 
 ## Prerequisites
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/pages/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for vLLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -102,14 +102,15 @@ Before using these templates, ensure you have:
 We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd prefer to use your own registry, build and push your own image:
 
 ```bash
-./container/build.sh --framework VLLM
+python container/render.py --framework=vllm --output-short-filename
+docker build -f container/rendered.Dockerfile .
 # Tag and push to your container registry
 # Update the image references in the YAML files
 ```
 
 ### Pre-Deployment Profiling (SLA Planner Only)
 
-If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/components/profiler/profiler_guide.md) to run pre-deployment profiling.
+If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/pages/components/profiler/profiler-guide.md) to run pre-deployment profiling.
 
 ## Usage
 
@@ -197,7 +198,7 @@ spec:
 vLLM workers are configured through command-line arguments. Key parameters include:
 
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
-- `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
+- `--disaggregation-mode prefill`: Enable prefill-only mode for disaggregated serving
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
 
 See the [vLLM CLI documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html?h=serve+arg) for the full list of configuration options.
@@ -234,7 +235,7 @@ All templates use **Qwen/Qwen3-0.6B** as the default model, but you can use any 
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/pages/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -244,12 +245,12 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create_deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation_guide.md)
-- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner_guide.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design_docs/disagg_serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/pages/kubernetes/deployment/create-deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/pages/kubernetes/README.md)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/pages/kubernetes/installation-guide.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/pages/components/planner/planner-guide.md)
+- **Examples**: [Deployment Examples](../../../../docs/pages/getting-started/examples.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/pages/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/pages/components/router/README.md)
 
 ## Troubleshooting
 
@@ -261,4 +262,4 @@ Common issues and solutions:
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/pages/kubernetes/README.md).

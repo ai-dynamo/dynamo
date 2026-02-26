@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional, Union
@@ -26,6 +27,7 @@ from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Context
@@ -39,6 +41,7 @@ from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
+from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -53,7 +56,6 @@ class RequestHandlerConfig:
     Configuration for the request handler
     """
 
-    component: object
     engine: TensorRTLLMEngine
     default_sampling_params: SamplingParams
     publisher: Publisher
@@ -70,16 +72,23 @@ class RequestHandlerConfig:
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
+    disable_request_abort: bool = True
 
 
-class HandlerBase:
+class HandlerBase(BaseGenerativeHandler):
     """
-    Base class for request handlers.
+    Base class for LLM request handlers (text generation, multimodal LLM).
+
+    This class is dedicated to LLM-based generation using TensorRT-LLM engine.
+    For diffusion-based handlers (video, image), see VideoGenerationHandler
+    and ImageGenerationHandler which inherit directly from BaseGenerativeHandler.
+
+    Inherits from BaseGenerativeHandler to ensure a consistent interface
+    across all generative handlers (LLM, video, image).
     """
 
     def __init__(self, config: RequestHandlerConfig):
         self.engine = config.engine
-        self.component = config.component
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
@@ -92,6 +101,7 @@ class HandlerBase:
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
+        self.disable_request_abort = config.disable_request_abort
 
     def check_error(self, result: dict):
         """
@@ -199,13 +209,15 @@ class HandlerBase:
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Abort the generation
-            # Temporary:
-            #   Disable calling abort() on the engine, which may get stuck if a
-            #   sufficiently large number of concurrent requests is cancelled.
-            # Note to restore:
-            #   call `generation_result.abort()`; and then
-            #   log `logging.debug(f"Aborted Request ID: {context.id()}")`
+            # Abort the generation unless disabled
+            if self.disable_request_abort:
+                logging.debug(
+                    f"Request ID {context.id()} cancelled but abort() skipped "
+                    "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
+                )
+            else:
+                generation_result.abort()
+                logging.debug(f"Aborted Request ID: {context.id()}")
 
             # Clean up any remaining background task
             for task in pending:
@@ -511,7 +523,16 @@ class HandlerBase:
             if processed_input:
                 return processed_input
 
-        # Fallback: text-only flow
+            # If multimodal processing returned None but request has multimodal data,
+            # this is an error (not a text-only request). Raise instead of falling back.
+            if request.get("multi_modal_data"):
+                raise RuntimeError(
+                    "Failed to process multimodal request. Check server logs for details. "
+                    "Common issues: missing allowed_local_media_path configuration, "
+                    "file not found, or file outside allowed directory."
+                )
+
+        # Fallback: text-only flow (no multimodal processor or no multimodal data)
         return request.get("token_ids")
 
     def _normalize_request_format(self, request: dict) -> None:
@@ -782,13 +803,24 @@ class HandlerBase:
                         )
 
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
                     if (
                         res.finished
                         and self.metrics_collector
                         and hasattr(res, "metrics_dict")
                     ):
                         try:
-                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                            if hasattr(
+                                self.metrics_collector,
+                                "log_request_metrics_dict",
+                            ):
+                                self.metrics_collector.log_request_metrics_dict(
+                                    res.metrics_dict
+                                )
+                            else:
+                                self.metrics_collector.log_metrics_dict(
+                                    res.metrics_dict
+                                )
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 
@@ -839,6 +871,29 @@ class HandlerBase:
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+
+        # Convert guided_decoding dict (from Rust serialization) to GuidedDecodingParams.
+        # Explicit field mapping avoids breakage if either side adds fields the other
+        # doesn't know about (e.g. Rust's "backend"/"choice" vs TRT-LLM's fields).
+        guided_decoding = overrides.pop("guided_decoding", None)
+        if guided_decoding is not None and isinstance(guided_decoding, dict):
+            # TRT-LLM's GuidedDecodingParams doesn't have a "choice" field.
+            # Convert choice list to a regex pattern: (choice1|choice2|...)
+            # This matches the approach used by vLLM's outlines backend.
+            regex = guided_decoding.get("regex")
+            choice = guided_decoding.get("choice")
+            if choice and not regex:
+                valid_choices = [c for c in choice if c is not None]
+                if valid_choices:
+                    regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
+
+            overrides["guided_decoding"] = GuidedDecodingParams(
+                json=guided_decoding.get("json"),
+                regex=regex,
+                grammar=guided_decoding.get("grammar"),
+                json_object=guided_decoding.get("json_object", False),
+                structural_tag=guided_decoding.get("structural_tag"),
+            )
 
         # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:
         # 1. it catches unsupported fields / attributes.

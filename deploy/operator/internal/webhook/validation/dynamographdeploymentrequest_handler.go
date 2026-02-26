@@ -21,7 +21,7 @@ import (
 	"context"
 	"fmt"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -34,20 +34,23 @@ import (
 const (
 	// DynamoGraphDeploymentRequestWebhookName is the name of the validating webhook handler for DynamoGraphDeploymentRequest.
 	DynamoGraphDeploymentRequestWebhookName = "dynamographdeploymentrequest-validating-webhook"
-	dynamoGraphDeploymentRequestWebhookPath = "/validate-nvidia-com-v1alpha1-dynamographdeploymentrequest"
+	dynamoGraphDeploymentRequestWebhookPath = "/validate-nvidia-com-v1beta1-dynamographdeploymentrequest"
 )
 
 // DynamoGraphDeploymentRequestHandler is a handler for validating DynamoGraphDeploymentRequest resources.
 // It is a thin wrapper around DynamoGraphDeploymentRequestValidator.
 type DynamoGraphDeploymentRequestHandler struct {
 	isClusterWideOperator bool
+	gpuDiscoveryEnabled   bool
 }
 
 // NewDynamoGraphDeploymentRequestHandler creates a new handler for DynamoGraphDeploymentRequest Webhook.
-// The isClusterWide parameter indicates whether the operator is running in cluster-wide or namespace-restricted mode.
-func NewDynamoGraphDeploymentRequestHandler(isClusterWide bool) *DynamoGraphDeploymentRequestHandler {
+// isClusterWide indicates whether the operator has cluster-wide permissions.
+// gpuDiscoveryEnabled indicates whether a ClusterRole for node read access was provisioned by Helm.
+func NewDynamoGraphDeploymentRequestHandler(isClusterWide bool, gpuDiscoveryEnabled bool) *DynamoGraphDeploymentRequestHandler {
 	return &DynamoGraphDeploymentRequestHandler{
 		isClusterWideOperator: isClusterWide,
+		gpuDiscoveryEnabled:   gpuDiscoveryEnabled,
 	}
 }
 
@@ -63,7 +66,7 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateCreate(ctx context.Context
 	logger.Info("validate create", "name", request.Name, "namespace", request.Namespace)
 
 	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentRequestValidator(request, h.isClusterWideOperator)
+	validator := NewDynamoGraphDeploymentRequestValidator(request, h.isClusterWideOperator, h.gpuDiscoveryEnabled)
 	return validator.Validate()
 }
 
@@ -90,23 +93,8 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context
 	}
 
 	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentRequestValidator(newRequest, h.isClusterWideOperator)
-
-	// Validate stateless rules
-	warnings, err := validator.Validate()
-	if err != nil {
-		return warnings, err
-	}
-
-	// Validate stateful rules (immutability)
-	updateWarnings, err := validator.ValidateUpdate(oldRequest)
-	if err != nil {
-		return updateWarnings, err
-	}
-
-	// Combine warnings
-	warnings = append(warnings, updateWarnings...)
-	return warnings, nil
+	validator := NewDynamoGraphDeploymentRequestValidator(newRequest, h.isClusterWideOperator, h.gpuDiscoveryEnabled)
+	return validator.ValidateUpdate(oldRequest)
 }
 
 // ValidateDelete validates a DynamoGraphDeploymentRequest delete request.
@@ -134,15 +122,15 @@ func (h *DynamoGraphDeploymentRequestHandler) RegisterWithManager(mgr manager.Ma
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeploymentRequest)
 
 	webhook := admission.
-		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}, observedValidator).
+		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}, observedValidator).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dynamoGraphDeploymentRequestWebhookPath, webhook)
 	return nil
 }
 
 // castToDynamoGraphDeploymentRequest attempts to cast a runtime.Object to a DynamoGraphDeploymentRequest.
-func castToDynamoGraphDeploymentRequest(obj runtime.Object) (*nvidiacomv1alpha1.DynamoGraphDeploymentRequest, error) {
-	request, ok := obj.(*nvidiacomv1alpha1.DynamoGraphDeploymentRequest)
+func castToDynamoGraphDeploymentRequest(obj runtime.Object) (*nvidiacomv1beta1.DynamoGraphDeploymentRequest, error) {
+	request, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeploymentRequest)
 	if !ok {
 		return nil, fmt.Errorf("expected DynamoGraphDeploymentRequest but got %T", obj)
 	}

@@ -26,7 +26,10 @@ The mocker engine now supports a vLLM-style CLI interface with individual argume
 - `--data-parallel-size`: Number of data parallel workers to simulate (default: 1)
 - `--num-workers`: Number of mocker workers to launch in the same process (default: 1). All workers share the same tokio runtime and thread pool
 - `--stagger-delay`: Delay in seconds between launching each worker to avoid overwhelming etcd/NATS/frontend. Set to 0 to disable staggering. Use -1 for auto mode (stagger dependent on number of workers). Default: -1 (auto)
-- `--is-prefill-worker` / `--is-decode-worker`: Whether the worker is a prefill or decode worker for disaggregated deployment. If not specified, mocker will be in aggregated mode.
+- `--disaggregation-mode prefill` / `--disaggregation-mode decode`: Whether the worker is a prefill or decode worker for disaggregated deployment. If not specified, mocker will be in aggregated mode.
+- `--kv-transfer-bandwidth`: KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation (default: 64.0, inter-node InfiniBand). Set to 0 to disable. For intra-node NVLink, typical value is ~450.
+- `--kv-cache-dtype`: Data type for KV cache, used to compute kv_bytes_per_token. "auto" uses the model's torch dtype (default).
+- `--kv-bytes-per-token`: KV cache bytes per token. If not specified, auto-computed from model config.
 
 **Environment variables:**
 
@@ -64,10 +67,10 @@ python -m dynamo.mocker \
 
 The profile results directory should contain `selected_prefill_interpolation/` and `selected_decode_interpolation/` subdirectories with `raw_data.npz` files. This works seamlessly in Kubernetes where profile data is mounted via ConfigMap or PersistentVolume.
 
-To generate profiling data for your own model/hardware configuration, run the profiler (see [SLA-driven profiling documentation](../../../../docs/components/profiler/profiler_guide.md) for details):
+To generate profiling data for your own model/hardware configuration, run the profiler (see [SLA-driven profiling documentation](../../../../docs/pages/components/profiler/profiler-guide.md) for details):
 
 ```bash
-python benchmarks/profiler/profile_sla.py \
+python components/src/dynamo/profiler/profile_sla.py \
   --profile-config your_profile_config.yaml
 ```
 

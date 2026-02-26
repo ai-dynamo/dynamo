@@ -3,7 +3,7 @@
 Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA Dynamo.
 
 > **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.
-> If not, follow the **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** first.
+> If not, follow the **[Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md)** first.
 
 ## Available Recipes
 
@@ -67,8 +67,8 @@ Each complete recipe follows this standard structure:
 
 The recipes require the Dynamo Kubernetes Platform to be installed. Follow the installation guide:
 
-- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Quickstart (~10 minutes)
-- **[Detailed Installation Guide](../docs/kubernetes/installation_guide.md)** - Advanced options
+- **[Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md)** - Quickstart (~10 minutes)
+- **[Detailed Installation Guide](../docs/pages/kubernetes/installation-guide.md)** - Advanced options
 
 **2. GPU Cluster Requirements**
 
@@ -289,18 +289,18 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 - Review pod logs: `kubectl logs <pod-name> -n ${NAMESPACE}`
 
 **For more troubleshooting:**
-- [Kubernetes Deployment Guide](../docs/kubernetes/README.md#troubleshooting)
-- [Observability Documentation](../docs/kubernetes/observability/)
+- [Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md#troubleshooting)
+- [Observability Documentation](../docs/pages/kubernetes/observability/)
 
 ## Related Documentation
 
-- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Platform installation and concepts
-- **[API Reference](../docs/kubernetes/api_reference.md)** - DynamoGraphDeployment CRD specification
-- **[vLLM Backend Guide](../docs/backends/vllm/README.md)** - vLLM-specific features
-- **[SGLang Backend Guide](../docs/backends/sglang/README.md)** - SGLang-specific features
-- **[TensorRT-LLM Backend Guide](../docs/backends/trtllm/README.md)** - TensorRT-LLM features
-- **[Observability](../docs/kubernetes/observability/)** - Monitoring and logging
-- **[Benchmarking Guide](../docs/benchmarks/benchmarking.md)** - Performance testing
+- **[Kubernetes Deployment Guide](../docs/pages/kubernetes/README.md)** - Platform installation and concepts
+- **[API Reference](../docs/pages/kubernetes/api-reference.md)** - DynamoGraphDeployment CRD specification
+- **[vLLM Backend Guide](../docs/pages/backends/vllm/README.md)** - vLLM-specific features
+- **[SGLang Backend Guide](../docs/pages/backends/sglang/README.md)** - SGLang-specific features
+- **[TensorRT-LLM Backend Guide](../docs/pages/backends/trtllm/README.md)** - TensorRT-LLM features
+- **[Observability](../docs/pages/kubernetes/observability/)** - Monitoring and logging
+- **[Benchmarking Guide](../docs/pages/benchmarks/benchmarking.md)** - Performance testing
 
 ## Contributing
 

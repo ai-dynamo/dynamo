@@ -29,6 +29,8 @@ import pytest
 import requests
 import yaml
 
+from tests.utils.test_output import resolve_test_output_path
+
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
 from .common import check_module_available
@@ -37,6 +39,8 @@ from .common import check_module_available
 # Todo: enable the rest when kvbm is built in the ci
 pytestmark = [
     pytest.mark.kvbm,
+    pytest.mark.vllm,
+    pytest.mark.trtllm,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_2,
@@ -139,8 +143,8 @@ class LLMServerManager:
             "16",
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
-            "--connector",
-            "nixl",
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
         ]
 
         # Construct prefiller command
@@ -150,14 +154,14 @@ class LLMServerManager:
             "dynamo.vllm",
             "--model",
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
-            "--is-prefill-worker",
+            "--disaggregation-mode",
+            "prefill",
             "--block-size",
             "16",
             "--max-model-len",
             "8000",  # required to fit on L4 GPU when using 8b model
-            "--connector",
-            "kvbm",
-            "nixl",
+            "--kv-transfer-config",
+            '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}',
         ]
 
         # GPU blocks override
@@ -505,7 +509,7 @@ def llm_server(request, runtime_services):
     port = getattr(request, "param", {}).get("port", None)
 
     # Put logs in the per-test directory set up by tests/conftest.py
-    log_dir = Path(request.node.name)
+    log_dir = Path(resolve_test_output_path(request.node.name))
 
     if check_module_available("vllm"):
         server_type = ServerType.vllm
@@ -547,10 +551,6 @@ def tester(llm_server):
 class TestDeterminismDisagg(BaseTestDeterminism):
     """Test class for determinism validation."""
 
-    @pytest.mark.skipif(
-        check_module_available("tensorrt_llm"),
-        reason="Skipping test until the TRT-LLM disagg hang issue is fixed. (https://github.com/NVIDIA/TensorRT-LLM/pull/11247)",
-    )
     @pytest.mark.parametrize(
         "llm_server",
         [

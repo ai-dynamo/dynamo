@@ -34,10 +34,6 @@ use crate::protocols::annotated::Annotated;
 use crate::stream;
 use crate::stream::StreamExt;
 
-// If set to true, then metrics will be labeled with the namespace, component, and endpoint labels.
-// These labels are prefixed with "dynamo_" to avoid collisions with Kubernetes and other monitoring system labels.
-pub const USE_AUTO_LABELS: bool = true;
-
 // Prometheus imports
 use prometheus::Encoder;
 
@@ -224,43 +220,47 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     // Build updated_labels: auto-labels first, then `labels` + stored labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
 
-    if USE_AUTO_LABELS {
-        // Validate that user-provided labels don't conflict with auto-generated labels
-        for (key, _) in labels {
-            if *key == labels::NAMESPACE || *key == labels::COMPONENT || *key == labels::ENDPOINT {
-                return Err(anyhow::anyhow!(
-                    "Label '{}' is automatically added by auto_label feature and cannot be manually set",
-                    key
-                ));
-            }
-        }
+    // Auto-label injection: Always add dynamo_namespace, dynamo_component, dynamo_endpoint labels
+    // based on the hierarchy. Label constants defined in prometheus_names.rs labels module.
+    //
+    // Python counterpart: components/src/dynamo/common/utils/prometheus.py register_engine_metrics_callback()
 
-        // Add auto-generated labels with sanitized values
-        if hierarchy_names.len() > 1 {
-            let namespace = &hierarchy_names[1];
-            if !namespace.is_empty() {
-                let valid_namespace = sanitize_prometheus_label(namespace)?;
-                if !valid_namespace.is_empty() {
-                    updated_labels.push((labels::NAMESPACE.to_string(), valid_namespace));
-                }
+    // Validate that user-provided labels don't conflict with auto-generated labels
+    for (key, _) in labels {
+        if *key == labels::NAMESPACE || *key == labels::COMPONENT || *key == labels::ENDPOINT {
+            return Err(anyhow::anyhow!(
+                "Label '{}' is automatically added by auto-label injection and cannot be manually set",
+                key
+            ));
+        }
+    }
+
+    // Add auto-generated labels with sanitized values
+    // Hierarchy: [drt, namespace, component, endpoint]
+    if hierarchy_names.len() > 1 {
+        let namespace = &hierarchy_names[1];
+        if !namespace.is_empty() {
+            let valid_namespace = sanitize_prometheus_label(namespace)?;
+            if !valid_namespace.is_empty() {
+                updated_labels.push((labels::NAMESPACE.to_string(), valid_namespace));
             }
         }
-        if hierarchy_names.len() > 2 {
-            let component = &hierarchy_names[2];
-            if !component.is_empty() {
-                let valid_component = sanitize_prometheus_label(component)?;
-                if !valid_component.is_empty() {
-                    updated_labels.push((labels::COMPONENT.to_string(), valid_component));
-                }
+    }
+    if hierarchy_names.len() > 2 {
+        let component = &hierarchy_names[2];
+        if !component.is_empty() {
+            let valid_component = sanitize_prometheus_label(component)?;
+            if !valid_component.is_empty() {
+                updated_labels.push((labels::COMPONENT.to_string(), valid_component));
             }
         }
-        if hierarchy_names.len() > 3 {
-            let endpoint = &hierarchy_names[3];
-            if !endpoint.is_empty() {
-                let valid_endpoint = sanitize_prometheus_label(endpoint)?;
-                if !valid_endpoint.is_empty() {
-                    updated_labels.push((labels::ENDPOINT.to_string(), valid_endpoint));
-                }
+    }
+    if hierarchy_names.len() > 3 {
+        let endpoint = &hierarchy_names[3];
+        if !endpoint.is_empty() {
+            let valid_endpoint = sanitize_prometheus_label(endpoint)?;
+            if !valid_endpoint.is_empty() {
+                updated_labels.push((labels::ENDPOINT.to_string(), valid_endpoint));
             }
         }
     }
@@ -1491,7 +1491,9 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
         println!("DRT output:");
         println!("{}", drt_output_raw);
 
-        let expected_drt_output = r#"# HELP dynamo_component_testcounter A test counter
+        // The uptime_seconds value is dynamic (depends on elapsed wall-clock time),
+        // so we check all other lines exactly and validate uptime separately.
+        let expected_drt_output_without_uptime = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
 dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
 # HELP dynamo_component_testcountervec A test counter vector
@@ -1526,20 +1528,53 @@ dynamo_component_testintgauge{dynamo_namespace="ns345"} 42
 # HELP dynamo_component_testintgaugevec A test int gauge vector
 # TYPE dynamo_component_testintgaugevec gauge
 dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server1",service="api",status="active"} 10
-dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",service="api",status="inactive"} 0
-# HELP dynamo_component_uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE dynamo_component_uptime_seconds gauge
-dynamo_component_uptime_seconds 0"#.to_string();
+dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",service="api",status="inactive"} 0"#;
 
+        // Split actual output into non-uptime lines and the uptime value line.
+        let mut non_uptime_lines = Vec::new();
+        let mut uptime_value: Option<f64> = None;
+        for line in drt_output_raw.trim_end_matches('\n').lines() {
+            if line.starts_with("dynamo_component_uptime_seconds ") {
+                let val_str = line
+                    .strip_prefix("dynamo_component_uptime_seconds ")
+                    .unwrap();
+                uptime_value = Some(val_str.parse::<f64>().expect("uptime should be a float"));
+            } else if line.starts_with("# HELP dynamo_component_uptime_seconds")
+                || line.starts_with("# TYPE dynamo_component_uptime_seconds")
+            {
+                // Skip HELP/TYPE lines for uptime (we just verify it exists via the value)
+            } else {
+                non_uptime_lines.push(line);
+            }
+        }
+
+        let actual_without_uptime = non_uptime_lines.join("\n");
         assert_eq!(
-            drt_output_raw.trim_end_matches('\n'),
-            expected_drt_output.trim_end_matches('\n'),
-            "\n=== DRT COMPARISON FAILED ===\n\
+            actual_without_uptime,
+            expected_drt_output_without_uptime.trim_end_matches('\n'),
+            "\n=== DRT COMPARISON FAILED (excluding uptime) ===\n\
              Expected:\n{}\n\
-             Actual (filtered):\n{}\n\
+             Actual:\n{}\n\
              ==============================",
-            expected_drt_output,
-            drt_output_raw
+            expected_drt_output_without_uptime,
+            actual_without_uptime
+        );
+
+        // Wait briefly so the uptime gauge is clearly positive on the next scrape.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let drt_output_after = drt.metrics().prometheus_expfmt().unwrap();
+        let uptime_after: f64 = drt_output_after
+            .lines()
+            .find(|l| l.starts_with("dynamo_component_uptime_seconds "))
+            .expect("uptime_seconds metric should be present after sleep")
+            .strip_prefix("dynamo_component_uptime_seconds ")
+            .unwrap()
+            .parse()
+            .expect("uptime should be a float");
+        assert!(
+            uptime_after > 0.0,
+            "uptime_seconds should be > 0 after 10ms sleep, got {}",
+            uptime_after
         );
 
         println!("✓ All Prometheus format outputs verified successfully!");

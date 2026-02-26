@@ -26,6 +26,7 @@ from .utils import DynamoFrontendProcess, run_migration_test
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.sglang,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
@@ -147,6 +148,9 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
+
+        # Disable backend shutdown grace period for all migration tests
+        env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = "0"
 
         # Configure health check based on worker type
         health_check_urls = [
@@ -281,9 +285,7 @@ def test_request_migration_sglang_prefill(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
-    ) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start decode worker first (required for prefill workers to connect)
@@ -351,9 +353,7 @@ def test_request_migration_sglang_kv_transfer(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
-    ) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
@@ -424,9 +424,7 @@ def test_request_migration_sglang_decode(
         )
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
-    ) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first

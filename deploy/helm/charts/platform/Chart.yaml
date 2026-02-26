@@ -19,11 +19,11 @@ maintainers:
     url: https://www.nvidia.com
 description: A Helm chart for NVIDIA Dynamo Platform.
 type: application
-version: 0.9.0
+version: 1.0.0
 home: https://nvidia.com
 dependencies:
   - name: dynamo-operator
-    version: 0.7.1
+    version: 1.0.0
     repository: file://components/operator
     condition: dynamo-operator.enabled
   - name: nats
@@ -33,7 +33,7 @@ dependencies:
   - name: etcd
     version: 12.0.18
     repository: "https://charts.bitnami.com/bitnami"
-    condition: etcd.enabled
+    condition: global.etcd.install
   - name: kai-scheduler
     version: v0.9.4
     repository: oci://ghcr.io/nvidia/kai-scheduler

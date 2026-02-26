@@ -30,6 +30,9 @@ spec:
   - interval: 5s
     path: /metrics
     port: http
+    # honorLabels ensures dynamo_namespace and other labels set by the dynamo
+    # runtime (including router metrics embedded in the frontend) are preserved.
+    honorLabels: true
     relabelings:
     - action: replace
       sourceLabels:
@@ -57,6 +60,9 @@ spec:
   - interval: 5s
     path: /metrics
     port: system
+  - interval: 5s
+    path: /metrics
+    port: nixl
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: worker
@@ -82,5 +88,47 @@ spec:
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: planner
+      nvidia.com/metrics-enabled: "true"
+---
+# TODO: Once a first-class 'router' componentType is added to the dynamo operator,
+#       replace this PodMonitor with one that selects on
+#       nvidia.com/dynamo-component-type: router instead of 'default'.
+#       That would also eliminate the port-override relabeling below, since router
+#       pods could declare containerPort: 9090 (DYN_SYSTEM_PORT) explicitly and
+#       the standard targetPort selector would work without the address rewrite hack.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dynamo-router
+spec:
+  {{- if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchNames:
+    - {{ .Release.Namespace }}
+  {{- else }}
+  namespaceSelector:
+    any: true
+  {{- end }}
+  podMetricsEndpoints:
+  - interval: 5s
+    path: /metrics
+    honorLabels: true
+    relabelings:
+    # Force port 9090 (DYN_SYSTEM_PORT) without requiring containerPort in the pod spec.
+    # targetPort: 9090 would generate a keep rule on __meta_kubernetes_pod_container_port_number
+    # that drops pods without an explicit containerPort: 9090 declaration.
+    - action: replace
+      sourceLabels:
+      - __address__
+      regex: '([^:]+)(?::\d+)?'
+      replacement: '${1}:9090'
+      targetLabel: __address__
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+  selector:
+    matchLabels:
+      nvidia.com/dynamo-component-type: default
       nvidia.com/metrics-enabled: "true"
 {{- end }}

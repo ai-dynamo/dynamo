@@ -14,7 +14,7 @@ A **DynamoGraphDeploymentRequest (DGDR)** is a Kubernetes Custom Resource that s
 - **What** model you want to deploy (`model`)
 - **How** it should perform (SLA targets: `ttft`, `itl`)
 - **Where** it should run (optional GPU preferences)
-- **Which** backend to use (`backend`: vllm, sglang, or trtllm)
+- **Which** backend to use (`backend`: sglang, trtllm, or vllm)
 - **Which** images to use (`profilingConfig.profilerImage`, `deploymentOverrides.workersImage`)
 
 The Dynamo Operator watches for DGDRs and automatically:
@@ -186,7 +186,7 @@ Profiles your model by creating real test deployments in Kubernetes and measurin
 - **Duration**: 2-4 hours
 - **Accuracy**: Highest (real measurements)
 - **GPU Requirements**: Full access to test different parallelization mappings
-- **Backends**: vLLM, SGLang, TensorRT-LLM
+- **Backends**: SGLang, TensorRT-LLM, vLLM
 
 ```yaml
 profilingConfig:
@@ -202,7 +202,7 @@ Uses performance simulation to rapidly estimate optimal configurations without r
 - **Duration**: 20-30 seconds
 - **Accuracy**: Estimated (may have errors for unusual configurations)
 - **GPU Requirements**: None
-- **Backends**: TensorRT-LLM only (vLLM/SGLang coming soon)
+- **Backends**: TensorRT-LLM only (SGLang/vLLM coming soon)
 
 ```yaml
 profilingConfig:
@@ -226,14 +226,15 @@ See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#
 
 ### Automatic GPU Discovery
 
-Cluster-scoped operators can optionally enable automatic GPU discovery:
+The operator automatically discovers GPU resources from your Kubernetes cluster nodes when available. GPU discovery provides:
 
-```yaml
-spec:
-  enableGpuDiscovery: true
-```
+- Hardware information (GPU model, VRAM, GPUs per node)
+- Automatic calculation of profiling search space based on model size
+- Hardware system identifier for AI Configurator integration
 
-This is only available with cluster-scoped operators (`namespaceRestriction.enabled=false`) as it requires cluster-wide node access permissions.
+**Permissions**: GPU discovery requires cluster-wide node read permissions. Cluster-scoped operators automatically have these permissions. Namespace-restricted operators can also use GPU discovery if granted node read permissions via RBAC.
+
+If GPU discovery is unavailable (no permissions or no GPU labels), the profiler will use manually specified hardware configuration or defaults.
 
 ## Configuration
 
@@ -336,7 +337,7 @@ planner:
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See [SLA Planner documentation](/docs/components/planner/planner_guide.md) for full list.
+> Planner arguments use `planner_` prefix. See the AI Configurator documentation for full list.
 
 ### Model Cache PVC (Advanced)
 
@@ -400,7 +401,7 @@ The profiler uses the DGD config as a **base template**, then optimizes it based
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--backend` | string | - | Inference backend: vllm, sglang, trtllm |
+| `--backend` | string | - | Inference backend: sglang, trtllm, vllm |
 | `--config` | string | - | Path to DGD YAML config file |
 | `--model` | string | - | HuggingFace model ID |
 | `--ttft` | float | - | Target TTFT in milliseconds |
@@ -640,8 +641,6 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 
 ## See Also
 
-- [Profiler Examples](profiler_examples.md) - Complete DGDR YAML examples
-- [SLA Planner Guide](/docs/components/planner/planner_guide.md) - End-to-end deployment workflow
-- [SLA Planner Architecture](/docs/components/planner/planner_guide.md) - How the Planner uses profiling data
+- [DGDR Examples](../../../components/src/dynamo/profiler/deploy/) - Complete DGDR YAML examples
 - [DGDR API Reference](/docs/kubernetes/api_reference.md) - DGDR specification
-- [Profiler Arguments Reference](/benchmarks/profiler/utils/profiler_argparse.py) - Full CLI reference
+- [Profiler Arguments Reference](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/profiler/utils/profiler_argparse.py) - Full CLI reference

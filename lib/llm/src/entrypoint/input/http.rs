@@ -7,15 +7,16 @@ use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{EngineConfig, EngineFactoryCallback, RouterConfig, input::common},
+    entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
-    namespace::is_global_namespace,
+    namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -49,37 +50,47 @@ pub async fn run(
         http_service_builder = http_service_builder.host(http_host);
     }
     http_service_builder =
+        http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
+    http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
+
+    // Inject the DRT's metrics registry so that component-scoped metrics
+    // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
+    http_service_builder =
+        http_service_builder.drt_metrics(Some(distributed_runtime.get_metrics_registry().clone()));
+
+    // Wire DRT discovery so that router metrics (dynamo_router_*) are registered
+    // with the instance_id as the router_id label.
+    http_service_builder =
+        http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {
             ref model,
-            ref engine_factory,
+            ref chat_engine_factory,
         } => {
-            // This allows the /health endpoint to query store for active instances
-            http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
+            // Pass the discovery client so the /health endpoint can query active instances
+            http_service_builder =
+                http_service_builder.discovery(Some(distributed_runtime.discovery()));
             let http_service = http_service_builder.build()?;
 
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
             // Listen for models registering themselves, add them to HTTP service
-            // Check if we should filter by namespace (based on the local model's namespace)
-            // Get namespace from the model, fallback to endpoint_id namespace if not set
-            let namespace = model.namespace().unwrap_or("");
-            let target_namespace = if is_global_namespace(namespace) {
-                None
-            } else {
-                Some(namespace.to_string())
-            };
+            // Create namespace filter from model configuration
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+                model.namespace(),
+                model.namespace_prefix(),
+            );
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
                 router_config.clone(),
                 migration_limit,
-                target_namespace,
+                namespace_filter,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
-                engine_factory.clone(),
+                chat_engine_factory.clone(),
             )
             .await?;
             http_service
@@ -107,19 +118,18 @@ pub async fn run(
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
 
-            let tokenizer_hf = model.card().tokenizer_hf()?;
-            let chat_pipeline =
-                common::build_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
-                .await?;
+            let tokenizer = model.card().tokenizer()?;
+            let chat_pipeline = common::build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(model.card(), inner_engine.clone(), tokenizer.clone())
+            .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer_hf)
+            >(model.card(), inner_engine, tokenizer)
             .await?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             // Enable all endpoints
@@ -154,17 +164,17 @@ async fn run_watcher(
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
     migration_limit: u32,
-    target_namespace: Option<String>,
+    namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
-    engine_factory: Option<EngineFactoryCallback>,
+    chat_engine_factory: Option<ChatEngineFactoryCallback>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,
         router_config,
         migration_limit,
-        engine_factory,
+        chat_engine_factory,
         metrics.clone(),
     );
     tracing::debug!("Waiting for remote model");
@@ -190,9 +200,7 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj
-            .watch(discovery_stream, target_namespace.as_deref())
-            .await;
+        watch_obj.watch(discovery_stream, namespace_filter).await;
     });
 
     Ok(())

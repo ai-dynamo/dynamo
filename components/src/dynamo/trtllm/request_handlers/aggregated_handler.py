@@ -7,7 +7,9 @@ import logging
 from typing import Optional
 
 from dynamo._core import Context
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
 from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
@@ -26,7 +28,7 @@ class AggregatedHandler(HandlerBase):
     def __init__(
         self,
         config: RequestHandlerConfig,
-        encoder_cache: Optional[EncoderCacheManager] = None,
+        encoder_cache: Optional[MultimodalEmbeddingCacheManager] = None,
     ):
         super().__init__(config)
         self._encoder_cache = encoder_cache

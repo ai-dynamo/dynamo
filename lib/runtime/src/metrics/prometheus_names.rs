@@ -47,11 +47,11 @@
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
 //! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
-//! - ✅ `nats_client_connection_duration_ms` - Connection time in milliseconds
 //! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
 //! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
-//! - ✅ `nats_client_current_connections` - Current active connections gauge
-//! - ✅ `nats_client_in_messages` - Total messages received counter
+//! - ✅ `dynamo_messaging_client_connection_duration_ms` - Connection time in milliseconds
+//! - ✅ `dynamo_messaging_client_current_connections` - Current active connections gauge
+//! - ✅ `dynamo_messaging_client_in_messages_total` - Total messages received counter
 //!
 //! ## Key Differences: Prometheus Metric Names vs Prometheus Label Names
 //!
@@ -68,9 +68,18 @@ pub mod name_prefix {
 
     /// Prefix for frontend service metrics
     pub const FRONTEND: &str = "dynamo_frontend";
+
+    /// Prefix for KV router metrics (used with router_id label)
+    pub const ROUTER: &str = "dynamo_router";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
+///
+/// These labels are auto-injected into metrics by the hierarchy system:
+/// - Rust: lib/runtime/src/metrics.rs create_metric() function
+/// - Python: components/src/dynamo/common/utils/prometheus.py register_engine_metrics_callback()
+///
+/// Python codegen: These constants are exported to lib/bindings/python/src/dynamo/prometheus_names.py
 pub mod labels {
     /// Label for component identification
     pub const COMPONENT: &str = "dynamo_component";
@@ -80,14 +89,55 @@ pub mod labels {
 
     /// Label for endpoint identification
     pub const ENDPOINT: &str = "dynamo_endpoint";
+
+    /// Label for worker data-parallel rank.
+    ///
+    /// Note: this is not an auto-inserted label like `dynamo_namespace`/`dynamo_component`.
+    /// It is used by worker/load-style metrics that need to disambiguate per-worker series.
+    pub const DP_RANK: &str = "dp_rank";
+
+    /// Label for worker instance ID (etcd lease ID).
+    pub const WORKER_ID: &str = "worker_id";
+
+    /// Label for model name/path (OpenAI API standard, injected by Dynamo)
+    /// This is the standard label name injected by all backends in metrics_labels=[("model", ...)].
+    /// Ensures compatibility with OpenAI-compatible tooling.
+    pub const MODEL: &str = "model";
+
+    /// Label for model name/path (alternative/native engine label, injected by Dynamo)
+    /// Some engines natively use model_name, so we inject both model and model_name
+    /// to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
+    /// When a metric already has a label, injection does not overwrite it (original is preserved).
+    pub const MODEL_NAME: &str = "model_name";
+
+    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    pub const WORKER_TYPE: &str = "worker_type";
+
+    /// Label for router instance (discovery.instance_id() of the frontend)
+    pub const ROUTER_ID: &str = "router_id";
+}
+
+/// Well-known component names used as values for the `dynamo_component` label.
+///
+/// These are the canonical names passed to `namespace.component(name)` to create
+/// `Component` instances whose metrics carry `dynamo_component=<name>`.
+///
+/// Python codegen: These constants are exported to lib/bindings/python/src/dynamo/prometheus_names.py
+pub mod component_names {
+    /// Component name for the KV router (frontend-side request routing).
+    pub const ROUTER: &str = "router";
+
+    // TODO: add PREFILL = "prefill" and DECODE = "decode" component names
+    // and migrate backend worker component creation to use these constants.
 }
 
 /// Frontend service metrics (LLM HTTP service)
 ///
 /// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod frontend_service {
-    // TODO: Move DYN_METRICS_PREFIX and other environment variable names to environment_names.rs
-    // for centralized environment variable constant management across the codebase
+    // TODO: Remove DYN_METRICS_PREFIX — the custom prefix override was added for NIM
+    // compatibility (PR #2432) but is no longer needed. All frontend metrics should
+    // use the fixed `dynamo_frontend_` prefix from `name_prefix::FRONTEND`.
     /// Environment variable that overrides the default metric prefix
     pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
 
@@ -113,8 +163,14 @@ pub mod frontend_service {
     /// Output sequence length in tokens
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
 
+    /// Predicted KV cache hit rate at routing time (0.0-1.0)
+    pub const KV_HIT_RATE: &str = "kv_hit_rate";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
+
+    /// Tokenizer latency in milliseconds
+    pub const TOKENIZER_LATENCY_MS: &str = "tokenizer_latency_ms";
 
     /// Total number of output tokens generated (counter that updates in real-time)
     pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
@@ -176,6 +232,18 @@ pub mod frontend_service {
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
+    /// Label name for tokenizer operation
+    pub const OPERATION_LABEL: &str = "operation";
+
+    /// Operation label values for tokenizer latency metric
+    pub mod operation {
+        /// Tokenization operation
+        pub const TOKENIZE: &str = "tokenize";
+
+        /// Detokenization operation
+        pub const DETOKENIZE: &str = "detokenize";
+    }
+
     /// Migration type label values
     pub mod migration_type {
         /// Migration during initial stream creation (NoResponders error)
@@ -201,6 +269,30 @@ pub mod frontend_service {
 
         /// Value for unary requests
         pub const UNARY: &str = "unary";
+    }
+
+    /// Error type label values for fine-grained error classification
+    pub mod error_type {
+        /// No error (used for successful requests)
+        pub const NONE: &str = "";
+
+        /// Client validation error (4xx with "Validation:" prefix)
+        pub const VALIDATION: &str = "validation";
+
+        /// Model or resource not found (404)
+        pub const NOT_FOUND: &str = "not_found";
+
+        /// Service overloaded, too many requests (503)
+        pub const OVERLOAD: &str = "overload";
+
+        /// Request cancelled by client or timeout
+        pub const CANCELLED: &str = "cancelled";
+
+        /// Internal server error (500 and other unexpected errors)
+        pub const INTERNAL: &str = "internal";
+
+        /// Feature not implemented (501)
+        pub const NOT_IMPLEMENTED: &str = "not_implemented";
     }
 }
 
@@ -325,10 +417,83 @@ pub mod kvbm {
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
+/// Router per-request metrics (component-scoped via `MetricsHierarchy`).
+///
+/// Metric names are composed as `"{METRIC_PREFIX}{frontend_service::*}"` at init time,
+/// then passed to `component.metrics().create_*()` which auto-prepends `dynamo_component_`,
+/// yielding e.g. `dynamo_component_router_requests_total`.
+/// See `lib/llm/src/kv_router/metrics.rs` `RouterRequestMetrics::from_component()`.
+pub mod router_request {
+    /// Prefix prepended to `frontend_service::*` names to form router metric names.
+    /// e.g. `"router_"` + `frontend_service::REQUESTS_TOTAL` → `"router_requests_total"`.
+    pub const METRIC_PREFIX: &str = "router_";
+}
+
+/// Routing overhead phase latency histogram suffixes.
+///
+/// Combined with `name_prefix::ROUTER` ("dynamo_router") in `RoutingOverheadMetrics::register()`,
+/// yielding e.g. `dynamo_router_overhead_block_hashing_ms{router_id="..."}`.
+/// See `lib/llm/src/kv_router/metrics.rs`.
+pub mod routing_overhead {
+    /// Time spent computing block hashes
+    pub const BLOCK_HASHING_MS: &str = "overhead_block_hashing_ms";
+
+    /// Time spent in indexer find_matches
+    pub const INDEXER_FIND_MATCHES_MS: &str = "overhead_indexer_find_matches_ms";
+
+    /// Time spent computing sequence hashes
+    pub const SEQ_HASHING_MS: &str = "overhead_seq_hashing_ms";
+
+    /// Time spent in scheduler worker selection
+    pub const SCHEDULING_MS: &str = "overhead_scheduling_ms";
+
+    /// Total routing overhead per request
+    pub const TOTAL_MS: &str = "overhead_total_ms";
+}
+
+/// Router request metrics (component-scoped aggregate histograms + counter)
+///
+/// These constants are the suffix portions of full metric names, combined with
+/// [`name_prefix::COMPONENT`] to form the complete name, e.g.
+/// `dynamo_component_router_requests_total`.
+///
+/// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
+pub mod router {
+    /// Total number of requests processed by the router
+    pub const REQUESTS_TOTAL: &str = "router_requests_total";
+
+    /// Time to first token observed at the router (seconds)
+    pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";
+
+    /// Average inter-token latency observed at the router (seconds)
+    pub const INTER_TOKEN_LATENCY_SECONDS: &str = "router_inter_token_latency_seconds";
+
+    /// Input sequence length in tokens observed at the router
+    pub const INPUT_SEQUENCE_TOKENS: &str = "router_input_sequence_tokens";
+
+    /// Output sequence length in tokens observed at the router
+    pub const OUTPUT_SEQUENCE_TOKENS: &str = "router_output_sequence_tokens";
+}
+
 // KvRouter (including KvInexer) Prometheus metric names
 pub mod kvrouter {
     /// Number of KV cache events applied to the index (including status)
     pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
+}
+
+// KV cache statistics metrics
+pub mod kvstats {
+    /// Total number of KV cache blocks available on the worker
+    pub const TOTAL_BLOCKS: &str = "total_blocks";
+
+    /// GPU cache usage as a percentage (0.0-1.0)
+    pub const GPU_CACHE_USAGE_PERCENT: &str = "gpu_cache_usage_percent";
+}
+
+// Model information metrics
+pub mod model_info {
+    /// Model load time in seconds
+    pub const LOAD_TIME_SECONDS: &str = "model_load_time_seconds";
 }
 
 // Shared regex patterns for Prometheus sanitization

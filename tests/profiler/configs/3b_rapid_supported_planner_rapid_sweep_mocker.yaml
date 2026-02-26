@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Case 3b: AIC supported model, rapid, with planner, rapid pre-deployment sweeping, enable mocker
+model: "Qwen/Qwen3-32B"
+backend: trtllm
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
+hardware:
+  gpuSku: h200_sxm
+  totalGpus: 8
+  numGpusPerNode: 8
+sla:
+  itl: 50.0
+features:
+  planner:
+    pre_deployment_sweeping_mode: rapid
+    enable_throughput_scaling: true
+    enable_load_scaling: false
+    mode: disagg
+    backend: trtllm
+  mocker:
+    enabled: true

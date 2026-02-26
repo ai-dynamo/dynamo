@@ -10,12 +10,18 @@ use dynamo_llm::backend::Decoder;
 use dynamo_llm::protocols::common::StopConditions;
 use dynamo_llm::tokenizers::DecodeStream;
 use dynamo_llm::tokenizers::hf::HuggingFaceTokenizer;
+use dynamo_llm::tokenizers::tiktoken::TikTokenTokenizer;
 use dynamo_llm::tokenizers::traits::{Encoder, Tokenizer};
 use dynamo_llm::types::TokenIdType;
 
 const TEST_TOKENIZER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
+);
+
+const TEST_TIKTOKEN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/data/sample-models/mock-tiktoken/tiktoken.model"
 );
 
 /// Input Sequence Length for tokenizer
@@ -54,7 +60,7 @@ pub fn decode(c: &mut Criterion) {
                 let tokenizer: Arc<dyn Tokenizer> =
                     Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
                 let ds = DecodeStream::new(tokenizer, &[], false);
-                Decoder::new(ds, StopConditions::default(), false)
+                Decoder::new(ds, StopConditions::default(), false, None)
             },
             |mut decoder| {
                 for tok in black_box(TEST_TOKS) {
@@ -78,7 +84,7 @@ pub fn decode_big(c: &mut Criterion) {
                 let tokenizer: Arc<dyn Tokenizer> =
                     Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
                 let ds = DecodeStream::new(tokenizer, &[], false);
-                Decoder::new(ds, StopConditions::default(), false)
+                Decoder::new(ds, StopConditions::default(), false, None)
             },
             |mut decoder| {
                 for tok in black_box(&BIG_TEST_TOKS) {
@@ -90,5 +96,53 @@ pub fn decode_big(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, encode, decode, decode_big);
+pub fn tiktoken_encode(c: &mut Criterion) {
+    let test_str: &str = &INPUT_STR.repeat(TARGET_ISL / INPUT_STR.len());
+
+    let encoder = TikTokenTokenizer::from_file_auto(TEST_TIKTOKEN).unwrap();
+    let mut group = c.benchmark_group("tiktoken-encode-group");
+    group.throughput(Throughput::Bytes(test_str.len() as u64));
+    group.bench_function("tiktoken_encode", |b| {
+        b.iter(|| {
+            let _ = encoder.encode(black_box(test_str)).unwrap();
+        })
+    });
+    group.finish();
+}
+
+pub fn tiktoken_decode(c: &mut Criterion) {
+    // Encode a test string to get realistic token IDs for this tokenizer
+    let encoder = TikTokenTokenizer::from_file_auto(TEST_TIKTOKEN).unwrap();
+    let encoding = encoder.encode(INPUT_STR).unwrap();
+    let test_toks: Vec<TokenIdType> = encoding.token_ids().to_vec();
+
+    let mut group = c.benchmark_group("tiktoken-decode-group");
+    group.throughput(Throughput::Elements(test_toks.len() as u64));
+    group.bench_function("tiktoken_decoder", |b| {
+        let toks = test_toks.clone();
+        b.iter_with_setup(
+            || {
+                let tokenizer: Arc<dyn Tokenizer> =
+                    Arc::new(TikTokenTokenizer::from_file_auto(TEST_TIKTOKEN).unwrap());
+                let ds = DecodeStream::new(tokenizer, &[], false);
+                Decoder::new(ds, StopConditions::default(), false, None)
+            },
+            |mut decoder| {
+                for tok in black_box(&toks) {
+                    let _ = decoder.step(*tok).unwrap();
+                }
+            },
+        )
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    encode,
+    decode,
+    decode_big,
+    tiktoken_encode,
+    tiktoken_decode
+);
 criterion_main!(benches);

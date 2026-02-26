@@ -587,7 +587,7 @@ fn load_embedded_fatbin() -> Result<cudarc::driver::sys::CUmodule, cudarc::drive
 // Try to load FATBIN from filesystem (runtime)
 fn load_runtime_fatbin() -> Result<cudarc::driver::sys::CUmodule, cudarc::driver::DriverError> {
     // 1. Check runtime environment variable first
-    if let Ok(runtime_path) = std::env::var(env_cuda::DYNAMO_FATBIN_PATH)
+    if let Ok(runtime_path) = std::env::var(env_cuda::DYN_FATBIN_PATH)
         && let Ok(fatbin_data) = std::fs::read(&runtime_path)
     {
         tracing::debug!("Loading FATBIN from runtime env var: {}", runtime_path);

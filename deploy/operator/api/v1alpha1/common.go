@@ -18,6 +18,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -54,7 +56,7 @@ type VolumeMount struct {
 }
 
 // Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+// with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md
 // for migration guidance. This field will be removed in a future API version.
 type Autoscaling struct {
 	// Deprecated: This field is ignored.
@@ -122,6 +124,34 @@ type ExtraPodMetadata struct {
 type ExtraPodSpec struct {
 	*corev1.PodSpec `json:",inline"`
 	MainContainer   *corev1.Container `json:"mainContainer,omitempty"`
+}
+
+// MarshalJSON implements json.Marshaler for ExtraPodSpec.
+//
+// corev1.PodSpec.Containers is declared without omitempty, so a nil slice
+// serializes as "containers": null.  The CRD structural schema defines
+// containers as type: array and rejects null.  This custom marshaller shadows
+// the Containers field with an omitempty-tagged copy so that nil/empty
+// Containers are omitted from the JSON output entirely.
+func (e ExtraPodSpec) MarshalJSON() ([]byte, error) {
+	// Type alias strips methods from corev1.PodSpec, preventing infinite
+	// recursion through any MarshalJSON defined on PodSpec.
+	type PodSpecAlias corev1.PodSpec
+
+	aux := struct {
+		*PodSpecAlias `json:",inline"`
+		Containers    []corev1.Container `json:"containers,omitempty"`
+		MainContainer *corev1.Container  `json:"mainContainer,omitempty"`
+	}{}
+
+	if e.PodSpec != nil {
+		a := PodSpecAlias(*e.PodSpec)
+		aux.PodSpecAlias = &a
+		aux.Containers = e.PodSpec.Containers
+	}
+	aux.MainContainer = e.MainContainer
+
+	return json.Marshal(aux)
 }
 
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter

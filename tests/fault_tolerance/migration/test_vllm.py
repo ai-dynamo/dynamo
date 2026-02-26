@@ -9,6 +9,7 @@ Test Execution Times (Last Run: 2026-01-09):
 - test_request_migration_vllm_decode: ~115s
 """
 
+import json
 import logging
 import os
 import shutil
@@ -26,6 +27,7 @@ from .utils import DynamoFrontendProcess, run_migration_test
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
@@ -102,28 +104,35 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.15",  # avoid assertion error on vLLM available memory checks
         ]
         if is_prefill is True:
-            command.append("--is-prefill-worker")
+            command.extend(["--disaggregation-mode", "prefill"])
         elif is_prefill is False:
-            command.append("--is-decode-worker")
+            command.extend(["--disaggregation-mode", "decode"])
+
+        # Aggregated mode and prefill workers publish KV events
+        if is_prefill is not False:
+            kv_event_port = f"2008{worker_id[-1]}"  # TODO: use dynamic port allocation
+            command.extend(
+                [
+                    "--kv-events-config",
+                    json.dumps(
+                        {
+                            "publisher": "zmq",
+                            "topic": "kv-events",
+                            "endpoint": f"tcp://*:{kv_event_port}",
+                            "enable_kv_cache_events": True,
+                        }
+                    ),
+                ]
+            )
 
         # Set environment variables
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
 
-        # Set KV event and NIXL ports based on worker mode
         # All workers need unique NIXL side channel ports for KV transfer
         env[
             "VLLM_NIXL_SIDE_CHANNEL_PORT"
         ] = f"560{worker_id[-1]}"  # TODO: use dynamic port allocation
-
-        if is_prefill is False:
-            # Decode workers don't publish KV events
-            env.pop("DYN_VLLM_KV_EVENT_PORT", None)
-        else:
-            # Aggregated mode and prefill workers publish KV events
-            env[
-                "DYN_VLLM_KV_EVENT_PORT"
-            ] = f"2008{worker_id[-1]}"  # TODO: use dynamic port allocation
 
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests
@@ -134,6 +143,9 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
+
+        # Disable backend shutdown grace period for all migration tests
+        env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = "0"
 
         # Configure health check based on worker type
         health_check_urls = [
@@ -269,9 +281,7 @@ def test_request_migration_vllm_prefill(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
-    ) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start decode worker first (required for prefill workers to connect)
@@ -348,9 +358,7 @@ def test_request_migration_vllm_kv_transfer(
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
-    ) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
@@ -431,9 +439,7 @@ def test_request_migration_vllm_decode(
         )
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
-    ) as frontend:
+    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
