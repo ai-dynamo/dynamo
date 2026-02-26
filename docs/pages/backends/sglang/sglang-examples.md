@@ -198,5 +198,4 @@ Ensure both prefill and decode workers can reach each other over TCP. The bootst
 - **[Reference Guide](sglang-reference-guide.md)**: Architecture, configuration, and operational details
 - **[SGLang Multimodal](../../features/multimodal/multimodal-sglang.md)**: Vision model deployment patterns
 - **[SGLang HiCache](../../integrations/sglang-hicache.md)**: Hierarchical cache integration
-- **[Benchmarking](../../benchmarks/benchmarking.md)**: Performance benchmarking tools
 - **[Tuning Disaggregated Performance](../../performance/tuning.md)**: P/D tuning guide

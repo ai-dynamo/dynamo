@@ -82,8 +82,6 @@ navigation:
         path: ../pages/features/disaggregated-serving/README.md
       - page: KV Cache Offloading
         path: ../pages/components/kvbm/kvbm-guide.md
-      - page: Dynamo Benchmarking
-        path: ../pages/benchmarks/benchmarking.md
       - section: Multimodality Support
         path: ../pages/features/multimodal/README.md
         contents:
@@ -312,9 +310,6 @@ navigation:
         contents:
           - page: Speculative Decoding with vLLM
             path: ../pages/features/speculative-decoding/speculative-decoding-vllm.md
-      # -- Benchmarks --
-      - page: KV Router A/B Testing
-        path: ../pages/benchmarks/kv-router-ab-testing.md
       # -- Mocker --
       - page: Mocker
         path: ../pages/mocker/mocker.md

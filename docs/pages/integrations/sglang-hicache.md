@@ -50,15 +50,3 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-## 3) (Optional) Benchmarking
-
-Run the perf script:
-```bash
-bash -x $DYNAMO_ROOT/benchmarks/llm/perf.sh \
-  --model Qwen/Qwen3-0.6B \
-  --tensor-parallelism 1 \
-  --data-parallelism 1 \
-  --concurrency "2,4,8" \
-  --input-sequence-length 2048 \
-  --output-sequence-length 256
-```

@@ -301,7 +301,7 @@ RUN if [ "${FRAMEWORK}" = "sglang" ]; then \
 RUN git lfs install
 
 # Install common and test dependencies (matches main Dockerfile dev stage)
-# This installs pytest-benchmark and other test dependencies required for CI
+# This installs test dependencies required for CI
 # TRT-LLM specific: Also installs cupy-cuda13x with special index strategy (Dockerfile.trtllm lines 768-776)
 # SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
 ARG FRAMEWORK
@@ -326,16 +326,10 @@ COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
 
 RUN chmod g+w ${WORKSPACE_DIR}
 
-# Install benchmarks package (includes prefix_data_generator, tabulate, etc.)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    cd ${WORKSPACE_DIR}/benchmarks && \
-    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install .
-
 # Install maturin and create editable install entry points.
 #
 # Why the `uv` check:
-# - This dev stage uses `uv` earlier (requirements + benchmarks). For SGLang, we also install an `uv` binary into
+# - This dev stage uses `uv` earlier (requirements). For SGLang, we also install an `uv` binary into
 #   /opt/dynamo/venv/bin and put that venv on PATH, so `uv` is expected to be available here in normal builds.
 # - The `command -v uv` guard is defensive: on SGLang, `uv` needs to "disappear" from PATH and we fall back to
 #   `python3 -m pip` so the editable install can still proceed (instead of failing mid-layer with a confusing error).

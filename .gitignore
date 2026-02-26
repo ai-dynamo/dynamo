@@ -120,8 +120,6 @@ core
 # AI generated worklogs
 worklogs/
 
-# Benchmarks
-benchmarks/results
 profiling_results*
 
 # Direnv

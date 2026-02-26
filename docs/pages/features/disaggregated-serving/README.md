@@ -752,4 +752,3 @@ For balanced workloads (ISL/OSL ratio between 2:1 and 10:1), aggregated is often
 - [AIConfigurator CLI Guide](https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/cli_user_guide.md)
 - [Dynamo Deployment Guide](https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/dynamo_deployment_guide.md)
 - [Dynamo Installation Guide](../../kubernetes/installation-guide.md)
-- [Benchmarking Guide](../../benchmarks/benchmarking.md)

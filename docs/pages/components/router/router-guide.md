@@ -80,7 +80,6 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
 
 For complete K8s examples and advanced configuration, see [K8s Examples](router-examples.md#k8s-examples).
-For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
 ## KV Cache Routing
 
@@ -222,8 +221,6 @@ We can then use the default routing methods exposed by the client class to send 
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
-
-For benchmarking KV router performance, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
 For custom routing logic and advanced patterns, see [Routing Patterns](router-examples.md#routing-patterns) in the examples documentation.
 
