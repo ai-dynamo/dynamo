@@ -4,8 +4,6 @@
 title: KVBM
 ---
 
-# KV Block Manager (KVBM)
-
 The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer and write-through cache for frameworks like vLLM and TensorRT-LLM.
 
 KVBM offers:

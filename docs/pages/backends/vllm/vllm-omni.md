@@ -4,8 +4,6 @@
 title: vLLM-Omni
 ---
 
-# [Experimental] Omni Models with vLLM
-
 Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-text, text-to-image, and text-to-video capabilities via OpenAI-compatible API endpoints.
 
 ## Prerequisites

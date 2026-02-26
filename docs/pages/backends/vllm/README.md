@@ -4,8 +4,6 @@
 title: vLLM
 ---
 
-# LLM Deployment using vLLM
-
 This directory contains reference implementations for deploying Large Language Models (LLMs) in various configurations using vLLM. For Dynamo integration, we leverage vLLM's native KV cache events, NIXL based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
 ## Use the Latest Release

@@ -4,8 +4,6 @@
 title: Logging
 ---
 
-# Dynamo Logging
-
 ## Overview
 
 Dynamo provides structured logging in both text as well as JSONL. When

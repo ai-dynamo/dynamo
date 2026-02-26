@@ -4,8 +4,6 @@
 title: Integration with Dynamo
 ---
 
-# Checkpoint/Restore for Fast Pod Startup
-
 > ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. The ChReK DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
 
 Checkpointing captures the complete state of a running worker pod (including GPU memory) and saves it to storage. New pods can restore from this checkpoint instead of performing a full cold start.
