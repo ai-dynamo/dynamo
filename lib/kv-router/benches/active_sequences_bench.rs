@@ -22,72 +22,12 @@ use uuid::Uuid;
     about = "ActiveSequences add_request/free throughput benchmark"
 )]
 struct Args {
-    /// Path to a JSONL mooncake trace file.
-    mooncake_trace_path: Option<String>,
-
-    /// Run built-in self-tests instead of the benchmark.
-    #[clap(long)]
-    test: bool,
-
-    /// Number of GPU blocks available in the mock engine's KV cache.
-    #[clap(long, default_value = "1048576")]
-    num_gpu_blocks: usize,
-
-    /// Number of tokens per KV cache block.
-    #[clap(long, default_value = "512")]
-    block_size: u32,
-
-    /// Wall-clock duration (ms) over which the trace is replayed during event generation.
-    #[clap(long, default_value = "30000")]
-    trace_simulation_duration_ms: u64,
-
-    /// Wall-clock duration (ms) over which the benchmark replays operations.
-    #[clap(long, default_value = "60000")]
-    benchmark_duration_ms: u64,
-
-    /// Number of unique simulated inference workers.
-    #[clap(short, long, default_value = "256")]
-    num_unique_inference_workers: usize,
-
-    /// How many times to duplicate unique workers during the benchmark phase.
-    #[clap(short = 'd', long, default_value = "1")]
-    inference_worker_duplication_factor: usize,
-
-    /// Factor by which to stretch each request's hash sequence length.
-    #[clap(long, default_value = "1")]
-    trace_length_factor: usize,
-
-    /// How many times to duplicate the raw trace data with offset hash_ids.
-    #[clap(long, default_value = "1")]
-    trace_duplication_factor: usize,
-
-    /// RNG seed for reproducible worker-to-trace assignment.
-    #[clap(long, default_value = "42")]
-    seed: u64,
-
-    /// Enable throughput vs p99 latency sweep mode.
-    #[clap(long)]
-    sweep: bool,
-
-    /// Minimum benchmark duration (ms) for sweep mode.
-    #[clap(long, default_value = "1000")]
-    sweep_min_ms: u64,
-
-    /// Maximum benchmark duration (ms) for sweep mode.
-    #[clap(long, default_value = "50000")]
-    sweep_max_ms: u64,
-
-    /// Number of logarithmically spaced sweep steps between min and max.
-    #[clap(long, default_value = "10")]
-    sweep_steps: usize,
+    #[clap(flatten)]
+    common: CommonArgs,
 
     /// Output path for the sweep plot SVG.
     #[clap(long, default_value = "active_seq_sweep_plot.svg")]
     sweep_output: String,
-
-    /// Ignored - passed by cargo bench harness.
-    #[arg(long, hide = true, global = true)]
-    bench: bool,
 }
 
 /// Pre-computed metadata for a request, stored before submission so the
@@ -538,79 +478,61 @@ async fn run_tests() -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    if args.test {
+    if args.common.test {
         return run_tests().await;
     }
 
     let path = args
+        .common
         .mooncake_trace_path
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("mooncake_trace_path is required for benchmarking"))?;
     let traces = process_mooncake_trace(
         path,
-        args.trace_length_factor,
-        args.trace_duplication_factor,
-        args.num_unique_inference_workers,
-        args.seed,
+        args.common.trace_length_factor,
+        args.common.trace_duplication_factor,
+        args.common.num_unique_inference_workers,
+        args.common.seed,
     )?;
 
     let seq_traces = generate_sequence_events(
         &traces,
-        args.num_gpu_blocks,
-        args.block_size,
-        args.trace_simulation_duration_ms,
+        args.common.num_gpu_blocks,
+        args.common.block_size,
+        args.common.trace_simulation_duration_ms,
     )
     .await?;
 
-    if args.sweep {
-        let log_min = (args.sweep_min_ms as f64).ln();
-        let log_max = (args.sweep_max_ms as f64).ln();
-        let n = args.sweep_steps;
-        let durations: Vec<u64> = (0..n)
-            .map(|i| {
-                let t = i as f64 / (n - 1) as f64;
-                (log_max * (1.0 - t) + log_min * t).exp().round() as u64
-            })
-            .collect();
+    if args.common.sweep {
+        let durations = compute_sweep_durations(
+            args.common.sweep_min_ms,
+            args.common.sweep_max_ms,
+            args.common.sweep_steps,
+        );
 
         let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
         for &dur_ms in &durations {
             println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
             let result = run_benchmark(
                 &seq_traces,
-                args.block_size,
+                args.common.block_size,
                 dur_ms,
-                args.inference_worker_duplication_factor,
+                args.common.inference_worker_duplication_factor,
             )
             .await?;
             results.push((dur_ms, result));
         }
 
-        println!("\n=== Sweep Summary ===");
-        println!(
-            "{:>12} {:>14} {:>14} {:>14} {:>14} {:>10}",
-            "duration_ms", "ops/s_off", "ops/s", "blk_ops/s_off", "blk_ops/s", "p99(us)"
-        );
-        for (dur, r) in &results {
-            println!(
-                "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>14.1} {:>10.1}",
-                dur,
-                r.offered_ops_throughput,
-                r.ops_throughput,
-                r.offered_block_throughput,
-                r.block_throughput,
-                r.latency_p99_us,
-            );
-        }
+        print_sweep_summary("active-sequences", &results);
 
         let all_results = vec![("active-sequences", results)];
         plot_sweep(&all_results, &args.sweep_output)?;
     } else {
         run_benchmark(
             &seq_traces,
-            args.block_size,
-            args.benchmark_duration_ms,
-            args.inference_worker_duplication_factor,
+            args.common.block_size,
+            args.common.benchmark_duration_ms,
+            args.common.inference_worker_duplication_factor,
         )
         .await?;
     }

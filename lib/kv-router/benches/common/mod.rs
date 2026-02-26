@@ -19,6 +19,73 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// Shared CLI arguments for trace-based benchmarks.
+#[derive(clap::Args, Debug)]
+pub struct CommonArgs {
+    /// Path to a JSONL mooncake trace file.
+    pub mooncake_trace_path: Option<String>,
+
+    /// Run built-in self-tests instead of the benchmark.
+    #[clap(long)]
+    pub test: bool,
+
+    /// Number of GPU blocks available in the mock engine's KV cache.
+    #[clap(long, default_value = "1048576")]
+    pub num_gpu_blocks: usize,
+
+    /// Number of tokens per KV cache block.
+    #[clap(long, default_value = "512")]
+    pub block_size: u32,
+
+    /// Wall-clock duration (ms) over which the trace is replayed during event generation.
+    #[clap(long, default_value = "30000")]
+    pub trace_simulation_duration_ms: u64,
+
+    /// Wall-clock duration (ms) over which the benchmark replays operations.
+    #[clap(long, default_value = "60000")]
+    pub benchmark_duration_ms: u64,
+
+    /// Number of unique simulated inference workers.
+    #[clap(short, long, default_value = "256")]
+    pub num_unique_inference_workers: usize,
+
+    /// How many times to duplicate unique workers during the benchmark phase.
+    #[clap(short = 'd', long, default_value = "1")]
+    pub inference_worker_duplication_factor: usize,
+
+    /// Factor by which to stretch each request's hash sequence length.
+    #[clap(long, default_value = "1")]
+    pub trace_length_factor: usize,
+
+    /// How many times to duplicate the raw trace data with offset hash_ids.
+    #[clap(long, default_value = "1")]
+    pub trace_duplication_factor: usize,
+
+    /// RNG seed for reproducible worker-to-trace assignment.
+    #[clap(long, default_value = "42")]
+    pub seed: u64,
+
+    /// Enable throughput vs p99 latency sweep mode.
+    #[clap(long)]
+    pub sweep: bool,
+
+    /// Minimum benchmark duration (ms) for sweep mode.
+    #[clap(long, default_value = "1000")]
+    pub sweep_min_ms: u64,
+
+    /// Maximum benchmark duration (ms) for sweep mode.
+    #[clap(long, default_value = "50000")]
+    pub sweep_max_ms: u64,
+
+    /// Number of logarithmically spaced sweep steps between min and max.
+    #[clap(long, default_value = "10")]
+    pub sweep_steps: usize,
+
+    /// Ignored - passed by cargo bench harness.
+    #[arg(long, hide = true, global = true)]
+    pub bench: bool,
+}
+
 /// A single request deserialized from the mooncake trace JSONL.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MooncakeRequest {
@@ -456,4 +523,36 @@ pub fn plot_sweep(
     root.present()?;
     println!("Sweep plot saved to {}", output_path);
     Ok(())
+}
+
+/// Compute logarithmically spaced benchmark durations for sweep mode.
+pub fn compute_sweep_durations(min_ms: u64, max_ms: u64, steps: usize) -> Vec<u64> {
+    let log_min = (min_ms as f64).ln();
+    let log_max = (max_ms as f64).ln();
+    (0..steps)
+        .map(|i| {
+            let t = i as f64 / (steps - 1) as f64;
+            (log_max * (1.0 - t) + log_min * t).exp().round() as u64
+        })
+        .collect()
+}
+
+/// Print a formatted sweep summary table.
+pub fn print_sweep_summary(name: &str, results: &[(u64, BenchmarkResults)]) {
+    println!("\n=== Sweep Summary: {} ===", name);
+    println!(
+        "{:>12} {:>14} {:>14} {:>14} {:>14} {:>10}",
+        "duration_ms", "ops/s_off", "ops/s", "blk_ops/s_off", "blk_ops/s", "p99(us)"
+    );
+    for (dur, r) in results {
+        println!(
+            "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>14.1} {:>10.1}",
+            dur,
+            r.offered_ops_throughput,
+            r.ops_throughput,
+            r.offered_block_throughput,
+            r.block_throughput,
+            r.latency_p99_us,
+        );
+    }
 }
