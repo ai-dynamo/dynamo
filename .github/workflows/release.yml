@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - 'release/*'
-      - 'pvijayakrish/automate-dynamo-rcs'  # TEMPORARY: remove after testing
   workflow_dispatch:
     inputs:
       rc_number:
@@ -51,15 +50,6 @@ jobs:
         run: |
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
           VERSION="${BRANCH_NAME#release/}"
-
-          # TEMPORARY: Use test version for non-release branches
-          if [[ ! "$BRANCH_NAME" =~ ^release/ ]]; then
-            VERSION="0.0.0-test1"
-            echo "Using test version: ${VERSION} (branch: ${BRANCH_NAME})"
-            echo "version=${VERSION}" >> $GITHUB_OUTPUT
-            echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
-            exit 0
-          fi
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -718,57 +708,3 @@ jobs:
           echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-platform:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
 
-  # ============================================================================
-  # SLACK NOTIFICATION
-  # ============================================================================
-
-  notify-slack:
-    name: Notify Slack
-    runs-on: prod-builder-amd-v1
-    if: false  # TEMPORARY: disabled for testing
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build, frontend-build, release-publish]
-    permissions:
-      contents: read
-    steps:
-      - name: Get Failed jobs
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          JOBS_JSON=$(mktemp)
-          curl -sSL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            >$JOBS_JSON
-
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | ":failed: " + (.name | split(" / ") | .[-1]) + "\\n"' "$JOBS_JSON")
-          echo $FAILED_JOBS
-          {
-            echo "FAILED_JOBS<<EOF"
-            echo "$FAILED_JOBS"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
-      - name: Notify Slack
-        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
-        with:
-          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            blocks:
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: ":alert: *Github Release Pipeline Failure*"
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: "<https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}|Workflow Summary>"
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: "${{ env.FAILED_JOBS }}"
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: "@ops-support Please investigate the failures above."
