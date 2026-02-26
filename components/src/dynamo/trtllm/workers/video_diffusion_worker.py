@@ -33,20 +33,19 @@ async def init_video_diffusion_worker(
         shutdown_event: Event to signal shutdown.
         shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
-    # Check visual_gen availability early with a clear error message.
-    # visual_gen is part of TensorRT-LLM but only available on the feat/visual_gen
-    # branch — not yet in any release. Without this check, users would get a cryptic
-    # ImportError deep inside DiffusionEngine.initialize().
+    # Check tensorrt_llm visual_gen availability early with a clear error message.
+    # visual_gen is part of TensorRT-LLM (tensorrt_llm._torch.visual_gen).
+    # Without this check, users would get a cryptic ImportError deep inside
+    # DiffusionEngine.initialize().
     try:
-        import visual_gen  # noqa: F401
+        import tensorrt_llm._torch.visual_gen  # noqa: F401
     except ImportError:
         raise ImportError(
-            "Video diffusion requires the 'visual_gen' package from TensorRT-LLM's "
-            "feat/visual_gen branch. Install with:\n"
-            "  git clone https://github.com/NVIDIA/TensorRT-LLM.git\n"
-            "  cd TensorRT-LLM && git checkout feat/visual_gen\n"
-            "  cd tensorrt_llm/visual_gen && pip install -e .\n"
-            "See: https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen"
+            "Video diffusion requires TensorRT-LLM with visual_gen support.\n"
+            "The visual_gen module is at tensorrt_llm._torch.visual_gen.\n"
+            "Install TensorRT-LLM with AIGV support:\n"
+            "  pip install tensorrt_llm\n"
+            "See: https://github.com/NVIDIA/TensorRT-LLM"
         ) from None
 
     from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
@@ -54,6 +53,13 @@ async def init_video_diffusion_worker(
     from dynamo.trtllm.request_handlers.video_diffusion import VideoGenerationHandler
 
     logging.info(f"Initializing video diffusion worker with config: {config}")
+
+    # Parse skip_components from comma-separated string to list
+    skip_components = (
+        [c.strip() for c in config.skip_components.split(",") if c.strip()]
+        if config.skip_components
+        else []
+    )
 
     # Build DiffusionConfig from the main Config
     diffusion_config = DiffusionConfig(
@@ -65,6 +71,8 @@ async def init_video_diffusion_worker(
         event_plane=config.event_plane,
         model_path=config.model,
         served_model_name=config.served_model_name,
+        torch_dtype=config.torch_dtype,
+        revision=config.revision,
         media_output_fs_url=config.media_output_fs_url,
         media_output_http_url=config.media_output_http_url,
         default_height=config.default_height,
@@ -72,26 +80,41 @@ async def init_video_diffusion_worker(
         default_num_frames=config.default_num_frames,
         default_num_inference_steps=config.default_num_inference_steps,
         default_guidance_scale=config.default_guidance_scale,
-        enable_teacache=config.enable_teacache,
-        teacache_thresh=config.teacache_thresh,
-        attn_type=config.attn_type,
-        linear_type=config.linear_type,
+        # Pipeline optimization
         disable_torch_compile=config.disable_torch_compile,
         torch_compile_mode=config.torch_compile_mode,
+        enable_fullgraph=config.enable_fullgraph,
+        fuse_qkv=config.fuse_qkv,
+        enable_cuda_graph=config.enable_cuda_graph,
+        enable_layerwise_nvtx_marker=config.enable_layerwise_nvtx_marker,
+        warmup_steps=config.warmup_steps,
+        # Attention
+        attn_backend=config.attn_backend,
+        # Quantization
+        quant_algo=config.quant_algo,
+        quant_dynamic=config.quant_dynamic,
+        # TeaCache
+        enable_teacache=config.enable_teacache,
+        teacache_use_ret_steps=config.teacache_use_ret_steps,
+        teacache_thresh=config.teacache_thresh,
+        # Parallelism
         dit_dp_size=config.dit_dp_size,
         dit_tp_size=config.dit_tp_size,
         dit_ulysses_size=config.dit_ulysses_size,
         dit_ring_size=config.dit_ring_size,
         dit_cfg_size=config.dit_cfg_size,
         dit_fsdp_size=config.dit_fsdp_size,
+        # Offloading
         enable_async_cpu_offload=config.enable_async_cpu_offload,
+        # Component loading
+        skip_components=skip_components,
     )
 
     # Get the endpoint from the runtime
     endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
-    component = endpoint.component()
+
     if shutdown_endpoints is not None:
         shutdown_endpoints[:] = [endpoint]
 
@@ -100,7 +123,7 @@ async def init_video_diffusion_worker(
     await engine.initialize()
 
     # Create the request handler
-    handler = VideoGenerationHandler(component, engine, diffusion_config)
+    handler = VideoGenerationHandler(engine, diffusion_config)
 
     # Register the model with Dynamo's discovery system
     model_name = config.served_model_name or config.model

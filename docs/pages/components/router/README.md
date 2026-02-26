@@ -4,8 +4,6 @@
 title: Router
 ---
 
-# Router
-
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 
 ## Quick Start
@@ -88,7 +86,7 @@ For more configuration options and tuning guidelines, see the [Router Guide](rou
 - You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
 
 **Multimodal Support:**
-- **vLLM and TRT-LLM**: Multimodal routing supported for images via multimodal hashes
+- **TRT-LLM and vLLM**: Multimodal routing supported for images via multimodal hashes
 - **SGLang**: Image routing not yet supported
 - **Other modalities** (audio, video, etc.): Not yet supported
 

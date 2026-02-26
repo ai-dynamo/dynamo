@@ -678,6 +678,79 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 		// Annotation validation test cases
 		{
+			name: "valid annotation vllm-distributed-executor-backend=mp",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid annotation vllm-distributed-executor-backend=ray",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid annotation vllm-distributed-executor-backend case insensitive MP",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "MP",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid annotation vllm-distributed-executor-backend",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  `annotation nvidia.com/vllm-distributed-executor-backend has invalid value "invalid": must be "mp" or "ray"`,
+		},
+		{
 			name: "no annotations is valid",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -717,7 +790,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Name:      "test-graph",
 					Namespace: "default",
 					Annotations: map[string]string{
-						consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0-dev",
+						consts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
@@ -764,6 +837,46 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  `annotation nvidia.com/dynamo-operator-origin-version has invalid value "not-a-version": must be valid semver`,
+		},
+		{
+			name: "both annotations valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoOperatorOriginVersion:    "1.0.0",
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "both annotations invalid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationDynamoOperatorOriginVersion:    "bad",
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "annotation nvidia.com/dynamo-operator-origin-version has invalid value \"bad\": must be valid semver\nannotation nvidia.com/vllm-distributed-executor-backend has invalid value \"invalid\": must be \"mp\" or \"ray\"",
+			errContains: true,
 		},
 	}
 

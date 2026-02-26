@@ -4,8 +4,6 @@
 title: Metrics
 ---
 
-# Dynamo Metrics
-
 ## Overview
 
 Dynamo provides built-in metrics capabilities through the Dynamo metrics API, which is automatically available whenever you use the `DistributedRuntime` framework. This document serves as a reference for all available metrics in Dynamo.
@@ -86,7 +84,7 @@ Dynamo exposes several categories of metrics:
 - **Frontend Metrics** (`dynamo_frontend_*`) - Request handling, token processing, and latency measurements
 - **Component Metrics** (`dynamo_component_*`) - Request counts, processing times, byte transfers, and system uptime
 - **Specialized Component Metrics** (e.g., `dynamo_preprocessor_*`) - Component-specific metrics
-- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/prometheus.md) (`vllm:*`), [SGLang](../backends/sglang/prometheus.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus.md) (`trtllm_*`)
+- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/prometheus.md) (`vllm:*`), [SGLang](../backends/sglang/sglang-observability.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus.md) (`trtllm_*`)
 
 ## Runtime Hierarchy
 
@@ -103,23 +101,20 @@ This hierarchical structure allows you to create metrics at the appropriate leve
 
 ### Backend Component Metrics
 
-**Backend workers** (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) expose `dynamo_component_*` metrics on port 8081 by default (configurable via `DYN_SYSTEM_PORT`).
+**Backend workers** (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) expose `dynamo_component_*` metrics on the system status port (configurable via `DYN_SYSTEM_PORT`, disabled by default). In Kubernetes the operator typically sets `DYN_SYSTEM_PORT=9090`; for local development you must set it explicitly (e.g. `DYN_SYSTEM_PORT=8081`).
 
-The core Dynamo backend system automatically exposes metrics on the system status port (default: 8081, configurable via `DYN_SYSTEM_PORT`) at the `/metrics` endpoint with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
+The core Dynamo backend system exposes metrics at the `/metrics` endpoint with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
 
 - `dynamo_component_inflight_requests`: Requests currently being processed (gauge)
 - `dynamo_component_request_bytes_total`: Total bytes received in requests (counter)
 - `dynamo_component_request_duration_seconds`: Request processing time (histogram)
 - `dynamo_component_requests_total`: Total requests processed (counter)
 - `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
-- `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge)
+- `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge). Automatically updated before each Prometheus scrape on both the frontend (`/metrics` on port 8000) and the system status server (`/metrics` on `DYN_SYSTEM_PORT` when set).
 
 **Access backend component metrics:**
 ```bash
-# Default port 8081
-curl http://localhost:8081/metrics
-
-# Or with custom port
+# Set DYN_SYSTEM_PORT to enable the system status server
 DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
 curl http://localhost:8081/metrics
 ```
@@ -194,7 +189,7 @@ curl -s localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
 **Timeline:**
 ```
 Timeline:    0, 1, ...
-Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (vLLM, SGLang, TRT)
+Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (SGLang, TRT, vLLM)
              │request start                     │received                              │
              |                                  |                                      |
              │                                  ├──> start prefill ──> first token ──> |last token
@@ -216,6 +211,71 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 - **Inflight**: Measures total request lifetime including processing time
 - **HTTP Queue**: Measures queuing time before processing begins (including prefill time)
 - **HTTP Queue ≤ Inflight** (HTTP queue is a subset of inflight time)
+
+### Router Metrics
+
+The router exposes metrics for monitoring routing decisions and overhead. Defined in `lib/llm/src/kv_router/metrics.rs`.
+
+For router configuration and tuning, see the [Router Guide](../components/router/router-guide.md).
+
+#### Router Request Metrics (`dynamo_component_router_*`)
+
+Histograms and counters for aggregate request-level statistics. Eagerly registered via `from_component()` with the DRT `MetricsRegistry` hierarchy. On the frontend, exposed at `/metrics` on the HTTP port (default 8000) via the `drt_metrics` bridge. On the standalone router (`python -m dynamo.router`), exposed on `DYN_SYSTEM_PORT` when set. Populated per-request when `--router-mode kv` is active; registered with zero values in non-KV modes.
+
+All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`).
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_component_router_requests_total` | Counter | Total requests processed by the router |
+| `dynamo_component_router_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
+| `dynamo_component_router_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
+| `dynamo_component_router_input_sequence_tokens` | Histogram | Input sequence length (tokens) |
+| `dynamo_component_router_output_sequence_tokens` | Histogram | Output sequence length (tokens) |
+| `dynamo_component_router_kv_hit_rate` | Histogram | Predicted KV cache hit rate at routing time (0.0-1.0) |
+
+#### Per-Request Routing Overhead (`dynamo_router_overhead_*`)
+
+Histograms (in milliseconds) tracking the time spent in each phase of the routing decision for every request. Registered on the frontend port (default 8000) at `/metrics` with a `router_id` label (the frontend's discovery instance ID).
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_router_overhead_block_hashing_ms` | Histogram | Time computing block hashes |
+| `dynamo_router_overhead_indexer_find_matches_ms` | Histogram | Time in indexer find_matches |
+| `dynamo_router_overhead_seq_hashing_ms` | Histogram | Time computing sequence hashes |
+| `dynamo_router_overhead_scheduling_ms` | Histogram | Time in scheduler worker selection |
+| `dynamo_router_overhead_total_ms` | Histogram | Total routing overhead per request |
+
+#### KV Indexer Metrics
+
+Tracks KV cache events applied to the router's radix tree index. Only appears when `--router-kv-overlap-score-weight` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--router-kv-overlap-score-weight 0` is set or no KV events have been received.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_component_kv_cache_events_applied` | Counter | KV cache events applied to the index |
+
+**Additional labels:** `status` (`ok` / `error`), `event_type` (`stored` / `removed` / `cleared`)
+
+#### Per-Worker Load and Timing Gauges (`dynamo_frontend_worker_*`)
+
+These appear once workers register and begin serving requests. They are registered on the frontend's local Prometheus registry (not component-scoped) and do not carry `dynamo_namespace` or `dynamo_component` labels.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_frontend_worker_active_decode_blocks` | Gauge | Active KV cache decode blocks per worker |
+| `dynamo_frontend_worker_active_prefill_tokens` | Gauge | Active prefill tokens queued per worker |
+| `dynamo_frontend_worker_last_time_to_first_token_seconds` | Gauge | Last observed TTFT per worker (seconds) |
+| `dynamo_frontend_worker_last_input_sequence_tokens` | Gauge | Last observed input sequence length per worker |
+| `dynamo_frontend_worker_last_inter_token_latency_seconds` | Gauge | Last observed ITL per worker (seconds) |
+
+**Labels:**
+
+| Label | Example Value | Description |
+|-------|---------------|-------------|
+| `worker_id` | `7890` | Worker instance ID (etcd lease ID) |
+| `dp_rank` | `0` | Data-parallel rank |
+| `worker_type` | `prefill` or `decode` | Worker role |
+
+In disaggregated mode, the `worker_type` label shows both `"prefill"` and `"decode"` values; in aggregated mode, all workers report as `"decode"`.
 
 ## Related Documentation
 

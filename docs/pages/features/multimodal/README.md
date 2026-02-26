@@ -5,8 +5,6 @@ title: Multimodality Support
 subtitle: Deploy multimodal models with image, video, and audio support in Dynamo
 ---
 
-# Multimodal Inference in Dynamo
-
 Dynamo supports multimodal inference across multiple LLM backends, enabling models to process images, video, and audio alongside text. This section provides comprehensive documentation for deploying multimodal models.
 
 > [!IMPORTANT]
@@ -39,10 +37,10 @@ Dynamo supports multimodal inference across multiple LLM backends, enabling mode
 
 ### Input Format Support
 
-| Format | vLLM | TRT-LLM | SGLang |
-|--------|------|---------|--------|
+| Format | SGLang | TRT-LLM | vLLM |
+|--------|--------|---------|------|
 | HTTP/HTTPS URL | ✅ | ✅ | ✅ |
-| Data URL (Base64) | ✅ | ❌ | ❌ |
+| Data URL (Base64) | ❌ | ❌ | ✅ |
 | Pre-computed Embeddings (.pt) | ❌ | ✅ | ❌ |
 
 ## Architecture Patterns
