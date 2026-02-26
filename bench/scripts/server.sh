@@ -122,7 +122,7 @@ launch_scenario_2() {
 
     # Start dynamo vllm worker
     DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
-        --model "$MODEL" --connector none &
+        --model "$MODEL" &
     CHILD_PIDS+=($!)
     echo "[server.sh] dynamo.vllm PID: ${CHILD_PIDS[-1]}"
 }
@@ -157,7 +157,7 @@ launch_scenario_3() {
 
     # Start dynamo vllm worker
     DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
-        --model "$MODEL" --connector none &
+        --model "$MODEL" &
     CHILD_PIDS+=($!)
     echo "[server.sh] dynamo.vllm PID: ${CHILD_PIDS[-1]}"
 }
