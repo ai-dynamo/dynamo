@@ -169,7 +169,7 @@ func applyContainerOverrides(container *corev1.Container, overrides *corev1.Cont
 	if overrides.Image != "" {
 		container.Image = overrides.Image
 	}
-	if len(overrides.Resources.Requests) > 0 || len(overrides.Resources.Limits) > 0 {
+	if len(overrides.Resources.Requests) > 0 || len(overrides.Resources.Limits) > 0 || len(overrides.Resources.Claims) > 0 {
 		container.Resources = overrides.Resources
 	}
 	if overrides.SecurityContext != nil {

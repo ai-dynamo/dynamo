@@ -421,6 +421,29 @@ func TestApplyProfilingJobOverrides_ContainerResources(t *testing.T) {
 	}
 }
 
+func TestApplyProfilingJobOverrides_ContainerResourceClaims(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Resources: corev1.ResourceRequirements{
+							Claims: []corev1.ResourceClaim{
+								{Name: "gpu"},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	claims := job.Spec.Template.Spec.Containers[0].Resources.Claims
+	if len(claims) != 1 || claims[0].Name != "gpu" {
+		t.Errorf("expected 1 resource claim 'gpu', got %v", claims)
+	}
+}
+
 func TestApplyProfilingJobOverrides_ContainerImage(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
