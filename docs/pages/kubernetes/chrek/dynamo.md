@@ -8,22 +8,17 @@ title: Integration with Dynamo
 
 > ⚠️ **Experimental Feature**: ChReK is currently in **beta/preview**. The ChReK DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
 
-Reduce cold start times for LLM inference workers from ~3 minutes to ~30 seconds using container checkpointing.
-
-## Overview
-
 Checkpointing captures the complete state of a running worker pod (including GPU memory) and saves it to storage. New pods can restore from this checkpoint instead of performing a full cold start.
 
 | Startup Type | Time | What Happens |
 |--------------|------|--------------|
-| **Cold Start** | ~3 min | Download model, load to GPU, initialize engine |
-| **Warm Start** (checkpoint) | ~30 sec | Restore from checkpoint tar |
+| **Cold Start** | ~1 min | Download model, load to GPU, initialize engine |
+| **Warm Start** (checkpoint) | < 10 sec | Restore from checkpoint tar |
 
 ## Prerequisites
 
-- Dynamo Platform installed (v0.4.0+)
+- Dynamo Platform installed (v0.4.0+) on k8s cluster with GPU nodes
 - ChReK Helm chart installed (separate from platform)
-- GPU nodes with containerd runtime (CRIU is bundled in ChReK images)
 - RWX PVC storage (PVC is currently the only supported backend)
 
 ## Quick Start
@@ -173,61 +168,6 @@ On first deployment:
 1. A checkpoint job runs to create the checkpoint
 2. Worker pods start with cold start (checkpoint not ready yet)
 3. Once checkpoint is ready, new pods (scale-up, restarts) restore from checkpoint
-
-## Storage Backends
-
-### PVC (Currently Supported)
-
-Use when you have RWX storage available (e.g., NFS, EFS, Filestore).
-
-```yaml
-checkpoint:
-  storage:
-    type: pvc
-    pvc:
-      pvcName: "chrek-pvc"
-      basePath: "/checkpoints"
-```
-
-**Requirements:**
-- RWX (ReadWriteMany) PVC for multi-node access
-- Sufficient storage (checkpoints are ~10-50GB per model)
-
-### S3 / MinIO (Planned - Not Yet Implemented)
-
-> ⚠️ **Note:** S3 storage backend is defined in the API but not yet fully implemented.
-
-Object storage support is planned for a future release. The configuration will look like:
-
-```yaml
-checkpoint:
-  storage:
-    type: s3  # Not yet supported
-    s3:
-      # AWS S3
-      uri: "s3://my-bucket/checkpoints"
-
-      # Or MinIO / custom S3
-      uri: "s3://minio.example.com/my-bucket/checkpoints"
-
-      # Optional: credentials secret
-      credentialsSecretRef: "s3-creds"
-```
-
-### OCI Registry (Planned - Not Yet Implemented)
-
-> ⚠️ **Note:** OCI registry storage backend is defined in the API but not yet fully implemented.
-
-Container registry storage support is planned for a future release. The configuration will look like:
-
-```yaml
-checkpoint:
-  storage:
-    type: oci  # Not yet supported
-    oci:
-      uri: "oci://myregistry.io/checkpoints"
-      credentialsSecretRef: "registry-creds"  # Docker config secret
-```
 
 ## Checkpoint Modes
 
@@ -418,27 +358,12 @@ Or use `auto` mode and the operator will find/create it automatically.
 
 ## Limitations
 
-⚠️ **Important**: ChReK has significant limitations that impact production readiness:
-
-### Security Considerations
-- **🔴 Privileged DaemonSet**: The ChReK DaemonSet runs in privileged mode with `hostPID`, `hostIPC`, and `hostNetwork` to perform CRIU operations externally
-- Workload pods (checkpoint jobs, restore pods) do **not** need privileged mode — all CRIU privilege lives in the DaemonSet
-- The privileged DaemonSet has elevated host access, which may violate security policies in many production environments
-
-### Technical Limitations
 - **vLLM and SGLang backends only**: TensorRT-LLM support is planned.
 - **LLM workers only**: Checkpoint/restore supports LLM decode and prefill workers. Specialized workers (multimodal, embedding, diffusion) are not supported.
-- **Single-node only**: Checkpoints must be created and restored on the same node
-- **Single-GPU only**: Multi-GPU configurations are not yet supported
+- **Single-GPU only**: Multi-GPU configurations are not yet supported (planned)
 - **Network state**: Active TCP connections are closed during restore (handled with `tcp-close` CRIU option)
 - **Storage**: Only PVC backend currently implemented (S3/OCI planned)
-
-### Recommendation
-ChReK is **experimental/beta** and best suited for:
-- ✅ Development and testing environments
-- ✅ Research and experimentation
-- ✅ Controlled production environments with appropriate security controls
-- ❌ Security-sensitive production workloads without proper risk assessment
+- **Security**: ChReK runs as a **privileged DaemonSet** which is required to run CRIU
 
 ## Troubleshooting
 
@@ -471,9 +396,6 @@ ChReK is **experimental/beta** and best suited for:
    ```bash
    # For PVC
    kubectl exec -it <any-pod-with-pvc> -- ls -la /checkpoints/
-
-   # For S3
-   aws s3 ls s3://my-bucket/checkpoints/
    ```
 
 3. Check environment variables:
@@ -490,18 +412,11 @@ Pods fall back to cold start if:
 
 Check logs for "Falling back to cold start" message.
 
-## Best Practices
-
-1. **Use RWX PVCs** for multi-node deployments (currently the only supported backend)
-2. **Pre-warm checkpoints** before scaling up
-3. **Monitor checkpoint size** - large models create large checkpoints
-4. **Clean up old checkpoints** to save storage
-
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `DYN_CHECKPOINT_STORAGE_TYPE` | Backend: `pvc`, `s3`, `oci` |
+| `DYN_CHECKPOINT_STORAGE_TYPE` | Backend: `pvc`, `s3`, `oci` (`s3` and `oci` are currently no-ops) |
 | `DYN_CHECKPOINT_LOCATION` | Full checkpoint location (checkpoint jobs) |
 | `DYN_CHECKPOINT_PATH` | Base checkpoint directory (restore pods, PVC) |
 | `DYN_CHECKPOINT_HASH` | Identity hash |
