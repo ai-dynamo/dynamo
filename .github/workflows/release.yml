@@ -409,8 +409,7 @@ jobs:
     needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build, frontend-build]
     if: |
       always() && !cancelled() &&
-      needs.prepare-release.result == 'success' &&
-      (needs.vllm-pipeline.result == 'success' || needs.sglang-pipeline.result == 'success' || needs.trtllm-pipeline.result == 'success')
+      needs.prepare-release.result == 'success'
     runs-on: cpu-amd-m5-4xlarge
     environment: automated-release
     env:
