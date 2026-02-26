@@ -11,8 +11,9 @@ MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 # This is intended for functional testing with small models (e.g. 2B) where CI
 # only has 1 GPU available. It reduces performance by:
 #   - Enabling --enforce-eager (disables torch.compile and CUDA graph capture)
-#   - Limiting --max-model-len to 4096 tokens
+#   - Limiting --max-model-len to 4096 tokens on P/D workers
 #   - Skipping multimodal encoder profiling (--skip-mm-prof)
+#   - Limiting P/D workers to image=1,video=0,audio=0 (--limit-mm-per-prompt)
 #   - Using lower gpu-memory-utilization fractions to share the GPU
 SINGLE_GPU=false
 
@@ -82,7 +83,7 @@ DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     EXTRA_ARGS="--enforce-eager --skip-mm-prof"
-    PD_EXTRA_ARGS="--max-model-len 4096"
+    PD_EXTRA_ARGS='--max-model-len 4096 --limit-mm-per-prompt {"image":1,"video":0,"audio":0}'
 fi
 
 # Start encode worker
