@@ -1466,6 +1466,7 @@ mod tests {
             metadata: None,
             tools: None,
             tool_choice: None,
+            cache_control: None,
         }
         .try_into()
         .unwrap();
@@ -1843,7 +1844,7 @@ mod tests {
 
     #[test]
     fn test_cache_control_1h_ttl_passthrough() {
-        use crate::protocols::openai::nvext::{CacheControl, CacheControlType};
+        use crate::protocols::openai::nvext::CacheControlType;
 
         let json = r#"{
             "model": "test",
