@@ -181,6 +181,7 @@ The main KV-aware routing arguments (frontend uses the same `--router-*` flag na
 - `--router-event-threads`: Number of event processing threads for the KV indexer. When set to 1 (default), the router uses a single-threaded radix tree with channel-based event processing, which supports TTL-based expiration and pruning. When set to a value greater than 1, the router uses a concurrent radix tree with a thread pool of the specified size for higher event throughput. Note: the concurrent indexer does not support TTL/pruning (`--router-ttl-secs`, `--router-max-tree-size`, `--router-prune-target-ratio` are ignored when `--router-event-threads > 1`). Can be set via `DYN_ROUTER_EVENT_THREADS` env var. For details on the underlying index data structures (`RadixTree`, `ConcurrentRadixTree`, `PositionalIndexer`) and their concurrency model (inline reads, sticky-routed writes via thread pool), see the [KV Router Index documentation](../../../../lib/kv-router/README.md).
 
 <Note>
+
 **State persistence** depends on the event transport mode:
 - **NATS Core / Event Plane mode** (default): State persists on workers—router rebuilds state by querying workers on startup. This is the default when workers have `local_indexer` enabled (which is the default). Works with both NATS Core and ZMQ event planes.
 - **JetStream mode** (`--router-durable-kv-events` on **both** frontend **and** workers): State persists across router restarts via JetStream and NATS object store snapshots.
@@ -199,6 +200,7 @@ When `--router-kv-overlap-score-weight` is set to 0, no KVIndexer is created and
 The cli args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When workers are configured to publish KV events (via `--kv-events-config`), the router relies on worker-side eviction events and these parameters are ignored.
 
 **Queue threshold vs. busy rejection thresholds:** `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. The busy thresholds **reject** a worker entirely from the candidate set when it exceeds a utilization limit — no traffic is sent until it drops below the threshold. In contrast, `--router-queue-threshold` does not reject workers; it **defers the entire routing decision** until at least one worker has capacity, so the request is routed with the freshest load metrics. The queue also enables priority scheduling via `nvext.agent_hints.latency_sensitivity`.
+
 </Note>
 
 To implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
@@ -319,9 +321,7 @@ await register_model(
 await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
-<Note>
-The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. The standalone router (`python -m dynamo.router`) uses `--router-*`-prefixed flags (e.g., `--router-block-size`, `--router-kv-events`). See the [Standalone Router README](../../../../components/src/dynamo/router/README.md) and example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh).
-</Note>
+<Note>The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. The standalone router (`python -m dynamo.router`) uses `--router-*`-prefixed flags (e.g., `--router-block-size`, `--router-kv-events`). See the [Standalone Router README](../../../../components/src/dynamo/router/README.md) and example script: [`examples/backends/sglang/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh).</Note>
 
 ### Request Flow
 
@@ -402,9 +402,11 @@ python -m dynamo.frontend --router-mode kv --http-port 8002 --router-replica-syn
 ```
 
 <Note>
+
 If you need to start with a fresh state in JetStream mode, you have two options:
 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](../../design-docs/distributed-runtime.md)) which will start a new stream and NATS object store path
 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
+
 </Note>
 
 ## Dynamic Threshold Configuration
