@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.15.1"
+VLLM_VER="0.16.0"
 VLLM_REF="v${VLLM_VER}"
 
 # Basic Configurations
@@ -24,8 +24,8 @@ INSTALLATION_DIR=/tmp
 TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to add 12.0+PTX
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
-FLASHINF_REF="v0.6.1"
-LMCACHE_REF="0.3.13"
+FLASHINF_REF="v0.6.3"
+LMCACHE_REF="0.3.14"
 VLLM_OMNI_REF="0.14.0"
 
 while [[ $# -gt 0 ]]; do
@@ -146,25 +146,35 @@ echo "✓ vLLM repository cloned"
 
 
 echo "\n=== Installing vLLM & FlashInfer ==="
+
+# Build GitHub release wheel URL per CUDA version
+# CUDA 12 wheels have no +cu suffix and use manylinux_2_31
+# CUDA 13 wheels have +cu130 suffix and use manylinux_2_35
 if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
-    echo "Installing vLLM $VLLM_REF from PyPI..."
-    uv pip install vllm[flashinfer,runai]==$VLLM_REF --torch-backend=${TORCH_BACKEND}
-    uv pip install flashinfer-cubin==$FLASHINF_REF
-    uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+    VLLM_GITHUB_WHEEL="vllm-${VLLM_VER}-cp38-abi3-manylinux_2_31_${ALT_ARCH}.whl"
+    EXTRA_PIP_ARGS=""
 elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
-    echo "⚠ Skipping LMCache on CUDA 13 env since LMCache doesn't support CUDA 13 "
-    echo "Installing vLLM $VLLM_REF from GitHub since CUDA 13 x86_64 wheel is only present on GitHub..."
-    uv pip install \
-        --index-strategy=unsafe-best-match \
-        --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
-        https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_35_${ALT_ARCH}.whl[flashinfer,runai] \
-        --torch-backend=${TORCH_BACKEND}
-    uv pip install flashinfer-cubin==$FLASHINF_REF
-    uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
+    VLLM_GITHUB_WHEEL="vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_35_${ALT_ARCH}.whl"
+    EXTRA_PIP_ARGS="--index-strategy=unsafe-best-match --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND}"
 else
     echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
     exit 1
 fi
+VLLM_GITHUB_URL="https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/${VLLM_GITHUB_WHEEL}"
+
+# Try PyPI first, fall back to GitHub release
+echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
+if uv pip install "vllm[flashinfer,runai]==${VLLM_VER}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
+    echo "✓ vLLM ${VLLM_VER} installed from PyPI"
+else
+    echo "⚠ PyPI install failed, installing from GitHub release..."
+    uv pip install ${EXTRA_PIP_ARGS} \
+        "${VLLM_GITHUB_URL}[flashinfer,runai]" \
+        --torch-backend=${TORCH_BACKEND}
+    echo "✓ vLLM ${VLLM_VER} installed from GitHub"
+fi
+uv pip install flashinfer-cubin==$FLASHINF_REF
+uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
 echo "✓ vLLM installation completed"
 
 echo "\n=== Installing vLLM-Omni ==="
