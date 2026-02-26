@@ -6,15 +6,35 @@ mod common;
 use common::*;
 
 use clap::Parser;
-use dynamo_kv_router::ActiveSequences;
+use dynamo_kv_router::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
+use dynamo_kv_router::{
+    ActiveSequencesMultiWorker, OverlapScores, SequencePublisher, SequenceRequest,
+};
 use dynamo_mocker::common::protocols::{DirectRequest, OutputSignal};
 use dynamo_mocker::scheduler::Scheduler;
 use dynamo_tokens::SequenceHash;
 use std::collections::HashMap;
+use std::future;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
+
+struct NoopSequencePublisher;
+
+impl SequencePublisher for NoopSequencePublisher {
+    fn publish_event(
+        &self,
+        _event: &ActiveSequenceEvent,
+    ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
+        future::ready(Ok(()))
+    }
+
+    fn publish_load(&self, _load: ActiveLoad) {}
+
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+}
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -271,8 +291,9 @@ fn rescale_traces(
         .collect()
 }
 
-/// Run the benchmark: replay sequence trace entries against ActiveSequences,
-/// measuring add_request / mark_prefill_completed / free latency.
+/// Run the benchmark: replay sequence trace entries against a shared
+/// ActiveSequencesMultiWorker, measuring potential_blocks_and_tokens /
+/// add_request / mark_prefill_completed / free latency.
 async fn run_benchmark(
     traces: &[Vec<SequenceTrace>],
     block_size: u32,
@@ -280,6 +301,20 @@ async fn run_benchmark(
     inference_worker_duplication_factor: usize,
 ) -> anyhow::Result<BenchmarkResults> {
     let scaled = rescale_traces(traces, benchmark_duration_ms);
+    let num_trace_workers = scaled.len();
+
+    // Total bench workers = trace workers × duplication factor.
+    // Each gets a unique WorkerWithDpRank in the shared multi-worker.
+    let total_workers = num_trace_workers * inference_worker_duplication_factor;
+    let dp_sizes: HashMap<u64, u32> = (0..total_workers as u64).map(|id| (id, 1)).collect();
+    let multi = Arc::new(ActiveSequencesMultiWorker::new(
+        NoopSequencePublisher,
+        block_size as usize,
+        dp_sizes,
+        false,
+        0,
+        "bench",
+    ));
 
     let total_entries: u64 = scaled.iter().map(|t| t.len() as u64).sum::<u64>()
         * inference_worker_duplication_factor as u64;
@@ -298,14 +333,18 @@ async fn run_benchmark(
     let progress = make_progress_bar(Some(total_entries));
 
     let mut tasks = Vec::new();
-    for _replica in 0..inference_worker_duplication_factor {
-        for worker_trace in &scaled {
-            let trace = worker_trace.clone();
+    for replica in 0..inference_worker_duplication_factor {
+        for (trace_idx, worker_trace) in scaled.iter().enumerate() {
+            let worker_id = (replica * num_trace_workers + trace_idx) as u64;
+            let worker = WorkerWithDpRank::from_worker_id(worker_id);
+
+            // Make request IDs unique per worker so the shared map has no conflicts
+            let trace = make_unique_trace(worker_trace, worker_id);
             let progress = progress.clone();
+            let multi = Arc::clone(&multi);
 
             tasks.push(tokio::spawn(async move {
                 let capacity = trace.len();
-                let mut seq = ActiveSequences::new(block_size as usize);
                 let mut latencies: Vec<u64> = Vec::with_capacity(capacity);
 
                 let mut target = Instant::now();
@@ -316,7 +355,7 @@ async fn run_benchmark(
                     let entry_ts = entry.timestamp_us;
 
                     let start = minstant::Instant::now();
-                    apply_entry(&mut seq, entry.entry);
+                    apply_entry(&multi, worker, entry.entry).await;
                     latencies.push(start.elapsed().as_nanos() as u64);
                     local_count += 1;
 
@@ -324,7 +363,7 @@ async fn run_benchmark(
                     while iter.peek().is_some_and(|e| e.timestamp_us == entry_ts) {
                         let e = iter.next().unwrap();
                         let start = minstant::Instant::now();
-                        apply_entry(&mut seq, e.entry);
+                        apply_entry(&multi, worker, e.entry).await;
                         latencies.push(start.elapsed().as_nanos() as u64);
                         local_count += 1;
                     }
@@ -377,7 +416,7 @@ async fn run_benchmark(
     };
 
     println!(
-        "Ops Throughput: {} ops/s (add + prefill_complete + free)",
+        "Ops Throughput: {} ops/s (potential_blocks_and_tokens + add + prefill_complete + free)",
         ops_throughput
     );
     println!("Block Throughput: {} block ops/s", block_throughput);
@@ -392,7 +431,46 @@ async fn run_benchmark(
     })
 }
 
-fn apply_entry(seq: &mut ActiveSequences, entry: SequenceTraceEntry) {
+/// Make request IDs unique by prefixing with the worker ID, so the shared
+/// request_to_worker map has no conflicts when traces are duplicated.
+fn make_unique_trace(trace: &[SequenceTrace], worker_id: u64) -> Vec<SequenceTrace> {
+    trace
+        .iter()
+        .map(|entry| {
+            let new_entry = match &entry.entry {
+                SequenceTraceEntry::Add {
+                    request_id,
+                    block_hashes,
+                    isl,
+                    output_length,
+                } => SequenceTraceEntry::Add {
+                    request_id: format!("{worker_id}:{request_id}"),
+                    block_hashes: block_hashes.clone(),
+                    isl: *isl,
+                    output_length: *output_length,
+                },
+                SequenceTraceEntry::PrefillComplete { request_id } => {
+                    SequenceTraceEntry::PrefillComplete {
+                        request_id: format!("{worker_id}:{request_id}"),
+                    }
+                }
+                SequenceTraceEntry::Free { request_id } => SequenceTraceEntry::Free {
+                    request_id: format!("{worker_id}:{request_id}"),
+                },
+            };
+            SequenceTrace {
+                entry: new_entry,
+                timestamp_us: entry.timestamp_us,
+            }
+        })
+        .collect()
+}
+
+async fn apply_entry(
+    multi: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+    worker: WorkerWithDpRank,
+    entry: SequenceTraceEntry,
+) {
     match entry {
         SequenceTraceEntry::Add {
             request_id,
@@ -400,19 +478,28 @@ fn apply_entry(seq: &mut ActiveSequences, entry: SequenceTraceEntry) {
             isl,
             output_length,
         } => {
-            seq.add_request(
-                request_id,
-                Some(block_hashes),
+            let _ = multi.potential_blocks_and_tokens(
+                Some(block_hashes.clone()),
                 isl,
-                0,
-                Some(output_length as u32),
+                OverlapScores::default(),
             );
+            let _ = multi
+                .add_request(SequenceRequest {
+                    request_id,
+                    token_sequence: Some(block_hashes),
+                    isl,
+                    overlap: 0,
+                    expected_output_tokens: Some(output_length as u32),
+                    worker,
+                    lora_name: None,
+                })
+                .await;
         }
         SequenceTraceEntry::PrefillComplete { request_id } => {
-            seq.mark_prefill_completed(&request_id);
+            let _ = multi.mark_prefill_completed(&request_id).await;
         }
         SequenceTraceEntry::Free { request_id } => {
-            seq.free(&request_id);
+            let _ = multi.free(&request_id).await;
         }
     }
 }
