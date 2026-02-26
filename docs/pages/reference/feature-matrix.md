@@ -108,7 +108,6 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 ---
 
-## Source References
 
 {/* Backend READMEs */}
 [vllm-readme]: ../backends/vllm
