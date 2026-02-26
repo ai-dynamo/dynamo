@@ -240,12 +240,12 @@ impl SchedulerQueue {
 /// Build the effective worker map for a scheduling decision.
 ///
 /// When `provided_worker_ids` is `Some` (External mode), those IDs define the
-/// worker set. Each worker's `ModelRuntimeConfig` (including `data_parallel_size`,
-/// `max_num_batched_tokens`, etc.) is set by the worker itself at startup and
+/// worker set. Each worker's `ModelRuntimeConfig` is set by the worker itself at startup and
 /// published via discovery. By the time a request arrives, the config is
 /// typically available in `discovery_workers`. If a worker hasn't registered
-/// yet (e.g., startup race), `ModelRuntimeConfig::default()` is used as a
-/// fallback.
+/// yet (e.g., startup race), a safe fallback config is used with
+/// `enable_local_indexer: false` to avoid querying a non-existent indexer
+/// endpoint. The config will be updated once the worker registers.
 ///
 /// When `provided_worker_ids` is `None` (Dynamo mode), the discovery worker
 /// map is used as-is.
@@ -257,7 +257,13 @@ fn build_effective_workers(
         Some(ids) => {
             let mut workers = HashMap::with_capacity(ids.len());
             for &id in ids {
-                let config = discovery_workers.get(&id).cloned().unwrap_or_default();
+                let config = discovery_workers.get(&id).cloned().unwrap_or_else(|| {
+                    ModelRuntimeConfig {
+                        // set to false to avoid an issue if the worker does not have local indexer.
+                        enable_local_indexer: false,
+                        ..Default::default()
+                    }
+                });
                 workers.insert(id, config);
             }
             workers

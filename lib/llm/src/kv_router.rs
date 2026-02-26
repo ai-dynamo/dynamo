@@ -297,6 +297,7 @@ impl KvRouter {
 
         let indexer = Indexer::new(component, &kv_router_config, block_size);
 
+        // Wait for at least one worker with a known runtime config before starting scheduler if discovery mode is Dynamo
         if kv_router_config.worker_discovery_mode == WorkerDiscoveryMode::Dynamo {
             let _ = workers_with_configs
                 .wait_for(|m| !m.is_empty())
