@@ -58,13 +58,11 @@ async def init_planner(runtime: DistributedRuntime, config: PlannerConfig):
 
     await start_planner(runtime, config)
 
-    component = runtime.namespace(config.namespace).component("Planner")
-
     async def generate(request: RequestType):
         """Dummy endpoint to satisfy that each component has an endpoint"""
         yield "mock endpoint"
 
-    generate_endpoint = component.endpoint("generate")
+    generate_endpoint = runtime.endpoint(f"{config.namespace}.Planner.generate")
     await generate_endpoint.serve_endpoint(generate)  # type: ignore[arg-type]
 
 

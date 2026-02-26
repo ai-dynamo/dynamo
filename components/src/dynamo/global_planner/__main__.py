@@ -69,10 +69,14 @@ async def main(runtime: DistributedRuntime, args):
     else:
         logger.info("Authorization: DISABLED (accepting all namespaces)")
 
-    logger.info("=" * 60)
+    if args.no_operation:
+        logger.info(
+            "No-operation mode: ENABLED (scale requests will be logged, not executed)"
+        )
+    else:
+        logger.info("No-operation mode: DISABLED")
 
-    # Create the GlobalPlanner component
-    component = runtime.namespace(namespace).component("GlobalPlanner")
+    logger.info("=" * 60)
 
     # Get K8s namespace (where GlobalPlanner pod is running)
     k8s_namespace = os.environ.get("POD_NAMESPACE", "default")
@@ -83,11 +87,12 @@ async def main(runtime: DistributedRuntime, args):
         runtime=runtime,
         managed_namespaces=args.managed_namespaces,
         k8s_namespace=k8s_namespace,
+        no_operation=args.no_operation,
     )
 
     # Serve scale_request endpoint
     logger.info("Serving endpoints...")
-    scale_endpoint = component.endpoint("scale_request")
+    scale_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.scale_request")
     await scale_endpoint.serve_endpoint(handler.scale_request)
     logger.info("  ✓ scale_request - Receives scaling requests from Planners")
 
@@ -101,7 +106,7 @@ async def main(runtime: DistributedRuntime, args):
             "managed_namespaces": args.managed_namespaces or "all",
         }
 
-    health_endpoint = component.endpoint("health")
+    health_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.health")
     await health_endpoint.serve_endpoint(health_check)
     logger.info("  ✓ health - Health check endpoint")
 

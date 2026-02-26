@@ -36,7 +36,7 @@ High-throughput, low-latency inference framework designed for serving generative
 
 Large language models exceed single-GPU capacity. Tensor parallelism spreads layers across GPUs but creates coordination challenges. Dynamo closes this orchestration gap.
 
-Dynamo is inference engine agnostic (supports TRT-LLM, vLLM, SGLang) and provides:
+Dynamo is inference engine agnostic (supports SGLang, TRT-LLM, vLLM) and provides:
 
 - **Disaggregated Prefill & Decode** – Maximizes GPU throughput with latency/throughput trade-offs
 - **Dynamic GPU Scheduling** – Optimizes performance based on fluctuating demand
@@ -194,6 +194,8 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
 > **TensorRT-LLM only:** The warning `Cannot connect to ModelExpress server/transport error. Using direct download.` is expected and can be safely ignored.
 >
 > See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
+
+> **Deprecation notice:** vLLM automatically enables KV event publishing when prefix caching is active. In a future release, this will change — KV events will be disabled by default for all backends. Start using `--kv-events-config` explicitly to prepare.
 
 #### Send a Request
 
@@ -377,7 +379,7 @@ For Slurm or other distributed deployments (and KV-aware routing):
 
 To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
 
-See [SGLang on Slurm](examples/backends/sglang/slurm_jobs/README.md) and [TRT-LLM on Slurm](examples/basics/multinode/trtllm/README.md) for deployment examples.
+See [TRT-LLM on Slurm](examples/basics/multinode/trtllm/README.md) for deployment examples.
 
 ## More News
 

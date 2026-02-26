@@ -1,6 +1,7 @@
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.29.0
 
@@ -45,7 +46,7 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: check
-check: generate manifests generate-api-docs
+check: generate manifests generate-api-docs generate-helm-docs
 	@echo "> Checking for uncommitted changes"
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "ERROR: Git tree is dirty after running validation steps."; \
@@ -82,24 +83,16 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	for file in config/crd/bases/*.yaml; do \
 		yq eval '(.. | select(has("extraPodSpec")) | .extraPodSpec.required) |= (. - ["containers"])' -i --indent 2 $$file || exit 1; \
 	done
+	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
+	for file in config/crd/bases/*.yaml; do \
+		yq eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
+	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
 		if ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
 			{ printf '%s\n' \
 				'# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.' \
 				'# SPDX-License-Identifier: Apache-2.0' \
-				'#' \
-				'# Licensed under the Apache License, Version 2.0 (the "License");' \
-				'# you may not use this file except in compliance with the License.' \
-				'# You may obtain a copy of the License at' \
-				'#' \
-				'# http://www.apache.org/licenses/LICENSE-2.0' \
-				'#' \
-				'# Unless required by applicable law or agreed to in writing, software' \
-				'# distributed under the License is distributed on an "AS IS" BASIS,' \
-				'# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.' \
-				'# See the License for the specific language governing permissions and' \
-				'# limitations under the License.' \
 				''; \
 			  cat "$$file"; \
 			} > "$$file.tmp" && mv "$$file.tmp" "$$file"; \
@@ -111,29 +104,15 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 			yq eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	if [ ! -d "../helm/charts/crds/templates/" ]; then \
-		echo "Creating directory ../helm/charts/crds/templates/"; \
-		mkdir -p ../helm/charts/crds/templates/; \
-	fi
-	cp config/crd/bases/*.yaml ../helm/charts/crds/templates/
+	echo "Copying CRD files to operator Helm chart crds/ directory"
+	mkdir -p ../helm/charts/platform/components/operator/crds/
+	cp config/crd/bases/*.yaml ../helm/charts/platform/components/operator/crds/
 	echo "Adding NVIDIA header to RBAC files"
 	for file in config/rbac/*.yaml; do \
 		if [ -f "$$file" ] && ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
 			{ printf '%s\n' \
 				'# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.' \
 				'# SPDX-License-Identifier: Apache-2.0' \
-				'#' \
-				'# Licensed under the Apache License, Version 2.0 (the "License");' \
-				'# you may not use this file except in compliance with the License.' \
-				'# You may obtain a copy of the License at' \
-				'#' \
-				'# http://www.apache.org/licenses/LICENSE-2.0' \
-				'#' \
-				'# Unless required by applicable law or agreed to in writing, software' \
-				'# distributed under the License is distributed on an "AS IS" BASIS,' \
-				'# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.' \
-				'# See the License for the specific language governing permissions and' \
-				'# limitations under the License.' \
 				''; \
 			  cat "$$file"; \
 			} > "$$file.tmp" && mv "$$file.tmp" "$$file"; \
@@ -141,8 +120,16 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	done
 
 .PHONY: generate
-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
+
+.PHONY: generate-pydantic
+generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (requires Python 3 + pydantic)
+	@python3 -c "import pydantic" 2>/dev/null || { echo "Error: pydantic not found. Install with: pip install pydantic"; exit 1; }
+	@echo "Generating Pydantic models from v1beta1 DGDR types..."
+	@python3 api/scripts/generate_pydantic_from_go.py
+	@echo "Running Pydantic validation tests..."
+	@python3 api/scripts/validate_pydantic_models.py
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -330,6 +317,15 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/pages/kubernetes/api-reference.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
+	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
+	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
+	python3 docs/fix-api-anchors.py ../../docs/pages/kubernetes/api-reference.md
+
+HELM_CHART_DIR := ../helm/charts/platform
+
+.PHONY: generate-helm-docs
+generate-helm-docs: ## Generate Helm chart README from values.yaml and template
+	@$(MAKE) -C $(HELM_CHART_DIR) generate-helm-docs
 
 .PHONY: coverage
 coverage: test

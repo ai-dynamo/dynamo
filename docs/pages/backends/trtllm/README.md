@@ -4,21 +4,11 @@
 title: TensorRT-LLM
 ---
 
-# LLM Deployment using TensorRT-LLM
-
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using TensorRT-LLM.
 
 ## Use the Latest Release
 
-We recommend using the latest stable release of dynamo to avoid breaking changes:
-
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-
-You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
-
-```bash
-git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
-```
+We recommend using the [latest stable release](https://github.com/ai-dynamo/dynamo/releases/latest) of Dynamo to avoid breaking changes.
 
 ---
 
@@ -72,7 +62,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 > [!NOTE]
 > - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
-> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **NATS** is optional - only needed if using KV routing with events. Workers must be explicitly configured to publish events. Use `--no-router-kv-events` on the frontend for prediction-based routing without events
 > - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Build container
@@ -216,11 +206,10 @@ Dynamo supports video generation using diffusion models through the `--modality 
 
 ### Requirements
 
-- **visual_gen**: Part of TensorRT-LLM, located at `tensorrt_llm/visual_gen/`. Currently available **only** on the [`feat/visual_gen`](https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen) branch (not yet merged to main or any release). Install from source:
+- **TensorRT-LLM with visual_gen**: The `visual_gen` module is part of TensorRT-LLM (`tensorrt_llm._torch.visual_gen`). Install TensorRT-LLM following the [official instructions](https://github.com/NVIDIA/TensorRT-LLM#installation).
+- **imageio with ffmpeg**: Required for encoding generated frames to MP4 video:
   ```bash
-  git clone https://github.com/NVIDIA/TensorRT-LLM.git
-  cd TensorRT-LLM && git checkout feat/visual_gen
-  cd tensorrt_llm/visual_gen && pip install -e .
+  pip install imageio[ffmpeg]
   ```
 - **dynamo-runtime with video API**: The Dynamo runtime must include `ModelType.Videos` support. Ensure you're using a compatible version.
 
@@ -238,7 +227,7 @@ The pipeline type is **auto-detected** from the model's `model_index.json` — n
 python -m dynamo.trtllm \
   --modality video_diffusion \
   --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-  --output-dir /tmp/videos
+  --media-output-fs-url file:///tmp/dynamo_media
 ```
 
 ### API Endpoint
@@ -263,7 +252,7 @@ curl -X POST http://localhost:8000/v1/videos \
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--output-dir` | Directory for generated videos | `/tmp/dynamo_videos` |
+| `--media-output-fs-url` | Filesystem URL for storing generated media | `file:///tmp/dynamo_media` |
 | `--default-height` | Default video height | `480` |
 | `--default-width` | Default video width | `832` |
 | `--default-num-frames` | Default frame count | `81` |
@@ -364,7 +353,7 @@ The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size`
 
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance-sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 

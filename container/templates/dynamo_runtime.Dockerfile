@@ -30,6 +30,13 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins \
     CARGO_TARGET_DIR=/opt/dynamo/target
 
+ENV LD_LIBRARY_PATH=\
+${NIXL_LIB_DIR}:\
+${NIXL_PLUGIN_DIR}:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+${LD_LIBRARY_PATH}
+
 # Copy ucx and nixl libs
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
 COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
@@ -37,13 +44,13 @@ COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_L
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-# Copy ffmpeg
+# Always copy FFmpeg so libs are available for Rust checks in CI
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
-    true # in case ffmpeg not enabled
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 
 # Copy built artifacts
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
@@ -57,7 +64,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python${PYTHON_VERSION}-dev \
-        python${PYTHON_VERSION}-venv && \
+        python${PYTHON_VERSION}-venv \
+        build-essential \
+        cmake \
+        protobuf-compiler \
+        pkg-config \
+        clang \
+        libclang-dev \
+        patchelf \
+        git \
+        git-lfs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3
@@ -103,6 +119,26 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
         fi; \
         uv pip install "$KVBM_WHEEL"; \
     fi
+
+# Initialize Git LFS (required for git+https dependencies with LFS artifacts)
+RUN git lfs install
+
+# Install test and common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install \
+        --index-strategy unsafe-best-match \
+        --extra-index-url https://download.pytorch.org/whl/cu130 \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
+
+# Copy workspace source code
+ARG WORKSPACE_DIR=/workspace
+WORKDIR ${WORKSPACE_DIR}
+COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
+RUN chmod g+w ${WORKSPACE_DIR}
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA

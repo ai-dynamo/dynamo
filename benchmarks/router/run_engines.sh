@@ -186,10 +186,10 @@ if [ "$USE_MOCKERS" = true ]; then
     # Set endpoint based on worker mode
     if [ "$MODE" = "prefill" ]; then
         MOCKER_ARGS+=("--endpoint" "dyn://test.prefill.generate")
-        MOCKER_ARGS+=("--is-prefill-worker")
+        MOCKER_ARGS+=("--disaggregation-mode" "prefill")
     elif [ "$MODE" = "decode" ]; then
         MOCKER_ARGS+=("--endpoint" "dyn://test.mocker.generate")
-        MOCKER_ARGS+=("--is-decode-worker")
+        MOCKER_ARGS+=("--disaggregation-mode" "decode")
     else
         MOCKER_ARGS+=("--endpoint" "dyn://test.mocker.generate")
     fi
@@ -254,13 +254,14 @@ else
                     VLLM_ARGS+=("--data-parallel-size" "$DATA_PARALLEL_SIZE")
                 fi
                 if [ "$MODE" = "prefill" ]; then
-                    VLLM_ARGS+=("--is-prefill-worker")
+                    VLLM_ARGS+=("--disaggregation-mode" "prefill")
                 elif [ "$MODE" = "decode" ]; then
-                    VLLM_ARGS+=("--is-decode-worker")
+                    VLLM_ARGS+=("--disaggregation-mode" "decode")
                 fi
                 VLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
-                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES DYN_VLLM_KV_EVENT_PORT=$((20080 + i)) VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) python3 -m dynamo.vllm \
+                VLLM_ARGS+=("--kv-events-config" "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:$((20080 + i))\",\"enable_kv_cache_events\":true}")
+                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) python3 -m dynamo.vllm \
                     "${VLLM_ARGS[@]}"
             fi
         } &

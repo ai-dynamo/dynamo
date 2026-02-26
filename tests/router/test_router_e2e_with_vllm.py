@@ -5,6 +5,7 @@
 # - GPU-1 subset (`-m "gpu_1 and not gpu_2"`): 130.43s total for 3 tests.
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
+import json
 import logging
 import os
 import time
@@ -147,7 +148,7 @@ class VLLMProcess:
         # - When data_parallel_size is set, launch one process per DP rank
         # - Each process gets --data-parallel-rank and --data-parallel-size
         # - Each process runs on its own GPU via CUDA_VISIBLE_DEVICES
-        # - --connector nixl enables KV cache transfer between ranks
+        # - --kv-transfer-config enables KV cache transfer between ranks
 
         for worker_idx in range(num_workers):
             # Calculate GPU device for this process
@@ -206,7 +207,7 @@ class VLLMProcess:
                         str(data_parallel_size),
                         # "--data-parallel-address", "127.0.0.1",  # Required for DP coordination
                         # "--data-parallel-rpc-port", "13345",  # RPC port for DP coordination
-                        # "--connector", "nixl",  # Required for KV transfer between DP ranks
+                        # "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',  # Required for KV transfer between DP ranks
                     ]
                 )
 
@@ -219,13 +220,23 @@ class VLLMProcess:
             kv_event_port = self._kv_event_ports[worker_idx]
             nixl_port = self._nixl_ports[worker_idx]
 
+            # Pass KV events config explicitly via CLI
+            kv_events_cfg = json.dumps(
+                {
+                    "publisher": "zmq",
+                    "topic": "kv-events",
+                    "endpoint": f"tcp://*:{kv_event_port}",
+                    "enable_kv_cache_events": True,
+                }
+            )
+            command.extend(["--kv-events-config", kv_events_cfg])
+
             env = os.environ.copy()  # Copy parent environment
             env_vars = {
                 "CUDA_VISIBLE_DEVICES": gpu_device,
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
-                "DYN_VLLM_KV_EVENT_PORT": str(kv_event_port),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
@@ -434,9 +445,7 @@ def test_router_decisions_vllm_multiple_workers(
 
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
-        namespace = runtime.namespace(vllm_workers.namespace)
-        component = namespace.component("backend")
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(f"{vllm_workers.namespace}.backend.generate")
 
         _test_router_decisions(
             vllm_workers,
@@ -444,6 +453,7 @@ def test_router_decisions_vllm_multiple_workers(
             MODEL_NAME,
             request,
             test_dp_rank=False,
+            block_size=BLOCK_SIZE,
             router_event_threads=router_event_threads,
         )
 
@@ -483,12 +493,17 @@ def test_router_decisions_vllm_dp(
         # Get runtime and create endpoint
         runtime = get_runtime(request_plane=request_plane)
         # Use the namespace from the vLLM workers
-        namespace = runtime.namespace(vllm_workers.namespace)
-        component = namespace.component("backend")  # endpoint is backend.generate
-        endpoint = component.endpoint("generate")
+        endpoint = runtime.endpoint(
+            f"{vllm_workers.namespace}.backend.generate"
+        )  # endpoint is backend.generate
 
         _test_router_decisions(
-            vllm_workers, endpoint, MODEL_NAME, request, test_dp_rank=True
+            vllm_workers,
+            endpoint,
+            MODEL_NAME,
+            request,
+            test_dp_rank=True,
+            block_size=BLOCK_SIZE,
         )
 
 

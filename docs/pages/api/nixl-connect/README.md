@@ -4,8 +4,6 @@
 title: NIXL Connect API
 ---
 
-# Dynamo NIXL Connect
-
 Dynamo NIXL Connect specializes in moving data between models/workers in a Dynamo Graph, and for the use cases where registration and memory regions need to be dynamic.
 Dynamo connect provides utilities for such use cases, using the NIXL-based I/O subsystem via a set of Python classes.
 The relaxed registration comes with some performance overheads, but simplifies the integration process.
@@ -167,5 +165,5 @@ and the worker awaits for the data transfer to complete for yielding a response.
 
   - [NVIDIA Dynamo](https://developer.nvidia.com/dynamo) @ [GitHub](https://github.com/ai-dynamo/dynamo)
   - [NVIDIA Inference Transfer Library (NIXL)](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/#nvidia_inference_transfer_library_nixl_low-latency_hardware-agnostic_communication%C2%A0) @ [GitHub](https://github.com/ai-dynamo/nixl)
-  - [Dynamo Multimodal Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal.md)
+  - [Dynamo Multimodal Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal)
   - [NVIDIA GPU Direct](https://developer.nvidia.com/gpudirect)

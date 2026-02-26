@@ -16,6 +16,10 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
+# Whether to manage CRDs via a pre-install/pre-upgrade hook Job.
+# The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
+upgradeCRD: true
+
 # Namespace restriction configuration for the operator
 # If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
 # If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace
@@ -77,11 +81,6 @@ controllerManager:
         cpu: 5m
         memory: 64Mi
   manager:
-    args:
-    - --health-probe-bind-address=:8081
-    - --metrics-bind-address=127.0.0.1:8080
-    - --leader-elect
-    - --leader-election-id=dynamo.nvidia.com
     containerSecurityContext:
       allowPrivilegeEscalation: false
       capabilities:
@@ -108,11 +107,6 @@ dynamo:
       annotations: {}
 
   groveTerminationDelay: 15m
-
-  internalImages:
-    debugger: python:3.12-slim
-
-  enableRestrictedSecurityContext: false
 
   dockerRegistry:
     server: ''
@@ -160,17 +154,9 @@ checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
 
-  # Image used for init containers in checkpoint jobs (e.g., signal file cleanup)
-  # Defaults to busybox:latest if not specified
-  initContainerImage: "busybox:latest"
-
   # Path written by worker when model is loaded and ready for checkpointing
   # Must match the path expected by checkpoint-enabled runtime images
   readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
-
-  # Path written by restore-entrypoint after successful CRIU restore
-  # Must match the path expected by checkpoint-enabled runtime images
-  restoreMarkerFilePath: "/tmp/dynamo-restored"
 
   # Storage configuration
   # These settings tell the operator where to find checkpoint storage
@@ -178,9 +164,6 @@ checkpoint:
   storage:
     # Storage backend type: pvc, s3, or oci
     type: pvc
-
-    # Host path for signal files (communication between checkpoint pod and DaemonSet)
-    signalHostPath: "/var/lib/chrek/signals"
 
     # PVC configuration (used when type=pvc)
     pvc:
@@ -213,10 +196,6 @@ checkpoint:
 
 # Webhook configuration
 webhook:
-  # Enable admission webhooks for validation
-  # Enabled by default for production-ready validation and better error reporting
-  enabled: true
-
   # Certificate configuration
   certificateSecret:
     # Name of the secret containing webhook TLS certificates

@@ -18,6 +18,13 @@ from dynamo.planner.remote_planner_client import RemotePlannerClient
 from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.utils.exceptions import EmptyTargetReplicasError
 
+
+async def _async_responses(*items):
+    """Async generator helper: yields each item in sequence, simulating a stream."""
+    for item in items:
+        yield item
+
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
@@ -30,24 +37,21 @@ pytestmark = [
 def mock_runtime():
     """Create a mock DistributedRuntime."""
     runtime = MagicMock()
-    namespace_mock = MagicMock()
-    component_mock = MagicMock()
     endpoint_mock = MagicMock()
     client_mock = AsyncMock()
 
-    runtime.namespace.return_value = namespace_mock
-    namespace_mock.component.return_value = component_mock
-    component_mock.endpoint.return_value = endpoint_mock
+    runtime.endpoint.return_value = endpoint_mock
     endpoint_mock.client = AsyncMock(return_value=client_mock)
     client_mock.wait_for_instances = AsyncMock()
 
-    # Mock scale_request to return a response
-    client_mock.scale_request = AsyncMock(
-        return_value={
-            "status": "success",
-            "message": "Scaled successfully",
-            "current_replicas": {"prefill": 3, "decode": 5},
-        }
+    # Mock generate to return a single-item async stream with the response dict
+    response_data = {
+        "status": "success",
+        "message": "Scaled successfully",
+        "current_replicas": {"prefill": 3, "decode": 5},
+    }
+    client_mock.generate = AsyncMock(
+        side_effect=lambda _: _async_responses(response_data)
     )
 
     return runtime, client_mock
@@ -82,31 +86,29 @@ async def test_send_scale_request_success(mock_runtime):
     assert response.current_replicas["decode"] == 5
     # Verify lazy init happened
     assert client._client is not None
-    runtime.namespace.assert_called_once_with("central-ns")
+    runtime.endpoint.assert_called_once_with("central-ns.Planner.scale_request")
 
 
 @pytest.mark.asyncio
 async def test_send_scale_request_error():
     """Test scale request error handling."""
     runtime = MagicMock()
-    namespace_mock = MagicMock()
-    component_mock = MagicMock()
     endpoint_mock = MagicMock()
     client_mock = AsyncMock()
 
-    runtime.namespace.return_value = namespace_mock
-    namespace_mock.component.return_value = component_mock
-    component_mock.endpoint.return_value = endpoint_mock
+    runtime.endpoint.return_value = endpoint_mock
     endpoint_mock.client = AsyncMock(return_value=client_mock)
     client_mock.wait_for_instances = AsyncMock()
 
-    # Mock scale_request to return error response
-    client_mock.scale_request = AsyncMock(
-        return_value={
-            "status": "error",
-            "message": "Namespace not authorized",
-            "current_replicas": {},
-        }
+    # Mock generate to return a single-item async stream with the error response dict
+    client_mock.generate = AsyncMock(
+        side_effect=lambda _: _async_responses(
+            {
+                "status": "error",
+                "message": "Namespace not authorized",
+                "current_replicas": {},
+            }
+        )
     )
 
     client = RemotePlannerClient(runtime, "central-ns", "Planner")
@@ -132,19 +134,15 @@ async def test_send_scale_request_error():
 async def test_send_scale_request_no_response():
     """Test scale request when no response is received."""
     runtime = MagicMock()
-    namespace_mock = MagicMock()
-    component_mock = MagicMock()
     endpoint_mock = MagicMock()
     client_mock = AsyncMock()
 
-    runtime.namespace.return_value = namespace_mock
-    namespace_mock.component.return_value = component_mock
-    component_mock.endpoint.return_value = endpoint_mock
+    runtime.endpoint.return_value = endpoint_mock
     endpoint_mock.client = AsyncMock(return_value=client_mock)
     client_mock.wait_for_instances = AsyncMock()
 
-    # Mock scale_request to return None
-    client_mock.scale_request = AsyncMock(return_value=None)
+    # Mock generate to return an empty async stream (no items → no response)
+    client_mock.generate = AsyncMock(side_effect=lambda _: _async_responses())
 
     client = RemotePlannerClient(runtime, "central-ns", "Planner")
 

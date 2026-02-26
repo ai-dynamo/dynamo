@@ -4,8 +4,6 @@
 title: Write Operation
 ---
 
-# dynamo.nixl_connect.WriteOperation
-
 An operation which transfers data from the local worker to a remote worker.
 
 To create the operation, NIXL metadata ([RdmaMetadata](rdma-metadata.md)) from a remote worker's [`WritableOperation`](writable-operation.md)

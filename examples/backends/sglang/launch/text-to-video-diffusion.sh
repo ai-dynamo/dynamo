@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Text-to-video generation with Wan2.1 models.
+# GPUs: 1 (--wan-size 1b) or 2 (--wan-size 14b)
 
 set -e
 
@@ -15,7 +18,7 @@ trap cleanup EXIT INT TERM
 
 # Defaults
 WAN_SIZE="1b"
-FS_URL="file:///tmp/dynamo_videos"
+FS_URL="file:///tmp/dynamo_media"
 HTTP_PORT="${HTTP_PORT:-8000}"
 NUM_FRAMES=17
 HEIGHT=480
@@ -61,7 +64,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --wan-size <1b|14b>          Model size (default: 1b)"
-            echo "  --fs-url <url>               Filesystem URL for video storage (default: file:///tmp/dynamo_videos)"
+            echo "  --fs-url <url>               Filesystem URL for media storage (default: file:///tmp/dynamo_media)"
             echo "  --http-port <port>            Frontend HTTP port (default: 8000)"
             echo "  --num-frames <n>              Default frame count for health check (default: 17)"
             echo "  --height <n>                  Video height (default: 480)"
@@ -139,7 +142,7 @@ python3 -m dynamo.sglang \
     --served-model-name "$MODEL_PATH" \
     --tp "$TP_SIZE" \
     --video-generation-worker \
-    --video-generation-fs-url "$FS_URL" \
+    --media-output-fs-url "$FS_URL" \
     --trust-remote-code \
     --skip-tokenizer-init \
     --enable-metrics \
