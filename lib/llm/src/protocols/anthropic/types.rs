@@ -28,10 +28,20 @@ use crate::protocols::openai::nvext::{CacheControl, NvExt};
 // Custom deserializers
 // ---------------------------------------------------------------------------
 
+/// Parsed system prompt content, preserving cache_control from block arrays.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemContent {
+    /// The concatenated text from all system blocks (or the plain string).
+    pub text: String,
+    /// Cache control from the last system block that had one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
 /// Deserialize `system` from either a plain string or an array of text blocks.
 /// The Anthropic API accepts both `"system": "text"` and
-/// `"system": [{"type": "text", "text": "..."}]`.
-fn deserialize_system_prompt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+/// `"system": [{"type": "text", "text": "...", "cache_control": {...}}]`.
+fn deserialize_system_prompt<'de, D>(deserializer: D) -> Result<Option<SystemContent>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -45,16 +55,28 @@ where
     #[derive(Deserialize)]
     struct SystemBlock {
         text: String,
+        #[serde(default)]
+        cache_control: Option<CacheControl>,
     }
 
     let maybe: Option<SystemPrompt> = Option::deserialize(deserializer)?;
     Ok(maybe.map(|sp| match sp {
-        SystemPrompt::Text(s) => s,
-        SystemPrompt::Blocks(blocks) => blocks
-            .into_iter()
-            .map(|b| b.text)
-            .collect::<Vec<_>>()
-            .join("\n"),
+        SystemPrompt::Text(s) => SystemContent {
+            text: s,
+            cache_control: None,
+        },
+        SystemPrompt::Blocks(blocks) => {
+            let cache_control = blocks.iter().rev().find_map(|b| b.cache_control.clone());
+            let text = blocks
+                .into_iter()
+                .map(|b| b.text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            SystemContent {
+                text,
+                cache_control,
+            }
+        }
     }))
 }
 
@@ -80,7 +102,7 @@ pub struct AnthropicCreateMessageRequest {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_system_prompt"
     )]
-    pub system: Option<String>,
+    pub system: Option<SystemContent>,
 
     /// Sampling temperature (0.0 - 1.0).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,7 +181,11 @@ pub enum AnthropicMessageContent {
 pub enum AnthropicContentBlock {
     /// Text content block.
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     /// Image content block.
     #[serde(rename = "image")]
     Image { source: AnthropicImageSource },
@@ -169,6 +195,8 @@ pub enum AnthropicContentBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Tool result from user.
     #[serde(rename = "tool_result")]
@@ -178,10 +206,17 @@ pub enum AnthropicContentBlock {
         content: Option<ToolResultContent>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Thinking content block from assistant (extended thinking / reasoning).
     #[serde(rename = "thinking")]
-    Thinking { thinking: String, signature: String },
+    Thinking {
+        thinking: String,
+        signature: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     /// Catch-all for unrecognized block types. Silently accepted and skipped
     /// during conversion so that new Anthropic features don't break the endpoint.
     #[serde(skip)]
@@ -247,7 +282,14 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                     .and_then(|t| t.as_str())
                     .unwrap_or("")
                     .to_string();
-                Ok(AnthropicContentBlock::Text { text })
+                let cache_control: Option<CacheControl> = value
+                    .get("cache_control")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok());
+                Ok(AnthropicContentBlock::Text {
+                    text,
+                    cache_control,
+                })
             }
             "image" => {
                 let source: AnthropicImageSource =
@@ -267,7 +309,16 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                     .unwrap_or("")
                     .to_string();
                 let input = value.get("input").cloned().unwrap_or(serde_json::json!({}));
-                Ok(AnthropicContentBlock::ToolUse { id, name, input })
+                let cache_control: Option<CacheControl> = value
+                    .get("cache_control")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok());
+                Ok(AnthropicContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    cache_control,
+                })
             }
             "tool_result" => {
                 let tool_use_id = value
@@ -280,10 +331,15 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                     .cloned()
                     .and_then(|v| serde_json::from_value(v).ok());
                 let is_error = value.get("is_error").and_then(|v| v.as_bool());
+                let cache_control: Option<CacheControl> = value
+                    .get("cache_control")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok());
                 Ok(AnthropicContentBlock::ToolResult {
                     tool_use_id,
                     content,
                     is_error,
+                    cache_control,
                 })
             }
             "thinking" => {
@@ -297,9 +353,14 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let cache_control: Option<CacheControl> = value
+                    .get("cache_control")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok());
                 Ok(AnthropicContentBlock::Thinking {
                     thinking,
                     signature,
+                    cache_control,
                 })
             }
             other => {
@@ -540,10 +601,12 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         let mut messages = Vec::new();
 
         // Prepend system message if present
-        if let Some(system_text) = &req.system {
+        if let Some(system_content) = &req.system {
             messages.push(ChatCompletionRequestMessage::System(
                 ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(system_text.clone()),
+                    content: ChatCompletionRequestSystemMessageContent::Text(
+                        system_content.text.clone(),
+                    ),
                     name: None,
                 },
             ));
@@ -621,10 +684,41 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 top_k: req.top_k.map(|k| k as i32),
                 ..Default::default()
             },
-            nvext: req.cache_control.map(|cc| NvExt {
-                cache_control: Some(cc),
-                ..Default::default()
-            }),
+            nvext: {
+                // Collect per-block cache_control: use the last one found
+                let mut last_block_cc: Option<CacheControl> = None;
+                for msg in &req.messages {
+                    if let AnthropicMessageContent::Blocks { content } = &msg.content {
+                        for block in content {
+                            let block_cc = match block {
+                                AnthropicContentBlock::Text { cache_control, .. } => {
+                                    cache_control.as_ref()
+                                }
+                                AnthropicContentBlock::ToolUse { cache_control, .. } => {
+                                    cache_control.as_ref()
+                                }
+                                AnthropicContentBlock::ToolResult { cache_control, .. } => {
+                                    cache_control.as_ref()
+                                }
+                                AnthropicContentBlock::Thinking { cache_control, .. } => {
+                                    cache_control.as_ref()
+                                }
+                                _ => None,
+                            };
+                            if block_cc.is_some() {
+                                last_block_cc = block_cc.cloned();
+                            }
+                        }
+                    }
+                }
+                // Merge: top-level > per-block > system block cache_control
+                let system_cc = req.system.as_ref().and_then(|s| s.cache_control.clone());
+                let effective_cc = req.cache_control.clone().or(last_block_cc).or(system_cc);
+                effective_cc.map(|cc| NvExt {
+                    cache_control: Some(cc),
+                    ..Default::default()
+                })
+            },
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
@@ -643,7 +737,7 @@ fn convert_user_blocks(
 
     for block in blocks {
         match block {
-            AnthropicContentBlock::Text { text } => {
+            AnthropicContentBlock::Text { text, .. } => {
                 text_parts.push(text.clone());
             }
             AnthropicContentBlock::ToolResult {
@@ -729,7 +823,7 @@ fn convert_assistant_blocks(
 
     for block in blocks {
         match block {
-            AnthropicContentBlock::Text { text } => {
+            AnthropicContentBlock::Text { text, .. } => {
                 text_content.push_str(text);
             }
             AnthropicContentBlock::Thinking { thinking, .. } => {
@@ -738,7 +832,9 @@ fn convert_assistant_blocks(
                 }
                 pending_reasoning.push_str(thinking);
             }
-            AnthropicContentBlock::ToolUse { id, name, input } => {
+            AnthropicContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 // Snapshot the reasoning that preceded this tool call.
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
@@ -957,7 +1053,7 @@ pub struct AnthropicCountTokensRequest {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_system_prompt"
     )]
-    pub system: Option<String>,
+    pub system: Option<SystemContent>,
     #[serde(default)]
     pub tools: Option<Vec<AnthropicTool>>,
 }
@@ -974,7 +1070,7 @@ impl AnthropicCountTokensRequest {
         let mut total_len: usize = 0;
 
         if let Some(system) = &self.system {
-            total_len += system.len();
+            total_len += system.text.len();
         }
 
         for msg in &self.messages {
@@ -1015,7 +1111,7 @@ impl AnthropicCountTokensRequest {
 
 fn estimate_block_len(block: &AnthropicContentBlock) -> usize {
     match block {
-        AnthropicContentBlock::Text { text } => text.len(),
+        AnthropicContentBlock::Text { text, .. } => text.len(),
         AnthropicContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
         AnthropicContentBlock::ToolResult { content, .. } => content
             .as_ref()
@@ -1095,7 +1191,10 @@ mod tests {
                     content: "Hi".into(),
                 },
             }],
-            system: Some("You are helpful.".into()),
+            system: Some(SystemContent {
+                text: "You are helpful.".into(),
+                cache_control: None,
+            }),
             temperature: None,
             top_p: None,
             top_k: None,
@@ -1138,6 +1237,7 @@ mod tests {
                             id: "tool_123".into(),
                             name: "get_weather".into(),
                             input: serde_json::json!({"location": "SF"}),
+                            cache_control: None,
                         }],
                     },
                 },
@@ -1148,6 +1248,7 @@ mod tests {
                             tool_use_id: "tool_123".into(),
                             content: Some(ToolResultContent::Text("72F and sunny".into())),
                             is_error: None,
+                            cache_control: None,
                         }],
                     },
                 },
@@ -1361,6 +1462,7 @@ mod tests {
                     AnthropicContentBlock::Thinking {
                         thinking,
                         signature,
+                        ..
                     } => {
                         assert_eq!(thinking, "Let me reason about this...");
                         assert_eq!(signature, "sig123");
@@ -1384,9 +1486,11 @@ mod tests {
                         AnthropicContentBlock::Thinking {
                             thinking: "I should think...".into(),
                             signature: "sig".into(),
+                            cache_control: None,
                         },
                         AnthropicContentBlock::Text {
                             text: "Answer".into(),
+                            cache_control: None,
                         },
                     ],
                 },
@@ -1538,7 +1642,10 @@ mod tests {
                     content: "Hello, world! This is a test message.".into(),
                 },
             }],
-            system: Some("You are helpful.".into()),
+            system: Some(SystemContent {
+                text: "You are helpful.".into(),
+                cache_control: None,
+            }),
             tools: None,
         };
 
@@ -1581,6 +1688,7 @@ mod tests {
             id: id.into(),
             name: "fn".into(),
             input: serde_json::json!({}),
+            cache_control: None,
         }
     }
 
@@ -1588,6 +1696,7 @@ mod tests {
         AnthropicContentBlock::Thinking {
             thinking: text.into(),
             signature: "sig".into(),
+            cache_control: None,
         }
     }
 
@@ -1715,6 +1824,7 @@ mod tests {
             thinking("A"),
             AnthropicContentBlock::Text {
                 text: "answer".into(),
+                cache_control: None,
             },
         ]);
 
@@ -1890,5 +2000,129 @@ mod tests {
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.nvext.is_none());
+    }
+
+    #[test]
+    fn test_per_block_cache_control_deserialization() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hello", "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": "World"}
+                ]
+            }]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        match &req.messages[0].content {
+            AnthropicMessageContent::Blocks { content } => {
+                match &content[0] {
+                    AnthropicContentBlock::Text { cache_control, .. } => {
+                        assert!(cache_control.is_some());
+                    }
+                    other => panic!("expected Text, got {other:?}"),
+                }
+                match &content[1] {
+                    AnthropicContentBlock::Text { cache_control, .. } => {
+                        assert!(cache_control.is_none());
+                    }
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
+            _ => panic!("expected blocks"),
+        }
+    }
+
+    #[test]
+    fn test_per_block_cache_control_last_wins() {
+        use crate::protocols::openai::nvext::CacheControlType;
+
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "system context", "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": "recent context", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+                    ]
+                }
+            ]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let nvext = chat_req.nvext.expect("nvext should be set");
+        let cc = nvext.cache_control.expect("cache_control should be set");
+        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
+        assert_eq!(cc.ttl_seconds(), 3600); // Last block's 1h TTL wins
+    }
+
+    #[test]
+    fn test_top_level_cache_control_overrides_per_block() {
+        use crate::protocols::openai::nvext::CacheControlType;
+
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "context", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+                    ]
+                }
+            ],
+            "cache_control": {"type": "ephemeral"}
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let nvext = chat_req.nvext.expect("nvext should be set");
+        let cc = nvext.cache_control.expect("cache_control should be set");
+        // Top-level (no TTL = 300s default) takes precedence over per-block (1h)
+        assert_eq!(cc.ttl_seconds(), 300);
+    }
+
+    #[test]
+    fn test_system_block_array_with_cache_control() {
+        use crate::protocols::openai::nvext::CacheControlType;
+
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "system": [
+                {"type": "text", "text": "You are a helpful assistant.", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Be concise."}
+            ]
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let system = req.system.as_ref().unwrap();
+        assert_eq!(system.text, "You are a helpful assistant.\nBe concise.");
+        // The LAST block with cache_control wins (first block here)
+        assert!(system.cache_control.is_some());
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let nvext = chat_req
+            .nvext
+            .expect("nvext should be set from system cache_control");
+        let cc = nvext.cache_control.expect("cache_control should be set");
+        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
+    }
+
+    #[test]
+    fn test_system_string_no_cache_control() {
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "system": "You are helpful."
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let system = req.system.as_ref().unwrap();
+        assert_eq!(system.text, "You are helpful.");
+        assert!(system.cache_control.is_none());
     }
 }
