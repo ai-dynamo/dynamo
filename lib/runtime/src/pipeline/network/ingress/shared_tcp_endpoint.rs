@@ -482,51 +482,38 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
-            // Send to worker pool with backpressure - BEFORE sending ACK
+            // ACK FIRST (before queuing)
+            // Send acknowledgment immediately so multiplexed clients are not blocked
+            // waiting for the work queue to have capacity.
+            let ack_response = TcpResponseMessage::empty();
+            if let Ok(encoded_ack) = ack_response.encode()
+                && response_tx.send(encoded_ack).is_err()
+            {
+                tracing::debug!("Write task closed, ending read loop");
+                handler.inflight.fetch_sub(1, Ordering::SeqCst);
+                handler.notify.notify_one();
+                break;
+            }
+
+            // QUEUE SECOND (backpressure on subsequent reads, NOT on ACK)
             match work_tx.send(work_item).await {
                 Ok(_) => {
-                    // Send acknowledgment ONLY after successful queuing
-                    let ack_response = TcpResponseMessage::empty();
-                    if let Ok(encoded_ack) = ack_response.encode()
-                        && response_tx.send(encoded_ack).is_err()
-                    {
-                        tracing::debug!("Write task closed, ending read loop");
-                        // Clean up inflight counter since work was queued but ACK failed
-                        handler.inflight.fetch_sub(1, Ordering::SeqCst);
-                        handler.notify.notify_one();
-                        break;
-                    }
-
                     tracing::trace!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
-                        "Request queued and acknowledged"
+                        "Request acknowledged and queued"
                     );
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::error!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
                         error = %e,
-                        "Failed to queue work to worker pool, sending error response"
+                        "Work queue closed after ACK sent; cannot send error (would corrupt FIFO)"
                     );
-
-                    // Send error response to client instead of ACK
-                    let error_response =
-                        TcpResponseMessage::new(Bytes::from(format!("Server overloaded: {}", e)));
-                    if let Ok(encoded) = error_response.encode() {
-                        let _ = response_tx.send(encoded);
-                    }
-
-                    // Clean up inflight counter
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
-
-                    // If channel is closed, break the loop
-                    if matches!(e, tokio::sync::mpsc::error::SendError(_)) {
-                        tracing::error!("Worker pool channel closed, shutting down read loop");
-                        break;
-                    }
+                    break; // Channel closed = fatal
                 }
             }
         }
@@ -535,12 +522,22 @@ impl SharedTcpServer {
     }
 
     async fn write_loop(
-        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        write_half: tokio::io::WriteHalf<TcpStream>,
         mut response_rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
     ) -> Result<()> {
-        while let Some(response) = response_rx.recv().await {
-            write_half.write_all(&response).await?;
-            write_half.flush().await?;
+        let mut writer =
+            tokio::io::BufWriter::with_capacity(64 * 1024, write_half);
+
+        while let Some(first) = response_rx.recv().await {
+            writer.write_all(&first).await?;
+
+            // Drain all immediately available responses into the same batch
+            while let Ok(response) = response_rx.try_recv() {
+                writer.write_all(&response).await?;
+            }
+
+            // Single flush for entire batch (replaces per-response flush)
+            writer.flush().await?;
         }
         Ok(())
     }
