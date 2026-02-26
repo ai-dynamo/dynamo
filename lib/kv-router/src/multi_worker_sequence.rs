@@ -8,10 +8,10 @@
 //! transport (e.g., NATS EventPublisher, Prometheus gauges) so that all business logic lives in
 //! this crate while the runtime glue stays in `lib/llm`.
 
-use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -29,10 +29,12 @@ use crate::sequence::{ActiveSequences, RequestId};
 /// Implementations provide the runtime-specific transport (e.g., NATS EventPublisher,
 /// Prometheus gauges) while the business logic in [`ActiveSequencesMultiWorker`] stays
 /// runtime-agnostic.
-#[async_trait]
 pub trait SequencePublisher: Send + Sync {
     /// Publish a replica-sync event to peer routers.
-    async fn publish_event(&self, event: &ActiveSequenceEvent) -> anyhow::Result<()>;
+    fn publish_event(
+        &self,
+        event: &ActiveSequenceEvent,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     /// Fire-and-forget publish of an [`ActiveLoad`] metric payload.
     fn publish_load(&self, load: ActiveLoad);
@@ -48,10 +50,11 @@ pub trait SequencePublisher: Send + Sync {
 }
 
 /// Abstraction over event subscription for replica sync.
-#[async_trait]
 pub trait SequenceSubscriber: Send {
     /// Receive the next replica-sync event, or `None` if the stream is closed.
-    async fn next_event(&mut self) -> Option<anyhow::Result<ActiveSequenceEvent>>;
+    fn next_event(
+        &mut self,
+    ) -> impl Future<Output = Option<anyhow::Result<ActiveSequenceEvent>>> + Send;
 }
 
 // ---------------------------------------------------------------------------

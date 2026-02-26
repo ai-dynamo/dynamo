@@ -14,7 +14,6 @@ pub use dynamo_kv_router::multi_worker_sequence::{
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
-use async_trait::async_trait;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
@@ -32,7 +31,6 @@ pub struct RuntimeSequencePublisher {
     metrics_publisher: Arc<EventPublisher>,
 }
 
-#[async_trait]
 impl SequencePublisher for RuntimeSequencePublisher {
     async fn publish_event(&self, event: &ActiveSequenceEvent) -> anyhow::Result<()> {
         self.event_publisher.publish(event).await
@@ -42,7 +40,11 @@ impl SequencePublisher for RuntimeSequencePublisher {
         let publisher = self.metrics_publisher.clone();
         tokio::spawn(async move {
             if let Err(e) = publisher.publish(&load).await {
-                tracing::trace!("Failed to publish ActiveLoad to NATS: {e:?}");
+                tracing::trace!(
+                    "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
+                    load.worker_id,
+                    load.dp_rank
+                );
             }
         });
     }
@@ -69,7 +71,6 @@ pub struct RuntimeSequenceSubscriber {
     inner: dynamo_runtime::transports::event_plane::TypedEventSubscriber<ActiveSequenceEvent>,
 }
 
-#[async_trait]
 impl SequenceSubscriber for RuntimeSequenceSubscriber {
     async fn next_event(&mut self) -> Option<anyhow::Result<ActiveSequenceEvent>> {
         match self.inner.next().await? {
