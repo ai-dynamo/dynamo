@@ -22,7 +22,7 @@ use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 use crate::protocols::openai::common_ext::CommonExt;
-use crate::protocols::openai::nvext::CacheControl;
+use crate::protocols::openai::nvext::{CacheControl, NvExt};
 
 // ---------------------------------------------------------------------------
 // Custom deserializers
@@ -621,10 +621,12 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 top_k: req.top_k.map(|k| k as i32),
                 ..Default::default()
             },
-            nvext: None,
+            nvext: req.cache_control.map(|cc| NvExt {
+                cache_control: Some(cc),
+                ..Default::default()
+            }),
             chat_template_args: None,
             media_io_kwargs: None,
-            cache_control: req.cache_control,
             unsupported_fields: Default::default(),
         })
     }
@@ -1833,11 +1835,10 @@ mod tests {
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(
-            chat_req.nvext.is_none(),
-            "cache_control should go to top-level field, not nvext"
-        );
-        let cc = chat_req.cache_control.expect("cache_control should be set");
+        let nvext = chat_req.nvext.expect("nvext should be set");
+        let cc = nvext
+            .cache_control
+            .expect("nvext.cache_control should be set");
         assert_eq!(cc.control_type, CacheControlType::Ephemeral);
         assert_eq!(cc.ttl_seconds(), 300);
     }
@@ -1856,7 +1857,10 @@ mod tests {
         assert!(req.cache_control.is_some());
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let cc = chat_req.cache_control.expect("cache_control should be set");
+        let nvext = chat_req.nvext.expect("nvext should be set");
+        let cc = nvext
+            .cache_control
+            .expect("nvext.cache_control should be set");
         assert_eq!(cc.control_type, CacheControlType::Ephemeral);
         assert_eq!(cc.ttl_seconds(), 3600);
     }
@@ -1886,6 +1890,5 @@ mod tests {
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.nvext.is_none());
-        assert!(chat_req.cache_control.is_none());
     }
 }

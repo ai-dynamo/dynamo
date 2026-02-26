@@ -58,14 +58,6 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_io_kwargs: Option<MediaDecoder>,
 
-    /// Top-level cache control for prompt prefix pinning.
-    /// Matches the Anthropic Messages API automatic caching mode where
-    /// `cache_control` is set at the request level (not per content block).
-    /// Also accepted on the OpenAI endpoint as a convenience alternative to
-    /// `nvext.cache_control`. If both are set, `nvext.cache_control` takes precedence.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<crate::protocols::openai::nvext::CacheControl>,
-
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
@@ -101,11 +93,8 @@ impl NvExtProvider for NvCreateChatCompletionRequest {
         None
     }
 
-    /// Check nvext.cache_control first, fall back to top-level cache_control.
     fn effective_cache_control(&self) -> Option<&crate::protocols::openai::nvext::CacheControl> {
-        NvExtProvider::nvext(self)
-            .and_then(|ext| ext.cache_control.as_ref())
-            .or(self.cache_control.as_ref())
+        NvExtProvider::nvext(self).and_then(|ext| ext.cache_control.as_ref())
     }
 }
 
