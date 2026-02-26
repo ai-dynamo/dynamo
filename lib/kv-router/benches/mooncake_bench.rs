@@ -14,8 +14,8 @@ use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_router::{
     ConcurrentRadixTree, InvertedIndex, NaiveNestedMap, PositionalIndexer, ThreadPoolIndexer,
 };
-use std::sync::Arc;
 use serde::Serialize;
+use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -265,7 +265,6 @@ struct SweepStepResult {
     #[serde(flatten)]
     results: BenchmarkResults,
 }
-
 
 /// Run the benchmark: replay each worker's merged trace against the indexer,
 /// measuring find_matches latency and event processing throughput.
@@ -573,8 +572,7 @@ async fn main() -> anyhow::Result<()> {
             args.common.sweep_max_ms,
             args.common.sweep_steps,
         );
-        let durations_high_to_low: Vec<u64> =
-            durations_low_to_high.iter().copied().rev().collect();
+        let durations_high_to_low: Vec<u64> = durations_low_to_high.iter().copied().rev().collect();
 
         let mut all_results: Vec<(&str, Vec<(u64, BenchmarkResults)>)> = Vec::new();
 
