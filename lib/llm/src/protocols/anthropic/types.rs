@@ -1832,7 +1832,10 @@ mod tests {
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(chat_req.nvext.is_none(), "cache_control should go to top-level field, not nvext");
+        assert!(
+            chat_req.nvext.is_none(),
+            "cache_control should go to top-level field, not nvext"
+        );
         let cc = chat_req.cache_control.expect("cache_control should be set");
         assert_eq!(cc.control_type, CacheControlType::Ephemeral);
         assert_eq!(cc.ttl_seconds(), 300);

@@ -273,9 +273,7 @@ impl OpenAIPreprocessor {
         let lora_name = self.lora_name.clone();
 
         // Extract cache_control TTL from either nvext or top-level field
-        let cache_control_ttl = request
-            .effective_cache_control()
-            .map(|cc| cc.ttl_seconds());
+        let cache_control_ttl = request.effective_cache_control().map(|cc| cc.ttl_seconds());
 
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {

@@ -99,10 +99,10 @@ impl AnthropicStreamConverter {
             self.input_token_count = usage.prompt_tokens;
             self.output_token_count = usage.completion_tokens;
             if let Some(details) = &usage.prompt_tokens_details {
-                if let Some(cached) = details.cached_tokens {
-                    if cached > 0 {
-                        self.cached_token_count = Some(cached);
-                    }
+                if let Some(cached) = details.cached_tokens
+                    && cached > 0
+                {
+                    self.cached_token_count = Some(cached);
                 }
             }
         }
@@ -341,10 +341,10 @@ impl AnthropicStreamConverter {
             self.input_token_count = usage.prompt_tokens;
             self.output_token_count = usage.completion_tokens;
             if let Some(details) = &usage.prompt_tokens_details {
-                if let Some(cached) = details.cached_tokens {
-                    if cached > 0 {
-                        self.cached_token_count = Some(cached);
-                    }
+                if let Some(cached) = details.cached_tokens
+                    && cached > 0
+                {
+                    self.cached_token_count = Some(cached);
                 }
             }
         }
