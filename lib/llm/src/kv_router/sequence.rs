@@ -94,9 +94,8 @@ pub async fn create_multi_worker_sequences(
 ) -> Result<Arc<ActiveSequencesMulti>> {
     let event_publisher =
         EventPublisher::for_component(&component, ACTIVE_SEQUENCES_SUBJECT).await?;
-    let metrics_publisher = Arc::new(
-        EventPublisher::for_namespace(component.namespace(), KV_METRICS_SUBJECT).await?,
-    );
+    let metrics_publisher =
+        Arc::new(EventPublisher::for_namespace(component.namespace(), KV_METRICS_SUBJECT).await?);
 
     let publisher = RuntimeSequencePublisher {
         event_publisher,
