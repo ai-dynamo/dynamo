@@ -21,7 +21,7 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 | `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps (default is UTC) | `false` | `true` |
 | `DYN_LOGGING_CONFIG_PATH` | Path to custom TOML logging configuration | none | `/path/to/config.toml` |
 | `VLLM_LOGGING_LEVEL` | vLLM backend log level (independent of `DYN_LOG`) | `INFO` | `DEBUG` |
-| `TLLM_LOG_LEVEL` | TensorRT-LLM backend log level (independent of `DYN_LOG`) | `ERROR` | `INFO` |
+| `TLLM_LOG_LEVEL` | TensorRT-LLM backend log level (independent of `DYN_LOG`) | `INFO` | `DEBUG` |
 | `DYN_SKIP_SGLANG_LOG_FORMATTING` | Disable Dynamo's SGLang log configuration | `false` | `true` |
 | `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace exporting | `false` | `true` |
