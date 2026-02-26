@@ -275,6 +275,28 @@ def parse_aiperf_output(output: str) -> dict | None:
             metrics["output_tok_per_sec"] = val
         elif "request" in norm and "throughput" in norm:
             metrics["req_per_sec"] = val
+        elif ("time" in norm and "first" in norm and "token" in norm) or "ttft" in norm:
+            metrics["ttft_ms_avg"] = val
+            if len(cells) >= 8:
+                try:
+                    metrics["ttft_ms_min"] = float(cells[2].replace(",", ""))
+                    metrics["ttft_ms_max"] = float(cells[3].replace(",", ""))
+                    metrics["ttft_ms_p99"] = float(cells[4].replace(",", ""))
+                    metrics["ttft_ms_p90"] = float(cells[5].replace(",", ""))
+                    metrics["ttft_ms_p50"] = float(cells[6].replace(",", ""))
+                except (ValueError, IndexError):
+                    pass
+        elif "inter" in norm and "token" in norm and "latency" in norm:
+            metrics["itl_ms_avg"] = val
+            if len(cells) >= 8:
+                try:
+                    metrics["itl_ms_min"] = float(cells[2].replace(",", ""))
+                    metrics["itl_ms_max"] = float(cells[3].replace(",", ""))
+                    metrics["itl_ms_p99"] = float(cells[4].replace(",", ""))
+                    metrics["itl_ms_p90"] = float(cells[5].replace(",", ""))
+                    metrics["itl_ms_p50"] = float(cells[6].replace(",", ""))
+                except (ValueError, IndexError):
+                    pass
         elif "request count" in norm:
             metrics["request_count"] = val
 
@@ -294,6 +316,20 @@ def parse_aiperf_output(output: str) -> dict | None:
                             ]
                         if "request_throughput" in entry:
                             metrics["req_per_sec"] = entry["request_throughput"]
+                        if (
+                            "time_to_first_token" in entry
+                            and entry["time_to_first_token"]
+                        ):
+                            ttft = entry["time_to_first_token"]
+                            for k in ("avg", "min", "max", "p99", "p90", "p50"):
+                                metrics.setdefault(f"ttft_ms_{k}", ttft.get(k))
+                        if (
+                            "inter_token_latency" in entry
+                            and entry["inter_token_latency"]
+                        ):
+                            itl = entry["inter_token_latency"]
+                            for k in ("avg", "min", "max", "p99", "p90", "p50"):
+                                metrics.setdefault(f"itl_ms_{k}", itl.get(k))
             except (json.JSONDecodeError, KeyError):
                 pass
 
@@ -411,6 +447,18 @@ def main():
         "req_latency_ms_p50",
         "duration_sec",
         "request_count",
+        "ttft_ms_avg",
+        "ttft_ms_min",
+        "ttft_ms_max",
+        "ttft_ms_p99",
+        "ttft_ms_p90",
+        "ttft_ms_p50",
+        "itl_ms_avg",
+        "itl_ms_min",
+        "itl_ms_max",
+        "itl_ms_p99",
+        "itl_ms_p90",
+        "itl_ms_p50",
         "computed_req_per_sec",
         "computed_tok_per_sec",
     ]
@@ -455,6 +503,8 @@ def main():
                                 f"    -> {metrics.get('req_per_sec', 'N/A')} req/s, "
                                 f"{metrics.get('output_tok_per_sec', 'N/A')} tok/s, "
                                 f"p99={metrics.get('req_latency_ms_p99', 'N/A')}ms, "
+                                f"ttft_p99={metrics.get('ttft_ms_p99', 'N/A')}ms, "
+                                f"itl_p99={metrics.get('itl_ms_p99', 'N/A')}ms, "
                                 f"{metrics.get('duration_sec', 'N/A')}s"
                             )
                         else:
@@ -500,7 +550,7 @@ def print_summary_table(results: list[dict]):
     print()
     print("── Results Matrix ─────────────────────────────────────────────────────")
     header = f"{'Mockers':>8}  {'NumReq':>8}  "
-    header += f"{'req/s':>{W}}  {'comp_rps':>{W}}  {'tok/s':>{W}}  {'p99_ms':>{W}}  {'dur_sec':>{W}}"
+    header += f"{'req/s':>{W}}  {'comp_rps':>{W}}  {'tok/s':>{W}}  {'p99_ms':>{W}}  {'ttft_p99':>{W}}  {'itl_p99':>{W}}  {'dur_sec':>{W}}"
     print(header)
     print("-" * len(header))
 
@@ -517,6 +567,8 @@ def print_summary_table(results: list[dict]):
             comp_rps = r.get("computed_req_per_sec", None)
             toks = r.get("output_tok_per_sec", None)
             p99 = r.get("req_latency_ms_p99", None)
+            ttft_p99 = r.get("ttft_ms_p99", None)
+            itl_p99 = r.get("itl_ms_p99", None)
             dur = r.get("duration_sec", None)
 
             rps_s = f"{rps:>{W}.1f}" if rps is not None else f"{'N/A':>{W}}"
@@ -525,10 +577,12 @@ def print_summary_table(results: list[dict]):
             )
             toks_s = f"{toks:>{W}.1f}" if toks is not None else f"{'N/A':>{W}}"
             p99_s = f"{p99:>{W}.1f}" if p99 is not None else f"{'N/A':>{W}}"
+            ttft_s = f"{ttft_p99:>{W}.1f}" if ttft_p99 is not None else f"{'N/A':>{W}}"
+            itl_s = f"{itl_p99:>{W}.1f}" if itl_p99 is not None else f"{'N/A':>{W}}"
             dur_s = f"{dur:>{W}.2f}" if dur is not None else f"{'N/A':>{W}}"
 
             print(
-                f"{nm:>8}  {nr:>8,}  {rps_s}  {comp_rps_s}  {toks_s}  {p99_s}  {dur_s}"
+                f"{nm:>8}  {nr:>8,}  {rps_s}  {comp_rps_s}  {toks_s}  {p99_s}  {ttft_s}  {itl_s}  {dur_s}"
             )
         print()  # blank line between mocker groups
 
