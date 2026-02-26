@@ -30,7 +30,7 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("step3", ReasoningParserType::Step3);
         map.insert("mistral", ReasoningParserType::Mistral);
         map.insert("granite", ReasoningParserType::Granite);
-        map.insert("nemotron_nano", ReasoningParserType::NemotronDeci); // nemotron nano is <think>...</think>
+        map.insert("nemotron_nano", ReasoningParserType::DeepseekR1); // nemotron nano is ...</think>
         map.insert("glm45", ReasoningParserType::NemotronDeci); // GLM-4.5/5 is <think>...</think>, no force_reasoning
         map.insert(
             "minimax_append_think",
