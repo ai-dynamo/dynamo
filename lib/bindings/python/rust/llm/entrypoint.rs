@@ -88,6 +88,7 @@ impl KvRouterConfig {
                 router_prune_target_ratio,
                 router_queue_threshold,
                 router_event_threads,
+                worker_discovery_mode: Default::default(),
             },
         }
     }

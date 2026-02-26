@@ -169,6 +169,34 @@ impl SchedulerQueue {
             let discovery_workers = self.workers_with_configs.borrow();
             let effective_workers =
                 build_effective_workers(&request.allowed_worker_ids, &discovery_workers);
+
+            if self.worker_discovery_mode == WorkerDiscoveryMode::External {
+                let epp_ids: Vec<WorkerId> = request
+                    .allowed_worker_ids
+                    .as_ref()
+                    .map(|ids| ids.iter().copied().collect())
+                    .unwrap_or_default();
+                let discovery_ids: Vec<WorkerId> = discovery_workers.keys().copied().collect();
+                let resolved_from_discovery: Vec<WorkerId> = effective_workers
+                    .keys()
+                    .filter(|id| discovery_workers.contains_key(id))
+                    .copied()
+                    .collect();
+                let using_fallback: Vec<WorkerId> = effective_workers
+                    .keys()
+                    .filter(|id| !discovery_workers.contains_key(id))
+                    .copied()
+                    .collect();
+                tracing::debug!(
+                    ?epp_ids,
+                    ?discovery_ids,
+                    ?resolved_from_discovery,
+                    ?using_fallback,
+                    effective_count = effective_workers.len(),
+                    "GAIE: External mode: EPP-provided workers vs discovery-registered workers"
+                );
+            }
+
             self.selector
                 .select_worker(&effective_workers, &request, self.block_size)
         };
@@ -258,8 +286,11 @@ fn build_effective_workers(
             let mut workers = HashMap::with_capacity(ids.len());
             for &id in ids {
                 let config = discovery_workers.get(&id).cloned().unwrap_or_else(|| {
+                    tracing::debug!(
+                        worker_id = id,
+                        "GAIE: Worker from EPP not yet in discovery, using fallback ModelRuntimeConfig"
+                    );
                     ModelRuntimeConfig {
-                        // set to false to avoid an issue if the worker does not have local indexer.
                         enable_local_indexer: false,
                         ..Default::default()
                     }

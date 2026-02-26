@@ -103,7 +103,7 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 	}
 
 	podsJSON := serializePods(pods)
-	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: pods received for scoring",
+	logger.V(logutil.DEFAULT).Info("GAIE: DynPrefillScorer: pods received for scoring",
 		"podCount", len(pods),
 		"podsJSON", string(podsJSON))
 

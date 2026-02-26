@@ -106,6 +106,8 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.uid
+              - name: DYN_LOG
+                value: "info,dynamo_llm::kv_router::queue=debug,dynamo_llm::kv_router::scheduler=debug"
             livenessProbe:
               httpGet:
                 path: /live

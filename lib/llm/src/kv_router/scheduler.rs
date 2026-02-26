@@ -156,8 +156,28 @@ impl KvScheduler {
             }
             WorkerDiscoveryMode::External => {
                 tracing::info!(
-                    "External worker discovery mode: skipping discovery-based worker monitoring"
+                    "GAIE: External worker discovery mode: worker set will be provided per-request by EPP"
                 );
+
+                let mut monitor_rx = workers_with_configs.clone();
+                let monitor_cancel_token = component.drt().child_token();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = monitor_cancel_token.cancelled() => break,
+                            result = monitor_rx.changed() => {
+                                if result.is_err() { break; }
+                            }
+                        }
+                        let current = monitor_rx.borrow_and_update();
+                        let worker_ids: Vec<u64> = current.keys().copied().collect();
+                        tracing::debug!(
+                            ?worker_ids,
+                            count = worker_ids.len(),
+                            "GAIE: External mode: discovery-registered workers updated (used for RuntimeConfig lookup)"
+                        );
+                    }
+                });
             }
         }
 
