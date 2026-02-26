@@ -281,6 +281,77 @@ class EncodeHelper:
             logging.debug("EncodeHelper completed readable operation.")
 
     @staticmethod
+    def _build_prompt_from_messages(messages, tokenizer):
+        """Build a prompt string from OpenAI-format messages using the model's
+        HuggingFace chat template.
+
+        VLMs such as Qwen2-VL embed vision-placeholder tokens (e.g.
+        ``<|vision_start|><|image_pad|><|vision_end|>``) inside their chat
+        template.  The Rust frontend may use a *different* template (e.g.
+        LLaVA's ``[INST]...[/INST]``) that omits these placeholders, so
+        decoding the Rust ``token_ids`` back to text produces a prompt without
+        image placeholders.  To fix this we re-apply the model's own HF chat
+        template to the original messages, which inserts the correct
+        placeholders for every model.
+
+        The OpenAI ``image_url`` content items are converted to the generic
+        ``{"type": "image"}`` form expected by HF chat templates.
+
+        Returns:
+            The prompt string with vision placeholders, or *None* if the
+            tokenizer does not support ``apply_chat_template``.
+        """
+        # Resolve the underlying HF tokenizer (TransformersTokenizer wraps it)
+        hf_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
+
+        apply_fn = getattr(hf_tokenizer, "apply_chat_template", None)
+        if apply_fn is None:
+            return None
+
+        # Convert OpenAI format → HF chat-template format
+        converted_messages = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            # String content (no images)
+            if isinstance(content, str):
+                converted_messages.append({"role": role, "content": content})
+                continue
+
+            # List of content items (may include images)
+            converted_content = []
+            for item in content:
+                if isinstance(item, str):
+                    converted_content.append({"type": "text", "text": item})
+                elif isinstance(item, dict):
+                    ctype = item.get("type", "")
+                    if ctype == "image_url":
+                        # HF templates expect {"type": "image"}, not the
+                        # OpenAI {"type": "image_url", "image_url": {...}}
+                        converted_content.append({"type": "image"})
+                    elif ctype == "text":
+                        converted_content.append(item)
+                    else:
+                        converted_content.append(item)
+            converted_messages.append({"role": role, "content": converted_content})
+
+        try:
+            prompt = apply_fn(
+                converted_messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            return prompt
+        except Exception as e:
+            logging.warning(
+                "ENCODE WORKER: apply_chat_template failed (%s), "
+                "falling back to token_ids decode",
+                e,
+            )
+            return None
+
+    @staticmethod
     async def _process_full_epd_flow(
         prompt_token_ids_from_request: list,
         image_urls: list,
@@ -288,6 +359,7 @@ class EncodeHelper:
         model_dir: str,
         model_type: str,
         engine,
+        messages=None,
     ):
         """
         Process image URLs via TRT-LLM's MultimodalEncoder (full EPD flow).
@@ -302,6 +374,9 @@ class EncodeHelper:
             model_dir: Path to model directory (unused; kept for API compatibility)
             model_type: Model type string (unused; kept for API compatibility)
             engine: TensorRTLLMEngine with MultimodalEncoder
+            messages: Original OpenAI-format messages (used to build prompt
+                with the model's HF chat template, which inserts correct
+                vision placeholders for VLMs like Qwen2-VL)
 
         Yields:
             Response with ep_disaggregated_params, processed_prompt, and prompt_token_ids
@@ -315,14 +390,63 @@ class EncodeHelper:
             yield {"ep_disaggregated_params": None}
             return
 
+        # Build the text prompt.  We prefer using the model's HF chat template
+        # applied to the original messages because:
+        # 1. The Rust frontend may use a different chat template that omits
+        #    vision-placeholder tokens (e.g. <|vision_start|><|image_pad|>
+        #    <|vision_end|> for Qwen2-VL).
+        # 2. Decoding the Rust token_ids back to text then produces a prompt
+        #    WITHOUT image placeholders → the VLM's HF processor cannot
+        #    expand image tokens → multimodal_lengths stays None → assertion
+        #    failure in EncoderSampler.
+        # By re-applying the model's own template we guarantee the correct
+        # placeholders are present for every VLM.
+        prompt_text = None
+        if messages and tokenizer is not None:
+            prompt_text = EncodeHelper._build_prompt_from_messages(
+                messages, tokenizer
+            )
+            if prompt_text:
+                logging.debug(
+                    "ENCODE WORKER: built prompt from messages via HF chat template "
+                    "(first 300 chars): %r",
+                    prompt_text[:300],
+                )
+
+        # Fallback: decode token_ids from the Rust preprocessor.
+        # This works for models whose Rust template already includes vision
+        # placeholders (e.g. LLaVA).
+        if prompt_text is None and tokenizer is not None:
+            prompt_text = tokenizer.decode(
+                prompt_token_ids_from_request, skip_special_tokens=False
+            )
+            logging.debug(
+                "ENCODE WORKER: using decoded token_ids as prompt "
+                "(first 300 chars): %r",
+                prompt_text[:300] if prompt_text else None,
+            )
+
+        if prompt_text is None:
+            raise RuntimeError(
+                "Cannot run full EPD encode flow without a tokenizer to "
+                "build prompt text"
+            )
+
         processed_mm_data = {"image": pil_images}
-        inputs = [
-            {
-                "prompt_token_ids": prompt_token_ids_from_request,
-                "multi_modal_data": processed_mm_data,
-                "mm_processor_kwargs": {},
-            }
-        ]
+        # IMPORTANT: Do NOT include prompt_token_ids in the input dict.
+        # TRT-LLM's _preprocess dispatches on an if/elif chain where
+        # "prompt_token_ids" is checked BEFORE "prompt". If both are present,
+        # TRT-LLM takes the prompt_token_ids branch and skips multimodal
+        # processing entirely (no input_processor, no multimodal hashing,
+        # no multimodal_lengths → assertion failure in EncoderSampler).
+        # By providing only "prompt" + "multi_modal_data", we ensure TRT-LLM
+        # takes the correct multimodal branch that runs the input processor.
+        input_dict = {
+            "prompt": prompt_text,
+            "multi_modal_data": processed_mm_data,
+            "mm_processor_kwargs": {},
+        }
+        inputs = [input_dict]
 
         # NOTE: MultimodalEncoder.generate() is synchronous. Run it off-thread to avoid
         # blocking the encode worker's event loop under concurrency.
@@ -352,16 +476,14 @@ class EncodeHelper:
         encoded_params = DisaggregatedParamsCodec.encode(ep_disaggregated_params)
         params_dict = asdict(encoded_params)
 
-        # Extract processed prompt (includes <image> tokens) for prefill/decode consistency.
-        # NOTE: processed_prompt will contain template/placeholder tokens
-        # (e.g. <image>, [INST], etc.). Adding special tokens here can change
-        # token alignment across EPD stages (prefill/decode), so we explicitly
-        # avoid adding them.
-        processed_prompt = None
-        if tokenizer is not None:
-            processed_prompt = tokenizer.decode(
-                prompt_token_ids_from_request, skip_special_tokens=False
-            )
+        # Return the prompt text (with vision placeholders) so the prefill
+        # worker can pass it to TRT-LLM's _preprocess.  The `is_mm_disagg`
+        # branch in TRT-LLM calls `get_prompt_token_ids(inputs, mm_handles)`
+        # which expects the prompt to contain the correct number of image
+        # placeholders matching mm_handles.  We MUST use `prompt_text` (built
+        # from the model's HF chat template) rather than decoding the Rust
+        # token_ids — the Rust template may omit vision placeholders.
+        processed_prompt = prompt_text
 
         logging.debug(
             "ENCODE WORKER: Extracted processed_prompt (len=%s)",
@@ -438,6 +560,9 @@ class EncodeHelper:
             # Use token_ids from request (Rust preprocessor already applied
             # chat template and tokenized; token_ids then include image placeholder tokens
             # if the model's tokenizer_config chat template emits them).
+            # We also pass the original messages so that _process_full_epd_flow
+            # can re-apply the model's HF chat template to get correct vision
+            # placeholders (the Rust template may differ from the model's).
             token_ids = request.get("token_ids")
             async for response in EncodeHelper._process_full_epd_flow(
                 token_ids,
@@ -446,6 +571,7 @@ class EncodeHelper:
                 model_dir,
                 model_type,
                 engine,
+                messages=messages,
             ):
                 yield response
 
