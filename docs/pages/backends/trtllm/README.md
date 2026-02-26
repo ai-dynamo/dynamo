@@ -4,8 +4,6 @@
 title: TensorRT-LLM
 ---
 
-# LLM Deployment using TensorRT-LLM
-
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using TensorRT-LLM.
 
 ## Use the Latest Release

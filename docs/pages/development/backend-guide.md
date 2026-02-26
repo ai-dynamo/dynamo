@@ -5,8 +5,6 @@ title: Writing Python Workers in Dynamo
 subtitle: Create custom Python workers and engines for Dynamo
 ---
 
-# Writing Python Workers in Dynamo
-
 This guide explains how to create your own Python worker in Dynamo.
 
 The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo.

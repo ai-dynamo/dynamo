@@ -4,8 +4,6 @@
 title: SGLang
 ---
 
-# Running SGLang with Dynamo
-
 ## Use the Latest Release
 
 We recommend using the latest stable release of Dynamo to avoid breaking changes:

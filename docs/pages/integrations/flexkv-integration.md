@@ -4,8 +4,6 @@
 title: FlexKV
 ---
 
-# FlexKV Integration in Dynamo
-
 ## Introduction
 
 [FlexKV](https://github.com/taco-project/FlexKV) is a scalable, distributed runtime for KV cache offloading developed by Tencent Cloud's TACO team in collaboration with the community. It acts as a unified KV caching layer for inference engines like SGLang, TensorRT-LLM, and vLLM.
