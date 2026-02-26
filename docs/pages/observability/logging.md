@@ -268,18 +268,9 @@ Dynamo's `DYN_LOG` environment variable controls Dynamo's own logging. Each
 inference backend has its own log level control that is **independent** of
 `DYN_LOG`.
 
-### vLLM
+### SGLang
 
-vLLM log level is controlled by the `VLLM_LOGGING_LEVEL` environment variable.
-It defaults to `INFO` and is completely independent of `DYN_LOG`.
-
-```bash
-# Set vLLM to debug while keeping Dynamo at info
-export DYN_LOG=info
-export VLLM_LOGGING_LEVEL=DEBUG
-```
-
-Valid values: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`.
+WIP
 
 ### TensorRT-LLM
 
@@ -298,9 +289,19 @@ Valid values: `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `INTERNAL_ERROR`.
 **Note:** `TLLM_LOG_LEVEL` is read once at TensorRT-LLM import time. It must
 be set before the process starts.
 
-### SGLang
 
-WIP
+### vLLM
+
+vLLM log level is controlled by the `VLLM_LOGGING_LEVEL` environment variable.
+It defaults to `INFO` and is completely independent of `DYN_LOG`.
+
+```bash
+# Set vLLM to debug while keeping Dynamo at info
+export DYN_LOG=info
+export VLLM_LOGGING_LEVEL=DEBUG
+```
+
+Valid values: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`.
 
 ## Related Documentation
 
