@@ -436,10 +436,6 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "None")]
     rank: Option<i32>,
 
-    /// World size for replicated mode
-    #[builder(default = "None")]
-    world_size: Option<i32>,
-
     /// NCCL configuration for replicated mode
     #[builder(default = "transfer::NcclConfig::disabled()")]
     nccl_config: transfer::NcclConfig,

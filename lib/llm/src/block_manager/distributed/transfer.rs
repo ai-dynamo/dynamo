@@ -107,13 +107,16 @@ impl NcclConfig {
     /// - The communicator will not be destroyed while this config exists
     #[cfg(feature = "nccl")]
     pub unsafe fn enabled(comm: ncclComm_t, rank: i32, world_size: i32) -> Self {
-        Self {
-            inner: Some(NcclConfigInner {
-                comm: NcclCommHandle::new(comm),
-                rank,
-                world_size,
-            }),
+        unsafe {
+            Self {
+                inner: Some(NcclConfigInner {
+                    comm: NcclCommHandle::new(comm),
+                    rank,
+                    world_size,
+                }),
+            }
         }
+
     }
 
     /// Returns true if NCCL is enabled and configured
@@ -233,6 +236,7 @@ pub struct BlockTransferHandler {
     /// Transfer mode: sharded (default) or replicated
     transfer_mode: TransferMode,
     /// NCCL config (required for replicated mode)
+    #[allow(dead_code)] // Needed for builds
     nccl_config: NcclConfig,
 }
 

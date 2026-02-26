@@ -23,8 +23,6 @@ fn build_nccl_config(
     world_size: Option<i32>,
     nccl_comm_ptr: Option<usize>,
 ) -> anyhow::Result<NcclConfig> {
-    // Check if the user is trying to use replicated mode
-    let wants_replicated = rank.is_some() || world_size.is_some() || nccl_comm_ptr.is_some();
 
     #[cfg(feature = "nccl")]
     {
@@ -38,6 +36,8 @@ fn build_nccl_config(
     }
     #[cfg(not(feature = "nccl"))]
     {
+        // Check if the user is trying to use replicated mode
+        let wants_replicated = rank.is_some() || world_size.is_some() || nccl_comm_ptr.is_some();
         if wants_replicated {
             anyhow::bail!(
                 "NCCL replicated mode requested (rank={:?}, world_size={:?}, nccl_comm_ptr={:?}) \
@@ -245,7 +245,6 @@ impl KvbmWorker {
             .leader_pub_url(get_leader_zmq_pub_url())
             .leader_ack_url(get_leader_zmq_ack_url())
             .rank(rank)
-            .world_size(world_size)
             .nccl_config(nccl_config)
             .build()
             .map_err(to_pyerr)?;
