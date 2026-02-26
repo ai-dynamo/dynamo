@@ -17,6 +17,17 @@ Release history in this document begins at v0.6.0.
 - **Docs:** [v0.9.0](https://docs.dynamo.nvidia.com/dynamo)
 - **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
 
+### Patch Release: v0.9.0.post1 (Feb 2026)
+
+**v0.9.0.post1** is a Helm-chart-only patch release on NGC (no GitHub release). It fixes the `dynamo-platform` Helm chart which incorrectly set the operator image tag to `0.7.1` instead of `0.9.0`. Only the `dynamo-platform` chart was patched; all other artifacts remain at v0.9.0.
+
+| Artifact | Version | Change | Link |
+|----------|---------|--------|------|
+| `dynamo-platform` | `0.9.0-post1` | Fixed operator image tag (`0.7.1` -> `0.9.0`) | [NGC](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-0.9.0-post1.tgz) |
+
+**Workaround for v0.9.0 chart:** If using the original v0.9.0 Helm chart, add this flag:
+`--set dynamo-operator.controllerManager.manager.image.tag=0.9.0`
+
 ### Container Images
 
 | Image:Tag | Description | Backend | CUDA | Arch | NGC | Notes |
@@ -46,7 +57,7 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 | Chart | Description | NGC |
 |-------|-------------|-----|
 | `dynamo-crds-0.9.0` | Custom Resource Definitions for Dynamo Kubernetes resources | [link](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-0.9.0.tgz) |
-| `dynamo-platform-0.9.0` | Platform services (etcd, NATS) for Dynamo cluster | [link](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-0.9.0.tgz) |
+| `dynamo-platform-0.9.0-post1` | Platform services (etcd, NATS) for Dynamo cluster | [link](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-0.9.0-post1.tgz) |
 
 > **Note:** The `dynamo-graph` Helm chart is deprecated as of v0.9.0. Use the Kubernetes operator for deployment graph management.
 
@@ -107,7 +118,7 @@ uv pip install kvbm==0.9.0
 
 ```bash
 helm install dynamo-crds oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds --version 0.9.0
-helm install dynamo-platform oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform --version 0.9.0
+helm install dynamo-platform oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform --version 0.9.0-post1
 ```
 
 ### Rust Crates (crates.io)
@@ -124,9 +135,7 @@ cargo add dynamo-config@0.9.0
 cargo add dynamo-tokens@0.9.0
 ```
 
-## CUDA and Driver Requirements
-
-For detailed CUDA toolkit versions and minimum driver requirements for each container image, see the [Support Matrix](support-matrix.md#cuda-and-driver-requirements).
+**CUDA and Driver Requirements:** For detailed CUDA toolkit versions and minimum driver requirements for each container image, see the [Support Matrix](support-matrix.md#cuda-and-driver-requirements).
 
 ## Known Issues
 
@@ -138,6 +147,7 @@ For a complete list of known issues, refer to the release notes for each version
 
 | Version | Artifact | Issue | Status |
 |---------|----------|-------|--------|
+| v0.9.0 | `dynamo-platform-0.9.0` | Helm chart sets operator image to `0.7.1` instead of `0.9.0`. | Fixed in v0.9.0.post1 |
 | v0.8.1 | `vllm-runtime:0.8.1-cuda13` | Container fails to launch. | Known issue |
 | v0.8.1 | `sglang-runtime:0.8.1-cuda13`, `vllm-runtime:0.8.1-cuda13` | Multimodality not expected to work on ARM64. Works on AMD64. | Known limitation |
 
@@ -145,6 +155,7 @@ For a complete list of known issues, refer to the release notes for each version
 
 ## Release History
 
+- **v0.9.0.post1**: Fixed `dynamo-platform` Helm chart operator image tag (Helm chart only, NGC)
 - **v0.9.0**: Updated vLLM to `v0.14.1`, SGLang to `v0.5.8`, TRT-LLM to `v1.3.0rc1`, NIXL to `v0.9.0`. New `dynamo-tokens` Rust crate. Deprecated `dynamo-graph` Helm chart.
 - **v0.8.1.post1/.post2/.post3 Patches**: Experimental patch releases updating TRT-LLM only (PyPI wheels and TRT-LLM container). No other artifacts changed.
 
@@ -306,6 +317,7 @@ For a complete list of known issues, refer to the release notes for each version
 
 | Chart | Notes |
 |-------|-------|
+| `dynamo-platform-0.9.0-post1` | Helm fix: operator image tag |
 | `dynamo-platform-0.9.0` | |
 | `dynamo-platform-0.8.1` | |
 | `dynamo-platform-0.8.0` | |
