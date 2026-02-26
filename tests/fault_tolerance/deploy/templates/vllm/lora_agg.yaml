@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-lora-agg
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: vllm-lora-agg
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmWorker:
+      dynamoNamespace: vllm-lora-agg
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 2
+      resources:
+        requests:
+          memory: "50Gi"
+          gpu: "1"
+        limits:
+          memory: "100Gi"
+          gpu: "1"
+      envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        # LoRA-specific environment variables
+        - name: DYN_LORA_ENABLED
+          value: "true"
+        - name: DYN_LORA_PATH
+          value: "/tmp/dynamo_loras_k8s"
+        # AWS/S3 configuration for LoRA storage (will be overridden by test)
+        - name: AWS_ENDPOINT
+          value: "http://minio-service:9000"
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: access-key
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: secret-key
+              optional: true
+        - name: AWS_REGION
+          value: "us-east-1"
+        - name: AWS_ALLOW_HTTP
+          value: "true"
+        - name: VLLM_USE_V1
+          value: "1"
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: "spawn"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        - name: VLLM_DEBUG
+          value: "1"
+        - name: VLLM_LOGGING_LEVEL
+          value: "DEBUG"
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --tensor-parallel-size
+            - "1"
+            - --gpu-memory-utilization
+            - "0.5"
+            - --max-model-len
+            - "1024"
+            - --enable-lora
+            - --max-loras
+            - "4"
+            - --max-lora-rank
+            - "64"
