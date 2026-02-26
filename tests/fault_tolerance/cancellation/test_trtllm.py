@@ -36,7 +36,7 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.nihglty,
+    pytest.mark.nightly,
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
     pytest.mark.xfail(reason="Cancellation is temporarily disabled", strict=True),
 ]
