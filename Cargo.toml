@@ -18,6 +18,9 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/config",
+    "lib/velo",
+    "lib/velo-discovery",
+    "lib/velo-messenger",
 ]
 resolver = "3"
 
@@ -42,8 +45,17 @@ dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics"] }
 dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features = ["byot"] }
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
+
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
+
+velo = { path = "lib/velo", version = "1.0.0" }
+velo-common = { git = "ssh://git@github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
+velo-backend = { git = "ssh://git@github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-backend" }
+velo-discovery = { path = "lib/velo-discovery", version = "1.0.0" }
+velo-events = { git = "ssh://git@github.com/ai-dynamo/dynamo.git", branch = "ryan/velo-events" }
+velo-messenger = { path = "lib/velo-messenger", version = "1.0.0" }
+
 # External dependencies
 anyhow = { version = "1" }
 async-nats = { version = "0.45.0", features = ["service"] }
