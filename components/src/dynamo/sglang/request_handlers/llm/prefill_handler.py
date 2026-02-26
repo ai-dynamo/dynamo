@@ -81,7 +81,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
-                **self._get_guided_decoding_params(sampling_opts.get("guided_decoding")),
+                **self._get_guided_decoding_params(
+                    sampling_opts.get("guided_decoding")
+                ),
             }
             sampling_params = {
                 k: v for k, v in sampling_params.items() if v is not None
