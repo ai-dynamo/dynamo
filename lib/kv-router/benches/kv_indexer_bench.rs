@@ -1280,7 +1280,7 @@ async fn run_stress_mode(args: StressArgs) {
     // Test single indexer
     if matches!(args.indexer_type, IndexerType::Single | IndexerType::All) {
         let token = CancellationToken::new();
-        let mut indexer = KvIndexer::new(token.clone(), args.common.block_size, metrics.clone());
+        let indexer = KvIndexer::new(token.clone(), args.common.block_size, metrics.clone());
 
         println!(
             "\n  Applying {} store events to KvIndexer...",
@@ -1290,7 +1290,7 @@ async fn run_stress_mode(args: StressArgs) {
 
         for (event_id, seq) in sequences.iter().enumerate() {
             let event = seq.to_store_event(event_id as u64);
-            KvIndexerInterface::apply_event(&mut indexer, event).await;
+            KvIndexerInterface::apply_event(&indexer, event).await;
 
             if args.common.verbose && (event_id + 1) % 100 == 0 {
                 println!("    Applied {}/{} events...", event_id + 1, sequences.len());
@@ -1322,7 +1322,7 @@ async fn run_stress_mode(args: StressArgs) {
     // Test sharded indexer
     if matches!(args.indexer_type, IndexerType::Sharded | IndexerType::All) {
         let token = CancellationToken::new();
-        let mut indexer = KvIndexerSharded::new(
+        let indexer = KvIndexerSharded::new(
             token.clone(),
             args.num_shards,
             args.common.block_size,
@@ -1337,7 +1337,7 @@ async fn run_stress_mode(args: StressArgs) {
 
         for (event_id, seq) in sequences.iter().enumerate() {
             let event = seq.to_store_event(event_id as u64);
-            KvIndexerInterface::apply_event(&mut indexer, event).await;
+            KvIndexerInterface::apply_event(&indexer, event).await;
 
             if args.common.verbose && (event_id + 1) % 100 == 0 {
                 println!("    Applied {}/{} events...", event_id + 1, sequences.len());
