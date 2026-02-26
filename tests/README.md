@@ -341,7 +341,7 @@ Runs per framework (vllm, sglang, trtllm). Each framework goes through: **Build*
 
 | Stage | What it does | Local equivalent |
 |-------|-------------|-----------------|
-| Build image | Render Dockerfile, build runtime container | `python container/render.py --framework=vllm --target=runtime && docker build ...` |
+| Build image | Render Dockerfile, build runtime container | `container/render.py --framework=vllm --target=runtime && docker build ...` |
 | Sanity check | Verify packages are installed in the image | `docker run --rm <image> /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check` |
 | CPU-only tests (parallel) | `(pre_merge or post_merge) and <framework> and gpu_0` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_0" -n auto --dist=loadscope -v --tb=short` |
 | Single GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and gpu_1` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short` |
