@@ -77,9 +77,9 @@ async def graceful_shutdown_with_discovery(
     logger.info("Received shutdown signal; unregistering endpoints from discovery")
     await _unregister_endpoints(list(endpoints))
 
-    if grace_period_s > 0:
-        logger.info("Grace period %.2fs before stopping endpoints", grace_period_s)
-        await asyncio.sleep(grace_period_s)
+    # if grace_period_s > 0:
+    #     logger.info("Grace period %.2fs before stopping endpoints", grace_period_s)
+    #     await asyncio.sleep(grace_period_s)
 
     if shutdown_event is not None:
         shutdown_event.set()

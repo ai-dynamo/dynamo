@@ -52,8 +52,6 @@ from dynamo.runtime import DistributedRuntime, Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
-from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-
 from .args import Config, parse_args
 from .checkpoint_restore import get_checkpoint_config
 from .constants import DisaggregationMode
@@ -939,6 +937,8 @@ async def init(
         # no endpoint health targets are registered yet.
         runtime.set_health_status(True)
         logger.info("[Shadow] Engine sleeping, startup probe now passing, waiting for lock")
+
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
         lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
         engine_id = os.environ.get("ENGINE_ID", "0")
