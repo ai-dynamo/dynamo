@@ -201,8 +201,8 @@ async fn generate_sequence_events(
                 progress.inc((i - prev_i) as u64);
             }
 
-            // Drop scheduler to close request_tx → spawned engine task exits →
-            // output_tx drops → drain task sees None
+            // Drop scheduler → CancelGuard fires → background task exits →
+            // output_tx dropped → drain task sees None
             drop(scheduler);
 
             let mut entries = drain_handle.await?;
@@ -453,7 +453,7 @@ async fn run_tests() -> anyhow::Result<()> {
         traces.iter().map(|t| t.len()).sum::<usize>()
     );
 
-    let seq_traces = generate_sequence_events(&traces, 1048576, 512, 5000).await?;
+    let seq_traces = generate_sequence_events(&traces, 1048576, 512, 100).await?;
 
     let total_adds = seq_traces
         .iter()

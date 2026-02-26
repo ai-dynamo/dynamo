@@ -162,14 +162,26 @@ pub fn partition_trace(
 /// Linearly rescale all timestamps in a worker's trace so the total span equals
 /// `duration` milliseconds.
 pub fn scale_mooncake_trace(trace: &[MooncakeRequest], duration: u64) -> Vec<MooncakeRequest> {
-    let total_duration = trace.last().unwrap().timestamp - trace.first().unwrap().timestamp;
+    let Some(first) = trace.first() else {
+        return Vec::new();
+    };
+    let total_duration = trace.last().unwrap().timestamp - first.timestamp;
+    if total_duration == 0 {
+        return trace
+            .iter()
+            .map(|r| MooncakeRequest {
+                timestamp: 0,
+                ..r.clone()
+            })
+            .collect();
+    }
     trace
         .iter()
         .map(|request| MooncakeRequest {
-            timestamp: request.timestamp * duration / total_duration,
+            timestamp: (request.timestamp - first.timestamp) * duration / total_duration,
             ..request.clone()
         })
-        .collect::<Vec<MooncakeRequest>>()
+        .collect()
 }
 
 /// Stretch each request's hash sequence by the given factor, simulating longer

@@ -194,13 +194,20 @@ fn prepare_worker_traces(
     let scaled_request_traces: Vec<_> = traces
         .into_iter()
         .map(|trace| {
-            let trace_duration_ms =
-                trace.last().unwrap().timestamp - trace.first().unwrap().timestamp;
+            let Some(first) = trace.first() else {
+                return Vec::new();
+            };
+            let first_ts = first.timestamp;
+            let trace_duration_ms = trace.last().unwrap().timestamp - first_ts;
             trace
                 .into_iter()
                 .map(|request| WorkerTrace {
-                    timestamp_us: request.timestamp * 1000 * benchmark_duration_ms
-                        / trace_duration_ms,
+                    timestamp_us: if trace_duration_ms == 0 {
+                        0
+                    } else {
+                        (request.timestamp - first_ts) * 1000 * benchmark_duration_ms
+                            / trace_duration_ms
+                    },
                     entry: WorkerTraceEntry::Request(
                         request
                             .hash_ids
@@ -216,7 +223,9 @@ fn prepare_worker_traces(
     let scaled_event_traces: Vec<_> = events
         .into_iter()
         .map(|worker_events| {
-            let start_instant = worker_events.first().unwrap().1;
+            let Some(&(_, start_instant)) = worker_events.first() else {
+                return Vec::new();
+            };
             worker_events
                 .into_iter()
                 .map(|(event, timestamp)| WorkerTrace {
