@@ -353,7 +353,6 @@ async def parse_args(args: list[str]) -> Config:
         server_args.served_model_name = parsed_args.served_model_name
         server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
         server_args.log_level = getattr(parsed_args, "log_level", "info")
-        server_args.skip_tokenizer_init = True
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
         server_args.tp_size = getattr(parsed_args, "tp_size", 1)
         server_args.dp_size = getattr(parsed_args, "dp_size", 1)
@@ -374,15 +373,9 @@ async def parse_args(args: list[str]) -> Config:
     server_args.stream_output = True
 
     if dynamo_config.use_sglang_tokenizer:
-        logging.info(
-            "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
-        )
-        server_args.skip_tokenizer_init = False
+        logging.info("Using SGLang's built in tokenizer")
     else:
-        logging.info(
-            "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
-        )
-        server_args.skip_tokenizer_init = True
+        logging.info("Using dynamo's built in tokenizer")
 
     # Derive use_kv_events from server_args.kv_events_config
     # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)

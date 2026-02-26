@@ -40,9 +40,9 @@ async def _register_model_with_runtime_config(
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
     input_type = input_type
 
-    if not server_args.skip_tokenizer_init:
+    if dynamo_args.use_sglang_tokenizer:
         logging.warning(
-            "The skip-tokenizer-init flag was not set. Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
+            "Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
         # Only override output_type for chat models, not for embeddings
