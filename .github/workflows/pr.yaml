@@ -342,7 +342,7 @@ jobs:
         helm dep build .
         # Install platform with namespace restriction for single profile testing
         helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-          --skip-crds \
+          --skip-crds \ # we manage crds via Velonix
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
