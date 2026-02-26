@@ -276,6 +276,7 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     "multimodal_disagg_qwen3vl_2b_e_pd": VLLMConfig(
         name="multimodal_disagg_qwen3vl_2b_e_pd",
         directory=vllm_dir,
@@ -335,6 +336,7 @@ vllm_configs = {
             )
         ],
     ),
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     "multimodal_disagg_qwen3vl_2b_epd": VLLMConfig(
         name="multimodal_disagg_qwen3vl_2b_epd",
         directory=vllm_dir,
@@ -349,6 +351,7 @@ vllm_configs = {
             "DYN_ENCODE_GPU_MEM": "0.30",
             "DYN_PREFILL_GPU_MEM": "0.30",
             "DYN_DECODE_GPU_MEM": "0.30",
+            "DYN_EXTRA_VLLM_ARGS": "--enforce-eager --max-model-len 4096",
         },
         request_payloads=[
             chat_payload(

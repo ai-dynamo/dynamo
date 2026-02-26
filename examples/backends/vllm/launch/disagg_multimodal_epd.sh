@@ -52,7 +52,7 @@ echo "Starting frontend..."
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend &
 
-EXTRA_ARGS=""
+EXTRA_ARGS="${DYN_EXTRA_VLLM_ARGS:-}"
 
 # GPU assignments (override via environment variables)
 DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
