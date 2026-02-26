@@ -79,6 +79,7 @@ impl AnthropicStreamConverter {
             usage: AnthropicUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
             },
         };
@@ -148,6 +149,7 @@ impl AnthropicStreamConverter {
                         index: self.text_block_index,
                         content_block: AnthropicResponseContentBlock::Text {
                             text: String::new(),
+                            citations: None,
                         },
                     };
                     events.push(make_sse_event("content_block_start", &block_start));
@@ -281,6 +283,7 @@ impl AnthropicStreamConverter {
             usage: AnthropicUsage {
                 input_tokens: self.input_token_count,
                 output_tokens: self.output_token_count,
+                cache_creation_input_tokens: None,
                 cache_read_input_tokens: self.cached_token_count,
             },
         };
@@ -387,6 +390,7 @@ impl AnthropicStreamConverter {
                         index: self.text_block_index,
                         content_block: AnthropicResponseContentBlock::Text {
                             text: String::new(),
+                            citations: None,
                         },
                     };
                     events.push(make_tagged_event("content_block_start", &ev));
@@ -501,6 +505,7 @@ impl AnthropicStreamConverter {
             usage: AnthropicUsage {
                 input_tokens: self.input_token_count,
                 output_tokens: self.output_token_count,
+                cache_creation_input_tokens: None,
                 cache_read_input_tokens: self.cached_token_count,
             },
         };

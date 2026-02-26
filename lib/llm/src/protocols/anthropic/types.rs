@@ -149,6 +149,20 @@ pub struct AnthropicCreateMessageRequest {
     /// the model may use for thinking (must be ≥ 1024 and < max_tokens).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+
+    /// Service tier selection: `"auto"` or `"standard_only"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+
+    /// Container identifier for stateful sandbox sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+
+    /// Output configuration: effort level and optional JSON schema format.
+    /// `effort` can be `"low"`, `"medium"`, `"high"`, or `"max"`.
+    /// `format` specifies structured JSON output constraints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<serde_json::Value>,
 }
 
 /// Extended thinking configuration for the request.
@@ -475,12 +489,29 @@ pub struct AnthropicImageSource {
 }
 
 /// A tool definition.
+///
+/// Client tools (custom) require `name` + `input_schema`. Server tools
+/// (web_search, bash, text_editor, code_execution, etc.) are discriminated
+/// by their `type` field (e.g. `"web_search_20260209"`) and may not have
+/// `input_schema`. We keep all fields optional beyond `name` so both
+/// kinds deserialize successfully and pass through to the backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicTool {
+    /// Tool name (required for client tools, present on server tools too).
     pub name: String,
+    /// Tool type discriminator. Client tools use `"custom"` (or omit).
+    /// Server tools use versioned types like `"web_search_20260209"`.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub input_schema: serde_json::Value,
+    /// JSON Schema for the tool input. Required for client tools, absent on
+    /// server tools (which define their own input shape server-side).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+    /// Cache control breakpoint on this tool definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// Tool choice specification.
@@ -545,17 +576,47 @@ pub struct AnthropicMessageResponse {
 }
 
 /// A content block in the response.
+///
+/// The Anthropic API returns up to 12 different block types. We model the
+/// common ones explicitly and catch the rest as `Other` so the proxy can
+/// forward them without losing data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AnthropicResponseContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        citations: Option<Vec<serde_json::Value>>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
     },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
+    #[serde(rename = "server_tool_use")]
+    ServerToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
+    #[serde(rename = "web_search_tool_result")]
+    WebSearchToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
+    },
+    /// Catch-all for new/uncommon block types (web_fetch_tool_result,
+    /// code_execution_tool_result, container_upload, etc.) so the proxy
+    /// can serialize them back without data loss.
+    #[serde(untagged)]
+    Other(serde_json::Value),
 }
 
 /// Token usage information.
@@ -563,8 +624,11 @@ pub enum AnthropicResponseContentBlock {
 pub struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Number of input tokens used to create a new cache entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
     /// Number of input tokens read from the prompt cache (prefix cache hits).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u32>,
 }
 
@@ -576,6 +640,11 @@ pub enum AnthropicStopReason {
     MaxTokens,
     StopSequence,
     ToolUse,
+    /// The model paused to yield control in an agentic loop, intending to
+    /// continue in a subsequent turn. Used with extended thinking / tool use.
+    PauseTurn,
+    /// The model refused to generate content (safety refusal).
+    Refusal,
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +694,15 @@ pub enum AnthropicDelta {
     TextDelta { text: String },
     #[serde(rename = "input_json_delta")]
     InputJsonDelta { partial_json: String },
+    /// Incremental thinking content during extended thinking streaming.
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta { thinking: String },
+    /// Incremental signature for a thinking block (sent at the end).
+    #[serde(rename = "signature_delta")]
+    SignatureDelta { signature: String },
+    /// Incremental citation attached to a text block.
+    #[serde(rename = "citations_delta")]
+    CitationsDelta { citation: serde_json::Value },
 }
 
 /// The delta body in a message_delta event.
@@ -1022,14 +1100,20 @@ fn convert_assistant_blocks(
 fn convert_anthropic_tools(tools: &[AnthropicTool]) -> Vec<ChatCompletionTool> {
     tools
         .iter()
-        .map(|tool| ChatCompletionTool {
-            r#type: ChatCompletionToolType::Function,
-            function: FunctionObject {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                parameters: Some(tool.input_schema.clone()),
-                strict: None,
-            },
+        .filter_map(|tool| {
+            // Server tools (web_search, bash, etc.) don't have input_schema
+            // and can't be meaningfully converted to OpenAI function tools.
+            // They are backend-specific and handled separately.
+            let schema = tool.input_schema.clone()?;
+            Some(ChatCompletionTool {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionObject {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters: Some(schema),
+                    strict: None,
+                },
+            })
         })
         .collect()
 }
@@ -1114,7 +1198,13 @@ pub fn chat_completion_to_anthropic_response(
         };
         if let Some(text) = text {
             // Text goes first in the content array
-            content.insert(0, AnthropicResponseContentBlock::Text { text });
+            content.insert(
+                0,
+                AnthropicResponseContentBlock::Text {
+                    text,
+                    citations: None,
+                },
+            );
         }
     }
 
@@ -1122,6 +1212,7 @@ pub fn chat_completion_to_anthropic_response(
     if content.is_empty() {
         content.push(AnthropicResponseContentBlock::Text {
             text: String::new(),
+            citations: None,
         });
     }
 
@@ -1136,6 +1227,7 @@ pub fn chat_completion_to_anthropic_response(
             AnthropicUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
+                cache_creation_input_tokens: None, // Not available from OpenAI format
                 cache_read_input_tokens,
             }
         })
@@ -1210,7 +1302,9 @@ impl AnthropicCountTokensRequest {
                 if let Some(desc) = &tool.description {
                     total_len += desc.len();
                 }
-                total_len += tool.input_schema.to_string().len();
+                if let Some(schema) = &tool.input_schema {
+                    total_len += schema.to_string().len();
+                }
             }
         }
 
@@ -1281,6 +1375,9 @@ mod tests {
             tool_choice: None,
             cache_control: None,
             thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1325,6 +1422,9 @@ mod tests {
             tool_choice: None,
             cache_control: None,
             thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1385,6 +1485,9 @@ mod tests {
             tool_choice: None,
             cache_control: None,
             thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1425,6 +1528,9 @@ mod tests {
             tool_choice: None,
             cache_control: None,
             thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1451,17 +1557,24 @@ mod tests {
             metadata: None,
             tools: Some(vec![AnthropicTool {
                 name: "get_weather".into(),
+                tool_type: None,
                 description: Some("Get weather info".into()),
-                input_schema: serde_json::json!({
+                input_schema: Some(serde_json::json!({
                     "type": "object",
                     "properties": {"location": {"type": "string"}},
                     "required": ["location"]
-                }),
+                })),
+                cache_control: None,
             }]),
             tool_choice: Some(AnthropicToolChoice::Simple(AnthropicToolChoiceSimple {
                 choice_type: AnthropicToolChoiceMode::Auto,
+                disable_parallel_tool_use: None,
             })),
             cache_control: None,
+            thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1524,7 +1637,7 @@ mod tests {
         assert_eq!(response.usage.output_tokens, 5);
         assert_eq!(response.content.len(), 1);
         match &response.content[0] {
-            AnthropicResponseContentBlock::Text { text } => {
+            AnthropicResponseContentBlock::Text { text, .. } => {
                 assert_eq!(text, "Hello!");
             }
             _ => panic!("expected text block"),
@@ -1630,6 +1743,9 @@ mod tests {
             tool_choice: None,
             cache_control: None,
             thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1711,6 +1827,9 @@ mod tests {
             tool_choice: None,
             cache_control: None,
             thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         }
         .try_into()
         .unwrap();
@@ -1824,6 +1943,9 @@ mod tests {
             tool_choice: None,
             cache_control: None,
             thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         match chat_req.inner.messages.into_iter().next().unwrap() {
@@ -2092,6 +2214,10 @@ mod tests {
                 control_type: CacheControlType::Ephemeral,
                 ttl: None,
             }),
+            thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2147,6 +2273,9 @@ mod tests {
             tool_choice: None,
             cache_control: None,
             thinking: None,
+            service_tier: None,
+            container: None,
+            output_config: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
