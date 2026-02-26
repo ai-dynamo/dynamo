@@ -19,9 +19,9 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::{KvRouterConfig, WorkerDiscoveryMode};
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
+use dynamo_llm::kv_router::{KvRouterConfig, WorkerDiscoveryMode};
 use dynamo_runtime::pipeline::RouterMode;
 
 use std::collections::HashSet;
@@ -1217,9 +1217,9 @@ pub unsafe extern "C" fn route_decode_request(
 /// Initialize the preprocessor, block size, and model name.
 ///
 /// Waits for discovery to sync (model card must be available for tokenization),
-/// then creates the preprocessor from the model card. `kv_cache_block_size` and
-/// `model_name` can be overridden via `DYN_KV_CACHE_BLOCK_SIZE` and `DYN_MODEL_NAME`
-/// environment variables; otherwise the values from the model card are used.
+/// then creates the preprocessor from the model card. The `kv_cache_block_size`
+/// and `model_name` are taken from the model card to ensure consistency with
+/// the worker configuration.
 async fn init_preprocessor(
     drt: &DistributedRuntime,
     target_namespace: &str,
@@ -1233,23 +1233,13 @@ async fn init_preprocessor(
         instance_count
     );
 
-    let (prep, discovered_block_size, discovered_model_name) =
+    let (prep, block_size, model_name) =
         fetch_preprocessor_from_discovery(drt, target_namespace).await?;
-
-    let block_size = std::env::var("DYN_KV_CACHE_BLOCK_SIZE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(discovered_block_size);
-
-    let model_name = std::env::var("DYN_MODEL_NAME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(discovered_model_name);
 
     tracing::info!(
         kv_cache_block_size = block_size,
         model_name = model_name,
-        "Preprocessor initialized"
+        "Preprocessor initialized from model card"
     );
 
     Ok((Some(prep), block_size, model_name))

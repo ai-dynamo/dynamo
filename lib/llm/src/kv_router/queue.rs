@@ -152,9 +152,7 @@ impl SchedulerQueue {
         if self.worker_discovery_mode == WorkerDiscoveryMode::External
             && request.allowed_worker_ids.is_none()
         {
-            tracing::error!(
-                "External discovery mode requires worker IDs in each request"
-            );
+            tracing::error!("External discovery mode requires worker IDs in each request");
             request.respond(Err(super::scheduler::KvSchedulerError::NoEndpoints));
             return;
         }

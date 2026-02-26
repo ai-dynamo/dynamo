@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::WorkerDiscoveryMode;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
+use super::WorkerDiscoveryMode;
 use super::WorkerSelector;
 use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::queue::SchedulerQueue;
@@ -125,8 +125,7 @@ impl KvScheduler {
                 let monitor_cancel_token = component.drt().child_token();
                 tokio::spawn(async move {
                     tracing::trace!("KvScheduler workers monitoring task started");
-                    let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> =
-                        HashMap::new();
+                    let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
 
                     loop {
                         tokio::select! {
