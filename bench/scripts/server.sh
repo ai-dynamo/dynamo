@@ -151,7 +151,7 @@ launch_scenario_3() {
     python -m dynamo.frontend \
         --dyn-chat-processor vllm \
         --dyn-preprocess-workers 32 \
-        --model "$MODEL" &
+        --model-name "$MODEL" &
     CHILD_PIDS+=($!)
     echo "[server.sh] dynamo.frontend (vllm processor) PID: ${CHILD_PIDS[-1]}"
 
