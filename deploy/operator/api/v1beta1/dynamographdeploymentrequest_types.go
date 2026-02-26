@@ -330,7 +330,7 @@ type HardwareSpec struct {
 
 	// VRAMMB is the VRAM per GPU in MiB.
 	// +optional
-	VRAMMB *float64 `json:"vramMb,omitempty"`
+	VRAMMB *int32 `json:"vramMb,omitempty"`
 
 	// TotalGPUs is the total number of GPUs available in the cluster.
 	// +optional

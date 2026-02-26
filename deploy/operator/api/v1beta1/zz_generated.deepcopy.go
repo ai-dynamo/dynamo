@@ -234,7 +234,7 @@ func (in *HardwareSpec) DeepCopyInto(out *HardwareSpec) {
 	*out = *in
 	if in.VRAMMB != nil {
 		in, out := &in.VRAMMB, &out.VRAMMB
-		*out = new(float64)
+		*out = new(int32)
 		**out = **in
 	}
 	if in.TotalGPUs != nil {
