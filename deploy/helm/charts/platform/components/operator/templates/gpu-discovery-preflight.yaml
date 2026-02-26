@@ -13,23 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Template-time check: verifies the installer has cluster-scoped RBAC access for GPU discovery.
+# Best-effort template-time check for cluster-scoped RBAC access required by GPU discovery.
 # Runs only when namespaceRestriction.enabled=true and gpuDiscovery.enabled=true (the default).
-# Uses Helm's lookup function (which runs as the installing user) instead of a Job-based check,
-# so it tests the correct identity and requires no pod scheduling or image pulls.
+#
+# Limitation: Helm's lookup function can only test list/get access, not create. This check
+# verifies the installer can read ClusterRole resources as a proxy for full cluster RBAC
+# access. In the rare case where an installer has create but not list permissions, this
+# check will false-fail; if that happens Helm's native error on the actual ClusterRole
+# creation (in gpu-discovery-rbac.yaml) will still be clear about the missing permission.
 {{- if and .Values.namespaceRestriction.enabled .Values.gpuDiscovery.enabled }}
 {{- /*
   GPU discovery (gpu-discovery-rbac.yaml) creates a ClusterRole + ClusterRoleBinding to grant
-  the namespace-scoped operator read-only node access.  Verify the installer has cluster-level
-  RBAC access by probing the API server with lookup, which executes using the installer's
-  kubeconfig credentials — the correct identity for this check.
+  the namespace-scoped operator read-only node access.
+
+  This is a best-effort check: lookup runs as the installing user and tests list/get access
+  on ClusterRoles — not the create permission that gpu-discovery-rbac.yaml actually needs.
+  There is no mechanism in Helm templates to test create permissions directly. In practice,
+  installers with create access almost always have list access too, so this catches the
+  common case. If the check is wrong, the actual resource creation will fail with a clear
+  Helm RBAC error.
 
   lookup returns an empty dict during helm template / --dry-run, so we use a two-probe
   heuristic to distinguish dry-run mode from insufficient permissions:
-    1. Probe ClusterRoles — if non-empty, the installer has cluster RBAC access.
+    1. Probe ClusterRoles — if non-empty, the installer has cluster RBAC read access.
     2. If empty, probe the release Namespace.  All authenticated users can read their own
        namespace during a real install.  If this succeeds but ClusterRoles did not, the
-       installer lacks cluster-scoped access and we fail with a helpful message.
+       installer likely lacks cluster-scoped access.
     3. If both are empty we are in dry-run / template mode — skip the check.
 */ -}}
 {{- $clusterProbe := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" "" -}}
