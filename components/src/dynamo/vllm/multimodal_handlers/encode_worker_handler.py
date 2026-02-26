@@ -13,9 +13,14 @@ from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 import dynamo.nixl_connect as connect
-from dynamo.common.multimodal import LocalEmbeddingSender, NixlPersistentEmbeddingSender
+from dynamo.common.multimodal import (
+    LocalEmbeddingSender,
+    NixlEmbeddingReceiver,
+    NixlPersistentEmbeddingSender,
+)
 from dynamo.runtime import DistributedRuntime
 
+from ..constants import EmbeddingTransmitterMode
 from ..multimodal_utils import (
     ImageLoader,
     encode_image_embeddings,
@@ -49,6 +54,7 @@ class EncodeWorkerHandler:
     def __init__(
         self,
         engine_args: AsyncEngineArgs,
+        embedding_transmitter_mode: EmbeddingTransmitterMode,
     ) -> None:
         self.engine_args = engine_args
         self.model = self.engine_args.model
@@ -70,11 +76,13 @@ class EncodeWorkerHandler:
         self._processed_requests = 0
         self.readables = []
         self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
-        self.embedding_sender = (
-            LocalEmbeddingSender()
-            if TRANSFER_LOCAL
-            else NixlPersistentEmbeddingSender()
-        )
+        if embedding_transmitter_mode == EmbeddingTransmitterMode.LOCAL:
+            self.embedding_sender = LocalEmbeddingSender()
+        elif embedding_transmitter_mode == EmbeddingTransmitterMode.NIXL_WRITE:
+            self.embedding_sender = NixlEmbeddingReceiver()
+        elif embedding_transmitter_mode == EmbeddingTransmitterMode.NIXL_READ:
+            self.embedding_sender = NixlPersistentEmbeddingSender()
+
         self.send_complete_queue = asyncio.Queue()
         self.send_complete_checker_task = asyncio.create_task(
             self.check_complete(self.send_complete_queue)

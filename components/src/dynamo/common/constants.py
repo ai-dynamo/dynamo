@@ -12,3 +12,11 @@ class DisaggregationMode(Enum):
     AGGREGATED = "agg"
     PREFILL = "prefill"
     DECODE = "decode"
+
+
+class EmbeddingTransmitterMode(Enum):
+    """Embedding transmitter mode for LLM workers."""
+
+    LOCAL = "local"
+    NIXL_WRITE = "nixl-write"
+    NIXL_READ = "nixl-read"
