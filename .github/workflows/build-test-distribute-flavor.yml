@@ -300,8 +300,9 @@ jobs:
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
-          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+          echo "test_image=${RUNTIME_IMAGE}-test" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -314,8 +315,8 @@ jobs:
         shell: bash
         run: |
           start_time=$(date +%s)
+          docker pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
           docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
-          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}-test
           docker pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
@@ -324,14 +325,14 @@ jobs:
       - name: Run Sanity Check on Runtime Image
         shell: bash
         run: |
-          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.test_image }}"
+          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.runtime_image }}"
 
           # Run the sanity check script inside the container
           # The script is located in /workspace/deploy/sanity_check.py in runtime containers
           export WORKSPACE=/workspace
 
           set +e
-          docker run --rm "${{ steps.calculate-target-tag.outputs.test_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
           SANITY_CHECK_EXIT_CODE=$?
           set -e
           if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
@@ -347,7 +348,7 @@ jobs:
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}-test
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
@@ -364,7 +365,7 @@ jobs:
         if: ( inputs.platform == 'amd64' && inputs.run_single_gpu_tests == true ) # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}-test
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.single_gpu_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
@@ -399,8 +400,9 @@ jobs:
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
-          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+          RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
+          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
+          echo "test_image=${RUNTIME_IMAGE}-test" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -413,7 +415,7 @@ jobs:
         shell: bash
         run: |
           start_time=$(date +%s)
-          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}-test
+          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
           docker pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
@@ -424,7 +426,7 @@ jobs:
         timeout-minutes: ${{ inputs.multi_gpu_test_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}-test
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.multi_gpu_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
@@ -461,8 +463,6 @@ jobs:
           CUDA_VERSION_RAW=${{ inputs.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ inputs.platform }}
-          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Copy image to target registry
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}
