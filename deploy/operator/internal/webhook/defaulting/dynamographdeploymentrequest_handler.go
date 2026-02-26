@@ -29,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-
 const (
 	dgdrDefaultingWebhookName = "dynamographdeploymentrequest-defaulting-webhook"
 	dgdrDefaultingWebhookPath = "/mutate-nvidia-com-v1beta1-dynamographdeploymentrequest"

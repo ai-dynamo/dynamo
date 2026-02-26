@@ -94,8 +94,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "vllm",
+					Model:     "test-model",
+					Backend:   "vllm",
 					Image:     "test-profiler:latest",
 					AutoApply: true,
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
@@ -1860,8 +1860,8 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "vllm",
+					Model:     "test-model",
+					Backend:   "vllm",
 					Image:     "test-profiler:latest",
 					AutoApply: true,
 					Hardware: &nvidiacomv1beta1.HardwareSpec{

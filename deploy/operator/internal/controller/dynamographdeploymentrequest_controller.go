@@ -92,7 +92,7 @@ const (
 
 	// Volume paths
 	ProfilingOutputPath        = "/data"
-	ProfilingOutputFile = "final_config.yaml"
+	ProfilingOutputFile        = "final_config.yaml"
 	ProfilingConfigMountPath   = "/config"
 	ProfilingConfigDefaultKey  = "disagg.yaml"
 	DefaultModelCacheMountPath = "/opt/model-cache"
@@ -1011,11 +1011,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 		var scriptBuf bytes.Buffer
 		err = tmpl.Execute(&scriptBuf, map[string]string{
-			"OutputPath":       ProfilingOutputPath,
+			"OutputPath":    ProfilingOutputPath,
 			"OutputFile":    ProfilingOutputFile,
 			"ConfigMapName": outputConfigMapName,
-			"Namespace":        dgdr.Namespace,
-			"DGDRName":         dgdr.Name,
+			"Namespace":     dgdr.Namespace,
+			"DGDRName":      dgdr.Name,
 		})
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to execute sidecar script template: %w", err)
