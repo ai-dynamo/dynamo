@@ -538,7 +538,7 @@ svg.card-icon{
     z-index: 0;
 }
 
-/* Bottom: Masked gradient for organic transition */
+/* Bottom: Gradient for organic transition */
 .landing-gradient-bottom {
     position: absolute;
     bottom: -282px;
@@ -549,14 +549,6 @@ svg.card-icon{
     opacity: 0.05;
     pointer-events: none;
     z-index: 5;
-    mask-image: url('https://www.figma.com/api/mcp/asset/27509afa-9c16-46bb-8415-4395e2e5a347');
-    mask-repeat: no-repeat;
-    mask-position: 0% -17px;
-    mask-size: 100% auto;
-    -webkit-mask-image: url('https://www.figma.com/api/mcp/asset/27509afa-9c16-46bb-8415-4395e2e5a347');
-    -webkit-mask-repeat: no-repeat;
-    -webkit-mask-position: 0% -17px;
-    -webkit-mask-size: 100% auto;
 }
 
 /* Landing Page Gradients Wrapper */
