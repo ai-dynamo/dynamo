@@ -1528,6 +1528,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dashmap 6.1.0",
+ "derive-getters",
  "dynamo-runtime",
  "dynamo-tokens",
  "flume",
@@ -1540,6 +1541,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
  "xxhash-rust",
 ]
 

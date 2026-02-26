@@ -1880,6 +1880,7 @@ dependencies = [
  "async-trait",
  "clap 4.5.60",
  "dashmap 6.1.0",
+ "derive-getters",
  "dynamo-bench",
  "dynamo-mocker",
  "dynamo-runtime",
