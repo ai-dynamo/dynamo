@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import logging
 import math
 import os
@@ -300,7 +301,7 @@ class RingBuffer:
             self._flush_freed_list()
 
 
-class NixlTransferRequest(TransferRequest):
+class NixlTransferRequest(BaseModel):
     """
     A TransferRequest subclass that includes additional fields specific to NIXL-based embedding transfer.
     """
@@ -308,7 +309,7 @@ class NixlTransferRequest(TransferRequest):
     sender_agent_id: str
     # metadata of the given agent ID, can be None if
     # sender determines that the receiver already connected to the sender.
-    agent_metadata: Optional[Any]
+    agent_metadata: Optional[str]
     # The ID of the tensor to be written
     tensor_id: int
     tensor_size: int
@@ -339,7 +340,7 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
         self.remote_agents = {}
         self.handshaked_receivers = set()
         self.agent_metadata = self.nixl_agent.get_agent_metadata()
-        logger.info(f"length of agent_metadata: {len(self.agent_metadata)}")
+        self.agent_metadata_b64 = base64.b64encode(self.agent_metadata).decode("utf-8")
 
         self.transfer_tracker = {}
 
@@ -443,7 +444,7 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
         """
         if remote_agent_id not in self.remote_agents:
             self.remote_agents[remote_agent_id] = self.nixl_agent.add_remote_agent(
-                remote_agent_metadata
+                base64.b64decode(remote_agent_metadata)
             )
 
     async def send_embeddings(
@@ -474,18 +475,18 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
         self.transfer_tracker[tensor_id] = (embeddings, desc, registered_desc, fut)
         self.transfer_queue.put_nowait("task_indicator")
 
-        request = NixlTransferRequest(
+        request = TransferRequest(
             embeddings_shape=list(embeddings.shape),
             embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
-            sender_agent_id=self.sender_id,
-            agent_metadata=self.agent_metadata
-            if remote_agent_id is None
-            and remote_agent_id not in self.handshaked_receivers
-            else None,
-            tensor_id=tensor_id,
-            tensor_size=embeddings.nbytes,
-            # Not passing metadata in serialized_request
-            serialized_request="",
+            serialized_request=NixlTransferRequest(
+                sender_agent_id=self.sender_id,
+                agent_metadata=self.agent_metadata_b64
+                if remote_agent_id is None
+                or remote_agent_id not in self.handshaked_receivers
+                else None,
+                tensor_id=tensor_id,
+                tensor_size=embeddings.nbytes,
+            ).model_dump_json(),
         )
         return request, fut
 
@@ -515,11 +516,14 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.remote_agents = {}
         self.reg_descs = self.nixl_agent.register_memory(self.transfer_tensor)
 
+        self.agent_metadata = self.nixl_agent.get_agent_metadata()
+        self.agent_metadata_b64 = base64.b64encode(self.agent_metadata).decode("utf-8")
+
         self.id_counter = MonolithicCounter()
         self.to_buffer_id = {}
 
     def get_agent_metadata(self):
-        return self.receiver_id, self.nixl_agent.get_agent_metadata()
+        return self.receiver_id, self.agent_metadata_b64
 
     async def receive_embeddings(
         self, request: TransferRequest
@@ -534,19 +538,26 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
             A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
             Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
         """
-        if request.sender_agent_id not in self.remote_agents:
-            if request.agent_metadata is None:
+        nixl_request = NixlTransferRequest.model_validate_json(
+            request.serialized_request
+        )
+        if nixl_request.sender_agent_id not in self.remote_agents:
+            if nixl_request.agent_metadata is None:
                 raise ValueError(
-                    f"Missing agent metadata for new sender {request.sender_agent_id}"
+                    f"Missing agent metadata for new sender {nixl_request.sender_agent_id}"
                 )
             self.remote_agents[
-                request.sender_agent_id
-            ] = self.nixl_agent.add_remote_agent(request.agent_metadata)
+                nixl_request.sender_agent_id
+            ] = self.nixl_agent.add_remote_agent(
+                base64.b64decode(nixl_request.agent_metadata)
+            )
 
         # Extract dynamic shape, metadata, and auxiliary data
         embeddings_shape = request.embeddings_shape
         embeddings_dtype = torch_dtype_from_string(request.embedding_dtype_str)
-        buffer_id, transfer_tensor = self.ring_buffer.get_buffer(request.tensor_size)
+        buffer_id, transfer_tensor = self.ring_buffer.get_buffer(
+            nixl_request.tensor_size
+        )
         if transfer_tensor is None:
             # [gluo TODO] not raise but retry or block on pending transfer
             raise MemoryError("No available buffer for transfer, please retry later.")
@@ -558,7 +569,7 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
         tensor_id = self.id_counter.get_next_id()
         notif_msg = pickle.dumps(
             (
-                request.tensor_id,
+                nixl_request.tensor_id,
                 (
                     transfer_tensor.data_ptr(),
                     # torch returns -1 for CPU device, need to normalized there
@@ -568,7 +579,7 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
                 tensor_id,
             )
         )
-        self.nixl_agent.send_notif(request.sender_agent_id, notif_msg=notif_msg)
+        self.nixl_agent.send_notif(nixl_request.sender_agent_id, notif_msg=notif_msg)
 
         # await for write notification
         start = time.perf_counter()
@@ -579,10 +590,12 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
         found = False
         while not found:
             notifs = self.nixl_agent.update_notifs()
-            if request.sender_agent_id in notifs:
-                for notif in notifs[request.sender_agent_id]:
+            if nixl_request.sender_agent_id in notifs:
+                for notif in notifs[nixl_request.sender_agent_id]:
                     if notif == done_signal:
-                        self.nixl_agent.notifs[request.sender_agent_id].remove(notif)
+                        self.nixl_agent.notifs[nixl_request.sender_agent_id].remove(
+                            notif
+                        )
                         found = True
                         break
 

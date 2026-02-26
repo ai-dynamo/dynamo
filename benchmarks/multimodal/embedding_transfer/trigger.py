@@ -23,18 +23,27 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
-    # Get endpoint
-    endpoint = runtime.endpoint("embedding_transfer.sender.generate")
+    # Get endpoint (sender -> receiver)
+    sender_endpoint = runtime.endpoint("embedding_transfer.sender.generate")
+    receiver_endpoint = runtime.endpoint("embedding_transfer.receiver.generate")
 
     # Create client and wait for service to be ready
-    client = await endpoint.client()
-    await client.wait_for_instances()
+    sender_client = await sender_endpoint.client()
+    await sender_client.wait_for_instances()
+    receiver_client = await receiver_endpoint.client()
+    await receiver_client.wait_for_instances()
 
+    client = receiver_client
+    # client = sender_client
+    num_requests = 100
     try:
         start_time = time.perf_counter()
-        stream = await client.round_robin("world,sun,moon,star")
-        async for response in stream:
-            print(response.data())
+        streams = [
+            await client.round_robin("world,sun,moon,star") for _ in range(num_requests)
+        ]
+        for stream in streams:
+            async for response in stream:
+                continue
         end_time = time.perf_counter()
         print(f"Time taken: {end_time - start_time:.2f} seconds")
     except Exception as e:
