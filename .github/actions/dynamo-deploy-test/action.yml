@@ -11,8 +11,7 @@ inputs:
     required: true
   registry:
     description: 'Container registry hostname. Required for rerun self-bootstrap.'
-    required: false
-    default: ''
+    required: true
   operator_tag:
     description: 'Operator image tag (default: main-operator). Required for rerun self-bootstrap.'
     required: false

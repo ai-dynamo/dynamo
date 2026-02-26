@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 name: 'Teardown Deploy Namespace'
 description: 'Clean up Dynamo platform resources and delete the Kubernetes namespace'
 

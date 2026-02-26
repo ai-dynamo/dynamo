@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 name: 'Setup Deploy Namespace'
 description: 'Create a Kubernetes namespace and install the Dynamo platform operator via Helm'
 
@@ -40,6 +37,7 @@ runs:
       run: |
         set -x
         kubectl create namespace $NAMESPACE
+        echo "Attaching the labels for secrets and cleanup"
         kubectl label namespaces ${NAMESPACE} \
           nscleanup/enabled=true \
           nscleanup/ttl=7200 \
@@ -47,7 +45,14 @@ runs:
           ngc-api=enabled \
           nvcr-imagepull=enabled \
           --overwrite=true
+        
+        # Set the context to the new namespace
         kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Check if Istio is installed
+        kubectl get pods -n istio-system
+        # Check if default storage class exists
+        kubectl get storageclass
 
     - name: Create HF token secret
       if: inputs.hf_token != ''
@@ -68,12 +73,21 @@ runs:
         OPERATOR_TAG: ${{ inputs.operator_tag }}
       run: |
         set -x
+        # Install Helm chart
+        export VIRTUAL_ENV=/opt/dynamo/venv
+        export KUBE_NS=$NAMESPACE
+        export ISTIO_ENABLED=true
+        export ISTIO_GATEWAY=istio-system/ingress-alb
+        export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
         OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
         echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
 
+        # Install helm dependencies
         helm repo add bitnami https://charts.bitnami.com/bitnami
         cd deploy/helm/charts/platform/
         helm dep build .
+        # Install platform with namespace restriction for single profile testing
+        # we manage crds via Velonix so we skip the crds installation
         helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
           --skip-crds \
           --set dynamo-operator.namespaceRestriction.enabled=true \
