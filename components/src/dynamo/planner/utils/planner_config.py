@@ -133,6 +133,18 @@ class PlannerConfig(BaseModel):
                 "(enable_throughput_scaling or enable_load_scaling)"
             )
 
+        if self.enable_throughput_scaling:
+            if (
+                self.pre_deployment_sweeping_mode is None
+                or self.pre_deployment_sweeping_mode
+                == PlannerPreDeploymentSweepMode.None_
+            ):
+                raise ValueError(
+                    "pre_deployment_sweeping_mode cannot be 'none' when "
+                    "enable_throughput_scaling is True. Throughput-based scaling "
+                    "requires pre-deployment sweeping to profile engine performance."
+                )
+
         if self.enable_load_scaling:
             # Router metrics URL is required outside kubernetes mode
             if not self.load_router_metrics_url and self.environment != "kubernetes":
@@ -211,6 +223,9 @@ class PlannerConfig(BaseModel):
                     )
 
         return cls.model_validate(data)
+
+    def scaling_enabled(self) -> bool:
+        return self.enable_throughput_scaling or self.enable_load_scaling
 
 
 if __name__ == "__main__":

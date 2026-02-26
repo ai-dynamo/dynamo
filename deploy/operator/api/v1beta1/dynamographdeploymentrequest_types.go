@@ -357,9 +357,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (frontend image).
-	// Example: "nvcr.io/nvidia/dynamo-runtime:latest"
-	// TODO: In a future MR, the operator will derive the backend inference image from the
-	// backend type automatically; backend images can be overridden via overrides.dgd.
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".
 	// +optional
 	Image string `json:"image,omitempty"`
 

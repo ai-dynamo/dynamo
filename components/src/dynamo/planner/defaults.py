@@ -70,7 +70,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     kalman_r = 10.0
     kalman_min_points = 5
 
-    no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
+    no_correction = True
     mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
 
     throughput_metrics_source = "frontend"  # "frontend" | "router"
