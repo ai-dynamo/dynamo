@@ -180,9 +180,9 @@ The profiler writes `final_config.yaml` to the output directory. When the planne
 
 | Backend | Dense Models | MoE Models |
 |---------|-------------|------------|
-| vLLM | supported | in progress |
-| SGLang | supported | supported |
-| TensorRT-LLM | supported | in progress |
+| vLLM | ✅ | 🚧 |
+| SGLang | ✅ | ✅ |
+| TensorRT-LLM | ✅ | 🚧 |
 
 ## Troubleshooting
 

@@ -212,7 +212,7 @@ Checkpoints are uniquely identified by a **16-character SHA256 hash** (64 bits) 
 | Field | Required | Affects Hash | Example |
 |-------|----------|-------------|---------|
 | `model` | ✓ | ✓ | `meta-llama/Llama-3-8B` |
-| `framework` | ✓ | ✓ | `vllm`, `sglang`, `trtllm` |
+| `framework` | ✓ | ✓ | `sglang`, `trtllm`, `vllm` |
 | `dynamoVersion` | | ✓ | `0.9.0`, `1.0.0` |
 | `tensorParallelSize` | | ✓ | `1`, `2`, `4`, `8` (default: 1) |
 | `pipelineParallelSize` | | ✓ | `1`, `2` (default: 1) |

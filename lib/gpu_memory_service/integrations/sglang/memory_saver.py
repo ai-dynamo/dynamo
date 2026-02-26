@@ -51,14 +51,15 @@ class GMSMemorySaverImpl:
         torch_impl: "_TorchMemorySaverImpl",
         socket_path: str,
         device_index: int,
+        mode=None,
     ):
         self._torch_impl = torch_impl
         self._socket_path = socket_path
         self._device_index = device_index
+        self._requested_mode = mode
         self._disabled = False
         self._imported_weights_bytes: int = 0
 
-        # Initialize allocator with auto mode
         self._allocator: Optional["GMSClientMemoryManager"]
         self._mem_pool: Optional["MemPool"]
         self._mode: str
@@ -74,19 +75,20 @@ class GMSMemorySaverImpl:
     def _init_allocator(
         self,
     ) -> tuple[Optional["GMSClientMemoryManager"], Optional["MemPool"], str]:
-        """Create allocator with automatic mode selection."""
+        """Create allocator with mode from config (default: RW_OR_RO)."""
         from gpu_memory_service import get_or_create_gms_client_memory_manager
         from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
+        mode = self._requested_mode or RequestedLockType.RW_OR_RO
         allocator, mem_pool = get_or_create_gms_client_memory_manager(
             self._socket_path,
             self._device_index,
-            mode=RequestedLockType.RW_OR_RO,
+            mode=mode,
             tag="weights",
         )
-        granted_mode = allocator.mode
+        granted_mode = allocator.granted_lock_type
         if granted_mode == GrantedLockType.RW:
-            allocator.clear_all()
+            allocator.clear_all_handles()
             actual_mode = "write"
         else:
             actual_mode = "read"
@@ -151,7 +153,8 @@ class GMSMemorySaverImpl:
         if self._allocator.is_unmapped:
             return
         logger.info("[GMS] Unmapping weights (VA-stable)")
-        self._allocator.unmap()
+        self._allocator.unmap_all_vas()
+        self._allocator.disconnect()
 
     def _resume_weights(self) -> None:
         if self._allocator is None:
@@ -159,7 +162,10 @@ class GMSMemorySaverImpl:
         if not self._allocator.is_unmapped:
             return
         logger.info("[GMS] Remapping weights (VA-stable)")
-        self._allocator.remap()
+        from gpu_memory_service.common.types import RequestedLockType
+
+        self._allocator.connect(RequestedLockType.RO)
+        self._allocator.remap_all_vas()
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
         """Finalize write mode: register tensors, commit, and switch to read."""

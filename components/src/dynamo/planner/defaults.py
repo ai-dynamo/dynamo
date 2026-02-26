@@ -73,6 +73,8 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     no_correction = True
     mode: Literal["disagg", "prefill", "decode", "agg"] = "disagg"
 
+    throughput_metrics_source = "frontend"  # "frontend" | "router"
+
     # Scaling mode flags
     enable_throughput_scaling = True
     enable_load_scaling = False

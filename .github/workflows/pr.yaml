@@ -194,10 +194,12 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-      test_gpu_timeout_minutes: 35
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
+      single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
+      single_gpu_test_timeout_minutes: 35
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
     secrets: inherit
 
   # ============================================================================
@@ -216,9 +218,11 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
+      single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
     secrets: inherit
 
   # ============================================================================
@@ -237,9 +241,11 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+      cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
+      single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
+      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
     secrets: inherit
 
 
@@ -364,7 +370,7 @@ jobs:
     # Run if core, vllm, or deploy is changed
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     runs-on: prod-default-small-v2
-    needs: [deploy-operator, vllm-pipeline]
+    needs: [changed-files, deploy-operator, vllm-pipeline]
     permissions:
       contents: read
     strategy:

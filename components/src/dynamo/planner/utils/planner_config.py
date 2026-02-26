@@ -93,6 +93,9 @@ class PlannerConfig(BaseModel):
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
+    throughput_metrics_source: Literal[
+        "frontend", "router"
+    ] = SLAPlannerDefaults.throughput_metrics_source
 
     no_correction: bool = SLAPlannerDefaults.no_correction
     model_name: Optional[str] = None
@@ -179,7 +182,12 @@ class PlannerConfig(BaseModel):
         inline JSON string, loads it, and validates.
         """
         path = Path(config_arg)
-        if path.is_file():
+        try:
+            is_file = path.is_file()
+        except OSError:
+            # Path component too long (e.g. inline JSON string passed as config arg)
+            is_file = False
+        if is_file:
             return cls._load_from_file(path)
 
         # Try parsing as inline JSON
