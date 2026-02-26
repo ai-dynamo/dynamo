@@ -22,6 +22,7 @@ use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 use crate::protocols::openai::common_ext::CommonExt;
+use crate::protocols::openai::nvext::CacheControl;
 
 // ---------------------------------------------------------------------------
 // Custom deserializers
@@ -112,6 +113,13 @@ pub struct AnthropicCreateMessageRequest {
     /// How the model should choose which tool to call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<AnthropicToolChoice>,
+
+    /// Top-level cache control for automatic prompt prefix caching.
+    /// When present, the system caches all content up to the last cacheable block.
+    /// Matches the Anthropic Messages API automatic caching mode.
+    /// See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching#automatic-caching
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// A single message in the conversation.
@@ -616,6 +624,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            cache_control: req.cache_control,
             unsupported_fields: Default::default(),
         })
     }
@@ -1053,6 +1062,7 @@ mod tests {
             metadata: None,
             tools: None,
             tool_choice: None,
+            cache_control: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1092,6 +1102,7 @@ mod tests {
             metadata: None,
             tools: None,
             tool_choice: None,
+            cache_control: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1148,6 +1159,7 @@ mod tests {
             metadata: None,
             tools: None,
             tool_choice: None,
+            cache_control: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1186,6 +1198,7 @@ mod tests {
             metadata: None,
             tools: None,
             tool_choice: None,
+            cache_control: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1222,6 +1235,7 @@ mod tests {
             tool_choice: Some(AnthropicToolChoice::Simple(AnthropicToolChoiceSimple {
                 choice_type: AnthropicToolChoiceMode::Auto,
             })),
+            cache_control: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1384,6 +1398,7 @@ mod tests {
             metadata: None,
             tools: None,
             tool_choice: None,
+            cache_control: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1549,6 +1564,7 @@ mod tests {
             metadata: None,
             tools: None,
             tool_choice: None,
+            cache_control: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         match chat_req.inner.messages.into_iter().next().unwrap() {
@@ -1785,5 +1801,87 @@ mod tests {
         let tools = msg.tool_calls.as_ref().unwrap();
         assert_eq!(tools[0].id, "t1");
         assert_eq!(tools[1].id, "t2");
+    }
+
+    #[test]
+    fn test_cache_control_passthrough() {
+        use crate::protocols::openai::nvext::{CacheControl, CacheControlType};
+
+        let req = AnthropicCreateMessageRequest {
+            model: "test-model".into(),
+            max_tokens: 100,
+            messages: vec![AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicMessageContent::Text {
+                    content: "Hello".into(),
+                },
+            }],
+            system: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: false,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+            cache_control: Some(CacheControl {
+                control_type: CacheControlType::Ephemeral,
+                ttl: None,
+            }),
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert!(chat_req.nvext.is_none(), "cache_control should go to top-level field, not nvext");
+        let cc = chat_req.cache_control.expect("cache_control should be set");
+        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
+        assert_eq!(cc.ttl_seconds(), 300);
+    }
+
+    #[test]
+    fn test_cache_control_1h_ttl_passthrough() {
+        use crate::protocols::openai::nvext::{CacheControl, CacheControlType};
+
+        let json = r#"{
+            "model": "test",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+        }"#;
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        assert!(req.cache_control.is_some());
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let cc = chat_req.cache_control.expect("cache_control should be set");
+        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
+        assert_eq!(cc.ttl_seconds(), 3600);
+    }
+
+    #[test]
+    fn test_no_cache_control_passthrough() {
+        let req = AnthropicCreateMessageRequest {
+            model: "test-model".into(),
+            max_tokens: 100,
+            messages: vec![AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicMessageContent::Text {
+                    content: "Hello".into(),
+                },
+            }],
+            system: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: false,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+            cache_control: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert!(chat_req.nvext.is_none());
+        assert!(chat_req.cache_control.is_none());
     }
 }
