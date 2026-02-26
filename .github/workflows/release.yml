@@ -461,6 +461,7 @@ jobs:
           echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "helm_chart_version=${VERSION}-rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "Will create tag: ${RC_TAG}"
 
       - name: Create RC tag
@@ -636,40 +637,53 @@ jobs:
             exit 1
           fi
 
-      - name: Package and push Helm chart to NGC
+      - name: Package and push Helm charts to NGC
         env:
-          NGC_REGISTRY: nvcr.io
-          NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
-          NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+          NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
         run: |
           set -euo pipefail
 
-          CHART_VERSION="${NGC_VERSION_TAG}"
+          REPO_ALIAS="ngc-staging-dynamo"
 
-          helm repo add bitnami https://charts.bitnami.com/bitnami
-          cd deploy/helm/charts/platform/
-          helm dep build .
+          helm plugin install https://github.com/chartmuseum/helm-push || true
 
-          helm package . --version "${CHART_VERSION}"
-          CHART_FILE="dynamo-platform-${CHART_VERSION}.tgz"
+          helm repo add "${REPO_ALIAS}" \
+            --username='$oauthtoken' \
+            --password="${NGC_TOKEN}" \
+            "${NGC_HELM_REPO}"
 
-          if [ ! -f "${CHART_FILE}" ]; then
-            echo "ERROR: Helm chart package not found: ${CHART_FILE}"
-            exit 1
-          fi
-
-          echo "Pushing Helm chart to NGC: ${CHART_FILE}"
-          helm push "${CHART_FILE}" "oci://${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo"
+          helm repo add nats https://nats-io.github.io/k8s/helm/charts/ || true
+          helm repo add bitnami https://charts.bitnami.com/bitnami || true
 
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Helm Chart" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-platform:${CHART_VERSION}\` pushed to \`oci://${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo\`" >> $GITHUB_STEP_SUMMARY
+          echo "### Helm Charts" >> $GITHUB_STEP_SUMMARY
+
+          PLATFORM_CHART_DIR="deploy/helm/charts/platform"
+          CHART_NAME=$(awk '/^name:/ {print $2}' "${PLATFORM_CHART_DIR}/Chart.yaml")
+          pushd "${PLATFORM_CHART_DIR}"
+          helm dep build .
+          popd
+
+          echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
+          helm package \
+            --version "${HELM_CHART_VERSION}" \
+            --app-version "${HELM_CHART_VERSION}" \
+            "${PLATFORM_CHART_DIR}"
+
+          CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
+          echo "Pushing ${CHART_FILE} to NGC Helm registry..."
+          helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
+          echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to \`${NGC_HELM_REPO}\`" >> $GITHUB_STEP_SUMMARY
+
+          helm repo remove "${REPO_ALIAS}"
 
       - name: Create release summary
         env:
           RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
           NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+          HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
           SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
           FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
         run: |
@@ -706,5 +720,5 @@ jobs:
           echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-platform:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
 
