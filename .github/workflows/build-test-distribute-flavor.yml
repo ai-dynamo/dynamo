@@ -246,6 +246,29 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
+      - name: Build and Push Test Image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          CUDA_MAJOR=${{ steps.calculate-target-tag.outputs.cuda_version_plain }}
+          CACHE_TAG="test-${{ inputs.framework }}-cuda${CUDA_MAJOR}-${{ inputs.platform }}-cache"
+          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
+          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max"
+          elif [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
+            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"
+          fi
+
+          docker buildx build \
+            --progress=plain \
+            --push \
+            --platform linux/${{ inputs.platform }} \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.default_target_image_uri }} \
+            ${CACHE_ARGS} \
+            -t ${{ steps.calculate-target-tag.outputs.default_target_image_uri }}-test .
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image && inputs.show_summary }}
@@ -292,17 +315,11 @@ jobs:
         run: |
           start_time=$(date +%s)
           docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}-test
           docker pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
-      - name: Build test image
-        shell: bash
-        run: |
-          DOCKER_BUILDKIT=1 docker build \
-            -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.test_image }} \
-            -t ${{ steps.calculate-target-tag.outputs.test_image }}-test .
 
       - name: Run Sanity Check on Runtime Image
         shell: bash
@@ -396,18 +413,11 @@ jobs:
         shell: bash
         run: |
           start_time=$(date +%s)
-          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}-test
           docker pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
-      - name: Build test image
-        shell: bash
-        run: |
-          DOCKER_BUILDKIT=1 docker build \
-            -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.test_image }} \
-            -t ${{ steps.calculate-target-tag.outputs.test_image }}-test .
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_2 or gpu_4 that require GPU hardware
       - name: Run GPU tests (sequential)

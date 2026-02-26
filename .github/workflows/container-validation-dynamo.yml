@@ -117,6 +117,28 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           push_image: 'true'
+      - name: Build and Push Test Image
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        shell: bash
+        run: |
+          CACHE_TAG="test-dynamo-cuda${CUDA_VERSION%%.*}-amd64-cache"
+          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
+          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max"
+          elif [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
+            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"
+          fi
+
+          docker buildx build \
+            --progress=plain \
+            --push \
+            --platform linux/amd64 \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.define_image_tag.outputs.remote_tag }} \
+            ${CACHE_ARGS} \
+            -t ${{ steps.define_image_tag.outputs.remote_tag }}-test .
 
   rust-checks:
     needs: [changed-files, build]
@@ -161,7 +183,7 @@ jobs:
     name: Pytest (parallel)
     timeout-minutes: 30
     env:
-      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}-test
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -172,16 +194,10 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
         run: docker pull ${{ env.IMAGE_TAG }}
-      - name: Build test image
-        run: |
-          DOCKER_BUILDKIT=1 docker build \
-            -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ env.IMAGE_TAG }} \
-            -t ${{ env.IMAGE_TAG }}-test .
       - name: Run pytest (parallel tests with xdist)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.IMAGE_TAG }}-test
+          image_tag: ${{ env.IMAGE_TAG }}
           pytest_marks: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)"
           framework: dynamo
           test_type: "pre_merge_parallel"
@@ -197,7 +213,7 @@ jobs:
     name: Pytest (sequential)
     timeout-minutes: 30
     env:
-      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}
+      IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.image_tag_suffix }}-test
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -208,16 +224,10 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
         run: docker pull ${{ env.IMAGE_TAG }}
-      - name: Build test image
-        run: |
-          DOCKER_BUILDKIT=1 docker build \
-            -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ env.IMAGE_TAG }} \
-            -t ${{ env.IMAGE_TAG }}-test .
       - name: Run pytest (sequential tests)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.IMAGE_TAG }}-test
+          image_tag: ${{ env.IMAGE_TAG }}
           pytest_marks: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)"
           framework: dynamo
           test_type: "pre_merge_sequential"
