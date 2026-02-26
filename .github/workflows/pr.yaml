@@ -403,38 +403,38 @@ jobs:
   #         image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
   #         platform_arch: amd64
 
-  # deploy-test-sglang:
-  #   runs-on: prod-default-small-v2
-  #   # Run if core, sglang, or deploy is changed
-  #   # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-  #   needs: [ deploy-operator]
-  #   timeout-minutes: 25
-  #   permissions:
-  #     contents: read
-  #   strategy:
-  #     fail-fast: false
-  #     max-parallel: 2
-  #     matrix:
-  #       profile:
-  #         - agg
-  #         - agg_router
-  #   name: deploy-test-sglang (${{ matrix.profile }})
-  #   env:
-  #     FRAMEWORK: sglang
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-  #     - name: Run Dynamo Deploy Test
-  #       id: deploy-test
-  #       uses: ./.github/actions/dynamo-deploy-test
-  #       with:
-  #         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-  #         namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-  #         deployment_file: "deploy/${{ matrix.profile }}.yaml"
-  #         framework: ${{ env.FRAMEWORK }}
-  #         profile: ${{ matrix.profile }}
-  #         image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
-  #         platform_arch: amd64
+  deploy-test-sglang:
+    runs-on: prod-default-small-v2
+    # Run if core, sglang, or deploy is changed
+    # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    needs: [ deploy-operator]
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        profile:
+          - agg
+          - agg_router
+    name: deploy-test-sglang (${{ matrix.profile }})
+    env:
+      FRAMEWORK: sglang
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Run Dynamo Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          deployment_file: "deploy/${{ matrix.profile }}.yaml"
+          framework: ${{ env.FRAMEWORK }}
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:4df144ac94044041c7131b7e1698dd7269296c6c-sglang-cuda12-amd64
+          platform_arch: amd64
 
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
