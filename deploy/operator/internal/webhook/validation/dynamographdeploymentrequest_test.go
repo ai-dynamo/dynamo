@@ -26,7 +26,7 @@ import (
 )
 
 func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
-	vram := float64(81920)
+	vram := int32(81920)
 	gpuCount := int32(8)
 
 	// errMsg: if non-empty, an error is expected and each newline-separated substring must appear in it.

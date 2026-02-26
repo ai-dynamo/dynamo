@@ -364,9 +364,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 
 		// Set observedGeneration to track the spec we're processing
 		dgdr.Status.ObservedGeneration = dgdr.Generation
-
-		// Initialize status
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonInitialized, MessageInitialized)
+
+		// Transition from initial ("") to Pending with ObservedGeneration persisted
 		return r.updatePhaseAndRequeue(ctx, dgdr, nvidiacomv1beta1.DGDRPhasePending, MessageInitialized)
 	}
 
@@ -378,12 +378,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
 
-	// Record event with appropriate message
-	if isOnlineProfiling(dgdr) {
-		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageProfilingJobCreated)
-	} else {
-		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageAICProfilingJobCreated)
-	}
+	r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, MessageProfilingJobCreated)
 
 	// Update to Profiling phase with Running status
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
@@ -397,7 +392,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 
 	// Check profiling job status (both online and offline/AIC run as Jobs)
 	// Note: We watch the Job via Owns(), so we'll be triggered automatically on Job changes
-	completed, err := r.checkProfilingJobStatus(ctx, dgdr)
+	completed, err := r.isProfilingJobCompleted(ctx, dgdr)
 	if err != nil {
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, err.Error())
 		// Job failed - clear profiling sub-phase and transition to Failed
@@ -784,32 +779,11 @@ func getOutputConfigMapName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest)
 	return fmt.Sprintf("%s%s", ConfigMapOutputPrefix, dgdr.Name)
 }
 
-// isOnlineProfiling returns true. In v1beta1, the profiler decides online vs AIC
-// mode internally based on its config. The controller always uses the same label.
-func isOnlineProfiling(_ *nvidiacomv1beta1.DynamoGraphDeploymentRequest) bool {
-	return true
-}
+
 
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	var errs []error
-
-	// Validate image is specified (required for the profiling job container).
-	// Mirrors the webhook admission check so controller-side writes cannot bypass it.
-	if dgdr.Spec.Image == "" {
-		errs = append(errs, fmt.Errorf("spec.image is required"))
-	}
-
-	// Disallow searchStrategy: thorough with backend: auto.
-	// Mirrors the webhook admission check so controller-side writes cannot bypass it.
-	if dgdr.Spec.SearchStrategy == nvidiacomv1beta1.SearchStrategyThorough &&
-		dgdr.Spec.Backend == nvidiacomv1beta1.BackendTypeAuto {
-		errs = append(errs, fmt.Errorf(
-			"spec.searchStrategy %q is incompatible with spec.backend %q: set spec.backend to a specific backend (sglang, trtllm, or vllm)",
-			nvidiacomv1beta1.SearchStrategyThorough,
-			nvidiacomv1beta1.BackendTypeAuto,
-		))
-	}
 
 	// Validate model cache PVC if provided
 	if dgdr.Spec.ModelCache != nil && dgdr.Spec.ModelCache.PVCName != "" {
@@ -1237,7 +1211,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		hw.GPUSKU = gpuInfo.Model
 	}
 	if hw.VRAMMB == nil {
-		vram := float64(gpuInfo.VRAMPerGPU)
+		vram := int32(gpuInfo.VRAMPerGPU)
 		hw.VRAMMB = &vram
 	}
 	if hw.NumGPUsPerNode == nil {
@@ -1292,8 +1266,8 @@ func outputPVCFromAnnotation(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest
 	return dgdr.Annotations[AnnotationOutputPVC]
 }
 
-// checkProfilingJobStatus checks if the profiling job has completed
-func (r *DynamoGraphDeploymentRequestReconciler) checkProfilingJobStatus(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (bool, error) {
+// isProfilingJobCompleted checks if the profiling job has completed
+func (r *DynamoGraphDeploymentRequestReconciler) isProfilingJobCompleted(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (bool, error) {
 	logger := log.FromContext(ctx)
 	jobName := getProfilingJobName(dgdr)
 
@@ -1455,12 +1429,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	// Update the object (annotations are on the object, not status)
 	if err := r.Update(ctx, dgdr); err != nil {
 		return fmt.Errorf("failed to update DGDR with generated DGD annotation: %w", err)
-	}
-
-	// Refetch the DGDR after the annotation update to get the latest resourceVersion
-	// and avoid conflicts with concurrent modifications before updating status.
-	if err := r.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, dgdr); err != nil {
-		return fmt.Errorf("failed to refetch DGDR after annotation update: %w", err)
 	}
 
 	return r.Status().Update(ctx, dgdr)
