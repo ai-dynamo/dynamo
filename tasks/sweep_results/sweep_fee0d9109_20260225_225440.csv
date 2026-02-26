@@ -1,0 +1,2 @@
+commit_name,commit_sha,profile,isl,osl,concurrency,num_mockers,num_requests,req_per_sec,output_tok_per_sec,req_latency_ms_avg,req_latency_ms_min,req_latency_ms_max,req_latency_ms_p99,req_latency_ms_p90,req_latency_ms_p50,duration_sec,request_count,computed_req_per_sec,computed_tok_per_sec
+head,fee0d9109,max-rps,32,32,4096,1,16384,16384.0,3926.37,32.77,30.0,39.0,36.0,34.0,33.0,4.17,,3929.0167865707435,125728.5371702638
