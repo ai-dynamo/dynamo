@@ -4,8 +4,6 @@
 title: Graceful Shutdown
 ---
 
-# Graceful Shutdown
-
 This document describes how Dynamo components handle shutdown signals to ensure in-flight requests complete successfully and resources are properly cleaned up.
 
 ## Overview

@@ -4,8 +4,6 @@
 title: Feature Matrix
 ---
 
-# Dynamo Feature Compatibility Matrices
-
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
 *Updated for Dynamo v0.9.0*
@@ -108,28 +106,27 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 ---
 
-## Source References
 
-{/* Backend READMEs */}
-[vllm-readme]: docs/backends/vllm/README.md
-[sglang-readme]: docs/backends/sglang/README.md
-[trtllm-readme]: docs/backends/trtllm/README.md
+{/* Backend READMEs — paths relative to rendered URL /getting-started/feature-matrix */}
+[vllm-readme]: ../backends/v-llm
+[sglang-readme]: ../backends/sg-lang
+[trtllm-readme]: ../backends/tensor-rt-llm
 
 {/* Design Docs */}
-[disagg]: docs/design_docs/disagg_serving.md
-[kv-routing]: docs/components/router/router_guide.md
-[planner]: docs/components/planner/README.md
-[kvbm]: docs/components/kvbm/README.md
-[migration]: docs/fault_tolerance/request_migration.md
-[tools]: docs/agents/tool-calling.md
+[disagg]: ../design-docs/disaggregated-serving
+[kv-routing]: ../components/router/router-guide
+[planner]: ../components/planner
+[kvbm]: ../components/kvbm
+[migration]: ../user-guides/fault-tolerance/request-migration
+[tools]: ../user-guides/tool-calling
 
 {/* Multimodal */}
-[mm]: docs/features/multimodal/README.md
-[mm-vllm]: docs/features/multimodal/multimodal_vllm.md
-[mm-trtllm]: docs/features/multimodal/multimodal_trtllm.md
-[mm-sglang]: docs/features/multimodal/multimodal_sglang.md
+[mm]: ../user-guides/multimodality-support
+[mm-vllm]: ../user-guides/multimodality-support/v-llm-multimodal
+[mm-trtllm]: ../user-guides/multimodality-support/tensor-rt-llm-multimodal
+[mm-sglang]: ../user-guides/multimodality-support/sg-lang-multimodal
 
 {/* Feature-specific */}
-[lora]: docs/kubernetes/deployment/dynamomodel-guide.md
-[vllm-spec]: docs/features/speculative_decoding/speculative_decoding_vllm.md
-[trtllm-eagle]: docs/backends/trtllm/llama4_plus_eagle.md
+[lora]: ../kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
+[vllm-spec]: ../additional-resources/speculative-decoding/speculative-decoding-with-v-llm
+[trtllm-eagle]: ../additional-resources/tensor-rt-llm-details/llama-4-eagle

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Case 2c: AIC supported model, rapid, without planner, e2eLatency instead of ttft/itl
+model: "Qwen/Qwen3-32B"
+backend: trtllm
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
+hardware:
+  gpuSku: h200_sxm
+  totalGpus: 64
+  numGpusPerNode: 8
+workload:
+  requestRate: 5.0
+sla:
+  ttft: null
+  itl: null
+  e2eLatency: 35000.0

@@ -242,12 +242,35 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=float,
             help="Default CFG guidance scale.",
         )
+
+        add_argument(
+            diffusion_group,
+            flag_name="--torch-dtype",
+            env_var="DYN_TRTLLM_TORCH_DTYPE",
+            default="bfloat16",
+            choices=["bfloat16", "float16", "float32"],
+            help="Torch dtype for model loading. bfloat16 recommended for Ampere+ GPUs.",
+        )
+        add_argument(
+            diffusion_group,
+            flag_name="--revision",
+            env_var="DYN_TRTLLM_REVISION",
+            default=None,
+            help="HuggingFace Hub revision (branch, tag, or commit SHA) for model download.",
+        )
         add_negatable_bool_argument(
             diffusion_group,
             flag_name="--enable-teacache",
             env_var="DYN_TRTLLM_ENABLE_TEACACHE",
             default=False,
             help="Enable TeaCache optimization for faster generation.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--teacache-use-ret-steps",
+            env_var="DYN_TRTLLM_TEACACHE_USE_RET_STEPS",
+            default=True,
+            help="Use retention steps for TeaCache.",
         )
         add_argument(
             diffusion_group,
@@ -259,24 +282,33 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             diffusion_group,
-            flag_name="--attn-type",
-            env_var="DYN_TRTLLM_ATTN_TYPE",
-            default="default",
-            choices=["default", "sage-attn", "sparse-videogen", "sparse-videogen2"],
-            help="Attention type for diffusion models.",
+            flag_name="--attn-backend",
+            env_var="DYN_TRTLLM_ATTN_BACKEND",
+            default="VANILLA",
+            choices=["VANILLA", "TRTLLM"],
+            help="Attention backend for diffusion models. VANILLA = PyTorch SDPA, TRTLLM = TensorRT-LLM kernels.",
         )
         add_argument(
             diffusion_group,
-            flag_name="--linear-type",
-            env_var="DYN_TRTLLM_LINEAR_TYPE",
-            default="default",
+            flag_name="--quant-algo",
+            env_var="DYN_TRTLLM_QUANT_ALGO",
+            default=None,
             choices=[
-                "default",
-                "trtllm-fp8-blockwise",
-                "trtllm-fp8-per-tensor",
-                "trtllm-nvfp4",
+                "FP8",
+                "FP8_BLOCK_SCALES",
+                "NVFP4",
+                "W4A16_AWQ",
+                "W4A8_AWQ",
+                "W8A8_SQ_PER_CHANNEL",
             ],
-            help="Linear type for quantization.",
+            help="Quantization algorithm for diffusion models. BF16 weights are quantized on-the-fly during loading.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--quant-dynamic",
+            env_var="DYN_TRTLLM_QUANT_DYNAMIC",
+            default=True,
+            help="Enable dynamic weight quantization (quantize BF16 weights on-the-fly during loading).",
         )
         add_negatable_bool_argument(
             diffusion_group,
@@ -292,6 +324,42 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default="default",
             choices=["default", "reduce-overhead", "max-autotune"],
             help="torch.compile mode.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--enable-fullgraph",
+            env_var="DYN_TRTLLM_ENABLE_FULLGRAPH",
+            default=False,
+            help="Enable torch.compile fullgraph mode (stricter but potentially faster).",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--fuse-qkv",
+            env_var="DYN_TRTLLM_FUSE_QKV",
+            default=True,
+            help="Enable QKV fusion for transformer attention layers.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--enable-cuda-graph",
+            env_var="DYN_TRTLLM_ENABLE_CUDA_GRAPH",
+            default=False,
+            help="Enable CUDA graph capture for transformer forward passes. Mutually exclusive with torch.compile.",
+        )
+        add_negatable_bool_argument(
+            diffusion_group,
+            flag_name="--enable-layerwise-nvtx-marker",
+            env_var="DYN_TRTLLM_ENABLE_LAYERWISE_NVTX_MARKER",
+            default=False,
+            help="Enable per-layer NVTX markers for profiling with Nsight Systems.",
+        )
+        add_argument(
+            diffusion_group,
+            flag_name="--warmup-steps",
+            env_var="DYN_TRTLLM_WARMUP_STEPS",
+            default=1,
+            arg_type=int,
+            help="Number of denoising steps to run during warmup (0 to disable).",
         )
         add_argument(
             diffusion_group,
@@ -341,12 +409,34 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="FSDP size for DiT.",
         )
+        # --- Guided Decoding ---
+        add_argument(
+            g,
+            flag_name="--guided-decoding-backend",
+            env_var="DYN_TRTLLM_GUIDED_DECODING_BACKEND",
+            default=None,
+            choices=["xgrammar", "llguidance"],
+            help="Backend to use for guided decoding (structured output). "
+            "Options: xgrammar, llguidance.",
+        )
+
         add_negatable_bool_argument(
             diffusion_group,
             flag_name="--enable-async-cpu-offload",
             env_var="DYN_TRTLLM_ENABLE_ASYNC_CPU_OFFLOAD",
             default=False,
             help="Enable async CPU offload for memory efficiency.",
+        )
+        add_argument(
+            diffusion_group,
+            flag_name="--skip-components",
+            env_var="DYN_TRTLLM_SKIP_COMPONENTS",
+            default="",
+            help=(
+                "Comma-separated list of pipeline components to skip loading. "
+                "Valid values: transformer, vae, text_encoder, tokenizer, scheduler, "
+                "image_encoder, image_processor."
+            ),
         )
 
 
@@ -371,6 +461,7 @@ class DynamoTrtllmConfig(ConfigBase):
     override_engine_args: str
     publish_events_and_metrics: bool
     disable_request_abort: bool
+    guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
     modality: Modality
@@ -383,12 +474,21 @@ class DynamoTrtllmConfig(ConfigBase):
     default_num_frames: int
     default_num_inference_steps: int
     default_guidance_scale: float
+    torch_dtype: str
+    revision: Optional[str] = None
     enable_teacache: bool
+    teacache_use_ret_steps: bool
     teacache_thresh: float
-    attn_type: str
-    linear_type: str
+    attn_backend: str
+    quant_algo: Optional[str]
+    quant_dynamic: bool
     disable_torch_compile: bool
     torch_compile_mode: str
+    enable_fullgraph: bool
+    fuse_qkv: bool
+    enable_cuda_graph: bool
+    enable_layerwise_nvtx_marker: bool
+    warmup_steps: int
     dit_dp_size: int
     dit_tp_size: int
     dit_ulysses_size: int
@@ -396,6 +496,7 @@ class DynamoTrtllmConfig(ConfigBase):
     dit_cfg_size: int
     dit_fsdp_size: int
     enable_async_cpu_offload: bool
+    skip_components: str
 
     def validate(self) -> None:
         if isinstance(self.disaggregation_mode, str):

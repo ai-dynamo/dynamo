@@ -4,8 +4,6 @@
 title: Testing
 ---
 
-# Fault Tolerance Testing
-
 This document describes the test infrastructure for validating Dynamo's fault tolerance mechanisms. The testing framework supports request cancellation, migration, etcd HA, and hardware fault injection scenarios.
 
 ## Overview

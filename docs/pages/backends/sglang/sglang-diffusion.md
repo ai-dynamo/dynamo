@@ -4,8 +4,6 @@
 title: Diffusion
 ---
 
-# Diffusion Models
-
 Dynamo SGLang supports three types of diffusion-based generation: **LLM diffusion** (text generation via iterative refinement), **image diffusion** (text-to-image), and **video generation** (text-to-video). Each uses a different worker flag and handler, but all integrate with SGLang's `DiffGenerator`.
 
 ## Overview

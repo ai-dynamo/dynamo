@@ -20,8 +20,15 @@ on:
 permissions:
   contents: write
 
+env:
+  REGISTRY_IMAGE: ai-dynamo/dynamo
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+
 jobs:
-  # Gate job for manual triggers - requires automated-release approval
+  # ============================================================================
+  # GATE: Approval + Version Extraction
+  # ============================================================================
+
   manual-approval:
     name: Approve Manual Run
     if: github.event_name == 'workflow_dispatch'
@@ -29,9 +36,8 @@ jobs:
     environment: automated-release
     steps:
       - name: Manual run approved
-        run: echo "✅ Manual workflow run approved via automated-release environment"
+        run: echo "Manual workflow run approved via automated-release environment"
 
-  # Extract version from branch name for downstream jobs
   prepare-release:
     name: Prepare Release
     runs-on: ubuntu-latest
@@ -42,11 +48,9 @@ jobs:
       - name: Extract version from branch
         id: extract
         run: |
-          # Extract version from branch name (e.g., release/0.7.0 -> 0.7.0)
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
           VERSION="${BRANCH_NAME#release/}"
 
-          # Enforce workflow_dispatch only runs on release/* branches
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "Error: workflow_dispatch can only be triggered from release/* branches"
@@ -66,37 +70,153 @@ jobs:
           echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
 
-  # Run the CI test suite (builds + tests)
-  ci-pipeline:
-    name: Release CI
+  # ============================================================================
+  # FRAMEWORK PIPELINES (Build + Test + Distribute)
+  # Builds amd64+arm64 images, runs tests, copies amd64 to ACR.
+  # release-publish then copies both architectures from ECR to NGC.
+  #
+  # NOTE: Each job directly depends on [prepare-release, manual-approval] with
+  # always() instead of going through an intermediate gate job. This avoids a
+  # GitHub Actions quirk where a skipped ancestor (manual-approval on push
+  # events) taints the entire dependency chain, causing downstream jobs to skip
+  # even when the intermediate gate succeeds.
+  # ============================================================================
+
+  vllm-pipeline:
+    name: vllm builds
     needs: [prepare-release, manual-approval]
-    # Run if: prepare-release succeeded AND (push event OR manual-approval succeeded)
     if: |
       always() &&
       needs.prepare-release.result == 'success' &&
       (github.event_name == 'push' || needs.manual-approval.result == 'success')
-    uses: ./.github/workflows/ci-test-suite.yml
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
-      pipeline_type: release
-      include_nightly_marks: false
-      image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
-      enable_slack_notification: false
-    secrets:
-      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      NGC_CI_ACCESS_TOKEN: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-      CI_TOKEN: ${{ secrets.CI_TOKEN }}
-      SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
-      AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
-      AZURE_AKS_CI_KUBECONFIG_B64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      DYNAMO_INGRESS_SUFFIX: ${{ secrets.DYNAMO_INGRESS_SUFFIX }}
+      framework: vllm
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ needs.prepare-release.outputs.image_prefix }}-vllm
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      single_gpu_test_timeout_minutes: 60
+      multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 60
+    secrets: inherit
 
-  # Build frontend images (needed for NGC publish)
+  sglang-pipeline:
+    name: sglang builds
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: sglang
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ needs.prepare-release.outputs.image_prefix }}-sglang
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+      single_gpu_test_timeout_minutes: 60
+      multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-pipeline:
+    name: trtllm builds
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: trtllm
+      target: runtime
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["13.1"]'
+      extra_tags: |
+        ${{ needs.prepare-release.outputs.image_prefix }}-trtllm
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      cpu_only_test_timeout_minutes: 60
+      single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      single_gpu_test_timeout_minutes: 60
+      multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
+      multi_gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
+  # RELEASE-SPECIFIC BUILDS
+  # ============================================================================
+
+  operator-build:
+    name: Build Operator Image
+    needs: [prepare-release, manual-approval]
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    outputs:
+      operator_tag: ${{ steps.build-and-push.outputs.operator_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          flavor: general
+          all_arch: 'true'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Linter
+        working-directory: ./deploy/operator
+        run: docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Tester
+        working-directory: ./deploy/operator
+        run: docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Build and push Container
+        id: build-and-push
+        working-directory: ./deploy/operator
+        run: |
+          ECR_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          ACR_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          SHA_TAG="${{ github.sha }}-operator"
+          PREFIX_TAG="${{ needs.prepare-release.outputs.image_prefix }}-operator"
+          IMAGE_URIS=(
+            "${ECR_BASE}:${SHA_TAG}"
+            "${ECR_BASE}:${PREFIX_TAG}"
+            "${ACR_BASE}:${SHA_TAG}"
+            "${ACR_BASE}:${PREFIX_TAG}"
+          )
+          echo "operator_tag=${PREFIX_TAG}" >> $GITHUB_OUTPUT
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+          docker buildx build --push --platform linux/amd64,linux/arm64 \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              ${TAGGING_FLAGS} -f Dockerfile .
+
   frontend-build:
     name: Build Frontend Images
     needs: [prepare-release, manual-approval]
@@ -105,30 +225,193 @@ jobs:
       needs.prepare-release.result == 'success' &&
       (github.event_name == 'push' || needs.manual-approval.result == 'success')
     uses: ./.github/workflows/build-frontend-image.yaml
-    secrets:
-      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
-      AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
-      CI_TOKEN: ${{ secrets.CI_TOKEN }}
-      SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+    with:
+      skip_change_detection: true
+      image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
+    secrets: inherit
 
-  # Tag the commit as release candidate and publish to NGC
-  # This job uses the automated-release environment for sensitive secrets
-  # Runs after ci-pipeline and frontend-build complete - requires builds to succeed
-  # Note: Tests may fail but builds must succeed for publishing
+  # ============================================================================
+  # BUILDER CLEANUP
+  # ============================================================================
+
+  clean-k8s-builder:
+    name: Clean K8s builder if exists
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Create K8s builders (skip bootstrap)
+      uses: ./.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+        buildkit_worker_addresses: ''
+        skip_bootstrap: true
+    - name: Builder Cleanup
+      run: docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
+
+  # ============================================================================
+  # DEPLOYMENT TESTS
+  # ============================================================================
+
+  deploy-operator:
+    name: Deploy Operator
+    runs-on: prod-default-small-v2
+    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build]
+    if: |
+      always() &&
+      needs.operator-build.result == 'success'
+    outputs:
+      NAMESPACE: ${{ steps.deploy.outputs.namespace }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Deploy Operator
+      id: deploy
+      run: |
+        set -x
+        BRANCH="${{ github.ref_name }}"
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+        NAMESPACE="gh-ci-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
+        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE
+
+        kubectl create namespace $NAMESPACE
+        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+        kubectl config set-context --current --namespace=$NAMESPACE
+        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $NAMESPACE || true
+        kubectl create secret docker-registry docker-imagepullsecret \
+          --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} \
+          --docker-username=${{ secrets.AZURE_ACR_USER }} \
+          --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
+          --namespace=${NAMESPACE}
+
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/helm/charts/platform/
+        helm dep build .
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+          --set dynamo-operator.namespaceRestriction.enabled=true \
+          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.prepare-release.outputs.image_prefix }}-operator \
+          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
+          --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.upgradeCRD=false \
+          --debug
+        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+
+  deploy-test-vllm:
+    if: always() && needs.deploy-operator.result == 'success'
+    runs-on: prod-default-small-v2
+    needs: [deploy-operator, vllm-pipeline]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile: [agg, agg_router, disagg, disagg_router]
+    name: deploy-test-vllm (${{ matrix.profile }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Dynamo Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          framework: vllm
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
+          platform_arch: amd64
+
+  deploy-test-sglang:
+    if: always() && needs.deploy-operator.result == 'success'
+    runs-on: prod-default-small-v2
+    needs: [deploy-operator, sglang-pipeline]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile: [agg, agg_router]
+    name: deploy-test-sglang (${{ matrix.profile }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Dynamo Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          framework: sglang
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
+          platform_arch: amd64
+
+  deploy-test-trtllm:
+    if: always() && needs.deploy-operator.result == 'success'
+    runs-on: prod-default-small-v2
+    needs: [deploy-operator, trtllm-pipeline]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile: [agg, agg_router, disagg, disagg_router]
+    name: deploy-test-trtllm (${{ matrix.profile }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Dynamo Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          framework: trtllm
+          profile: ${{ matrix.profile }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
+          platform_arch: amd64
+
+  deploy-cleanup:
+    name: Cleanup AKS resources
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [deploy-operator, deploy-test-sglang, deploy-test-trtllm, deploy-test-vllm]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Cleanup
+      timeout-minutes: 5
+      env:
+        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      run: |
+        if [ -z "$NAMESPACE" ]; then
+          echo "No namespace to clean up"
+          exit 0
+        fi
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        kubectl get dynamographdeployments || true
+        kubectl get all || true
+        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+        helm uninstall dynamo-platform --namespace $NAMESPACE --timeout 10m || true
+        kubectl delete namespace $NAMESPACE || true
+
+  # ============================================================================
+  # NGC PUBLISH: RC tag, crane copy to NGC, Helm chart push
+  # Runs after framework builds + operator + frontend complete.
+  # Tests may fail but builds must have produced images for publishing.
+  # ============================================================================
+
   release-publish:
     name: Tag RC & Publish to NGC
-    needs: [prepare-release, ci-pipeline, frontend-build]
+    needs: [prepare-release, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator-build, frontend-build]
     if: |
       always() && !cancelled() &&
       needs.prepare-release.result == 'success' &&
-      (needs.ci-pipeline.result == 'success' || needs.ci-pipeline.result == 'failure') &&
-      (needs.frontend-build.result == 'success' || needs.frontend-build.result == 'failure')
-    runs-on: cpu-amd-m5-4xlarge  # Self-hosted runner with IAM instance role for ECR access
+      (needs.vllm-pipeline.result == 'success' || needs.sglang-pipeline.result == 'success' || needs.trtllm-pipeline.result == 'success')
+    runs-on: cpu-amd-m5-4xlarge
     environment: automated-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
@@ -149,9 +432,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Check if RC number was provided as input
           if [ -n "${INPUT_RC_NUMBER}" ]; then
-            # Validate input is a non-negative integer
             if ! [[ "${INPUT_RC_NUMBER}" =~ ^[0-9]+$ ]]; then
               echo "Error: rc_number must be a non-negative integer (got: ${INPUT_RC_NUMBER})"
               exit 1
@@ -159,21 +440,14 @@ jobs:
             NEXT_RC="${INPUT_RC_NUMBER}"
             echo "Using provided RC number: ${NEXT_RC}"
           else
-            # Auto-increment: Find existing RC tags for this version
             echo "No RC number provided. Auto-incrementing..."
-            echo "Looking for existing RC tags for version ${VERSION}..."
-
-            # Pattern: vX.Y.Z-rcN
             RC_PATTERN="v${VERSION}-rc"
-
-            # Get all matching tags sorted by RC number
             EXISTING_RCS=$(git tag -l "${RC_PATTERN}*" | grep -E "^v${VERSION}-rc[0-9]+$" | sort -V || true)
 
             if [ -z "$EXISTING_RCS" ]; then
               NEXT_RC=0
               echo "No existing RC tags found. Starting with rc0."
             else
-              # Get the highest RC number
               LAST_RC=$(echo "$EXISTING_RCS" | tail -1)
               LAST_RC_NUM=${LAST_RC#v${VERSION}-rc}
               NEXT_RC=$((LAST_RC_NUM + 1))
@@ -187,6 +461,7 @@ jobs:
           echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "helm_chart_version=${VERSION}-rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "Will create tag: ${RC_TAG}"
 
       - name: Create RC tag
@@ -194,23 +469,16 @@ jobs:
           RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
         run: |
           set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Create annotated tag
           git tag -a "${RC_TAG}" -m "Release candidate ${RC_TAG}"
-
-          # Push the tag
           git push origin "${RC_TAG}"
-
-          echo "✅ Created and pushed tag: ${RC_TAG}"
+          echo "Created and pushed tag: ${RC_TAG}"
 
       - name: Setup crane
         env:
           CRANE_VERSION: v0.20.2
         run: |
-          # Download crane from official Google releases
           curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
             | tar -xzf - crane
           sudo mv crane /usr/local/bin/
@@ -220,9 +488,7 @@ jobs:
         run: |
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          echo "Logging into ECR..."
           aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
-          echo "✅ ECR login successful"
 
       - name: Login to NGC
         env:
@@ -236,143 +502,127 @@ jobs:
         env:
           NGC_REGISTRY: nvcr.io
           NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
-          RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
           NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
-          CI_PIPELINE_RESULT: ${{ needs.ci-pipeline.result }}
-          FRONTEND_BUILD_RESULT: ${{ needs.frontend-build.result }}
         run: |
           set -euo pipefail
 
-          # Track success/failure for summary
           SUCCESSFUL_COPIES=()
           FAILED_COPIES=()
 
-          # Get ECR hostname from instance role
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
-          FRAMEWORKS=("vllm" "trtllm" "sglang")
           ARCHITECTURES=("amd64" "arm64")
 
           echo "========================================"
-          echo "Build Status:"
-          echo "  CI Pipeline: ${CI_PIPELINE_RESULT}"
-          echo "  Frontend Build: ${FRONTEND_BUILD_RESULT}"
-          echo "========================================"
-          echo ""
           echo "Copying images from ECR to NGC (registry-to-registry)"
           echo "NGC Version Tag: ${NGC_VERSION_TAG}"
+          echo "========================================"
 
-          # Copy runtime images (from ci-test-suite.yml)
-          for FRAMEWORK in "${FRAMEWORKS[@]}"; do
-            for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-${ARCH}"
-              SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
-              NGC_TAG="${NGC_VERSION_TAG}-${ARCH}"
-              NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_TAG}"
-
-              echo "----------------------------------------"
-              echo "Copying: ${FRAMEWORK}-runtime:${NGC_TAG}"
-
-              if crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
-                echo "✅ Copied: ${FRAMEWORK}-runtime:${NGC_TAG}"
-                SUCCESSFUL_COPIES+=("${FRAMEWORK}-runtime:${NGC_TAG}")
-              else
-                echo "⚠️  Warning: Failed to copy ${FRAMEWORK} (${ARCH}), skipping..."
-                FAILED_COPIES+=("${FRAMEWORK}-runtime:${NGC_TAG}")
-              fi
-            done
-          done
-
-          # Copy CUDA 13 images - both architectures
-          echo ""
-          echo "Copying CUDA 13 images from ECR..."
-          CUDA13_FRAMEWORKS=("vllm" "sglang")
-          for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
-            for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-cuda13-${ARCH}"
-              SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
-              NGC_TAG="${NGC_VERSION_TAG}-cuda13-${ARCH}"
-              NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_TAG}"
-
-              echo "----------------------------------------"
-              echo "Copying: ${FRAMEWORK}-runtime:${NGC_TAG}"
-
-              if crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
-                echo "✅ Copied: ${FRAMEWORK}-runtime:${NGC_TAG}"
-                SUCCESSFUL_COPIES+=("${FRAMEWORK}-runtime:${NGC_TAG}")
-              else
-                echo "⚠️  Warning: Failed to copy ${FRAMEWORK} CUDA13 (${ARCH}), skipping..."
-                FAILED_COPIES+=("${FRAMEWORK}-runtime:${NGC_TAG}")
-              fi
-            done
-
-            # Create multi-arch manifest
-            MULTIARCH="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13"
-            echo "Creating manifest: ${MULTIARCH}"
-            docker manifest create "${MULTIARCH}" \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13-amd64" \
-              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13-arm64" || true
-            if docker manifest push "${MULTIARCH}"; then
-              echo "✅ Created multi-arch: ${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13"
-              SUCCESSFUL_COPIES+=("${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13 (multi-arch)")
+          copy_image() {
+            local SRC="$1" DST="$2" LABEL="$3"
+            echo "----------------------------------------"
+            echo "Copying: ${LABEL}"
+            if crane copy "${SRC}" "${DST}"; then
+              echo "  Copied: ${LABEL}"
+              SUCCESSFUL_COPIES+=("${LABEL}")
+              return 0
             else
-              echo "⚠️  Failed to create ${FRAMEWORK} CUDA13 multi-arch"
-              FAILED_COPIES+=("${FRAMEWORK}-runtime:${NGC_VERSION_TAG}-cuda13 (multi-arch)")
+              echo "  Warning: Failed to copy ${LABEL}, skipping..."
+              FAILED_COPIES+=("${LABEL}")
+              return 1
             fi
+          }
+
+          create_manifest() {
+            local MANIFEST="$1" AMD64_IMG="$2" ARM64_IMG="$3" LABEL="$4"
+            echo "Creating manifest: ${MANIFEST}"
+            docker manifest create "${MANIFEST}" "${AMD64_IMG}" "${ARM64_IMG}" || true
+            if docker manifest push "${MANIFEST}"; then
+              echo "  Created multi-arch: ${LABEL}"
+              SUCCESSFUL_COPIES+=("${LABEL} (multi-arch)")
+            else
+              echo "  Failed to create multi-arch: ${LABEL}"
+              FAILED_COPIES+=("${LABEL} (multi-arch)")
+            fi
+          }
+
+          # ---- CUDA 12 runtime images (vllm and sglang) ----
+          echo ""
+          echo "=== CUDA 12 Runtime Images (vllm, sglang) ==="
+          CUDA12_FRAMEWORKS=("vllm" "sglang")
+          for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
+            NGC_NAME="${FRAMEWORK}-runtime"
+            for ARCH in "${ARCHITECTURES[@]}"; do
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-${FRAMEWORK}-cuda12-${ARCH}"
+              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
+              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
+            done
+
+            create_manifest \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-amd64" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-arm64" \
+              "${NGC_NAME}:${NGC_VERSION_TAG}"
           done
 
-          # Copy frontend images from ECR (built by build-frontend-image.yaml)
+          # ---- CUDA 13 runtime images (vllm, sglang, trtllm) ----
           echo ""
-          echo "Copying frontend images from ECR..."
+          echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) ==="
+          CUDA13_FRAMEWORKS=("vllm" "sglang" "trtllm")
+          for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
+            if [ "${FRAMEWORK}" = "trtllm" ]; then
+              NGC_NAME="tensorrtllm-runtime"
+            else
+              NGC_NAME="${FRAMEWORK}-runtime"
+            fi
+
+            for ARCH in "${ARCHITECTURES[@]}"; do
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-${FRAMEWORK}-cuda13-${ARCH}"
+              TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
+              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
+            done
+
+            create_manifest \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-amd64" \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-arm64" \
+              "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+          done
+
+          # ---- Frontend images ----
+          echo ""
+          echo "=== Frontend Images ==="
           FRONTEND_IMAGES=()
           for ARCH in "${ARCHITECTURES[@]}"; do
-            SOURCE_TAG="${{ github.sha }}-frontend-${ARCH}"
-            SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
-            NGC_TAG="${NGC_VERSION_TAG}-${ARCH}"
-            NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_TAG}"
-
-            echo "----------------------------------------"
-            echo "Copying: dynamo-frontend:${NGC_TAG}"
-
-            if crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
-              echo "✅ Copied: dynamo-frontend:${NGC_TAG}"
-              SUCCESSFUL_COPIES+=("dynamo-frontend:${NGC_TAG}")
-              FRONTEND_IMAGES+=("${NGC_IMAGE}")
-            else
-              echo "⚠️  Warning: Failed to copy dynamo-frontend (${ARCH}), skipping..."
-              FAILED_COPIES+=("dynamo-frontend:${NGC_TAG}")
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-frontend-${ARCH}"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"
+            if copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}-${ARCH}"; then
+              FRONTEND_IMAGES+=("${TARGET}")
             fi
           done
 
-          # Create multi-arch manifest for frontend
-          echo ""
-          echo "Creating multi-arch manifest for dynamo-frontend..."
-          FRONTEND_MULTIARCH="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
-
           if [ ${#FRONTEND_IMAGES[@]} -eq 2 ]; then
-            echo "Creating manifest index: ${FRONTEND_MULTIARCH}"
-            docker manifest create "${FRONTEND_MULTIARCH}" \
-              "${FRONTEND_IMAGES[0]}" \
-              "${FRONTEND_IMAGES[1]}" || true
-
-            if docker manifest push "${FRONTEND_MULTIARCH}"; then
-              echo "✅ Created multi-arch manifest: dynamo-frontend:${NGC_VERSION_TAG}"
-              SUCCESSFUL_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch)")
-            else
-              echo "⚠️  Warning: Failed to create multi-arch manifest"
-              FAILED_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch)")
-            fi
+            create_manifest \
+              "${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}" \
+              "${FRONTEND_IMAGES[0]}" "${FRONTEND_IMAGES[1]}" \
+              "dynamo-frontend:${NGC_VERSION_TAG}"
           else
-            echo "⚠️  Warning: Not all architectures available, skipping multi-arch manifest"
+            echo "Warning: Not all frontend architectures available, skipping multi-arch manifest"
             FAILED_COPIES+=("dynamo-frontend:${NGC_VERSION_TAG} (multi-arch - missing archs)")
           fi
 
-          # Output counts for summary
+          # ---- Operator image (multi-arch manifest already built by operator-build) ----
+          echo ""
+          echo "=== Operator Image ==="
+          OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-operator"
+          OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
+          copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
+
+          # ---- Summary ----
           echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
           echo "failed_count=${#FAILED_COPIES[@]}" >> $GITHUB_OUTPUT
 
-          # Save lists for summary (newline-separated)
           printf '%s\n' "${SUCCESSFUL_COPIES[@]}" > /tmp/successful_copies.txt
           printf '%s\n' "${FAILED_COPIES[@]}" > /tmp/failed_copies.txt 2>/dev/null || true
 
@@ -382,21 +632,60 @@ jobs:
           echo "  Failed: ${#FAILED_COPIES[@]}"
           echo "========================================"
 
-          # Fail the step if all copies failed
           if [ ${#SUCCESSFUL_COPIES[@]} -eq 0 ]; then
-            echo "❌ ERROR: No images were successfully copied to NGC!"
+            echo "ERROR: No images were successfully copied to NGC!"
             exit 1
           fi
+
+      - name: Package and push Helm charts to NGC
+        env:
+          NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
+          NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
+        run: |
+          set -euo pipefail
+
+          REPO_ALIAS="ngc-staging-dynamo"
+
+          helm plugin install https://github.com/chartmuseum/helm-push || true
+
+          helm repo add "${REPO_ALIAS}" \
+            --username='$oauthtoken' \
+            --password="${NGC_TOKEN}" \
+            "${NGC_HELM_REPO}" > /dev/null 2>&1
+
+          helm repo add nats https://nats-io.github.io/k8s/helm/charts/ || true
+          helm repo add bitnami https://charts.bitnami.com/bitnami || true
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Helm Charts" >> $GITHUB_STEP_SUMMARY
+
+          PLATFORM_CHART_DIR="deploy/helm/charts/platform"
+          CHART_NAME=$(awk '/^name:/ {print $2}' "${PLATFORM_CHART_DIR}/Chart.yaml")
+          pushd "${PLATFORM_CHART_DIR}"
+          helm dep build .
+          popd
+
+          echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
+          helm package \
+            --version "${HELM_CHART_VERSION}" \
+            --app-version "${HELM_CHART_VERSION}" \
+            "${PLATFORM_CHART_DIR}"
+
+          CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
+          echo "Pushing ${CHART_FILE} to NGC Helm registry..."
+          helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
+          echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
+
+          helm repo remove "${REPO_ALIAS}"
 
       - name: Create release summary
         env:
           RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
-          RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
           NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
+          HELM_CHART_VERSION: ${{ steps.rc_tag.outputs.helm_chart_version }}
           SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
           FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
-          CI_PIPELINE_RESULT: ${{ needs.ci-pipeline.result }}
-          FRONTEND_BUILD_RESULT: ${{ needs.frontend-build.result }}
         run: |
           echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -408,35 +697,28 @@ jobs:
           echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Build Status" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Pipeline | Result |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| CI Pipeline | ${CI_PIPELINE_RESULT} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Frontend Build | ${FRONTEND_BUILD_RESULT} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo "### NGC Publishing Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Successful copies**: ${SUCCESSFUL_COUNT}" >> $GITHUB_STEP_SUMMARY
-          echo "- ⚠️ **Failed copies**: ${FAILED_COUNT}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Successful copies**: ${SUCCESSFUL_COUNT}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failed copies**: ${FAILED_COUNT}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 12):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`trtllm-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 12 - default):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Runtime images (CUDA 13):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch: amd64, arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13-arm64\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch: amd64, arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13-arm64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Operator image:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch: amd64, arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-amd64\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-arm64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
 

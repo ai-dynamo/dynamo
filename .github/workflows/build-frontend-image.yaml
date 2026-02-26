@@ -10,6 +10,17 @@ on:
     - "pull-request/[0-9]+"
     # Note: release/* branches are handled by release.yml which calls this workflow
   workflow_call:
+    inputs:
+      skip_change_detection:
+        description: 'Skip changed-files detection and always build (used by release pipeline)'
+        required: false
+        type: boolean
+        default: false
+      image_prefix:
+        description: 'Optional prefix for image tags (e.g., release-0.9.0). When set, images are also tagged as {prefix}-frontend-{arch}.'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -25,6 +36,8 @@ on:
         required: true
       AZURE_ACR_PASSWORD:
         required: true
+      CI_TOKEN:
+        required: false
       SCCACHE_S3_BUCKET:
         required: true
 
@@ -59,7 +72,7 @@ jobs:
   build-epp-image:
     name: Build EPP Image
     needs: changed-files
-    if: needs.changed-files.outputs.frontend == 'true'
+    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true
     runs-on: prod-builder-v3
     outputs:
       epp_image_ref: ${{ steps.build-epp-image.outputs.epp_image_ref }}
@@ -111,7 +124,7 @@ jobs:
   build-frontend-image:
     name: Build Frontend Image
     needs: [changed-files, build-epp-image]
-    if: needs.changed-files.outputs.frontend == 'true'
+    if: needs.changed-files.outputs.frontend == 'true' || inputs.skip_change_detection == true
     strategy:
       fail-fast: false
       matrix:
@@ -196,6 +209,7 @@ jobs:
             ${{ matrix.arch == 'amd64' && steps.calculate-target-tag.outputs.azure_target_image_uri || '' }}
             ${{ github.ref_name == 'main' && format('{0}:main-frontend-{1}', steps.calculate-target-tag.outputs.ecr_image_base, matrix.arch) || '' }}
             ${{ github.ref_name == 'main' && format('{0}:main-frontend-{1}-{2}', steps.calculate-target-tag.outputs.ecr_image_base, github.sha, matrix.arch) || '' }}
+            ${{ inputs.image_prefix != '' && format('{0}:{1}-frontend-{2}', steps.calculate-target-tag.outputs.ecr_image_base, inputs.image_prefix, matrix.arch) || '' }}
 
       - name: Show summary
         shell: bash
