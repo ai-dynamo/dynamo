@@ -339,16 +339,16 @@ vllm_configs = {
         name="multimodal_disagg_qwen3vl_2b_epd",
         directory=vllm_dir,
         script_name="disagg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
         env={
             "DYN_ENCODE_WORKER_GPU": "0",
             "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "1",
-            "DYN_ENCODE_GPU_MEM": "0.4",
-            "DYN_PREFILL_GPU_MEM": "0.4",
-            "DYN_DECODE_GPU_MEM": "0.85",
+            "DYN_DECODE_WORKER_GPU": "0",
+            "DYN_ENCODE_GPU_MEM": "0.30",
+            "DYN_PREFILL_GPU_MEM": "0.30",
+            "DYN_DECODE_GPU_MEM": "0.30",
         },
         request_payloads=[
             chat_payload(
