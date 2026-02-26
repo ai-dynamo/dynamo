@@ -127,11 +127,12 @@ class EncodeWorkerHandler:
         # 7. Await for the write operation to complete.
         # 8. Yield the encode response.
 
+        rng_gen = nvtx.start_range("mm:encode_worker_generate", color="blue")
+        active_inner_rng = None
         try:
             time_start = time.perf_counter()
-            rng_gen = nvtx.start_range("mm:encode_worker_generate", color="blue")
 
-            rng_cache = nvtx.start_range("mm:enc:cache_check", color="cyan")
+            active_inner_rng = nvtx.start_range("mm:enc:cache_check", color="cyan")
             # Before batch process images, check cache first
             need_encode_indexes = []
             embedding_lists = [None] * len(request.multimodal_inputs)
@@ -156,9 +157,10 @@ class EncodeWorkerHandler:
                     # keep track of key to avoid recompute of it
                     need_encode_indexes.append((idx, embedding_key))
 
-            nvtx.end_range(rng_cache)
+            nvtx.end_range(active_inner_rng)
+            active_inner_rng = None
 
-            rng_load = nvtx.start_range("mm:enc:image_load", color="green")
+            active_inner_rng = nvtx.start_range("mm:enc:image_load", color="green")
             # Load and generate image tensors
             image_tasks = []
             image_to_load = []
@@ -185,18 +187,20 @@ class EncodeWorkerHandler:
                     f"Errors occurred during image loading:\n{collective_exceptions}"
                 )
 
-            nvtx.end_range(rng_load)
+            nvtx.end_range(active_inner_rng)
+            active_inner_rng = None
 
             if loaded_images:
-                rng_preprocess = nvtx.start_range(
+                active_inner_rng = nvtx.start_range(
                     "mm:enc:image_preprocess", color="yellow"
                 )
                 image_embeds = await asyncio.to_thread(
                     self.image_processor, images=loaded_images, return_tensors="pt"
                 )
-                nvtx.end_range(rng_preprocess)
+                nvtx.end_range(active_inner_rng)
+                active_inner_rng = None
 
-                rng_encode = nvtx.start_range("mm:enc:vision_encode", color="red")
+                active_inner_rng = nvtx.start_range("mm:enc:vision_encode", color="red")
                 # Encode the image embeddings using model-specific encoder
                 embeddings = await asyncio.to_thread(
                     encode_image_embeddings,
@@ -205,10 +209,12 @@ class EncodeWorkerHandler:
                     vision_encoder=self.vision_encoder,
                     projector=self.projector,
                 )
+                nvtx.end_range(active_inner_rng)
+                active_inner_rng = None
 
-                nvtx.end_range(rng_encode)
-
-                rng_split = nvtx.start_range("mm:enc:split_embeddings", color="orange")
+                active_inner_rng = nvtx.start_range(
+                    "mm:enc:split_embeddings", color="orange"
+                )
                 # [gluo FIXME] This is specific to qwen vision processing..
                 # Split concatenated embeddings for each image item.
                 if is_qwen_vl_model(self.model):
@@ -235,7 +241,8 @@ class EncodeWorkerHandler:
                     else None
                 )
 
-                nvtx.end_range(rng_split)
+                nvtx.end_range(active_inner_rng)
+                active_inner_rng = None
 
             # fill in the embedding_lists with new computed embeddings and cache them
             for split_idx, (list_idx, key) in enumerate(need_encode_indexes):
@@ -256,7 +263,9 @@ class EncodeWorkerHandler:
 
             before_transfer_time = time.perf_counter()
 
-            rng_transfer = nvtx.start_range("mm:enc:embedding_transfer", color="purple")
+            active_inner_rng = nvtx.start_range(
+                "mm:enc:embedding_transfer", color="purple"
+            )
             # Prepare transfer
             send_tasks = [
                 asyncio.create_task(
@@ -290,7 +299,8 @@ class EncodeWorkerHandler:
                     (transfer_request[1], embedding_item.embeddings)
                 )
 
-            nvtx.end_range(rng_transfer)
+            nvtx.end_range(active_inner_rng)
+            active_inner_rng = None
 
             logger.debug(f"Request: {request.model_dump_json()}")
 
@@ -305,11 +315,13 @@ class EncodeWorkerHandler:
                 f"Average encoding time: {self._accumulated_time / self._processed_requests:.4f} seconds over {self._processed_requests} requests."
             )
 
-            nvtx.end_range(rng_gen)
-
             # Yield transformed request back
             yield request.model_dump_json()
 
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
             raise
+        finally:
+            if active_inner_rng is not None:
+                nvtx.end_range(active_inner_rng)
+            nvtx.end_range(rng_gen)

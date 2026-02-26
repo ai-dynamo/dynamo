@@ -259,17 +259,23 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         rng_prefill = nvtx.start_range("mm:pd:first_token_prefill", color="darkred")
         num_output_tokens_so_far = 0
         first_token = True
-        async for response in gen:
+        try:
+            async for response in gen:
+                if first_token:
+                    nvtx.end_range(rng_prefill)
+                    first_token = False
+                logger.debug(
+                    f"Response kv_transfer_params: {response.kv_transfer_params}"
+                )
+                logger.debug(
+                    f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
+                )
+                yield self._format_engine_output(response, num_output_tokens_so_far)
+                if response.outputs:
+                    num_output_tokens_so_far = len(response.outputs[0].token_ids)
+        finally:
             if first_token:
                 nvtx.end_range(rng_prefill)
-                first_token = False
-            logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
-            logger.debug(
-                f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
-            )
-            yield self._format_engine_output(response, num_output_tokens_so_far)
-            if response.outputs:
-                num_output_tokens_so_far = len(response.outputs[0].token_ids)
 
     # ── Disaggregated generation (prefill here, decode remote) ───────
 

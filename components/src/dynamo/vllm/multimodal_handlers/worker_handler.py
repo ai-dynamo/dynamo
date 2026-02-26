@@ -99,19 +99,25 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
 
         rng_first = nvtx.start_range("mm:decode:first_token", color="darkred")
         first_token = True
-        async for response in gen:
+        try:
+            async for response in gen:
+                if first_token:
+                    nvtx.end_range(rng_first)
+                    first_token = False
+                logger.debug(
+                    f"Response kv_transfer_params: {response.kv_transfer_params}"
+                )
+                yield MyRequestOutput(
+                    request_id=response.request_id,
+                    prompt=response.prompt,
+                    prompt_token_ids=response.prompt_token_ids,
+                    prompt_logprobs=response.prompt_logprobs,
+                    outputs=response.outputs,
+                    finished=response.finished,
+                    metrics=response.metrics,
+                    kv_transfer_params=response.kv_transfer_params,
+                ).model_dump_json()
+        finally:
             if first_token:
                 nvtx.end_range(rng_first)
-                first_token = False
-            logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
-            yield MyRequestOutput(
-                request_id=response.request_id,
-                prompt=response.prompt,
-                prompt_token_ids=response.prompt_token_ids,
-                prompt_logprobs=response.prompt_logprobs,
-                outputs=response.outputs,
-                finished=response.finished,
-                metrics=response.metrics,
-                kv_transfer_params=response.kv_transfer_params,
-            ).model_dump_json()
-        nvtx.end_range(rng_decode)
+            nvtx.end_range(rng_decode)

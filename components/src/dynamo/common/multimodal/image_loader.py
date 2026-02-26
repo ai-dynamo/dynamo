@@ -56,6 +56,7 @@ class ImageLoader:
             image_url_lower = image_url.lower()
             if image_url_lower in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
+                nvtx.end_range(rng)
                 return self._image_cache[image_url_lower]
 
         try:
@@ -116,7 +117,6 @@ class ImageLoader:
                 self._image_cache[image_url_lower] = image_converted
                 await self._cache_queue.put(image_url_lower)
 
-            nvtx.end_range(rng)
             return image_converted
 
         except httpx.HTTPError as e:
@@ -125,6 +125,8 @@ class ImageLoader:
         except Exception as e:
             logger.error(f"Error loading image: {e}")
             raise ValueError(f"Failed to load image: {e}")
+        finally:
+            nvtx.end_range(rng)
 
     async def load_image_batch(
         self,
