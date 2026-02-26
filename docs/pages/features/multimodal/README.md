@@ -39,10 +39,10 @@ Dynamo supports multimodal inference across multiple LLM backends, enabling mode
 
 ### Input Format Support
 
-| Format | vLLM | TRT-LLM | SGLang |
-|--------|------|---------|--------|
+| Format | SGLang | TRT-LLM | vLLM |
+|--------|--------|---------|------|
 | HTTP/HTTPS URL | ✅ | ✅ | ✅ |
-| Data URL (Base64) | ✅ | ❌ | ❌ |
+| Data URL (Base64) | ❌ | ❌ | ✅ |
 | Pre-computed Embeddings (.pt) | ❌ | ✅ | ❌ |
 
 ## Architecture Patterns

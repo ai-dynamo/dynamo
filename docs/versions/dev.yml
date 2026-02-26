@@ -58,8 +58,6 @@ navigation:
             contents:
               - page: Integration with Dynamo
                 path: ../pages/kubernetes/chrek/dynamo.md
-              - page: Standalone Usage
-                path: ../pages/kubernetes/chrek/standalone.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -148,8 +146,8 @@ navigation:
                 path: ../pages/backends/sglang/sglang-disaggregation.md
               - page: Diffusion
                 path: ../pages/backends/sglang/sglang-diffusion.md
-              - page: Prometheus
-                path: ../pages/backends/sglang/sglang-prometheus.md
+              - page: Observability
+                path: ../pages/backends/sglang/sglang-observability.md
           - page: TensorRT-LLM
             path: ../pages/backends/trtllm/README.md
       - section: Frontend
@@ -224,7 +222,10 @@ navigation:
   - section: Blog
     path: ../blogs/index.mdx
     slug: blog
-    contents: []
+    contents:
+      - page: "Flash Indexer: Inter-Galactic KV Routing"
+        path: ../blogs/flash-indexer/flash-indexer.md
+        slug: flash-indexer
 
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.

@@ -145,7 +145,7 @@ impl DistributedRuntime {
                 (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
             }
             DiscoveryBackend::KvStore(kv_selector) => {
-                tracing::info!("Initializing KV store discovery backend");
+                tracing::info!("Initializing KV store discovery backend: {}", kv_selector);
                 let runtime_clone = runtime.clone();
                 let store = match kv_selector {
                     kv::Selector::Etcd(etcd_config) => {

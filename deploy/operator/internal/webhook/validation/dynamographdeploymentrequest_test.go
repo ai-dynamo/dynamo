@@ -359,7 +359,6 @@ func TestDynamoGraphDeploymentRequestValidator_ValidateUpdate(t *testing.T) {
 					Model:   "llama-3-70b",
 					Backend: nvidiacomv1beta1.BackendTypeVllm,
 					Image:   "profiler:latest",
-
 				},
 			},
 			wantErr: false,

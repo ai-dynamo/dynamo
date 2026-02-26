@@ -45,11 +45,11 @@ export DYN_EVENT_PLANE=zmq
 Python components also accept this as a CLI flag:
 
 ```bash
-# vLLM backend
-python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
-
 # SGLang backend
 python3 -m dynamo.sglang --event-plane zmq --model Qwen/Qwen3-0.6B
+
+# vLLM backend
+python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
 ```
 
 ### Environment Variables

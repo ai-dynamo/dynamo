@@ -69,6 +69,13 @@ async def main(runtime: DistributedRuntime, args):
     else:
         logger.info("Authorization: DISABLED (accepting all namespaces)")
 
+    if args.no_operation:
+        logger.info(
+            "No-operation mode: ENABLED (scale requests will be logged, not executed)"
+        )
+    else:
+        logger.info("No-operation mode: DISABLED")
+
     logger.info("=" * 60)
 
     # Get K8s namespace (where GlobalPlanner pod is running)
@@ -80,6 +87,7 @@ async def main(runtime: DistributedRuntime, args):
         runtime=runtime,
         managed_namespaces=args.managed_namespaces,
         k8s_namespace=k8s_namespace,
+        no_operation=args.no_operation,
     )
 
     # Serve scale_request endpoint

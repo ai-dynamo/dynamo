@@ -96,7 +96,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					Image: "test-profiler:latest",
+					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -147,7 +147,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					Image: "test-profiler:latest",
+					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -304,8 +304,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "trtllm",
+					Model:          "test-model",
+					Backend:        "trtllm",
 					Image:          "test-profiler:latest",
 					SearchStrategy: "rapid",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
@@ -365,9 +365,9 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:     "test-model",
-					Backend:   "vllm",
-					Image:     "test-profiler:latest",
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -477,7 +477,7 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					Image: "test-profiler:latest",
+					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -601,7 +601,7 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					Image: "test-profiler:latest",
+					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -676,7 +676,7 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					Image: "test-profiler:latest",
+					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -879,7 +879,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "trtllm",
-					Image: "test-profiler:latest",
+					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						GPUSKU:         "H200-SXM",
 						NumGPUsPerNode: ptr.To[int32](8),
@@ -940,8 +940,8 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "trtllm",
+					Model:          "test-model",
+					Backend:        "trtllm",
 					Image:          "test-profiler:latest",
 					SearchStrategy: "rapid",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
@@ -1006,7 +1006,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "trtllm",
-					Image: "test-profiler:latest",
+					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -1086,7 +1086,7 @@ var _ = Describe("DGDR Error Handling", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					Image: "test-profiler:latest",
+					Image:   "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",

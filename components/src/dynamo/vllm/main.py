@@ -147,15 +147,15 @@ async def worker():
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established
-    pre_created_engine = None
+    checkpoint_restore_engine = None
     if checkpoint_cfg is not None:
         logger.info("Checkpoint mode enabled (watcher-driven signals)")
 
         # Checkpoint mode requires sleep mode — enable before engine init
         config.engine_args.enable_sleep_mode = True
 
-        pre_created_engine = setup_vllm_engine(config)
-        engine_client = pre_created_engine[0]
+        checkpoint_restore_engine = setup_vllm_engine(config)
+        engine_client = checkpoint_restore_engine[0]
 
         if not await checkpoint_cfg.run_lifecycle(
             engine_client, CHECKPOINT_SLEEP_MODE_LEVEL
@@ -185,7 +185,7 @@ async def worker():
             config,
             shutdown_event,
             shutdown_endpoints,
-            pre_created_engine=pre_created_engine,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
         logger.debug("multimodal worker completed")
     elif config.omni:
@@ -193,12 +193,18 @@ async def worker():
         logger.debug("init_omni completed")
     elif config.disaggregation_mode == DisaggregationMode.PREFILL:
         await init_prefill(
-            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+            runtime,
+            config,
+            shutdown_event,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
         logger.debug("init_prefill completed")
     else:
         await init(
-            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+            runtime,
+            config,
+            shutdown_event,
+            checkpoint_restore_engine=checkpoint_restore_engine,
         )
         logger.debug("init completed")
 
@@ -592,7 +598,7 @@ async def init_prefill(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    pre_created_engine=None,
+    checkpoint_restore_engine=None,
 ):
     """
     Instantiate and serve
@@ -605,14 +611,14 @@ async def init_prefill(
     )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if pre_created_engine is not None:
+    if checkpoint_restore_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             _component_gauges,
-        ) = pre_created_engine
+        ) = checkpoint_restore_engine
     else:
         (
             engine_client,
@@ -734,7 +740,7 @@ async def init(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
-    pre_created_engine=None,
+    checkpoint_restore_engine=None,
 ):
     """
     Instantiate and serve
@@ -773,14 +779,14 @@ async def init(
         )
 
     # Use pre-created engine if provided (checkpoint mode), otherwise create new
-    if pre_created_engine is not None:
+    if checkpoint_restore_engine is not None:
         (
             engine_client,
             vllm_config,
             default_sampling_params,
             prometheus_temp_dir,
             component_gauges,
-        ) = pre_created_engine
+        ) = checkpoint_restore_engine
         # Factory is created after unpack so component_gauges is available
         factory = StatLoggerFactory(
             endpoint=generate_endpoint,

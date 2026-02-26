@@ -56,7 +56,7 @@ use crate::protocols::{
         nvext::NvExtProvider,
     },
 };
-use crate::tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
+use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -151,7 +151,7 @@ pub struct OpenAIPreprocessor {
 impl OpenAIPreprocessor {
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
-        let tokenizer = mdc.tokenizer_hf()?;
+        let tokenizer = mdc.tokenizer()?;
         match formatter {
             PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
         }
@@ -160,10 +160,10 @@ impl OpenAIPreprocessor {
     pub fn new_with_parts(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
-        hf_tokenizer: tokenizers::Tokenizer,
+        tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
-        let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
+        let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
         let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
@@ -285,6 +285,7 @@ impl OpenAIPreprocessor {
                 priority_jump: hints.and_then(|h| h.latency_sensitivity),
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
+                allowed_worker_ids: None,
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
@@ -946,6 +947,34 @@ impl OpenAIPreprocessor {
         jail.apply_with_finish_reason(stream)
     }
 
+    /// Check if reasoning parsing should be disabled based on per-request parameters.
+    /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
+    /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false.
+    fn is_reasoning_disabled_by_request(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        match reasoning_parser {
+            Some("kimi_k25") => {
+                if let Some(args) = chat_template_args
+                    && let Some(thinking) = args.get("thinking")
+                {
+                    return thinking == &serde_json::Value::Bool(false);
+                }
+                false
+            }
+            Some("nemotron_nano") => {
+                if let Some(args) = chat_template_args
+                    && let Some(enable_thinking) = args.get("enable_thinking")
+                {
+                    return enable_thinking == &serde_json::Value::Bool(false);
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
     // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
     // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
@@ -1094,7 +1123,11 @@ impl
         );
 
         // Try to parse reasoning content only if parser is configured
-        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some();
+        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
+            && !Self::is_reasoning_disabled_by_request(
+                self.runtime_config.reasoning_parser.as_deref(),
+                request.chat_template_args.as_ref(),
+            );
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
@@ -1329,3 +1362,115 @@ impl
 }
 
 // Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_reasoning_disabled_by_request() {
+        let thinking_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("thinking".to_string(), serde_json::Value::Bool(true));
+            m
+        };
+        let thinking_false = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("thinking".to_string(), serde_json::Value::Bool(false));
+            m
+        };
+        let enable_thinking_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+            m
+        };
+        let enable_thinking_false = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "enable_thinking".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            m
+        };
+        let empty_args = std::collections::HashMap::new();
+
+        // (parser, args, expected_disabled, description)
+        let cases = [
+            (
+                Some("kimi_k25"),
+                Some(&thinking_false),
+                true,
+                "kimi_k25 + thinking=false → disabled",
+            ),
+            (
+                Some("kimi_k25"),
+                Some(&thinking_true),
+                false,
+                "kimi_k25 + thinking=true → enabled",
+            ),
+            (
+                Some("kimi_k25"),
+                None,
+                false,
+                "kimi_k25 + no args → enabled",
+            ),
+            (
+                Some("kimi_k25"),
+                Some(&empty_args),
+                false,
+                "kimi_k25 + empty args → enabled",
+            ),
+            (
+                Some("deepseek_r1"),
+                Some(&thinking_false),
+                false,
+                "deepseek_r1 → never disabled",
+            ),
+            (
+                Some("basic"),
+                Some(&thinking_false),
+                false,
+                "basic → never disabled",
+            ),
+            (
+                None,
+                Some(&thinking_false),
+                false,
+                "no parser → never disabled",
+            ),
+            // nemotron_nano uses "enable_thinking" key
+            (
+                Some("nemotron_nano"),
+                Some(&enable_thinking_false),
+                true,
+                "nemotron_nano + enable_thinking=false → disabled",
+            ),
+            (
+                Some("nemotron_nano"),
+                Some(&enable_thinking_true),
+                false,
+                "nemotron_nano + enable_thinking=true → enabled",
+            ),
+            (
+                Some("nemotron_nano"),
+                None,
+                false,
+                "nemotron_nano + no args → enabled",
+            ),
+            (
+                Some("nemotron_nano"),
+                Some(&empty_args),
+                false,
+                "nemotron_nano + empty args → enabled",
+            ),
+        ];
+
+        for (parser, args, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::is_reasoning_disabled_by_request(parser, args),
+                expected,
+                "FAILED: {desc}",
+            );
+        }
+    }
+}

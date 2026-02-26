@@ -58,6 +58,9 @@ pub struct ActiveSequence {
 
     #[getter(copy)]
     enable_prefix_caching: bool,
+
+    #[getter(copy)]
+    emit_token_ids: bool,
 }
 
 impl ActiveSequence {
@@ -67,15 +70,33 @@ impl ActiveSequence {
         max_output_tokens: usize,
         block_size: Option<usize>,
         enable_prefix_caching: bool,
+        emit_token_ids: bool,
     ) -> Self {
         let block_size = block_size.unwrap_or(64);
         let num_input_tokens = tokens.len();
+
+        let block_token_ids: Option<Vec<Vec<u32>>> = if emit_token_ids {
+            let num_complete = tokens.len() / block_size;
+            Some(
+                tokens
+                    .chunks(block_size)
+                    .take(num_complete)
+                    .map(|c| c.to_vec())
+                    .collect(),
+            )
+        } else {
+            None
+        };
 
         let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
         let unique_blocks =
             create_unique_blocks_from_sequence(&tokens, block_size, enable_prefix_caching);
         let block_hashes = tokens.blocks().iter().map(|b| b.block_hash()).collect();
-        let creation_signal = Some(MoveBlock::Use(unique_blocks.clone(), block_hashes));
+        let creation_signal = Some(MoveBlock::Use(
+            unique_blocks.clone(),
+            block_hashes,
+            block_token_ids,
+        ));
 
         let seq = Self {
             unique_blocks,
@@ -86,6 +107,7 @@ impl ActiveSequence {
             num_input_tokens,
             creation_signal,
             enable_prefix_caching,
+            emit_token_ids,
         };
         seq.validate().expect("invalid ActiveSequence");
         seq
@@ -122,7 +144,13 @@ impl ActiveSequence {
         block_size: Option<usize>,
         enable_prefix_caching: bool,
     ) -> (Self, Option<MoveBlock>) {
-        let mut sequence = Self::new(tokens, max_output_tokens, block_size, enable_prefix_caching);
+        let mut sequence = Self::new(
+            tokens,
+            max_output_tokens,
+            block_size,
+            enable_prefix_caching,
+            false,
+        );
         let signal = sequence.take_creation_signal();
         (sequence, signal)
     }
@@ -142,12 +170,18 @@ impl ActiveSequence {
 
         // Replace last partial block with full block if it exists
         if let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.last().cloned() {
+            let last_complete = self.tokens.last_complete_block().unwrap();
             let last_seq_hash = if self.enable_prefix_caching {
-                self.tokens.last_complete_block().unwrap().sequence_hash()
+                last_complete.sequence_hash()
             } else {
                 random::<u64>()
             };
-            let last_block_hash = self.tokens.last_complete_block().unwrap().block_hash();
+            let last_block_hash = last_complete.block_hash();
+            let promote_token_ids = if self.emit_token_ids {
+                Some(last_complete.tokens().to_vec())
+            } else {
+                None
+            };
             self.unique_blocks.pop();
 
             // After pop, the last element is the parent block
@@ -163,12 +197,13 @@ impl ActiveSequence {
                 last_seq_hash,
                 second_to_last_hash,
                 last_block_hash,
+                promote_token_ids,
             ));
         }
 
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
-        signals.push(MoveBlock::Use(vec![new_partial_block], vec![]));
+        signals.push(MoveBlock::Use(vec![new_partial_block], vec![], None));
         Some(signals)
     }
 
@@ -234,9 +269,22 @@ impl ActiveSequence {
 
         // Don't reset generated_tokens since we're keeping the tokens in the sequence
 
+        let block_token_ids = if self.emit_token_ids {
+            Some(
+                self.tokens
+                    .blocks()
+                    .iter()
+                    .map(|b| b.tokens().to_vec())
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
         self.creation_signal = Some(MoveBlock::Use(
             self.unique_blocks.clone(),
             self.block_hashes(),
+            block_token_ids,
         ));
 
         free_signal
@@ -270,7 +318,7 @@ mod tests {
         // Check that we got a Use signal
         assert!(signal1.is_some());
         match &signal1 {
-            Some(MoveBlock::Use(blocks, _hashes)) => {
+            Some(MoveBlock::Use(blocks, _hashes, ..)) => {
                 assert_eq!(blocks.len(), 1);
             }
             _ => panic!("Expected Use signal"),
@@ -291,7 +339,7 @@ mod tests {
 
         // First signal should be Promote for the previous block
         match &signal_16[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hash) => {
+            MoveBlock::Promote(_, _, parent_hash, _hash, ..) => {
                 assert_eq!(*parent_hash, None);
             }
             _ => panic!("Expected Promote signal as second signal"),
@@ -299,7 +347,7 @@ mod tests {
 
         // Second signal should be Use for new partial block
         match &signal_16[1] {
-            MoveBlock::Use(blocks, _hashes) => {
+            MoveBlock::Use(blocks, _hashes, ..) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
@@ -386,7 +434,7 @@ mod tests {
 
         // Check that signal[0] is promote
         match &signal[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hash) => {
+            MoveBlock::Promote(_, _, parent_hash, _hash, ..) => {
                 // Check that the parent_hash matches unique_blocks[1], which should be a full block
                 if let UniqueBlock::FullBlock(expected_hash) = seq1.unique_blocks()[1] {
                     assert_eq!(
@@ -420,7 +468,7 @@ mod tests {
         // Initial signal - should have received a Use signal for the partial block
         assert!(signal.is_some());
         match signal {
-            Some(MoveBlock::Use(blocks, _hashes)) => {
+            Some(MoveBlock::Use(blocks, _hashes, ..)) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
@@ -438,7 +486,7 @@ mod tests {
 
         // First signal should be Promote
         match &signals_second[0] {
-            MoveBlock::Promote(_, _, parent_hash, _hash) => {
+            MoveBlock::Promote(_, _, parent_hash, _hash, ..) => {
                 assert_eq!(*parent_hash, None);
             }
             _ => panic!("Expected Promote signal as first signal after second token"),
@@ -446,7 +494,7 @@ mod tests {
 
         // Second signal should be Use for new partial block
         match &signals_second[1] {
-            MoveBlock::Use(blocks, _hashes) => {
+            MoveBlock::Use(blocks, _hashes, ..) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
