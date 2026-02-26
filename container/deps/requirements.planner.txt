@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dependencies for planner, profiler, and global_planner components.
+#
+# Version Pinning Strategy:
+# - Use == for packages that are pure Python and well-tested
+# - Use <= or < for packages that may have platform-specific versions
+
+filterpy==1.4.5
+kubernetes==32.0.1
+matplotlib==3.10.7
+pmdarima==2.1.1
+prometheus-api-client==0.6.0
+prophet==1.2.1
+scikit-learn==1.7.2
+scipy<1.14.0  # Upper bound for pmdarima compatibility

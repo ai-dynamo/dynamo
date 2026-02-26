@@ -88,14 +88,17 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
-# Install common and test dependencies as root
-RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/requirements.txt \
-    --mount=type=bind,source=container/deps/requirements.test.txt,target=/tmp/deps/requirements.test.txt \
+# Install runtime dependencies (common + planner + benchmarks) as root.
+# Test and dev dependencies are NOT installed here — they go in the test and dev images.
+RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/deps/requirements.common.txt \
+    --mount=type=bind,source=container/deps/requirements.planner.txt,target=/tmp/deps/requirements.planner.txt \
+    --mount=type=bind,source=container/deps/requirements.benchmark.txt,target=/tmp/deps/requirements.benchmark.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
-        --requirement /tmp/deps/requirements.txt \
-        --requirement /tmp/deps/requirements.test.txt \
+        --requirement /tmp/deps/requirements.common.txt \
+        --requirement /tmp/deps/requirements.planner.txt \
+        --requirement /tmp/deps/requirements.benchmark.txt \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
@@ -104,7 +107,7 @@ RUN --mount=type=bind,source=container/deps/requirements.txt,target=/tmp/deps/re
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks
 
-# Force-reinstall NVIDIA packages in a separate layer so requirements.txt changes don't trigger re-download
+# Force-reinstall NVIDIA packages in a separate layer so requirements changes don't trigger re-download
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \

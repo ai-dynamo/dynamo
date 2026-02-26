@@ -172,10 +172,16 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
         run: docker pull ${{ env.IMAGE_TAG }}
+      - name: Build test image
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ env.IMAGE_TAG }} \
+            -t ${{ env.IMAGE_TAG }}-test .
       - name: Run pytest (parallel tests with xdist)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.IMAGE_TAG }}
+          image_tag: ${{ env.IMAGE_TAG }}-test
           pytest_marks: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)"
           framework: dynamo
           test_type: "pre_merge_parallel"
@@ -202,10 +208,16 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull image
         run: docker pull ${{ env.IMAGE_TAG }}
+      - name: Build test image
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ env.IMAGE_TAG }} \
+            -t ${{ env.IMAGE_TAG }}-test .
       - name: Run pytest (sequential tests)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.IMAGE_TAG }}
+          image_tag: ${{ env.IMAGE_TAG }}-test
           pytest_marks: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)"
           framework: dynamo
           test_type: "pre_merge_sequential"

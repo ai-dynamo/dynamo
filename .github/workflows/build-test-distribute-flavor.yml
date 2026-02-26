@@ -296,6 +296,13 @@ jobs:
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
+      - name: Build test image
+        shell: bash
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.test_image }} \
+            -t ${{ steps.calculate-target-tag.outputs.test_image }}-test .
 
       - name: Run Sanity Check on Runtime Image
         shell: bash
@@ -323,7 +330,7 @@ jobs:
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}-test
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
@@ -340,7 +347,7 @@ jobs:
         if: ( inputs.platform == 'amd64' && inputs.run_single_gpu_tests == true ) # We only run GPU tests on amd64
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}-test
           pytest_marks: ${{ inputs.single_gpu_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
@@ -394,13 +401,20 @@ jobs:
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
+      - name: Build test image
+        shell: bash
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.test_image }} \
+            -t ${{ steps.calculate-target-tag.outputs.test_image }}-test .
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_2 or gpu_4 that require GPU hardware
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.multi_gpu_test_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}-test
           pytest_marks: ${{ inputs.multi_gpu_test_markers }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"

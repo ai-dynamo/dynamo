@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Development-only tools — NOT for runtime or test containers.
+#
+# Version Pinning Strategy:
+# - Use == for packages that are pure Python and well-tested
+
+mypy==1.18.2
+pre-commit==4.5.0
+pyright==1.1.407
+types-aiofiles==25.1.0.20251011
+types-PyYAML==6.0.12.20250915
