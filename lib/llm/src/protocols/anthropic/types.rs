@@ -394,6 +394,9 @@ pub enum AnthropicResponseContentBlock {
 pub struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Number of input tokens read from the prompt cache (prefix cache hits).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
 }
 
 /// Reason the model stopped generating.
@@ -904,9 +907,16 @@ pub fn chat_completion_to_anthropic_response(
     // Map usage
     let usage = chat_resp
         .usage
-        .map(|u| AnthropicUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
+        .map(|u| {
+            let cache_read_input_tokens = u
+                .prompt_tokens_details
+                .and_then(|d| d.cached_tokens)
+                .filter(|&n| n > 0);
+            AnthropicUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cache_read_input_tokens,
+            }
         })
         .unwrap_or_default();
 
