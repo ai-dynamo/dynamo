@@ -17,6 +17,11 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/frontend:my-tag
+          env:
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "128"
+            - name: DYN_MODEL_NAME
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
       eppConfig:
         # This config uses the same disagg-profile-handler as disaggregated deployments.
         # The handler's graceful degradation feature makes this possible:

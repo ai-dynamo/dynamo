@@ -14,6 +14,11 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          env:
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "128"
+            - name: DYN_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
       eppConfig:
         config:
           plugins:

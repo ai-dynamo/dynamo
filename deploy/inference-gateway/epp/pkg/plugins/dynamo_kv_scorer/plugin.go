@@ -123,9 +123,14 @@ func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
 	ffiDecodeFallback = getEnvBoolOrDefault("DYN_DECODE_FALLBACK", false)
-	// Note: model name and kv_cache_block_size are now auto-discovered from the model card
-	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, decode_fallback=%v\n",
-		ffiNamespace, ffiComponent, ffiDecodeFallback)
+	// DYN_KV_CACHE_BLOCK_SIZE and DYN_MODEL_NAME are read by the Rust router (lib.rs)
+	// at create_routers time. They override the values from the model card discovery.
+	// Set these in the EPP pod env to match the worker configuration.
+	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, decode_fallback=%v, "+
+		"kv_cache_block_size=%s, model_name=%s\n",
+		ffiNamespace, ffiComponent, ffiDecodeFallback,
+		getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
+		getEnvOrDefault("DYN_MODEL_NAME", "(from discovery)"))
 }
 
 func getEnvOrDefault(key, def string) string {

@@ -665,20 +665,33 @@ pub unsafe extern "C" fn create_routers(
 
         let model_manager = Arc::new(ModelManager::new());
 
-        // Fetch model card via discovery and create preprocessor + get block_size
+        // Read block_size and model_name from env vars when available (External mode).
+        // Fall back to discovery-based model card if not set.
+        let env_block_size: Option<u32> = std::env::var("DYN_KV_CACHE_BLOCK_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok());
+        let env_model_name: Option<String> = std::env::var("DYN_MODEL_NAME")
+            .ok()
+            .filter(|s| !s.is_empty());
+
         let (preprocessor, block_size, model_name) =
             match fetch_preprocessor_from_discovery(&drt, &namespace_str).await {
                 Ok((prep, bs, name)) => {
+                    let block_size = env_block_size.unwrap_or(bs);
+                    let model_name = env_model_name.unwrap_or(name);
                     tracing::info!(
-                        kv_cache_block_size = bs,
+                        kv_cache_block_size = block_size,
+                        model_name = model_name,
                         "Preprocessor created from discovery"
                     );
-                    (Some(prep), bs, name)
+                    (Some(prep), block_size, model_name)
                 }
                 Err(e) => {
+                    // In External mode, block_size and model_name from env vars
+                    // are sufficient; preprocessor is still needed for tokenization.
                     tracing::error!(
                         error = %e,
-                        "Failed to fetch model card from discovery - cannot determine block_size"
+                        "Failed to fetch model card from discovery - cannot create preprocessor"
                     );
                     return Err(QueryRouterResult::ErrInitFailed);
                 }
