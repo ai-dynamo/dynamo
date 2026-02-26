@@ -2,16 +2,18 @@
 
 This document provides instructions for organizing, marking, and running tests in the Dynamo project. Follow these guidelines to ensure consistency and maintainability across the test suite.
 
-Dynamo has three areas of tests:
+Dynamo has three areas of tests and checks:
 
 1. **[Rust Testing](#rust-testing)** -- Covers the Rust crates under `lib/`. Has unit and integration tests. CI also enforces format, lint, and license checks before merge.
 2. **[Python Testing (pytest)](#python-testing-pytest)** -- Covers Python components and cross-component workflows. Has unit, integration, and E2E tests. Uses pytest markers to select tests by lifecycle stage, hardware, and framework.
-3. **[Container Setup](#container-setup)** -- Building and running test containers. Covers rendering Dockerfiles for different frameworks and choosing between runtime, dev, and local-dev targets.
+3. **Miscellaneous checks** -- Format (`cargo fmt`, `ruff`), lint (`clippy`, `pre-commit`), license (`cargo-deny`), unused dependencies (`cargo machete`), doc build (`cargo doc`). These run as part of CI and are documented in [Running Rust Checks and Tests](#running-rust-checks-and-tests).
+
+All tests run inside containers. See the [Container Development Guide](../container/README.md) for how to build and launch one.
 
 Each area can have one or more of the following types of tests:
 
 1. **Unit** -- Exercises a single function, class, or module in isolation. No external services, no GPU. Each test typically runs in milliseconds; all unit tests combined may take <5 minutes.
-2. **Integration** -- Wires multiple components together using **mock engines** (`dynamo.mocker`) and **real infrastructure** (ETCD for service discovery, NATS for messaging). Validates that the router, planner, frontend gRPC, and similar subsystems work together without launching a real inference engine. No GPU required. Each test typically runs in seconds; all integration tests combined may take <30 minutes.
+2. **Integration** -- Wires multiple components together using **mock engines** (`dynamo.mocker`) and **real infrastructure** (ETCD for service discovery, NATS for messaging if enabled). Validates that the router, planner, frontend gRPC, and similar subsystems work together without launching a real inference engine. No GPU required. Each test typically runs in seconds; all integration tests combined may take <30 minutes.
 3. **End-to-End (E2E)** -- Starts a **real inference engine** (vLLM, SGLang, or TRT-LLM), sends requests through the frontend, and validates responses. Requires GPU. Each test typically runs in minutes; the full E2E suite may take several hours.
 
 It is absolutely important to be mindful of how long a test you write takes. Slow tests have a compounding cost: they burn GPU-hours in CI (GPUs are expensive and shared), they discourage engineers from running suites locally (so bugs slip through to CI), and they slow down the entire team's development velocity. A test suite that takes too long becomes a test suite that nobody runs. When adding or modifying tests, include a per-test time estimate in your PR description -- CI GPU resources are limited and these estimates help the team schedule tests across pre-merge, nightly, and weekly pipelines.
@@ -210,12 +212,25 @@ mod kv_cache_tests {
 
 ### Prerequisites
 
-If you are working in a **local-dev or dev container**, you must compile the Rust bindings before running pytest. Without this step, tests that import `dynamo._internal` will fail with `ImportError`.
+This section assumes you are already inside a running **runtime**, **local-dev**, or **dev** container. If not, see the [Container Development Guide](../container/README.md) to build and launch one. The typical workflow is:
+
+1. Build a development container (`render.py ...` + `docker build ...`)
+2. Launch it (`run.sh ...`)
+3. Inside the container, compile code and run tests (see below)
+
+**Local-dev / dev containers** -- you must compile the Rust bindings before running pytest. Without this step, tests that import `dynamo._internal` will fail with `ImportError`:
 ```bash
 cargo build --locked --features dynamo-llm/block-manager --workspace
 cd lib/bindings/python && maturin develop --uv && cd -
 ```
-In a **runtime container**, the bindings are pre-built and no compilation is needed.
+
+**Runtime containers** -- binaries are pre-built, no compilation needed. Just run pytest.
+
+Sanity check (optional but recommended) -- verify the environment is wired up correctly:
+```bash
+deploy/sanity_check.py                        # local-dev / dev containers
+deploy/sanity_check.py --runtime-check-only   # runtime containers
+```
 
 ### Environment Setup
 - Use the dev container for consistency.
@@ -296,37 +311,6 @@ uv pip install pytest-asyncio
 
 ---
 
-## Container Setup
-
-- Build a runtime-only container and execute tests (no compilation; example for vllm -- substitute your framework and CUDA version as needed):
-  ```bash
-  python container/render.py --framework=vllm --target=runtime
-  # now you will have vllm-runtime-cuda12.9-amd64-rendered.Dockerfile
-  docker build -t dynamo:vllm-latest -f vllm-runtime-cuda12.9-amd64-rendered.Dockerfile .
-  ./container/run.sh --mount-workspace -it -- pytest
-  ./container/run.sh --mount-workspace -it -- pytest -m [optional markers]
-  ```
-  The rendered filename follows the pattern `<framework>-<target>-cuda<version>-<arch>-rendered.Dockerfile`. Valid frameworks: `dynamo`, `vllm`, `sglang`, `trtllm`.
-- For local development (includes compilers, debuggers, editors, etc.), use `--target=local-dev` instead of `runtime`. See the [Container Development Guide](../container/README.md) for examples. Quick rundown:
-  ```bash
-  # 1. Render and build a local-dev image
-  python container/render.py --framework=vllm --target=local-dev
-  docker build -t dynamo:vllm-local-dev -f vllm-local-dev-cuda12.9-amd64-rendered.Dockerfile .
-
-  # 2. Enter the container with your workspace mounted
-  ./container/run.sh --mount-workspace -it  # add options as needed, e.g. -e HF_TOKEN=$HF_TOKEN
-
-  # 3. Inside the container: compile Rust + Python bindings
-  cargo build --locked --features dynamo-llm/block-manager --workspace
-  cd lib/bindings/python && maturin develop --uv && cd -
-
-  # 4. Run tests (see "Running Rust Checks and Tests" and "Running Python Tests" above)
-  cargo test --locked --all-targets
-  pytest -m "unit and pre_merge" -v --tb=short
-  ```
-
----
-
 ## CI Pipeline Overview
 
 It is highly recommended that you run tests thoroughly on your local machine before submitting to CI. Local iteration is faster, gives you immediate feedback, and avoids burning shared CI GPU resources on avoidable failures. The following stages are what CI runs -- you can (and should) run the same commands on your machine before submitting to CI.
@@ -358,7 +342,7 @@ Runs per framework (vllm, sglang, trtllm). Each framework goes through: **Build*
 | Stage | What it does | Local equivalent |
 |-------|-------------|-----------------|
 | Build image | Render Dockerfile, build runtime container | `python container/render.py --framework=vllm --target=runtime && docker build ...` |
-| Sanity check | Verify packages are installed in the image | `docker run --rm <image> python /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check` |
+| Sanity check | Verify packages are installed in the image | `docker run --rm <image> /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check` |
 | CPU-only tests (parallel) | `(pre_merge or post_merge) and <framework> and gpu_0` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_0" -n auto --dist=loadscope -v --tb=short` |
 | Single GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and gpu_1` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short` |
 | Multi-GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and (gpu_2 or gpu_4)` | `pytest -m "(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)" -v --tb=short` |
