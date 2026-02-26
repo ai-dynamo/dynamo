@@ -300,13 +300,7 @@ be set before the process starts.
 
 ### SGLang
 
-SGLang logging is currently configured through Dynamo and follows the
-`DYN_LOG` level by default. To disable Dynamo's SGLang log configuration
-and manage it independently, set:
-
-```bash
-export DYN_SKIP_SGLANG_LOG_FORMATTING=true
-```
+WIP
 
 ## Related Documentation
 
