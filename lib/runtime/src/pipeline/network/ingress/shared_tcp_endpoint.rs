@@ -525,8 +525,7 @@ impl SharedTcpServer {
         write_half: tokio::io::WriteHalf<TcpStream>,
         mut response_rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
     ) -> Result<()> {
-        let mut writer =
-            tokio::io::BufWriter::with_capacity(64 * 1024, write_half);
+        let mut writer = tokio::io::BufWriter::with_capacity(64 * 1024, write_half);
 
         while let Some(first) = response_rx.recv().await {
             writer.write_all(&first).await?;

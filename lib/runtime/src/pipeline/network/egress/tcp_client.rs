@@ -541,9 +541,7 @@ impl TcpConnection {
             .await
             .map_err(|_| anyhow::anyhow!("Reader task closed"))?;
 
-        if trace
-            && let Some(start) = e2e_start
-        {
+        if trace && let Some(start) = e2e_start {
             let e2e_ns = start.elapsed().as_nanos() as u64;
             tracing::trace!(e2e_ns = e2e_ns, "TCP request e2e latency");
         }
@@ -773,11 +771,8 @@ impl HostPool {
             }
 
             // Another task is connecting. Wait for it to finish (or timeout).
-            let _ = tokio::time::timeout(
-                self.connect_timeout,
-                self.connect_notify.notified(),
-            )
-            .await;
+            let _ =
+                tokio::time::timeout(self.connect_timeout, self.connect_notify.notified()).await;
 
             // Try hot path again after yield
             let guard = self.snapshot.load();
@@ -1115,7 +1110,7 @@ impl RequestPlaneClient for TcpRequestClient {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
                 let cause = crate::error::DynamoError::from(
-                    e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>,
+                    e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
                 );
                 Err(anyhow::anyhow!(
                     crate::error::DynamoError::builder()
@@ -1649,7 +1644,9 @@ mod tests {
         let conn = pool.get_connection(addr).await.unwrap();
         let mut headers = Headers::new();
         headers.insert("x-endpoint-path".to_string(), "test".to_string());
-        let result = conn.send_request(Bytes::from("before_crash"), &headers).await;
+        let result = conn
+            .send_request(Bytes::from("before_crash"), &headers)
+            .await;
         assert!(result.is_ok());
         drop(conn);
 
@@ -1662,7 +1659,9 @@ mod tests {
         let conn = pool.get_connection(addr).await;
         // Pool should either fail to connect or return an unhealthy conn
         if let Ok(conn) = conn {
-            let result = conn.send_request(Bytes::from("after_crash"), &headers).await;
+            let result = conn
+                .send_request(Bytes::from("after_crash"), &headers)
+                .await;
             // Either send fails or connection is unhealthy
             assert!(result.is_err() || !conn.is_healthy());
         }
@@ -1721,7 +1720,9 @@ mod tests {
         // Pool should heal: get new connection and succeed
         tokio::time::sleep(Duration::from_millis(100)).await;
         let conn = pool.get_connection(addr).await.unwrap();
-        let result = conn.send_request(Bytes::from("after_recovery"), &headers).await;
+        let result = conn
+            .send_request(Bytes::from("after_recovery"), &headers)
+            .await;
         assert!(result.is_ok(), "Pool should heal after server recovery");
     }
 
@@ -1788,11 +1789,8 @@ mod tests {
                     let conn = pool.get_connection(addr).await?;
                     let mut headers = Headers::new();
                     headers.insert("x-endpoint-path".to_string(), "test".to_string());
-                    conn.send_request(
-                        Bytes::from(format!("round_{}_req_{}", round, i)),
-                        &headers,
-                    )
-                    .await
+                    conn.send_request(Bytes::from(format!("round_{}_req_{}", round, i)), &headers)
+                        .await
                 }));
             }
 
@@ -1865,9 +1863,7 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..50 {
             let pool = pool.clone();
-            handles.push(tokio::spawn(async move {
-                pool.get_connection(addr).await
-            }));
+            handles.push(tokio::spawn(async move { pool.get_connection(addr).await }));
         }
 
         let mut ok = 0;
@@ -1982,7 +1978,10 @@ mod tests {
             }
         }
 
-        assert!(ok_count > 0, "Requests across multiple hosts should succeed");
+        assert!(
+            ok_count > 0,
+            "Requests across multiple hosts should succeed"
+        );
         // Total connections across all hosts should be bounded
         let tc = total_conns.load(Ordering::SeqCst);
         assert!(
@@ -2116,8 +2115,7 @@ mod tests {
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
         // Create a watch channel with no instances initially
-        let (instance_tx, instance_rx) =
-            tokio::sync::watch::channel::<Vec<Instance>>(Vec::new());
+        let (instance_tx, instance_rx) = tokio::sync::watch::channel::<Vec<Instance>>(Vec::new());
 
         // Start the warmup watcher
         pool.start_warmup_watcher(instance_rx, cancel_token.clone());
