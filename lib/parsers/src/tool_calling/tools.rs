@@ -16,9 +16,9 @@ pub async fn try_tool_call_parse_aggregate(
     Option<String>,
 )> {
     if parser_str.is_none() {
-        tracing::info!("No tool parser provided. Trying parsing with default parser.");
+        tracing::debug!("No tool parser provided. Trying parsing with default parser.");
     } else {
-        tracing::info!("Using tool parser: {:?}", parser_str);
+        tracing::debug!("Using tool parser: {:?}", parser_str);
     }
     let (parsed, content) = detect_and_parse_tool_call(message, parser_str, tools).await?;
     if parsed.is_empty() {

@@ -463,7 +463,7 @@ impl WorkerSelector for DefaultWorkerSelector {
 
                 worker_logits.insert(worker, logit);
 
-                tracing::info!(
+                tracing::debug!(
                     "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
                      = {overlap_weight:.1} * prefill_blocks + decode_blocks \
                      = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
