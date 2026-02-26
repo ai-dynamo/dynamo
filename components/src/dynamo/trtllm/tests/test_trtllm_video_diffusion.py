@@ -13,6 +13,7 @@ import asyncio
 import threading
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
@@ -537,8 +538,6 @@ class ConcurrencyTracker:
             self._active_count -= 1
 
         # Return a mock MediaOutput with a video tensor
-        from types import SimpleNamespace
-
         return SimpleNamespace(
             video=torch.zeros((4, 64, 64, 3), dtype=torch.uint8),
             image=None,
@@ -668,8 +667,6 @@ class TestVideoHandlerResponseFormats:
 
     def _make_handler(self):
         """Create a handler with mocked engine and fs."""
-        from types import SimpleNamespace
-
         from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
             VideoGenerationHandler,
         )
