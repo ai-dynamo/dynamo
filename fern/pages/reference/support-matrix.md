@@ -4,8 +4,6 @@
 title: Support Matrix
 ---
 
-# Dynamo Support Matrix
-
 This document provides the support matrix for Dynamo, including hardware, software and build instructions.
 
 **See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support

@@ -4,8 +4,6 @@
 title: Rolling Updates
 ---
 
-# Rolling Updates for DynamoGraphDeployments
-
 This guide covers how rolling updates work for `DynamoGraphDeployment` (DGD) resources. Rolling updates allow you to update worker configurations (images, resources, environment variables, etc.) with minimal downtime by gradually replacing old pods with new ones.
 
 The behavior of rolling updates depends on the backing resource type of your deployment. DGDs backed by Kubernetes Deployments benefit from **managed rolling updates** with namespace isolation, while Grove and LWS-backed deployments use their native update mechanisms.

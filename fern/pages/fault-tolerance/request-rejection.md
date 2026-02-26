@@ -4,8 +4,6 @@
 title: Request Rejection
 ---
 
-# Request Rejection (Load Shedding)
-
 This document describes how Dynamo implements request rejection to prevent system overload and maintain service stability under high load conditions.
 
 ## Overview

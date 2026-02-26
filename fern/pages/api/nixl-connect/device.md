@@ -4,8 +4,6 @@
 title: Device
 ---
 
-# dynamo.nixl_connect.Device
-
 `Device` class describes the device a given allocation resides in.
 Usually host (`"cpu"`) or GPU (`"cuda"`) memory.
 

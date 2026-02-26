@@ -4,8 +4,6 @@
 title: Prometheus + Grafana Setup
 ---
 
-# Metrics Visualization with Prometheus and Grafana
-
 ## Overview
 
 This guide shows how to set up Prometheus and Grafana for visualizing Dynamo metrics on a single machine for demo purposes.

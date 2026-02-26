@@ -4,8 +4,6 @@
 title: Detailed Installation Guide
 ---
 
-# Installation Guide for Dynamo Kubernetes Platform
-
 Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestration and scaling, using the Dynamo Kubernetes Platform.
 
 ## Before You Start

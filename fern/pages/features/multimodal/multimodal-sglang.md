@@ -4,8 +4,6 @@
 title: SGLang Multimodal
 ---
 
-# SGLang Multimodal
-
 This document provides a comprehensive guide for multimodal inference using SGLang backend in Dynamo. SGLang multimodal supports **EPD**, **E/PD**, and **E/P/D** flows, with NIXL (RDMA) for zero-copy tensor transfer in disaggregated modes.
 
 ## Support Matrix

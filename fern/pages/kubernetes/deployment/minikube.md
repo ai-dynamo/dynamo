@@ -4,8 +4,6 @@
 title: Minikube Setup
 ---
 
-# Minikube Setup Guide
-
 Don't have a Kubernetes cluster? No problem! You can set up a local development environment using Minikube. This guide walks through the set up of everything you need to run Dynamo Kubernetes Platform locally.
 
 ## 1. Install Minikube

@@ -4,8 +4,6 @@
 title: Profiler Guide
 ---
 
-# Profiler Guide
-
 ## Overview
 
 The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
