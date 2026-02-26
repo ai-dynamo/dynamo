@@ -1061,8 +1061,9 @@ var _ = Describe("DGDR Error Handling", func() {
 	BeforeEach(func() {
 		recorder = record.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:   k8sClient,
-			Recorder: recorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Recorder:  recorder,
 			Config: &configv1alpha1.OperatorConfiguration{
 				Namespace: configv1alpha1.NamespaceConfiguration{
 					Restricted: "",
