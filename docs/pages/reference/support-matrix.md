@@ -2,11 +2,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Support Matrix
+subtitle: Hardware, software, and build compatibility for Dynamo
 ---
 
-This document provides the support matrix for Dynamo, including hardware, software and build instructions.
-
 **See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support
+
+## At a Glance
+
+**Latest stable release:** [v0.9.0](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.0) -- SGLang `0.5.8` | TensorRT-LLM `1.3.0rc1` | vLLM `0.14.1` | NIXL `0.9.0`
+
+| Requirement | Supported |
+| :--- | :--- |
+| **GPU** | NVIDIA Ampere, Ada Lovelace, Hopper, Blackwell |
+| **OS** | Ubuntu 22.04, Ubuntu 24.04, CentOS Stream 9 (experimental) |
+| **Arch** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
+| **CUDA 12** | Container images for SGLang and vLLM (CUDA 12.9) |
+| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.0); experimental for SGLang and vLLM in v0.8.x |
+
+**On this page:** [Backend Dependencies](#backend-dependencies) | [CUDA and Drivers](#cuda-and-driver-requirements) | [Hardware](#hardware-compatibility) | [Platform](#platform-architecture-compatibility) | [Cloud](#cloud-service-provider-compatibility) | [Build Support](#build-support)
 
 ## Backend Dependencies
 
@@ -16,9 +29,9 @@ The following table shows the backend framework versions included with each Dyna
 | :--- | :--- | :--- | :--- | :--- |
 | **main (ToT)** | `0.5.9` | `1.3.0rc5` | `0.16.0` | `0.10.0` |
 | **v1.0.0** *(in progress)* | `0.5.9` | `1.3.0rc5` | `0.15.1` | `0.10.1` |
-| **v0.9.1** | `0.5.8` | `1.3.0rc3` | `0.14.1` | `0.9.0` |
+| **v0.9.1** *(in progress)* | `0.5.8` | `1.3.0rc3` | `0.14.1` | `0.9.0` |
 | **v0.9.0** | `0.5.8` | `1.3.0rc1` | `0.14.1` | `0.9.0` |
-| **v0.8.1.post3** *(in progress)* | `0.5.6.post2` | `1.2.0rc6.post3` | `0.12.0` | `0.8.0` |
+| **v0.8.1.post3** | `0.5.6.post2` | `1.2.0rc6.post3` | `0.12.0` | `0.8.0` |
 | **v0.8.1.post2** | `0.5.6.post2` | `1.2.0rc6.post2` | `0.12.0` | `0.8.0` |
 | **v0.8.1.post1** | `0.5.6.post2` | `1.2.0rc6.post1` | `0.12.0` | `0.8.0` |
 | **v0.8.1** | `0.5.6.post2` | `1.2.0rc6.post1` | `0.12.0` | `0.8.0` |
@@ -40,20 +53,57 @@ The following table shows the backend framework versions included with each Dyna
 - Backend versions listed are the only versions tested and supported for each release.
 - TensorRT-LLM does not support Python 3.11; installation of the `ai-dynamo[trtllm]` wheel will fail on Python 3.11.
 
-### CUDA Versions by Backend
+### CUDA and Driver Requirements
 
-| **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **Notes** |
+Dynamo container images include CUDA toolkit libraries. The host machine must have a compatible NVIDIA GPU driver installed.
+
+| Dynamo Version | Backend | CUDA Toolkit | Min Driver | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **v0.8.1** | `12.9`, `13.0` | `13.0` | `12.9`, `13.0` | Experimental SGLang/vLLM CUDA 13 support |
-| **v0.8.0** | `12.9`, `13.0` | `13.0` | `12.9`, `13.0` | Experimental SGLang/vLLM CUDA 13 support |
-| **v0.7.1** | `12.8` | `13.0` | `12.9` | |
-| **v0.7.0** | `12.9` | `13.0` | `12.8` | TensorRT-LLM CUDA 13 support - CUDA 12.9 deprecated |
-| **v0.6.1** | `12.9` | `12.9` | `12.8` | |
-| **v0.6.0** | `12.8` | `12.9` | `12.8` | |
+| **1.0.0** *(in progress)* | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| **0.9.1** *(in progress)* | **SGLang** | 12.9 | 575.xx+ | |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| **0.9.0** | **SGLang** | 12.9 | 575.xx+ | |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| **0.8.1** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | Experimental |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | Experimental |
+| **0.8.0** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | Experimental |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | Experimental |
+| **0.7.1** | **SGLang** | 12.8 | 570.xx+ | |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| **0.7.0** | **SGLang** | 12.9 | 575.xx+ | |
+| | **TensorRT-LLM** | 13.0 | 580.xx+ | |
+| | **vLLM** | 12.8 | 570.xx+ | |
 
 Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
 
+Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
+
 For detailed artifact versions and NGC links (including container images, Python wheels, Helm charts, and Rust crates), see the [Release Artifacts](release-artifacts.md) page.
+
+#### CUDA Compatibility Resources
+
+For detailed information on CUDA driver compatibility, forward compatibility, and troubleshooting:
+
+- [CUDA Compatibility Overview](https://docs.nvidia.com/deploy/cuda-compatibility/)
+- [Why CUDA Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/why-cuda-compatibility.html)
+- [Minor Version Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
+- [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
+- [FAQ](https://docs.nvidia.com/deploy/cuda-compatibility/frequently-asked-questions.html)
+
+For extended driver compatibility beyond the minimum versions listed above, consider using `cuda-compat` packages on the host. See [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html) for details.
 
 ## Hardware Compatibility
 
@@ -90,45 +140,6 @@ Wheels are built using a manylinux_2_28-compatible environment and validated on 
 
 > [!Caution]
 > KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
-
-## Software Compatibility
-
-### CUDA and Driver Requirements
-
-Dynamo container images include CUDA toolkit libraries. The host machine must have a compatible NVIDIA GPU driver installed.
-
-| Dynamo Version | Backend | CUDA Toolkit | Min Driver (Linux) | Min Driver (Windows) | Notes |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **0.8.1** | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
-| | | 13.0 | 580.xx+ | 581.xx+ | Experimental |
-| | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
-| | **vLLM** | 12.9 | 575.xx+ | 576.xx+ | |
-| | | 13.0 | 580.xx+ | 581.xx+ | Experimental |
-| **0.8.0** | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
-| | | 13.0 | 580.xx+ | 581.xx+ | Experimental |
-| | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
-| | **vLLM** | 12.9 | 575.xx+ | 576.xx+ | |
-| | | 13.0 | 580.xx+ | 581.xx+ | Experimental |
-| **0.7.1** | **SGLang** | 12.8 | 570.xx+ | 571.xx+ | |
-| | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
-| | **vLLM** | 12.9 | 575.xx+ | 576.xx+ | |
-| **0.7.0** | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
-| | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
-| | **vLLM** | 12.8 | 570.xx+ | 571.xx+ | |
-
-Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
-
-#### CUDA Compatibility Resources
-
-For detailed information on CUDA driver compatibility, forward compatibility, and troubleshooting:
-
-- [CUDA Compatibility Overview](https://docs.nvidia.com/deploy/cuda-compatibility/)
-- [Why CUDA Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/why-cuda-compatibility.html)
-- [Minor Version Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
-- [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
-- [FAQ](https://docs.nvidia.com/deploy/cuda-compatibility/frequently-asked-questions.html)
-
-For extended driver compatibility beyond the minimum versions listed above, consider using `cuda-compat` packages on the host. See [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html) for details.
 
 ## Cloud Service Provider Compatibility
 
