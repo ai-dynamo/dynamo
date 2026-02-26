@@ -127,6 +127,17 @@ impl TcpRequestConfig {
     }
 }
 
+/// RAII guard that decrements the inflight counter on drop.
+/// Ensures fetch_sub always runs regardless of how the caller exits
+/// (success, error via `?`, timeout cancellation, or future drop).
+struct InflightGuard(Arc<AtomicU64>);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Pending request in the lock-free submit queue
 struct PendingRequest {
     /// Pre-encoded request data ready to send (zero-copy Bytes)
@@ -158,6 +169,9 @@ struct TcpConnection {
     healthy: Arc<AtomicBool>,
     /// Number of in-flight requests (for capacity heuristic)
     inflight: Arc<AtomicU64>,
+    /// Bounded admission: callers must acquire a permit before pushing to submit_queue.
+    /// Prevents unbounded memory growth under sustained overload.
+    admission: Arc<tokio::sync::Semaphore>,
     /// Max inflight for capacity heuristic (matches channel_buffer)
     channel_buffer: usize,
 }
@@ -179,6 +193,7 @@ impl TcpConnection {
         let writer_notify = Arc::new(tokio::sync::Notify::new());
         let healthy = Arc::new(AtomicBool::new(true));
         let inflight = Arc::new(AtomicU64::new(0));
+        let admission = Arc::new(tokio::sync::Semaphore::new(channel_buffer));
 
         // Spawn writer task (batched via BufWriter)
         let writer_handle = {
@@ -186,10 +201,9 @@ impl TcpConnection {
             let response_q = response_queue.clone();
             let notify = writer_notify.clone();
             let healthy = healthy.clone();
-            let inflight = inflight.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    Self::writer_task(write_half, submit_q, response_q, notify, healthy.clone(), inflight)
+                    Self::writer_task(write_half, submit_q, response_q, notify, healthy.clone())
                         .await
                 {
                     tracing::debug!("Writer task failed for {}: {}", addr, e);
@@ -222,6 +236,7 @@ impl TcpConnection {
             reader_handle: Arc::new(reader_handle),
             healthy,
             inflight,
+            admission,
             channel_buffer,
         })
     }
@@ -301,7 +316,6 @@ impl TcpConnection {
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         notify: Arc<tokio::sync::Notify>,
         healthy: Arc<AtomicBool>,
-        inflight: Arc<AtomicU64>,
     ) -> Result<()> {
         let mut writer = tokio::io::BufWriter::with_capacity(WRITER_BUF_CAPACITY, write_half);
         let trace = latency_trace_enabled();
@@ -358,14 +372,13 @@ impl TcpConnection {
 
                 for data in &encoded_batch {
                     if let Err(e) = writer.write_all(data).await {
-                        inflight.fetch_sub(count as u64, Ordering::Relaxed);
+                        // Callers' InflightGuard handles decrement on their error path
                         return Err(e.into());
                     }
                 }
 
                 // Phase 3: Single flush = single write(2) syscall for entire batch
                 if let Err(e) = writer.flush().await {
-                    inflight.fetch_sub(count as u64, Ordering::Relaxed);
                     return Err(e.into());
                 }
 
@@ -472,7 +485,12 @@ impl TcpConnection {
         Ok(())
     }
 
-    /// Send a request via lock-free SegQueue push (~20-40ns)
+    /// Send a request via bounded admission + lock-free SegQueue push.
+    ///
+    /// The admission semaphore caps in-flight requests per connection at `channel_buffer`,
+    /// preventing unbounded memory growth under sustained overload.
+    /// The `InflightGuard` RAII type ensures the inflight counter is always decremented,
+    /// even on error returns (`?`), timeout cancellation, or future drop.
     async fn send_request(&self, payload: Bytes, headers: &Headers) -> Result<Bytes> {
         use crate::pipeline::network::codec::TcpRequestMessage;
 
@@ -497,10 +515,19 @@ impl TcpConnection {
             None
         };
 
-        // Increment inflight before push (for capacity heuristic)
-        self.inflight.fetch_add(1, Ordering::Relaxed);
+        // Bounded admission: blocks if channel_buffer in-flight requests already queued.
+        // Prevents unbounded SegQueue growth under sustained overload.
+        let _permit = self
+            .admission
+            .acquire()
+            .await
+            .map_err(|_| anyhow::anyhow!("Connection admission closed"))?;
 
-        // Lock-free submit: ~20-40ns
+        // Increment inflight (RAII guard ensures decrement on ALL exit paths)
+        self.inflight.fetch_add(1, Ordering::Relaxed);
+        let _guard = InflightGuard(self.inflight.clone());
+
+        // Lock-free submit
         self.submit_queue.push(PendingRequest {
             encoded_data,
             response_tx,
@@ -509,13 +536,10 @@ impl TcpConnection {
         // Wake writer if it was sleeping
         self.writer_notify.notify_one();
 
-        // Await response
+        // Await response — on error/timeout/drop, _guard decrements inflight
         let result = response_rx
             .await
             .map_err(|_| anyhow::anyhow!("Reader task closed"))?;
-
-        // Decrement inflight after response
-        self.inflight.fetch_sub(1, Ordering::Relaxed);
 
         if trace
             && let Some(start) = e2e_start
@@ -2177,5 +2201,114 @@ mod tests {
             1,
             "Should use only 1 connection"
         );
+    }
+
+    #[tokio::test]
+    async fn test_inflight_counter_recovers_on_reader_drop() {
+        // Start a server that accepts but immediately closes the connection
+        // so the reader task exits, causing all in-flight requests to error.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            // Accept then drop the connection immediately
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+
+        let conn = Arc::new(
+            TcpConnection::connect(addr, Duration::from_secs(5), 10)
+                .await
+                .unwrap(),
+        );
+
+        // Send requests that will fail because the server closed the connection
+        let mut handles = vec![];
+        for i in 0..5 {
+            let conn = conn.clone();
+            handles.push(tokio::spawn(async move {
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                conn.send_request(Bytes::from(format!("req_{}", i)), &headers)
+                    .await
+            }));
+        }
+
+        // Wait for all requests to complete (they should all error)
+        for handle in handles {
+            let _ = handle.await.unwrap();
+        }
+
+        // Give tasks a moment to fully drain
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The critical assertion: inflight counter must return to 0
+        // (InflightGuard RAII ensures decrement on all exit paths)
+        assert_eq!(
+            conn.inflight.load(Ordering::Relaxed),
+            0,
+            "Inflight counter must recover to 0 after all requests complete/fail"
+        );
+
+        // available_capacity should be back to full
+        assert_eq!(
+            conn.available_capacity(),
+            conn.channel_buffer,
+            "Available capacity must recover to channel_buffer after all requests drain"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_admission_prevents_unbounded_queue() {
+        // Start a slow server that accepts but doesn't respond quickly
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Hold connection open but never respond
+            let (_read, _write) = tokio::io::split(stream);
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        // Pool size 1, channel_buffer 5 — only 5 requests can be in-flight
+        let conn = Arc::new(
+            TcpConnection::connect(addr, Duration::from_secs(5), 5)
+                .await
+                .unwrap(),
+        );
+
+        // Try to send 20 requests concurrently — only 5 should get through admission,
+        // the rest should block on the semaphore
+        let mut handles = vec![];
+        for i in 0..20 {
+            let conn = conn.clone();
+            handles.push(tokio::spawn(async move {
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                // Use a short timeout to avoid waiting forever
+                tokio::time::timeout(
+                    Duration::from_millis(200),
+                    conn.send_request(Bytes::from(format!("req_{}", i)), &headers),
+                )
+                .await
+            }));
+        }
+
+        // Wait a bit for requests to pile up
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Inflight should be capped at channel_buffer (5)
+        let inflight = conn.inflight.load(Ordering::Relaxed);
+        assert!(
+            inflight <= 5,
+            "Inflight should be bounded by channel_buffer (5), got {}",
+            inflight
+        );
+
+        // Clean up
+        for handle in handles {
+            let _ = handle.await;
+        }
     }
 }
