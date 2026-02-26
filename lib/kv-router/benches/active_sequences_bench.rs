@@ -479,7 +479,7 @@ async fn apply_entry(
             output_length,
         } => {
             let _ = multi.potential_blocks_and_tokens(
-                Some(block_hashes.clone()),
+                Some(&block_hashes),
                 isl,
                 OverlapScores::default(),
             );

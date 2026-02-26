@@ -136,7 +136,7 @@ impl SchedulerQueue {
     /// compute potential load → select worker → respond → book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest) {
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
-            request.token_seq.clone(),
+            request.token_seq.as_deref(),
             request.isl_tokens,
             request.overlaps.clone(),
         );

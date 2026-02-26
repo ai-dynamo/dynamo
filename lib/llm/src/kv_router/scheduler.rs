@@ -145,7 +145,7 @@ impl KvScheduler {
                         .iter()
                         .map(|(&id, c)| (id, c.data_parallel_size))
                         .collect();
-                    slots_monitor.update_workers(dp_sizes);
+                    slots_monitor.update_workers(&dp_sizes);
                     last_workers = current_workers;
                 }
             }
@@ -295,9 +295,9 @@ impl KvScheduler {
         isl_tokens: usize,
         overlaps: OverlapScores,
     ) -> Vec<PotentialLoad> {
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens(token_seq, isl_tokens, overlaps);
+        let (decode_blocks, prefill_tokens) =
+            self.slots
+                .potential_blocks_and_tokens(token_seq.as_deref(), isl_tokens, overlaps);
 
         // Get all unique WorkerWithDpRank from both hashmaps
         let mut workers: HashSet<WorkerWithDpRank> = HashSet::new();

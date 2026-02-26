@@ -1,18 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Multi-worker extension of [`ActiveSequences`] using shared DashMap for lock-free concurrent
-//! access, with pluggable event publishing and metric observation via traits.
+//! Multi-worker extension of [`ActiveSequences`] with per-worker `RwLock` for
+//! fine-grained concurrent access, plus pluggable event publishing and metric
+//! observation via traits.
 //!
-//! The two traits [`SequencePublisher`] and [`SequenceSubscriber`] abstract the runtime-specific
-//! transport (e.g., NATS EventPublisher, Prometheus gauges) so that all business logic lives in
-//! this crate while the runtime glue stays in `lib/llm`.
+//! The two traits [`SequencePublisher`] and [`SequenceSubscriber`] abstract the
+//! runtime-specific transport (e.g., NATS EventPublisher, Prometheus gauges) so
+//! that all business logic lives in this crate while the runtime glue stays in
+//! `lib/llm`.
 
 use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{
@@ -92,16 +94,49 @@ pub struct SequenceRequest {
 }
 
 // ---------------------------------------------------------------------------
+// WorkerTable
+// ---------------------------------------------------------------------------
+
+/// Dense table of workers indexed by position, with a side map for
+/// `WorkerWithDpRank → index` lookup.  Each slot has its own `RwLock` so
+/// readers (e.g. `potential_blocks_and_tokens` fan-out) never contend with
+/// writers targeting a different worker.
+struct WorkerTable {
+    slots: Vec<(WorkerWithDpRank, RwLock<ActiveSequences>)>,
+    index: HashMap<WorkerWithDpRank, usize>,
+}
+
+impl WorkerTable {
+    fn new(block_size: usize, dp_sizes: &HashMap<u64, u32>) -> Self {
+        let mut slots = Vec::new();
+        let mut index = HashMap::new();
+        for (&worker_id, &dp_size) in dp_sizes {
+            for dp_rank in 0..dp_size {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                index.insert(worker, slots.len());
+                slots.push((worker, RwLock::new(ActiveSequences::new(block_size))));
+            }
+        }
+        Self { slots, index }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ActiveSequencesMultiWorker
 // ---------------------------------------------------------------------------
 
-/// Multi-worker extension of [`ActiveSequences`] using shared DashMap for lock-free concurrent
-/// access.
+/// Multi-worker extension of [`ActiveSequences`] with per-worker `RwLock` for
+/// fine-grained concurrent access.
 ///
-/// Generic over `P: SequencePublisher` to decouple from runtime-specific event transport
-/// and metrics infrastructure.
+/// The outer `RwLock<WorkerTable>` is held briefly for every operation (read
+/// lock) and exclusively only during the rare `update_workers` call.  The inner
+/// per-slot `RwLock<ActiveSequences>` provides independent read/write access
+/// per worker so that a mutation on worker A never blocks readers of worker B.
+///
+/// Generic over `P: SequencePublisher` to decouple from runtime-specific event
+/// transport and metrics infrastructure.
 pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
-    workers: Arc<DashMap<WorkerWithDpRank, ActiveSequences>>,
+    workers: RwLock<WorkerTable>,
     request_to_worker: Arc<DashMap<RequestId, WorkerWithDpRank>>,
     request_to_lora: Arc<DashMap<RequestId, String>>,
     block_size: usize,
@@ -125,21 +160,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> Self {
         assert!(block_size > 1, "block_size must be greater than 1");
 
-        let workers = Arc::new(DashMap::new());
-        let request_to_worker = Arc::new(DashMap::new());
-        let request_to_lora = Arc::new(DashMap::new());
-
-        for (worker_id, dp_size) in dp_sizes {
-            for dp_rank in 0..dp_size {
-                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                workers.insert(worker, ActiveSequences::new(block_size));
-            }
-        }
-
         Self {
-            workers,
-            request_to_worker,
-            request_to_lora,
+            workers: RwLock::new(WorkerTable::new(block_size, &dp_sizes)),
+            request_to_worker: Arc::new(DashMap::new()),
+            request_to_lora: Arc::new(DashMap::new()),
             block_size,
             router_id,
             publisher,
@@ -202,8 +226,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                     .insert(event.request_id.clone(), lora_name.clone());
                             }
 
-                            if let Some(mut entry) = self.workers.get_mut(&event.worker) {
-                                entry.add_request(
+                            let table = self.workers.read().unwrap();
+                            if let Some(&idx) = table.index.get(&event.worker) {
+                                let mut seq = table.slots[idx].1.write().unwrap();
+                                seq.add_request(
                                     event.request_id.clone(),
                                     token_sequence.clone(),
                                     *isl,
@@ -220,18 +246,24 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         ActiveSequenceEventData::Free => {
                             if let Some((_, worker)) =
                                 self.request_to_worker.remove(&event.request_id)
-                                && let Some(mut entry) = self.workers.get_mut(&worker)
                             {
-                                entry.free(&event.request_id);
+                                let table = self.workers.read().unwrap();
+                                if let Some(&idx) = table.index.get(&worker) {
+                                    let mut seq = table.slots[idx].1.write().unwrap();
+                                    seq.free(&event.request_id);
+                                }
                             }
                             self.request_to_lora.remove(&event.request_id);
                         }
                         ActiveSequenceEventData::MarkPrefillCompleted => {
                             if let Some(worker) =
                                 self.request_to_worker.get(&event.request_id)
-                                && let Some(mut entry) = self.workers.get_mut(&*worker)
                             {
-                                entry.mark_prefill_completed(&event.request_id);
+                                let table = self.workers.read().unwrap();
+                                if let Some(&idx) = table.index.get(&*worker) {
+                                    let mut seq = table.slots[idx].1.write().unwrap();
+                                    seq.mark_prefill_completed(&event.request_id);
+                                }
                             }
                         }
                     }
@@ -249,26 +281,29 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Update the set of workers, adding and removing as needed.
     ///
     /// `new_dp_sizes` maps worker IDs to their data-parallel size.
-    pub fn update_workers(&self, new_dp_sizes: HashMap<u64, u32>) {
-        let current_workers: HashSet<WorkerWithDpRank> =
-            self.workers.iter().map(|entry| *entry.key()).collect();
+    pub fn update_workers(&self, new_dp_sizes: &HashMap<u64, u32>) {
+        let mut table = self.workers.write().unwrap();
 
-        let mut new_workers: HashSet<WorkerWithDpRank> = HashSet::new();
-        for (worker_id, dp_size) in &new_dp_sizes {
-            for dp_rank in 0..*dp_size {
-                new_workers.insert(WorkerWithDpRank::new(*worker_id, dp_rank));
+        let current_workers: HashSet<WorkerWithDpRank> = table.index.keys().copied().collect();
+
+        let mut target_workers: HashSet<WorkerWithDpRank> = HashSet::new();
+        for (&worker_id, &dp_size) in new_dp_sizes {
+            for dp_rank in 0..dp_size {
+                target_workers.insert(WorkerWithDpRank::new(worker_id, dp_rank));
             }
         }
 
-        let workers_to_remove: Vec<WorkerWithDpRank> =
-            current_workers.difference(&new_workers).copied().collect();
-        let workers_to_add: Vec<WorkerWithDpRank> =
-            new_workers.difference(&current_workers).copied().collect();
+        let workers_to_remove: HashSet<WorkerWithDpRank> = current_workers
+            .difference(&target_workers)
+            .copied()
+            .collect();
 
+        // Clean up request mappings for removed workers
         for worker in &workers_to_remove {
             tracing::warn!("Removing worker {:?}", worker);
 
-            self.workers.remove(worker);
+            self.request_to_worker
+                .retain(|_request_id, mapped_worker| mapped_worker != worker);
 
             let requests_to_remove: Vec<RequestId> = self
                 .request_to_worker
@@ -277,19 +312,33 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 .map(|entry| entry.key().clone())
                 .collect();
 
-            self.request_to_worker
-                .retain(|_request_id, mapped_worker| mapped_worker != worker);
-
             for request_id in requests_to_remove {
                 self.request_to_lora.remove(&request_id);
             }
         }
 
-        for worker in &workers_to_add {
-            tracing::warn!("Adding worker {:?}", worker);
-            self.workers
-                .insert(*worker, ActiveSequences::new(self.block_size));
+        // Drain old slots, preserving ActiveSequences for retained workers
+        let old_slots = std::mem::take(&mut table.slots);
+        let mut preserved: HashMap<WorkerWithDpRank, ActiveSequences> = old_slots
+            .into_iter()
+            .filter(|(w, _)| !workers_to_remove.contains(w))
+            .map(|(w, lock)| (w, lock.into_inner().unwrap()))
+            .collect();
+
+        // Rebuild table with new worker set
+        let mut new_slots = Vec::new();
+        let mut new_index = HashMap::new();
+        for &worker in &target_workers {
+            let seq = preserved.remove(&worker).unwrap_or_else(|| {
+                tracing::warn!("Adding worker {:?}", worker);
+                ActiveSequences::new(self.block_size)
+            });
+            new_index.insert(worker, new_slots.len());
+            new_slots.push((worker, RwLock::new(seq)));
         }
+
+        table.slots = new_slots;
+        table.index = new_index;
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
@@ -303,8 +352,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             lora_name,
         } = req;
 
-        if !self.workers.contains_key(&worker) {
-            return Err(SequenceError::WorkerNotFound { worker });
+        {
+            let table = self.workers.read().unwrap();
+            if !table.index.contains_key(&worker) {
+                return Err(SequenceError::WorkerNotFound { worker });
+            }
         }
 
         if let Some(existing_worker) = self.request_to_worker.get(&request_id) {
@@ -337,11 +389,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
 
         let removed_requests = {
-            let mut entry = self
-                .workers
-                .get_mut(&worker)
+            let table = self.workers.read().unwrap();
+            let &idx = table
+                .index
+                .get(&worker)
                 .ok_or(SequenceError::WorkerNotFound { worker })?;
-            entry.add_request(
+            let mut seq = table.slots[idx].1.write().unwrap();
+            seq.add_request(
                 request_id,
                 token_sequence,
                 isl,
@@ -394,11 +448,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
 
         {
-            let mut entry = self
-                .workers
-                .get_mut(&worker)
+            let table = self.workers.read().unwrap();
+            let &idx = table
+                .index
+                .get(&worker)
                 .ok_or(SequenceError::WorkerNotFound { worker })?;
-            mutate_fn(&mut entry, request_id);
+            let mut seq = table.slots[idx].1.write().unwrap();
+            mutate_fn(&mut seq, request_id);
         }
 
         if remove_mapping {
@@ -471,11 +527,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             })?;
 
         let success = {
-            let mut entry = self
-                .workers
-                .get_mut(&worker)
+            let table = self.workers.read().unwrap();
+            let &idx = table
+                .index
+                .get(&worker)
                 .ok_or(SequenceError::WorkerNotFound { worker })?;
-            entry.add_output_block(request_id, decay_fraction)
+            let mut seq = table.slots[idx].1.write().unwrap();
+            seq.add_output_block(request_id, decay_fraction)
         };
 
         if !success {
@@ -492,11 +550,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Read active blocks/tokens from a worker and publish ActiveLoad metrics.
     fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank) {
         let (active_blocks, active_tokens) = {
-            let Some(entry) = self.workers.get(&worker) else {
+            let table = self.workers.read().unwrap();
+            let Some(&idx) = table.index.get(&worker) else {
                 tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
                 return;
             };
-            (entry.active_blocks(), entry.active_tokens())
+            let seq = table.slots[idx].1.read().unwrap();
+            (seq.active_blocks(), seq.active_tokens())
         };
 
         self.publisher
@@ -514,7 +574,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Get the number of workers.
     pub fn num_workers(&self) -> usize {
-        self.workers.len()
+        self.workers.read().unwrap().slots.len()
     }
 
     /// Get the worker type for this router ("prefill" or "decode").
@@ -523,13 +583,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Query all workers for the number of new blocks that would be added by a token sequence.
-    pub fn new_blocks(
-        &self,
-        token_sequence: Vec<SequenceHash>,
-    ) -> HashMap<WorkerWithDpRank, usize> {
-        let mut results = HashMap::with_capacity(self.workers.len());
-        for entry in self.workers.iter() {
-            results.insert(*entry.key(), entry.value().new_blocks(&token_sequence));
+    pub fn new_blocks(&self, token_sequence: &[SequenceHash]) -> HashMap<WorkerWithDpRank, usize> {
+        let table = self.workers.read().unwrap();
+        let mut results = HashMap::with_capacity(table.slots.len());
+        for (worker, lock) in &table.slots {
+            let seq = lock.read().unwrap();
+            results.insert(*worker, seq.new_blocks(token_sequence));
         }
         results
     }
@@ -537,14 +596,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Query all workers for the total number of blocks (new + active) that would be used.
     pub fn potential_blocks(
         &self,
-        token_sequence: Vec<SequenceHash>,
+        token_sequence: &[SequenceHash],
     ) -> HashMap<WorkerWithDpRank, usize> {
-        let mut results = HashMap::with_capacity(self.workers.len());
-        for entry in self.workers.iter() {
-            results.insert(
-                *entry.key(),
-                entry.value().potential_blocks(&token_sequence),
-            );
+        let table = self.workers.read().unwrap();
+        let mut results = HashMap::with_capacity(table.slots.len());
+        for (worker, lock) in &table.slots {
+            let seq = lock.read().unwrap();
+            results.insert(*worker, seq.potential_blocks(token_sequence));
         }
         results
     }
@@ -552,7 +610,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Query all workers for the potential blocks and tokens.
     pub fn potential_blocks_and_tokens(
         &self,
-        token_sequence: Option<Vec<SequenceHash>>,
+        token_sequence: Option<&[SequenceHash]>,
         isl: usize,
         overlaps: OverlapScores,
     ) -> (
@@ -561,22 +619,21 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
+
+        let table = self.workers.read().unwrap();
+
         #[cfg(feature = "bench")]
-        let num_workers = self.workers.len();
+        let num_workers = table.slots.len();
 
-        let mut potential_blocks = HashMap::with_capacity(self.workers.len());
-        let mut potential_tokens = HashMap::with_capacity(self.workers.len());
+        let mut potential_blocks = HashMap::with_capacity(table.slots.len());
+        let mut potential_tokens = HashMap::with_capacity(table.slots.len());
 
-        for entry in self.workers.iter() {
-            let worker = *entry.key();
-            let overlap = *overlaps.scores.get(&worker).unwrap_or(&0);
-
-            let (blocks, tokens) =
-                entry
-                    .value()
-                    .potential_blocks_and_tokens(token_sequence.as_deref(), isl, overlap);
-            potential_blocks.insert(worker, blocks);
-            potential_tokens.insert(worker, tokens);
+        for (worker, lock) in &table.slots {
+            let overlap = *overlaps.scores.get(worker).unwrap_or(&0);
+            let seq = lock.read().unwrap();
+            let (blocks, tokens) = seq.potential_blocks_and_tokens(token_sequence, isl, overlap);
+            potential_blocks.insert(*worker, blocks);
+            potential_tokens.insert(*worker, tokens);
         }
 
         #[cfg(feature = "bench")]
@@ -594,18 +651,22 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Query all workers for their current number of active blocks.
     pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
-        let mut results = HashMap::with_capacity(self.workers.len());
-        for entry in self.workers.iter() {
-            results.insert(*entry.key(), entry.value().active_blocks());
+        let table = self.workers.read().unwrap();
+        let mut results = HashMap::with_capacity(table.slots.len());
+        for (worker, lock) in &table.slots {
+            let seq = lock.read().unwrap();
+            results.insert(*worker, seq.active_blocks());
         }
         results
     }
 
     /// Query all workers for their current number of active tokens.
     pub fn active_tokens(&self) -> HashMap<WorkerWithDpRank, usize> {
-        let mut results = HashMap::with_capacity(self.workers.len());
-        for entry in self.workers.iter() {
-            results.insert(*entry.key(), entry.value().active_tokens());
+        let table = self.workers.read().unwrap();
+        let mut results = HashMap::with_capacity(table.slots.len());
+        for (worker, lock) in &table.slots {
+            let seq = lock.read().unwrap();
+            results.insert(*worker, seq.active_tokens());
         }
         results
     }
