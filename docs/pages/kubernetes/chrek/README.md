@@ -67,7 +67,7 @@ helm install chrek nvidia/chrek \
 ### ✅ Currently Supported
 - ✅ **vLLM and SGLang backends** (TensorRT-LLM planned)
 - ✅ **LLM decode/prefill workers only** (multimodal, embedding, and diffusion workers are not supported)
-- ✅ Single-node, single-GPU checkpoints
+- ✅ Cross-node, single-GPU checkpoints
 - ✅ PVC storage backend (RWX for multi-node)
 - ✅ CUDA checkpoint/restore
 - ✅ PyTorch distributed state (with `GLOO_SOCKET_IFNAME=lo`)
