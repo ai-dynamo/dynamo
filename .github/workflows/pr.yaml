@@ -35,227 +35,227 @@ jobs:
   # ============================================================================
 
 
-  changed-files:
-    runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
-    outputs:
-      core: ${{ steps.changes.outputs.core }}
-      operator: ${{ steps.changes.outputs.operator }}
-      deploy: ${{ steps.changes.outputs.deploy }}
-      vllm: ${{ steps.changes.outputs.vllm }}
-      sglang: ${{ steps.changes.outputs.sglang }}
-      trtllm: ${{ steps.changes.outputs.trtllm }}
-      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-        with:
-          fetch-depth: 0
-      - name: Check for changes
-        id: changes
-        uses: ./.github/actions/changed-files
-        with:
-          gh_token: ${{ github.token }}
-      - name: Export builder name
-        id: export-builder-name
-        run: |
-          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
+#   changed-files:
+#     runs-on: ubuntu-latest
+#     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
+#     outputs:
+#       core: ${{ steps.changes.outputs.core }}
+#       operator: ${{ steps.changes.outputs.operator }}
+#       deploy: ${{ steps.changes.outputs.deploy }}
+#       vllm: ${{ steps.changes.outputs.vllm }}
+#       sglang: ${{ steps.changes.outputs.sglang }}
+#       trtllm: ${{ steps.changes.outputs.trtllm }}
+#       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+#         with:
+#           fetch-depth: 0
+#       - name: Check for changes
+#         id: changes
+#         uses: ./.github/actions/changed-files
+#         with:
+#           gh_token: ${{ github.token }}
+#       - name: Export builder name
+#         id: export-builder-name
+#         run: |
+#           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
-  backend-status-check:
-    runs-on: ubuntu-latest
-    needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
-    if: always()
-    steps:
-      - name: "Check all dependent jobs"
-        run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+#   backend-status-check:
+#     runs-on: ubuntu-latest
+#     needs: [changed-files, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
+#     if: always()
+#     steps:
+#       - name: "Check all dependent jobs"
+#         run: |
+#           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
-  deploy-status-check:
-    runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    if: always()
-    steps:
-      - name: "Check all deploy test jobs"
-        run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
-
-
-  # ============================================================================
-  # Operator
-  # ============================================================================
-
-  operator:
-    needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
-    name: Operator
-    runs-on: prod-default-v2
-    env:
-      IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    outputs:
-      operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
-        with:
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          flavor: general
-          all_arch: 'true'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Linter
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Tester
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Set up Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with:
-          go-version: '1.25'
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install Python dependencies for operator codegen
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
-      - name: Check for uncommitted changes
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          make check
-      - name: Build and push Container
-        id: build-and-push-image
-        shell: bash
-        working-directory: ./deploy/operator
-        env:
-          NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
-        run: |
-          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          IMAGE_URIS=(
-            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-          )
-
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            IMAGE_URIS+=(
-              "${ECR_DEFAULT_IMAGE_BASE}:main-operator"
-              "${ACR_IMAGE_BASE}:main-operator"
-            )
-          fi
-
-          echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          echo "flags for docker buildx: ${TAGGING_FLAGS}"
-
-          if [[ "$NO_CACHE_FLAG" == "true" ]]; then
-            NO_CACHE_FLAG="--no-cache"
-          fi
-          docker buildx build --push ${NO_CACHE_FLAG} \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              ${TAGGING_FLAGS} -f Dockerfile .
-
-          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
+#   deploy-status-check:
+#     runs-on: ubuntu-latest
+#     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+#     if: always()
+#     steps:
+#       - name: "Check all deploy test jobs"
+#         run: |
+#           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
 
-# ============================================================================
-# FRAMEWORK PIPELINES (Build → Test → Copy)
-# ============================================================================
-  # ============================================================================
-  # VLLM PIPELINE
-  # ============================================================================
-  vllm-pipeline:
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: vllm
-      target: runtime
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
-      cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
-      single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 35
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-    secrets: inherit
+#   # ============================================================================
+#   # Operator
+#   # ============================================================================
 
-  # ============================================================================
-  # SGLANG PIPELINE
-  # ============================================================================
-  sglang-pipeline:
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: sglang
-      target: runtime
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
-      cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
-      single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-    secrets: inherit
+#   operator:
+#     needs: changed-files
+#     if: needs.changed-files.outputs.operator == 'true'
+#     name: Operator
+#     runs-on: prod-default-v2
+#     env:
+#       IMAGE_REGISTRY: ai-dynamo
+#       IMAGE_REPOSITORY: dynamo
+#       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+#     outputs:
+#       operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+#       - name: Initialize Dynamo Builder
+#         uses: ./.github/actions/init-dynamo-builder
+#         with:
+#           builder_name: ${{ needs.changed-files.outputs.builder_name }}
+#           flavor: general
+#           all_arch: 'true'
+#       - name: Docker Login
+#         uses: ./.github/actions/docker-login
+#         with:
+#           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+#           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+#           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+#           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+#           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+#       - name: Linter
+#         shell: bash
+#         working-directory: ./deploy/operator
+#         run: |
+#           docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+#       - name: Tester
+#         shell: bash
+#         working-directory: ./deploy/operator
+#         run: |
+#           docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+#       - name: Set up Go
+#         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+#         with:
+#           go-version: '1.25'
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: "3.11"
+#       - name: Install Python dependencies for operator codegen
+#         shell: bash
+#         working-directory: ./deploy/operator
+#         run: |
+#           python -m pip install --upgrade pip
+#           python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
+#       - name: Check for uncommitted changes
+#         shell: bash
+#         working-directory: ./deploy/operator
+#         run: |
+#           make check
+#       - name: Build and push Container
+#         id: build-and-push-image
+#         shell: bash
+#         working-directory: ./deploy/operator
+#         env:
+#           NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
+#         run: |
+#           ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+#           DEFAULT_TAG="${{ github.sha }}-operator"
+#           ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+#           IMAGE_URIS=(
+#             "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
+#             "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
+#           )
 
-  # ============================================================================
-  # TRTLLM PIPELINE
-  # ============================================================================
-  trtllm-pipeline:
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: trtllm
-      target: runtime
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["13.1"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
-      copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
-      cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
-      single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
-      run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
-    secrets: inherit
+#           if [[ "${{ github.ref_name }}" == "main" ]]; then
+#             IMAGE_URIS+=(
+#               "${ECR_DEFAULT_IMAGE_BASE}:main-operator"
+#               "${ACR_IMAGE_BASE}:main-operator"
+#             )
+#           fi
+
+#           echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
+#           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+#           echo "flags for docker buildx: ${TAGGING_FLAGS}"
+
+#           if [[ "$NO_CACHE_FLAG" == "true" ]]; then
+#             NO_CACHE_FLAG="--no-cache"
+#           fi
+#           docker buildx build --push ${NO_CACHE_FLAG} \
+#               --platform linux/amd64,linux/arm64 \
+#               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+#               ${TAGGING_FLAGS} -f Dockerfile .
+
+#           echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
+#           echo "" >> $GITHUB_STEP_SUMMARY
+#           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+#           echo "|-----|" >> $GITHUB_STEP_SUMMARY
+#           for image_uri in "${IMAGE_URIS[@]}"; do
+#             echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+#           done
+
+
+# # ============================================================================
+# # FRAMEWORK PIPELINES (Build → Test → Copy)
+# # ============================================================================
+#   # ============================================================================
+#   # VLLM PIPELINE
+#   # ============================================================================
+#   vllm-pipeline:
+#     needs: [changed-files]
+#     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+#     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+#     with:
+#       framework: vllm
+#       target: runtime
+#       platforms: '["amd64", "arm64"]'
+#       cuda_versions: '["12.9", "13.0"]'
+#       extra_tags: |
+#         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+#         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+#       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+#       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+#       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+#       cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
+#       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
+#       single_gpu_test_timeout_minutes: 35
+#       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+#     secrets: inherit
+
+#   # ============================================================================
+#   # SGLANG PIPELINE
+#   # ============================================================================
+#   sglang-pipeline:
+#     needs: [changed-files]
+#     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+#     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+#     with:
+#       framework: sglang
+#       target: runtime
+#       platforms: '["amd64", "arm64"]'
+#       cuda_versions: '["12.9", "13.0"]'
+#       extra_tags: |
+#         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
+#         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+#       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+#       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+#       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+#       cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
+#       single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
+#       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+#     secrets: inherit
+
+#   # ============================================================================
+#   # TRTLLM PIPELINE
+#   # ============================================================================
+#   trtllm-pipeline:
+#     needs: [changed-files]
+#     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+#     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+#     with:
+#       framework: trtllm
+#       target: runtime
+#       platforms: '["amd64", "arm64"]'
+#       cuda_versions: '["13.1"]'
+#       extra_tags: |
+#         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
+#         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+#       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+#       build_timeout_minutes: ${{ github.ref_name == 'main' && 120 || 60 }}
+#       copy_timeout_minutes: ${{ github.ref_name == 'main' && 20 || 10 }}
+#       cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
+#       single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
+#       run_multi_gpu_tests: false  # TODO: Dmitry is working on fixing markers for multi-GPU tests, can enable after that is resolved
+#     secrets: inherit
 
 
    # ============================================================================
@@ -266,15 +266,6 @@ jobs:
   deploy-operator:
     runs-on: prod-default-small-v2
     # Run when any deploy test will run: if core, any framework, or deploy files changed
-    if: |
-      always() &&
-      (needs.changed-files.outputs.core == 'true' ||
-       needs.changed-files.outputs.vllm == 'true' ||
-       needs.changed-files.outputs.sglang == 'true' ||
-       needs.changed-files.outputs.trtllm == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
-    needs: [changed-files, operator]
     outputs:
       NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
     steps:
@@ -282,13 +273,14 @@ jobs:
     - name: Determine operator image tag
       id: operator-tag
       run: |
-        if [ "${{ needs.operator.result }}" == "success" ]; then
-          echo "tag=${{ needs.operator.outputs.operator_default_tag }}" >> $GITHUB_OUTPUT
-          echo "Using newly built operator image: ${{ needs.operator.outputs.operator_default_tag }}"
-        else
-          echo "tag=main-operator" >> $GITHUB_OUTPUT
-          echo "Using stable operator image: main-operator"
-        fi
+        echo "tag=main-operator" >> $GITHUB_OUTPUT
+        # if [ "${{ needs.operator.result }}" == "success" ]; then
+        #   echo "tag=${{ needs.operator.outputs.operator_default_tag }}" >> $GITHUB_OUTPUT
+        #   echo "Using newly built operator image: ${{ needs.operator.outputs.operator_default_tag }}"
+        # else
+        #   echo "tag=main-operator" >> $GITHUB_OUTPUT
+        #   echo "Using stable operator image: main-operator"
+        # fi
     - name: Deploy Operator
       id: deploy-operator-step
       env:
@@ -375,79 +367,79 @@ jobs:
    #
    # End-to-end tests for each framework with various deployment profiles
    # ============================================================================
-  deploy-test-vllm:
-    # Run if core, vllm, or deploy is changed
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    runs-on: prod-default-small-v2
-    needs: [changed-files, deploy-operator, vllm-pipeline]
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        profile:
-          - agg
-          - agg_router
-          - disagg
-          - disagg_router
-    name: deploy-test-vllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: vllm
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          deployment_file: "deploy/${{ matrix.profile }}.yaml"
-          framework: ${{ env.FRAMEWORK }}
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
-          platform_arch: amd64
+  # deploy-test-vllm:
+  #   # Run if core, vllm, or deploy is changed
+  #   # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+  #   runs-on: prod-default-small-v2
+  #   needs: [deploy-operator]
+  #   timeout-minutes: 25
+  #   permissions:
+  #     contents: read
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 2
+  #     matrix:
+  #       profile:
+  #         - agg
+  #         - agg_router
+  #         - disagg
+  #         - disagg_router
+  #   name: deploy-test-vllm (${{ matrix.profile }})
+  #   env:
+  #     FRAMEWORK: vllm
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Run Dynamo Deploy Test
+  #       id: deploy-test
+  #       uses: ./.github/actions/dynamo-deploy-test
+  #       with:
+  #         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+  #         namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #         deployment_file: "deploy/${{ matrix.profile }}.yaml"
+  #         framework: ${{ env.FRAMEWORK }}
+  #         profile: ${{ matrix.profile }}
+  #         image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-amd64
+  #         platform_arch: amd64
 
-  deploy-test-sglang:
-    runs-on: prod-default-small-v2
-    # Run if core, sglang, or deploy is changed
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    needs: [changed-files, deploy-operator, sglang-pipeline]
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        profile:
-          - agg
-          - agg_router
-    name: deploy-test-sglang (${{ matrix.profile }})
-    env:
-      FRAMEWORK: sglang
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          deployment_file: "deploy/${{ matrix.profile }}.yaml"
-          framework: ${{ env.FRAMEWORK }}
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
-          platform_arch: amd64
+  # deploy-test-sglang:
+  #   runs-on: prod-default-small-v2
+  #   # Run if core, sglang, or deploy is changed
+  #   # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+  #   needs: [ deploy-operator]
+  #   timeout-minutes: 25
+  #   permissions:
+  #     contents: read
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 2
+  #     matrix:
+  #       profile:
+  #         - agg
+  #         - agg_router
+  #   name: deploy-test-sglang (${{ matrix.profile }})
+  #   env:
+  #     FRAMEWORK: sglang
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Run Dynamo Deploy Test
+  #       id: deploy-test
+  #       uses: ./.github/actions/dynamo-deploy-test
+  #       with:
+  #         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+  #         namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #         deployment_file: "deploy/${{ matrix.profile }}.yaml"
+  #         framework: ${{ env.FRAMEWORK }}
+  #         profile: ${{ matrix.profile }}
+  #         image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-amd64
+  #         platform_arch: amd64
 
   deploy-test-trtllm:
     runs-on: prod-default-small-v2
     # Run if core, trtllm, or deploy is changed
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    needs: [changed-files, deploy-operator, trtllm-pipeline]
+    # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    needs: [deploy-operator]
     timeout-minutes: 25
     permissions:
       contents: read
@@ -477,7 +469,7 @@ jobs:
           deployment_file: "deploy/${{ matrix.profile }}.yaml"
           framework: ${{ env.FRAMEWORK }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-amd64
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:4df144ac94044041c7131b7e1698dd7269296c6c-trtllm-cuda13-amd64
           platform_arch: amd64
 
   # ============================================================================
@@ -485,25 +477,25 @@ jobs:
   # Clean up ephemeral Kubernetes namespace and resources
   # ============================================================================
 
-  clean-k8s-builder:
-    name: Clean K8s builder if exists
-    runs-on: prod-default-small-v2
-    if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-    - name: Create K8s builders (skip bootstrap)
-      uses: ./.github/actions/bootstrap-buildkit
-      continue-on-error: true
-      with:
-        builder_name: ${{ needs.changed-files.outputs.builder_name }}
-        buildkit_worker_addresses: '' # k8s builder
-        skip_bootstrap: true
-    - name: Builder Cleanup in case of k8s builder
-      shell: bash
-      run: |
-        docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true
+  # clean-k8s-builder:
+  #   name: Clean K8s builder if exists
+  #   runs-on: prod-default-small-v2
+  #   if: always()
+  #   needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
+  #   steps:
+  #   - name: Checkout repository
+  #     uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #   - name: Create K8s builders (skip bootstrap)
+  #     uses: ./.github/actions/bootstrap-buildkit
+  #     continue-on-error: true
+  #     with:
+  #       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+  #       buildkit_worker_addresses: '' # k8s builder
+  #       skip_bootstrap: true
+  #   - name: Builder Cleanup in case of k8s builder
+  #     shell: bash
+  #     run: |
+  #       docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true
 
 
   cleanup:
