@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use super::WorkerSelector;
 use super::protocols::WorkerWithDpRank;
 use super::scheduler::{SchedulingRequest, SchedulingResponse};
-use super::sequence::{ActiveSequencesMultiWorker, SequenceRequest};
+use super::sequence::{ActiveSequencesMulti, SequenceRequest};
 use crate::discovery::RuntimeConfigWatch;
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -51,7 +51,7 @@ impl PartialOrd for QueueEntry {
 /// If queueing is disabled (threshold_frac is None), requests are scheduled immediately.
 pub struct SchedulerQueue {
     pending: Mutex<BinaryHeap<QueueEntry>>,
-    slots: Arc<ActiveSequencesMultiWorker>,
+    slots: Arc<ActiveSequencesMulti>,
     workers_with_configs: RuntimeConfigWatch,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
@@ -63,7 +63,7 @@ pub struct SchedulerQueue {
 
 impl SchedulerQueue {
     pub fn new(
-        slots: Arc<ActiveSequencesMultiWorker>,
+        slots: Arc<ActiveSequencesMulti>,
         workers_with_configs: RuntimeConfigWatch,
         threshold_frac: Option<f64>,
         block_size: u32,
@@ -103,7 +103,7 @@ impl SchedulerQueue {
             return;
         };
 
-        if self.all_workers_busy(threshold).await {
+        if self.all_workers_busy(threshold) {
             tracing::debug!("all workers busy, queueing request");
             let entry = self.make_entry(request);
             self.pending.lock().await.push(entry);
@@ -121,7 +121,7 @@ impl SchedulerQueue {
         };
 
         loop {
-            if self.all_workers_busy(threshold).await {
+            if self.all_workers_busy(threshold) {
                 break;
             }
             let Some(entry) = self.pending.lock().await.pop() else {
@@ -135,14 +135,11 @@ impl SchedulerQueue {
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load → select worker → respond → book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest) {
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens(
-                request.token_seq.clone(),
-                request.isl_tokens,
-                request.overlaps.clone(),
-            )
-            .await;
+        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
+            request.token_seq.clone(),
+            request.isl_tokens,
+            request.overlaps.clone(),
+        );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
 
@@ -194,8 +191,8 @@ impl SchedulerQueue {
 
     /// Check if all workers are busy based on threshold.
     /// Returns true only if ALL workers exceed the threshold (no worker has capacity).
-    async fn all_workers_busy(&self, threshold: f64) -> bool {
-        let active_tokens = self.slots.active_tokens().await;
+    fn all_workers_busy(&self, threshold: f64) -> bool {
+        let active_tokens = self.slots.active_tokens();
         let configs = self.workers_with_configs.borrow();
 
         for (&worker_id, config) in configs.iter() {

@@ -4,8 +4,6 @@
 title: Readable Operation
 ---
 
-# dynamo.nixl_connect.ReadableOperation
-
 An operation which enables a remote worker to read data from the local worker.
 
 To create the operation, a set of local [`Descriptor`](descriptor.md) objects must be provided that reference memory intended to be transferred to a remote worker.

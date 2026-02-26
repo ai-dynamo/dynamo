@@ -133,10 +133,8 @@ async def worker(runtime: DistributedRuntime) -> None:
     )
 
     # Connect to downstream TRT-LLM workers
-    downstream_endpoint = (
-        runtime.namespace(args.namespace)
-        .component(args.downstream_component)
-        .endpoint(args.downstream_endpoint)
+    downstream_endpoint = runtime.endpoint(
+        f"{args.namespace}.{args.downstream_component}.{args.downstream_endpoint}"
     )
     downstream_client = await downstream_endpoint.client()
 
@@ -175,8 +173,7 @@ async def worker(runtime: DistributedRuntime) -> None:
     )
 
     # Register this worker's endpoint
-    component = runtime.namespace(args.namespace).component(args.component)
-    endpoint = component.endpoint(args.endpoint)
+    endpoint = runtime.endpoint(f"{args.namespace}.{args.component}.{args.endpoint}")
 
     # Use ModelInput.Tokens so Frontend preprocesses the request
     # Request format: {token_ids, sampling_options, stop_conditions, extra_args: {messages}}

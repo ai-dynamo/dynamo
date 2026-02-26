@@ -4,8 +4,6 @@
 title: Frontend
 ---
 
-# Frontend
-
 The Dynamo Frontend is the API gateway for serving LLM inference requests. It provides OpenAI-compatible HTTP endpoints and KServe gRPC endpoints, handling request preprocessing, routing, and response formatting.
 
 ## Feature Matrix

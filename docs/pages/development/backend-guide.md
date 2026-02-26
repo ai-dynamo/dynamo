@@ -5,8 +5,6 @@ title: Writing Python Workers in Dynamo
 subtitle: Create custom Python workers and engines for Dynamo
 ---
 
-# Writing Python Workers in Dynamo
-
 This guide explains how to create your own Python worker in Dynamo.
 
 The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo.
@@ -27,11 +25,10 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
     # 2. Register ourselves on the network
     #
-    component = runtime.namespace("namespace").component("component")
+    endpoint = runtime.endpoint("namespace.component.endpoint")
     model_path = "Qwen/Qwen3-0.6B" # or "/data/models/Qwen3-0.6B"
     model_input = ModelInput.Tokens # or ModelInput.Text if engine handles pre-processing
     model_type = ModelType.Chat # or ModelType.Chat | ModelType.Completions if model can be deployed on chat and completions endpoints
-    endpoint = component.endpoint("endpoint")
     # Optional last param to register_model is model_name. If not present derives it from model_path
     await register_model(model_input, model_type, endpoint, model_path)
 

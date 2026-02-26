@@ -890,6 +890,62 @@ mod tests {
     }
 
     #[test]
+    fn test_lora_name_round_trip_through_tracker() {
+        let mut tracker = CacheStatusTracker::new();
+
+        let should_publish = tracker.handle_store(
+            "hash_lora".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            Some("my-adapter".to_string()),
+            Some(StorageTier::Device),
+            None,
+        );
+
+        assert!(should_publish);
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Store {
+                lora_name,
+                token_ids,
+                ..
+            } => {
+                assert_eq!(lora_name.as_deref(), Some("my-adapter"));
+                assert_eq!(token_ids, &[1, 2, 3, 4]);
+            }
+            other => panic!("expected Store event, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lora_name_none_for_base_model() {
+        let mut tracker = CacheStatusTracker::new();
+
+        tracker.handle_store(
+            "hash_base".to_string(),
+            EventSource::Vllm,
+            vec![1, 2, 3, 4],
+            None,
+            4,
+            None,
+            Some(StorageTier::Device),
+            None,
+        );
+
+        let events = tracker.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ConsolidatedEvent::Store { lora_name, .. } => {
+                assert!(lora_name.is_none());
+            }
+            other => panic!("expected Store event, got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_compute_sequence_hash_deterministic() {
         let block_hash1 = compute_local_block_hash(&[1, 2, 3, 4]);
         let block_hash2 = compute_local_block_hash(&[5, 6, 7, 8]);

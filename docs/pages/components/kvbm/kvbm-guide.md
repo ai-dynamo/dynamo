@@ -5,8 +5,7 @@ title: KVBM Guide
 subtitle: Enable KV offloading using KV Block Manager (KVBM) for Dynamo deployments
 ---
 
-# KVBM Guide
-The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer for frameworks like vLLM and TensorRT-LLM.
+The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer and write-through cache for frameworks like vLLM and TensorRT-LLM.
 
 KVBM is modular and can be used standalone via `pip install kvbm` or as the memory management component in the full Dynamo stack. This guide covers installation, configuration, and deployment of the Dynamo KV Block Manager (KVBM) and other KV cache management systems.
 
@@ -236,6 +235,9 @@ export DYN_KVBM_DISK_CACHE_GB=8
 You can also specify exact block counts instead of GB:
 - `DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS`
 - `DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS`
+
+> [!NOTE] KVBM is a write-through cache and it is possible to misconfigure. Each of the capacities should increase as you enable more tiers. As an example, if you configure your GPU device to have 100GB of memory dedicated for KV cache storage, then configure
+`DYN_KVBM_CPU_CACHE_GB >= 100`. The same goes for configuring the disk cache; `DYN_KVBM_DISK_CACHE_GB >= DYN_KVBM_CPU_CACHE_GB`. If the cpu cache is configured to be less than the device cache, then _there will be no benefit from KVBM_. In many cases you will see performance degradation as KVBM will churn by offloading blocks from the GPU to CPU after every forward pass. To know what your minimum value for `DYN_KVBM_CPU_CACHE_GB` should be for your setup, consult your llm engine's kv cache configuration.
 
 ### SSD Lifespan Protection
 

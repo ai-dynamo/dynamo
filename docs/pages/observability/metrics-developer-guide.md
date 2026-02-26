@@ -4,8 +4,6 @@
 title: Metrics Developer Guide
 ---
 
-# Metrics Developer Guide
-
 This guide explains how to create and use custom metrics in Dynamo components using the Dynamo metrics API.
 
 ## Metrics Exposure

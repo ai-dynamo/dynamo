@@ -4,8 +4,6 @@
 title: Speculative Decoding with vLLM
 ---
 
-# Speculative Decoding with vLLM
-
 Using Speculative Decoding with the vLLM backend.
 
 > **See also**: [Speculative Decoding Overview](./README.md) for cross-backend documentation.
