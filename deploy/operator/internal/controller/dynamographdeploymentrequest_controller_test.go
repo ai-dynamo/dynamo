@@ -1862,7 +1862,8 @@ spec:
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
 					Backend: "vllm",
-					Image:   "test-profiler:latest",
+					Image:     "test-profiler:latest",
+					AutoApply: true,
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -1923,7 +1924,7 @@ spec:
 					Namespace: namespace,
 				},
 				Data: map[string]string{
-					ProfilingOutputFileMocker: dgdYAML,
+					ProfilingOutputFile: dgdYAML,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
