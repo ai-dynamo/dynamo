@@ -307,6 +307,10 @@ and manage it independently, set:
 export DYN_SKIP_SGLANG_LOG_FORMATTING=true
 ```
 
+Alternatively, pass the `--log-level` argument to the SGLang worker
+command to set the SGLang engine's log level directly (e.g.
+`--log-level DEBUG`). This is independent of `DYN_LOG`. 
+
 ## Related Documentation
 
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
