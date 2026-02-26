@@ -601,7 +601,7 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
 
             await asyncio.sleep(0.001)
             # Waited for too long without transfer completion, log for debugging
-            if (time.perf_counter() - start) > 1 and not logged:
+            if (time.perf_counter() - start) > 3 and not logged:
                 logger.info(
                     f"still waiting for transfer completion for tensor_id {tensor_id}"
                 )
