@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import AsyncIterator
 
+import nvtx
 import torch
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -105,6 +106,7 @@ class EncodeWorkerHandler:
     async def generate(
         self, request: vLLMMultimodalRequest, context
     ) -> AsyncIterator[str]:
+        nvtx.mark("mm:enc:request_arrived", color="navy")
         logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
@@ -127,6 +129,9 @@ class EncodeWorkerHandler:
 
         try:
             time_start = time.perf_counter()
+            rng_gen = nvtx.start_range("mm:encode_worker_generate", color="blue")
+
+            rng_cache = nvtx.start_range("mm:enc:cache_check", color="cyan")
             # Before batch process images, check cache first
             need_encode_indexes = []
             embedding_lists = [None] * len(request.multimodal_inputs)
@@ -151,6 +156,9 @@ class EncodeWorkerHandler:
                     # keep track of key to avoid recompute of it
                     need_encode_indexes.append((idx, embedding_key))
 
+            nvtx.end_range(rng_cache)
+
+            rng_load = nvtx.start_range("mm:enc:image_load", color="green")
             # Load and generate image tensors
             image_tasks = []
             image_to_load = []
@@ -177,11 +185,18 @@ class EncodeWorkerHandler:
                     f"Errors occurred during image loading:\n{collective_exceptions}"
                 )
 
+            nvtx.end_range(rng_load)
+
             if loaded_images:
+                rng_preprocess = nvtx.start_range(
+                    "mm:enc:image_preprocess", color="yellow"
+                )
                 image_embeds = await asyncio.to_thread(
                     self.image_processor, images=loaded_images, return_tensors="pt"
                 )
+                nvtx.end_range(rng_preprocess)
 
+                rng_encode = nvtx.start_range("mm:enc:vision_encode", color="red")
                 # Encode the image embeddings using model-specific encoder
                 embeddings = await asyncio.to_thread(
                     encode_image_embeddings,
@@ -191,6 +206,9 @@ class EncodeWorkerHandler:
                     projector=self.projector,
                 )
 
+                nvtx.end_range(rng_encode)
+
+                rng_split = nvtx.start_range("mm:enc:split_embeddings", color="orange")
                 # [gluo FIXME] This is specific to qwen vision processing..
                 # Split concatenated embeddings for each image item.
                 if is_qwen_vl_model(self.model):
@@ -217,6 +235,8 @@ class EncodeWorkerHandler:
                     else None
                 )
 
+                nvtx.end_range(rng_split)
+
             # fill in the embedding_lists with new computed embeddings and cache them
             for split_idx, (list_idx, key) in enumerate(need_encode_indexes):
                 embedding_lists[list_idx] = EmbeddingItem(
@@ -236,6 +256,7 @@ class EncodeWorkerHandler:
 
             before_transfer_time = time.perf_counter()
 
+            rng_transfer = nvtx.start_range("mm:enc:embedding_transfer", color="purple")
             # Prepare transfer
             send_tasks = [
                 asyncio.create_task(
@@ -269,6 +290,8 @@ class EncodeWorkerHandler:
                     (transfer_request[1], embedding_item.embeddings)
                 )
 
+            nvtx.end_range(rng_transfer)
+
             logger.debug(f"Request: {request.model_dump_json()}")
 
             time_end = time.perf_counter()
@@ -281,6 +304,8 @@ class EncodeWorkerHandler:
                 f"Encoded image(s) for request {{ id: {request_id} }} in {time_end - time_start:.4f} seconds. "
                 f"Average encoding time: {self._accumulated_time / self._processed_requests:.4f} seconds over {self._processed_requests} requests."
             )
+
+            nvtx.end_range(rng_gen)
 
             # Yield transformed request back
             yield request.model_dump_json()

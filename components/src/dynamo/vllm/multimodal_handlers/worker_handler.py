@@ -3,6 +3,7 @@
 
 import logging
 
+import nvtx
 from vllm.inputs.data import TokensPrompt
 
 import dynamo.nixl_connect as connect
@@ -53,6 +54,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         logger.info("Multimodal Decode Worker async initialization completed.")
 
     async def generate(self, request: vLLMMultimodalRequest, context):
+        rng_decode = nvtx.start_range("mm:decode_worker_generate", color="blue")
         logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
@@ -95,7 +97,12 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
             lora_request=lora_request,
         )
 
+        rng_first = nvtx.start_range("mm:decode:first_token", color="darkred")
+        first_token = True
         async for response in gen:
+            if first_token:
+                nvtx.end_range(rng_first)
+                first_token = False
             logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
             yield MyRequestOutput(
                 request_id=response.request_id,
@@ -107,3 +114,4 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                 metrics=response.metrics,
                 kv_transfer_params=response.kv_transfer_params,
             ).model_dump_json()
+        nvtx.end_range(rng_decode)

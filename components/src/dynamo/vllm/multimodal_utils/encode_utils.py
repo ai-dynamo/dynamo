@@ -18,6 +18,7 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
+import nvtx
 import torch
 
 from .model import SupportedModels, is_model_supported, is_qwen_vl_model
@@ -105,6 +106,7 @@ def encode_image_embeddings(
         ValueError: If projector is missing for LLaVA models
         NotImplementedError: If model is not supported
     """
+    rng_gpu = nvtx.start_range("mm:enc:vit_gpu_forward", color="darkred")
     with torch.no_grad():
         # Route through the correct encoder based on model
         if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
@@ -127,7 +129,8 @@ def encode_image_embeddings(
             embeddings = embeddings[0]
         embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
 
-        return embeddings
+    nvtx.end_range(rng_gpu)
+    return embeddings
 
 
 def get_encoder_components(

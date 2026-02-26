@@ -8,6 +8,7 @@ import uuid
 from collections import defaultdict
 from typing import Any
 
+import nvtx
 import torch
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -255,8 +256,13 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             lora_request=lora_request,
         )
 
+        rng_prefill = nvtx.start_range("mm:pd:first_token_prefill", color="darkred")
         num_output_tokens_so_far = 0
+        first_token = True
         async for response in gen:
+            if first_token:
+                nvtx.end_range(rng_prefill)
+                first_token = False
             logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
             logger.debug(
                 f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
@@ -283,6 +289,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         logger.debug("Prefill request: %s", prefill_only_request)
 
         lora_request = self._resolve_lora_request(request.model)
+        rng_prefill = nvtx.start_range("mm:pd:disagg_prefill", color="darkred")
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=prefill_only_request.engine_prompt["prompt_token_ids"],
@@ -296,6 +303,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Drain prefill generator (max_tokens=1, expect a single response)
         async for prefill_response in gen:
             pass
+        nvtx.end_range(rng_prefill)
 
         # Qwen VL (mRoPE): keep the ORIGINAL unexpanded prompt.
         # The decode worker passes multi_modal_data which causes vLLM to
@@ -332,6 +340,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 f"— ensure the same adapter is loaded on the decode worker."
             )
 
+        rng_remote_decode = nvtx.start_range(
+            "mm:pd:disagg_remote_decode", color="purple"
+        )
         num_output_tokens_so_far = 0
         async for (
             decode_response
@@ -342,22 +353,37 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             yield self._format_engine_output(output, num_output_tokens_so_far)
             if output.outputs:
                 num_output_tokens_so_far = len(output.outputs[0].token_ids)
+        nvtx.end_range(rng_remote_decode)
 
     # ── Public entry point ───────────────────────────────────────────
 
     async def generate(self, raw_request: dict, context):
         """Parse the request, load multimodal data, and run inference."""
+        nvtx.mark("mm:pd:request_arrived", color="navy")
+        rng_pd = nvtx.start_range("mm:pd_worker_generate", color="green")
+
+        rng_parse = nvtx.start_range("mm:pd:parse_request", color="cyan")
         request, image_urls = self._parse_frontend_request(raw_request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
+        nvtx.end_range(rng_parse)
 
+        rng_load = nvtx.start_range("mm:pd:load_multimodal", color="yellow")
         multi_modal_data = await self._load_multimodal_data(
             image_urls, request.request_id
         )
+        nvtx.end_range(rng_load)
+
         self._finalize_request_metadata(request, multi_modal_data)
 
         if self.enable_disagg and self.decode_worker_client:
+            rng_disagg = nvtx.start_range("mm:pd:generate_disagg", color="red")
             async for chunk in self._generate_disagg(request, multi_modal_data):
                 yield chunk
+            nvtx.end_range(rng_disagg)
         else:
+            rng_agg = nvtx.start_range("mm:pd:generate_agg", color="red")
             async for chunk in self._generate_agg(request, multi_modal_data):
                 yield chunk
+            nvtx.end_range(rng_agg)
+
+        nvtx.end_range(rng_pd)

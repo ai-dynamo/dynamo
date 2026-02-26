@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from queue import Queue
 from typing import Any, List
 
+import nvtx
 import torch
 from pydantic import BaseModel
 from safetensors import torch as safetensors_torch
@@ -152,6 +153,7 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         """
         # Implementation to send embeddings to the downstream worker
         # This could involve publishing to a message queue or making an API call
+        rng = nvtx.start_range("mm:local:send_embeddings", color="magenta")
         embedding_key = f"{self.sender_id}_{self.embedding_counter}"
         self.embedding_counter += 1
         tensor_path = await asyncio.to_thread(
@@ -161,6 +163,7 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
         )
         fut = asyncio.get_event_loop().create_future()
         fut.set_result(None)
+        nvtx.end_range(rng)
         return (
             TransferRequest(
                 embeddings_shape=list(embeddings.shape),
@@ -194,12 +197,14 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
             A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
             Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
         """
+        rng = nvtx.start_range("mm:local:receive_embeddings", color="magenta")
         tensor_path = request.serialized_request
         tensors = await asyncio.to_thread(safetensors_torch.load_file, tensor_path)
         embedding_tensor = tensors["ec_cache"]
         tensor_id = self.tensor_id_counter
         self.tensor_id_counter += 1
         self.received_tensors[tensor_id] = tensor_path
+        nvtx.end_range(rng)
         return tensor_id, embedding_tensor
 
     def release_tensor(self, tensor_id: int):
@@ -361,18 +366,24 @@ class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
         Returns:
             A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
         """
+        rng = nvtx.start_range("mm:nixl:send_embeddings", color="magenta")
         if stage_embeddings:
             transfer_buf = embeddings
         else:
             transfer_buf = embeddings.clone().detach()
+        rng_desc = nvtx.start_range("mm:nixl:create_descriptor", color="pink")
         descriptor = nixl_connect.Descriptor(transfer_buf)
+        nvtx.end_range(rng_desc)
+        rng_readable = nvtx.start_range("mm:nixl:create_readable", color="pink")
         readable_op = await self.connector.create_readable(descriptor)
+        nvtx.end_range(rng_readable)
 
         request = TransferRequest(
             embeddings_shape=list(embeddings.shape),
             embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
             serialized_request=readable_op.metadata().model_dump(),
         )
+        nvtx.end_range(rng)
         return request, readable_op.wait_for_completion()
 
 
@@ -440,6 +451,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             request.serialized_request
         )
 
+        rng = nvtx.start_range("mm:nixl:receive_embeddings", color="magenta")
         if self.warmedup_descriptors.empty():
             logger.debug(
                 "No warmed up descriptors available, creating a temporary one for transfer."
@@ -458,16 +470,21 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             )
             dynamic_descriptor = False
 
+        rng_read = nvtx.start_range("mm:nixl:begin_read", color="pink")
         # Create read operation to read from EncodeHandler
         read_op = await self.connector.begin_read(readable_metadata, descriptor)
+        nvtx.end_range(rng_read)
         # Wait for the read operation to complete
+        rng_wait = nvtx.start_range("mm:nixl:wait_completion", color="pink")
         await read_op.wait_for_completion()
+        nvtx.end_range(rng_wait)
         logging.debug(
             f"Successfully read embeddings via NIXL: {encodings_tensor.shape}"
         )
         tensor_id = self.tensor_id_counter
         self.tensor_id_counter += 1
         self.inuse_descriptors[tensor_id] = (descriptor, dynamic_descriptor)
+        nvtx.end_range(rng)
         return tensor_id, encodings_tensor
 
     def release_tensor(self, tensor_id: int):
