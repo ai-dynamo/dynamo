@@ -368,7 +368,18 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
                             tensor_id,
                             (dest_buffer, dest_device_id, dest_mem_str),
                             write_done_id,
+                            remote_agent_metadata,
                         ) = pickle.loads(notif)
+                        if remote_agent_id not in self.remote_agents:
+                            if len(remote_agent_metadata) == 0:
+                                logger.error(
+                                    f"Received transfer notification from unknown agent {remote_agent_id} without metadata, cannot add remote agent for transfer"
+                                )
+                                continue
+                            # This means the sender has not handshaked with the receiver before, add remote agent for future transfer
+                            self.remote_agents[
+                                remote_agent_id
+                            ] = self.nixl_agent.add_remote_agent(remote_agent_metadata)
                         transfer_info = self.transfer_tracker[tensor_id]
                         remote_memory_info = [
                             (dest_buffer, transfer_info[0].nbytes, dest_device_id),
@@ -577,6 +588,9 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
                     "cuda" if str(transfer_tensor.device).startswith("cuda") else "cpu",
                 ),
                 tensor_id,
+                # side channel handshake fallback for receiver API consistency,
+                # this will increase message size for the first few transfers before handshake
+                self.agent_metadata if nixl_request.agent_metadata else b"",
             )
         )
         self.nixl_agent.send_notif(nixl_request.sender_agent_id, notif_msg=notif_msg)

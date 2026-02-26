@@ -57,17 +57,6 @@ async def worker(runtime: DistributedRuntime):
                 ):
                     pass
 
-                if (
-                    transmitter_type == "nixl_write"
-                    and workflow_string == "sender-first"
-                ):
-                    print(
-                        f"Skipping: {workflow_string} with transmitter type: {transmitter_type}"
-                    )
-                    print(
-                        "Reason: NIXL write sender does not support sender-first workflow yet"
-                    )
-                    continue
                 if transmitter_type == "nixl_read" and use_gpu:
                     print(
                         f"Skipping: use_gpu={use_gpu} with transmitter type: {transmitter_type}"

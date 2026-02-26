@@ -101,36 +101,50 @@ class TestLocalEmbeddingTransfer:
         await benchmark(sender, receiver, from_cuda=True)
 
 
-# @pytest.mark.xfail(run=False, reason="slow")
 @pytest.mark.asyncio
 @pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
+@pytest.mark.parametrize(
+    "explicit_add_agent",
+    [
+        True,
+        False,
+    ],
+    ids=["explicit_add_agent", "implicit_add_agent"],
+)
 class TestNixlEmbeddingTransfer:
-    async def test_correctness(self):
+    async def test_correctness(self, explicit_add_agent):
         sender = NixlEmbeddingSender()
         receiver = NixlEmbeddingReceiver()
-        # Additional step to add receiver to sender
-        receiver_id, receiver_agent_metadata = receiver.get_agent_metadata()
-        await sender.add_agent(receiver_id, receiver_agent_metadata)
+        # Additional step to add receiver to sender if desired,
+        # this reduce message size on first few transfers
+        if explicit_add_agent:
+            receiver_id, receiver_agent_metadata = receiver.get_agent_metadata()
+            await sender.add_agent(receiver_id, receiver_agent_metadata)
 
         await correctness(sender, receiver)
 
-    async def test_benchmark(self):
+    async def test_benchmark(self, explicit_add_agent):
         sender = NixlEmbeddingSender()
         receiver = NixlEmbeddingReceiver()
-        # Additional step to add receiver to sender
-        receiver_id, receiver_agent_metadata = receiver.get_agent_metadata()
-        await sender.add_agent(receiver_id, receiver_agent_metadata)
+        # Additional step to add receiver to sender if desired,
+        # this reduce message size on first few transfers
+        if explicit_add_agent:
+            receiver_id, receiver_agent_metadata = receiver.get_agent_metadata()
+            await sender.add_agent(receiver_id, receiver_agent_metadata)
 
         await benchmark(sender, receiver)
 
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
-    async def test_gpu_benchmark(self):
+    async def test_gpu_benchmark(self, explicit_add_agent):
         sender = NixlEmbeddingSender()
         receiver = NixlEmbeddingReceiver()
-        # Additional step to add receiver to sender
-        receiver_id, receiver_agent_metadata = receiver.get_agent_metadata()
-        await sender.add_agent(receiver_id, receiver_agent_metadata)
+        # Additional step to add receiver to sender if desired,
+        # this reduce message size on first few transfers
+        if explicit_add_agent:
+            receiver_id, receiver_agent_metadata = receiver.get_agent_metadata()
+            await sender.add_agent(receiver_id, receiver_agent_metadata)
+
         await benchmark(sender, receiver, from_cuda=True)
 
 

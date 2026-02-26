@@ -57,10 +57,6 @@ class Sender:
     async def generate(self, request: str):
         # Select the variant of sender/receiver based on config
         sender, tensor, tensor_count = self.get_run_config()
-        if isinstance(sender, NixlEmbeddingSender):
-            raise NotImplementedError(
-                "NixlEmbeddingSender does not support sender first workflow yet"
-            )
 
         request = TransferRequest(requests=[])
         futures = []
