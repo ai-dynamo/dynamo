@@ -71,3 +71,8 @@ required-features = ["bench"]
 name = "mooncake_bench"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "active_sequences_bench"
+harness = false
+required-features = ["bench"]

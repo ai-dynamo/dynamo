@@ -1,0 +1,620 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+#[path = "common/mod.rs"]
+mod common;
+use common::*;
+
+use clap::Parser;
+use dynamo_kv_router::ActiveSequences;
+use dynamo_mocker::common::protocols::{DirectRequest, OutputSignal};
+use dynamo_mocker::scheduler::Scheduler;
+use dynamo_tokens::SequenceHash;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant};
+use uuid::Uuid;
+
+#[derive(Parser, Debug)]
+#[clap(
+    version,
+    about = "ActiveSequences add_request/free throughput benchmark"
+)]
+struct Args {
+    /// Path to a JSONL mooncake trace file.
+    mooncake_trace_path: Option<String>,
+
+    /// Run built-in self-tests instead of the benchmark.
+    #[clap(long)]
+    test: bool,
+
+    /// Number of GPU blocks available in the mock engine's KV cache.
+    #[clap(long, default_value = "1048576")]
+    num_gpu_blocks: usize,
+
+    /// Number of tokens per KV cache block.
+    #[clap(long, default_value = "512")]
+    block_size: u32,
+
+    /// Wall-clock duration (ms) over which the trace is replayed during event generation.
+    #[clap(long, default_value = "30000")]
+    trace_simulation_duration_ms: u64,
+
+    /// Wall-clock duration (ms) over which the benchmark replays operations.
+    #[clap(long, default_value = "60000")]
+    benchmark_duration_ms: u64,
+
+    /// Number of unique simulated inference workers.
+    #[clap(short, long, default_value = "256")]
+    num_unique_inference_workers: usize,
+
+    /// How many times to duplicate unique workers during the benchmark phase.
+    #[clap(short = 'd', long, default_value = "1")]
+    inference_worker_duplication_factor: usize,
+
+    /// Factor by which to stretch each request's hash sequence length.
+    #[clap(long, default_value = "1")]
+    trace_length_factor: usize,
+
+    /// How many times to duplicate the raw trace data with offset hash_ids.
+    #[clap(long, default_value = "1")]
+    trace_duplication_factor: usize,
+
+    /// RNG seed for reproducible worker-to-trace assignment.
+    #[clap(long, default_value = "42")]
+    seed: u64,
+
+    /// Enable throughput vs p99 latency sweep mode.
+    #[clap(long)]
+    sweep: bool,
+
+    /// Minimum benchmark duration (ms) for sweep mode.
+    #[clap(long, default_value = "1000")]
+    sweep_min_ms: u64,
+
+    /// Maximum benchmark duration (ms) for sweep mode.
+    #[clap(long, default_value = "50000")]
+    sweep_max_ms: u64,
+
+    /// Number of logarithmically spaced sweep steps between min and max.
+    #[clap(long, default_value = "10")]
+    sweep_steps: usize,
+
+    /// Output path for the sweep plot SVG.
+    #[clap(long, default_value = "active_seq_sweep_plot.svg")]
+    sweep_output: String,
+
+    /// Ignored - passed by cargo bench harness.
+    #[arg(long, hide = true, global = true)]
+    bench: bool,
+}
+
+/// Pre-computed metadata for a request, stored before submission so the
+/// output signal can look it up by UUID.
+struct RequestMetadata {
+    block_hashes: Vec<SequenceHash>,
+    isl: usize,
+    output_length: u64,
+}
+
+/// A single timestamped entry in a worker's sequence trace.
+#[derive(Clone)]
+enum SequenceTraceEntry {
+    Add {
+        request_id: String,
+        block_hashes: Vec<SequenceHash>,
+        isl: usize,
+        output_length: u64,
+    },
+    PrefillComplete {
+        request_id: String,
+    },
+    Free {
+        request_id: String,
+    },
+}
+
+/// A timestamped sequence trace entry for benchmark replay.
+#[derive(Clone)]
+struct SequenceTrace {
+    entry: SequenceTraceEntry,
+    timestamp_us: u64,
+}
+
+/// Run requests through the mocker to produce sequence lifecycle events
+/// (add / prefill_complete / free) with realistic timing.
+///
+/// For each worker we:
+/// 1. Create a Scheduler with an output_tx channel (no KvCacheEventSink needed)
+/// 2. Pre-compute block hashes for each request
+/// 3. Drain OutputSignal: first signal per UUID → Add + PrefillComplete,
+///    completed=true → Free
+/// 4. Collect timestamps for later replay
+async fn generate_sequence_events(
+    traces: &[Vec<MooncakeRequest>],
+    num_gpu_blocks: usize,
+    block_size: u32,
+    trace_simulation_duration_ms: u64,
+) -> anyhow::Result<Vec<Vec<SequenceTrace>>> {
+    println!("Generating sequence events...");
+    let sched_args = default_mock_engine_args(num_gpu_blocks, block_size as usize)?;
+
+    let scaled_traces: Vec<_> = traces
+        .iter()
+        .map(|worker_trace| scale_mooncake_trace(worker_trace, trace_simulation_duration_ms))
+        .collect();
+
+    let progress = make_progress_bar(Some(traces.iter().map(|w| w.len() as u64).sum::<u64>()));
+
+    let mut tasks: Vec<JoinHandle<anyhow::Result<Vec<SequenceTrace>>>> = Vec::new();
+
+    for worker_trace in scaled_traces {
+        let sched_args = sched_args.clone();
+        let progress = progress.clone();
+
+        tasks.push(tokio::spawn(async move {
+            let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+
+            // No KvCacheEventSink — we only need output signals
+            let scheduler = Scheduler::new(sched_args, 0, Some(output_tx), None, None);
+
+            // Pre-compute metadata for each request before submission
+            let mut metadata: HashMap<Uuid, RequestMetadata> = HashMap::new();
+            for req in &worker_trace {
+                let block_hashes: Vec<SequenceHash> = req
+                    .hash_ids
+                    .iter()
+                    .map(|&id| local_block_hash_from_id(id, block_size).0)
+                    .collect();
+                let isl = req.hash_ids.len() * block_size as usize;
+                metadata.insert(
+                    req.uuid,
+                    RequestMetadata {
+                        block_hashes,
+                        isl,
+                        output_length: req.output_length,
+                    },
+                );
+            }
+
+            // Spawn drain task that converts OutputSignals → SequenceTrace entries
+            let drain_handle: JoinHandle<Vec<SequenceTrace>> = tokio::spawn(async move {
+                let mut entries = Vec::new();
+                let mut seen: HashMap<Uuid, bool> = HashMap::new();
+
+                while let Some(signal) = output_rx.recv().await {
+                    let request_id = signal.uuid.to_string();
+
+                    if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(signal.uuid) {
+                        e.insert(false);
+
+                        if let Some(meta) = metadata.get(&signal.uuid) {
+                            entries.push(SequenceTrace {
+                                entry: SequenceTraceEntry::Add {
+                                    request_id: request_id.clone(),
+                                    block_hashes: meta.block_hashes.clone(),
+                                    isl: meta.isl,
+                                    output_length: meta.output_length,
+                                },
+                                timestamp_us: 0, // rescaled later
+                            });
+                            entries.push(SequenceTrace {
+                                entry: SequenceTraceEntry::PrefillComplete {
+                                    request_id: request_id.clone(),
+                                },
+                                timestamp_us: 0,
+                            });
+                        }
+                    }
+
+                    if signal.completed {
+                        seen.insert(signal.uuid, true);
+                        entries.push(SequenceTrace {
+                            entry: SequenceTraceEntry::Free { request_id },
+                            timestamp_us: 0,
+                        });
+                    }
+                }
+
+                entries
+            });
+
+            // Submit requests at scaled timing
+            let mut i = 0;
+            let mut target = Instant::now();
+            let start = target;
+
+            while i < worker_trace.len() {
+                let prev_i = i;
+                scheduler
+                    .receive(DirectRequest {
+                        tokens: tokens_from_request(&worker_trace[i], block_size),
+                        max_output_tokens: worker_trace[i].output_length as usize,
+                        uuid: Some(worker_trace[i].uuid),
+                        dp_rank: 0,
+                    })
+                    .await;
+                i += 1;
+
+                while i < worker_trace.len()
+                    && worker_trace[i].timestamp == worker_trace[i - 1].timestamp
+                {
+                    scheduler
+                        .receive(DirectRequest {
+                            tokens: tokens_from_request(&worker_trace[i], block_size),
+                            max_output_tokens: worker_trace[i].output_length as usize,
+                            uuid: Some(worker_trace[i].uuid),
+                            dp_rank: 0,
+                        })
+                        .await;
+                    i += 1;
+                }
+
+                if i < worker_trace.len() {
+                    target += Duration::from_millis(
+                        worker_trace[i].timestamp - worker_trace[i - 1].timestamp,
+                    );
+                }
+
+                tokio::time::sleep_until(target).await;
+                progress.inc((i - prev_i) as u64);
+            }
+
+            // Drop scheduler to close request_tx → spawned engine task exits →
+            // output_tx drops → drain task sees None
+            drop(scheduler);
+
+            let mut entries = drain_handle.await?;
+
+            // Assign monotonically increasing timestamps based on entry order
+            let total_us = (Instant::now() - start).as_micros() as u64;
+            let num_entries = entries.len() as u64;
+            for (idx, entry) in entries.iter_mut().enumerate() {
+                entry.timestamp_us = if num_entries > 1 {
+                    idx as u64 * total_us / (num_entries - 1)
+                } else {
+                    0
+                };
+            }
+
+            Ok(entries)
+        }));
+    }
+
+    let mut all_traces = Vec::new();
+    for task in tasks {
+        all_traces.push(task.await??);
+    }
+
+    let total_adds = all_traces
+        .iter()
+        .flatten()
+        .filter(|e| matches!(e.entry, SequenceTraceEntry::Add { .. }))
+        .count();
+    let total_frees = all_traces
+        .iter()
+        .flatten()
+        .filter(|e| matches!(e.entry, SequenceTraceEntry::Free { .. }))
+        .count();
+
+    println!("Add events: {}, Free events: {}", total_adds, total_frees);
+
+    Ok(all_traces)
+}
+
+/// Rescale sequence trace timestamps into the benchmark duration.
+fn rescale_traces(
+    traces: &[Vec<SequenceTrace>],
+    benchmark_duration_ms: u64,
+) -> Vec<Vec<SequenceTrace>> {
+    traces
+        .iter()
+        .map(|worker_trace| {
+            if worker_trace.is_empty() {
+                return Vec::new();
+            }
+            let max_ts = worker_trace
+                .last()
+                .map(|e| e.timestamp_us)
+                .unwrap_or(1)
+                .max(1);
+            let target_us = benchmark_duration_ms * 1000;
+            worker_trace
+                .iter()
+                .map(|entry| SequenceTrace {
+                    entry: entry.entry.clone(),
+                    timestamp_us: entry.timestamp_us * target_us / max_ts,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Run the benchmark: replay sequence trace entries against ActiveSequences,
+/// measuring add_request / mark_prefill_completed / free latency.
+async fn run_benchmark(
+    traces: &[Vec<SequenceTrace>],
+    block_size: u32,
+    benchmark_duration_ms: u64,
+    inference_worker_duplication_factor: usize,
+) -> anyhow::Result<BenchmarkResults> {
+    let scaled = rescale_traces(traces, benchmark_duration_ms);
+    let scaled: Vec<Arc<Vec<SequenceTrace>>> = scaled.into_iter().map(Arc::new).collect();
+
+    let total_entries: u64 = scaled.iter().map(|t| t.len() as u64).sum::<u64>()
+        * inference_worker_duplication_factor as u64;
+
+    let progress = make_progress_bar(Some(total_entries));
+
+    let mut tasks = Vec::new();
+    for _replica in 0..inference_worker_duplication_factor {
+        for worker_trace in &scaled {
+            let trace = worker_trace.clone();
+            let progress = progress.clone();
+
+            tasks.push(tokio::spawn(async move {
+                let mut seq = ActiveSequences::new(block_size as usize);
+                let mut latencies: Vec<u64> = Vec::with_capacity(trace.len());
+
+                let mut target = Instant::now();
+                let mut iter = trace.iter().peekable();
+                let mut local_count: u64 = 0;
+
+                while let Some(entry) = iter.next() {
+                    let entry_ts = entry.timestamp_us;
+
+                    let start = minstant::Instant::now();
+                    apply_entry(&mut seq, &entry.entry);
+                    latencies.push(start.elapsed().as_nanos() as u64);
+                    local_count += 1;
+
+                    // Process all entries at the same timestamp
+                    while iter.peek().is_some_and(|e| e.timestamp_us == entry_ts) {
+                        let e = iter.next().unwrap();
+                        let start = minstant::Instant::now();
+                        apply_entry(&mut seq, &e.entry);
+                        latencies.push(start.elapsed().as_nanos() as u64);
+                        local_count += 1;
+                    }
+
+                    if let Some(next) = iter.peek() {
+                        target += Duration::from_micros(next.timestamp_us - entry_ts);
+                    }
+
+                    if target > Instant::now() {
+                        tokio::time::sleep_until(target).await;
+                    }
+
+                    if local_count > 100 {
+                        progress.inc(local_count);
+                        local_count = 0;
+                    }
+                }
+
+                progress.inc(local_count);
+
+                Ok::<_, anyhow::Error>(latencies)
+            }));
+        }
+    }
+
+    let mut all_latencies = Vec::new();
+    for task in tasks {
+        all_latencies.extend(task.await??);
+    }
+
+    if progress.elapsed() > Duration::from_millis(benchmark_duration_ms * 11 / 10) {
+        eprintln!(
+            "WARNING: Benchmarker could not keep up. Rerun with a larger --benchmark-duration-ms."
+        );
+    }
+
+    let total_duration = progress.elapsed();
+    let total_ops = all_latencies.len();
+
+    // Count blocks for block throughput
+    let total_blocks: usize = scaled
+        .iter()
+        .flat_map(|t| t.iter())
+        .map(|entry| match &entry.entry {
+            SequenceTraceEntry::Add { block_hashes, .. } => block_hashes.len(),
+            _ => 0,
+        })
+        .sum::<usize>()
+        * inference_worker_duplication_factor;
+
+    let offered_ops_throughput = total_ops as f32 / benchmark_duration_ms as f32 * 1000.0;
+    let ops_throughput = total_ops as f32 / total_duration.as_millis() as f32 * 1000.0;
+    let offered_block_throughput = total_blocks as f32 / benchmark_duration_ms as f32 * 1000.0;
+    let block_throughput = total_blocks as f32 / total_duration.as_millis() as f32 * 1000.0;
+
+    all_latencies.sort_unstable();
+    let latency_p99_us = if all_latencies.is_empty() {
+        0.0
+    } else {
+        all_latencies[all_latencies.len() * 99 / 100] as f32 / 1000.0
+    };
+
+    println!(
+        "Ops Throughput: {} ops/s (add + prefill_complete + free)",
+        ops_throughput
+    );
+    println!("Block Throughput: {} block ops/s", block_throughput);
+    println!("Latency p99: {}us", latency_p99_us);
+
+    Ok(BenchmarkResults {
+        offered_ops_throughput,
+        ops_throughput,
+        offered_block_throughput,
+        block_throughput,
+        latency_p99_us,
+    })
+}
+
+fn apply_entry(seq: &mut ActiveSequences, entry: &SequenceTraceEntry) {
+    match entry {
+        SequenceTraceEntry::Add {
+            request_id,
+            block_hashes,
+            isl,
+            output_length,
+        } => {
+            seq.add_request(
+                request_id.clone(),
+                Some(block_hashes.clone()),
+                *isl,
+                0,
+                Some(*output_length as u32),
+            );
+        }
+        SequenceTraceEntry::PrefillComplete { request_id } => {
+            seq.mark_prefill_completed(request_id);
+        }
+        SequenceTraceEntry::Free { request_id } => {
+            seq.free(request_id);
+        }
+    }
+}
+
+async fn run_tests() -> anyhow::Result<()> {
+    use std::fs::File;
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!(
+        "active_seq_bench_test_{}.jsonl",
+        std::process::id()
+    ));
+    {
+        let mut f = File::create(&path)?;
+        for (i, (hash_ids, output_length)) in
+            [(&[0u64, 1, 2] as &[u64], 10u64), (&[0, 1, 3, 4], 10)]
+                .iter()
+                .enumerate()
+        {
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "timestamp": i as u64,
+                    "hash_ids": hash_ids,
+                    "output_length": output_length,
+                })
+            )?;
+        }
+    }
+
+    let traces = process_mooncake_trace(path.to_str().unwrap(), 1, 1, 2, 42)?;
+    std::fs::remove_file(&path).ok();
+
+    println!(
+        "Loaded {} workers, {} total requests",
+        traces.len(),
+        traces.iter().map(|t| t.len()).sum::<usize>()
+    );
+
+    let seq_traces = generate_sequence_events(&traces, 1048576, 512, 5000).await?;
+
+    let total_adds = seq_traces
+        .iter()
+        .flatten()
+        .filter(|e| matches!(e.entry, SequenceTraceEntry::Add { .. }))
+        .count();
+    let total_frees = seq_traces
+        .iter()
+        .flatten()
+        .filter(|e| matches!(e.entry, SequenceTraceEntry::Free { .. }))
+        .count();
+
+    assert!(total_adds > 0, "expected at least one Add event");
+    assert!(total_frees > 0, "expected at least one Free event");
+    assert_eq!(total_adds, total_frees, "adds and frees should match");
+
+    println!("All tests passed.");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    if args.test {
+        return run_tests().await;
+    }
+
+    let path = args
+        .mooncake_trace_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("mooncake_trace_path is required for benchmarking"))?;
+    let traces = process_mooncake_trace(
+        path,
+        args.trace_length_factor,
+        args.trace_duplication_factor,
+        args.num_unique_inference_workers,
+        args.seed,
+    )?;
+
+    let seq_traces = generate_sequence_events(
+        &traces,
+        args.num_gpu_blocks,
+        args.block_size,
+        args.trace_simulation_duration_ms,
+    )
+    .await?;
+
+    if args.sweep {
+        let log_min = (args.sweep_min_ms as f64).ln();
+        let log_max = (args.sweep_max_ms as f64).ln();
+        let n = args.sweep_steps;
+        let durations: Vec<u64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / (n - 1) as f64;
+                (log_max * (1.0 - t) + log_min * t).exp().round() as u64
+            })
+            .collect();
+
+        let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
+        for &dur_ms in &durations {
+            println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
+            let result = run_benchmark(
+                &seq_traces,
+                args.block_size,
+                dur_ms,
+                args.inference_worker_duplication_factor,
+            )
+            .await?;
+            results.push((dur_ms, result));
+        }
+
+        println!("\n=== Sweep Summary ===");
+        println!(
+            "{:>12} {:>14} {:>14} {:>14} {:>14} {:>10}",
+            "duration_ms", "ops/s_off", "ops/s", "blk_ops/s_off", "blk_ops/s", "p99(us)"
+        );
+        for (dur, r) in &results {
+            println!(
+                "{:>12} {:>14.1} {:>14.1} {:>14.1} {:>14.1} {:>10.1}",
+                dur,
+                r.offered_ops_throughput,
+                r.ops_throughput,
+                r.offered_block_throughput,
+                r.block_throughput,
+                r.latency_p99_us,
+            );
+        }
+
+        let all_results = vec![("active-sequences", results)];
+        plot_sweep(&all_results, &args.sweep_output)?;
+    } else {
+        run_benchmark(
+            &seq_traces,
+            args.block_size,
+            args.benchmark_duration_ms,
+            args.inference_worker_duplication_factor,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
