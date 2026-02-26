@@ -394,12 +394,31 @@ Dynamo supports embedding cache in both aggregated and disaggregated settings fo
 
 | Setting | Implementation | Launch Script | Status |
 |---------|---------------|---------------|--------|
-| **Disaggregated (E/PD)** | Dynamo-managed cache in the PD worker layer on top of TRT-LLM engine | `disagg_e_pd.sh` + `--multimodal-embedding-cache-capacity-gb` | Supported |
+| **Disaggregated Encoder** | Dynamo-managed cache in the PD worker layer on top of TRT-LLM engine | `disagg_e_pd.sh` + `--multimodal-embedding-cache-capacity-gb` | Supported |
 | **Aggregated** | N/A | N/A | Not yet supported |
 
 The cache uses `MultimodalEmbeddingCacheManager` to maintain an LRU cache of encoder embeddings on CPU. When the same image is seen again, the cached embedding is reused instead of re-encoding.
 
-### Disaggregated (E/PD)
+### Disaggregated Encoder (Embedding Cache in Prefill Worker)
+
+In the disaggregated setting, the Prefill Worker (P) owns a CPU-side LRU embedding cache (`EmbeddingCacheManager`). On each request P checks the cache first — on a hit, the Encode Worker is skipped entirely. On a miss, P routes to the Encode Worker (E), receives embeddings via NIXL, saves them to the cache, and then feeds the embeddings along with the request into the TRT-LLM Instance for prefill.
+
+```mermaid
+---
+title: Embedding Cache — Disaggregated Encoder
+---
+flowchart LR
+    req[Request] --> cpu_check{"CPU cache hit?<br/>(EmbeddingCacheManager)"}
+
+    subgraph P ["Prefill Worker (P)"]
+        cpu_check -. hit .-> use[Use cached embedding]
+        use --> trtllm[TRT-LLM Instance]
+    end
+
+    cpu_check -- miss --> E["Encode Worker (E)"]
+    E -- "embeddings via NIXL" --> save["Save to cache"]
+    save --> trtllm
+```
 
 The `disagg_e_pd.sh` script launches a separate encode worker and a PD worker. Extra arguments are forwarded to the PD worker. Enable embedding cache by passing `--multimodal-embedding-cache-capacity-gb`:
 

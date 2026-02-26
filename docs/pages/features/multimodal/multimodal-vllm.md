@@ -418,18 +418,23 @@ Dynamo supports embedding cache in both aggregated and disaggregated settings:
 | Setting | Implementation | Launch Script |
 |---------|---------------|---------------|
 | **Aggregated** | `ec_both` via upstream vLLM (main or v0.17.0+) | `vllm_serve_embedding_cache.sh` |
-| **Disaggregated** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
+| **Disaggregated encoder** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
 
-### ec_both (Aggregated)
+### Aggregated Worker
 
 A single vLLM instance acts as both **producer** (encodes and saves embeddings to CPU cache) and **consumer** (loads cached embeddings back to GPU). Repeated images skip encoding entirely.
 
 ```mermaid
+---
+title: Embedding Cache — Aggregated Encoder (e.g. aggregated EP or EPD node)
+---
 flowchart LR
-  HTTP --> vllm[vLLM Instance<br/>ec_both]
-  vllm --save--> cache[(CPU Embedding Cache<br/>LRU)]
-  cache --load--> vllm
-  vllm --> HTTP
+  req[Multimodal Request] --> gpu{GPU Encoder Cache<br/>hit?}
+  gpu -- yes --> skip[Use cached GPU embedding<br/>no encoder, no connector]
+  gpu -- no --> cpu{CPU Embedding Cache<br/>hit?}
+  cpu -- yes --> load[Load: CPU → GPU<br/>skip encoder]
+  cpu -- no --> encode[Run Encoder]
+  encode -- save: GPU → CPU --> store[(CPU Embedding Cache<br/>LRU)]
 ```
 
 **Launch:**
@@ -441,19 +446,25 @@ bash launch/vllm_serve_embedding_cache.sh --multimodal-embedding-cache-capacity-
 
 This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector` automatically. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled).
 
-### Disaggregated Embedding Cache
+### Disaggregated Encoder (Embedding Cache in Prefill Worker)
 
-In the disaggregated setting, Dynamo maintains the embedding cache in its own worker layer on top of the vLLM engine. The encode worker computes embeddings and writes them to the cache, while the PD worker reads cached embeddings instead of re-encoding.
+In the disaggregated setting, the Prefill Worker (P) owns a CPU-side LRU embedding cache (`EmbeddingCacheManager`). On each request P checks the cache first — on a hit, the Encode Worker is skipped entirely. On a miss, P routes to the Encode Worker (E), receives embeddings via NIXL, saves them to the cache, and then feeds the embeddings along with the request into the vLLM Instance for prefill.
 
 ```mermaid
+---
+title: Embedding Cache — Disaggregated Encoder
+---
 flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --image_url--> encode_worker[Encode Worker]
-  encode_worker --> processor
-  encode_worker --embeddings--> cache[(Dynamo Embedding Cache)]
-  cache --load--> pd_worker[PD Worker]
-  pd_worker --> encode_worker
+    req[Request] --> cpu_check{"CPU cache hit?<br/>(EmbeddingCacheManager)"}
+
+    subgraph P ["Prefill Worker (P)"]
+        cpu_check -. hit .-> use[Use cached embedding]
+        use --> vllm[vLLM Instance]
+    end
+
+    cpu_check -- miss --> E["Encode Worker (E)"]
+    E -- "embeddings via NIXL" --> save["Save to cache"]
+    save --> vllm
 ```
 
 **Launch:**
