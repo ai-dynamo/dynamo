@@ -4,8 +4,6 @@
 title: Device Kind
 ---
 
-# dynamo.nixl_connect.DeviceKind(IntEnum)
-
 Represents the kind of device a [`Device`](device.md) object represents.
 
 

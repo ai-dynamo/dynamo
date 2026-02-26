@@ -5,9 +5,6 @@ title: Dynamo Benchmarking
 subtitle: Benchmark and compare performance across Dynamo deployment configurations
 ---
 
-
-# Dynamo Benchmarking Guide
-
 This benchmarking framework lets you compare performance across any combination of:
 - **DynamoGraphDeployments**
 - **External HTTP endpoints** (existing services deployed following standard documentation from vLLM, llm-d, AIBrix, etc.)

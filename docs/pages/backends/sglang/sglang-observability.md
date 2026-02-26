@@ -4,8 +4,6 @@
 title: Observability
 ---
 
-# SGLang Observability
-
 This guide covers metrics, tracing, and visualization for SGLang deployments running through Dynamo.
 
 ## Prometheus Metrics

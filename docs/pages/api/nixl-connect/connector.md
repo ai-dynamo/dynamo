@@ -4,8 +4,6 @@
 title: Connector
 ---
 
-# dynamo.nixl_connect.Connector
-
 Core class for managing the connection between workers in a distributed environment.
 Use this class to create readable and writable operations, or read and write data to remote workers.
 

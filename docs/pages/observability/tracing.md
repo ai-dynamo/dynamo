@@ -4,8 +4,6 @@
 title: Tracing
 ---
 
-# Distributed Tracing with Tempo
-
 ## Overview
 
 Dynamo supports OpenTelemetry-based distributed tracing for visualizing request flows across Frontend and Worker components. Traces are exported to Tempo via OTLP (OpenTelemetry Protocol) and visualized in Grafana.
