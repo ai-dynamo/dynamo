@@ -13,12 +13,14 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: docker.io/lambda108/epp-inference-extension-dynamo:epp-discovery
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "128"
             - name: DYN_MODEL_NAME
               value: "Qwen/Qwen3-0.6B"
+            - name: DYN_DECODE_FALLBACK
+              value: "true"
       eppConfig:
         config:
           plugins:
@@ -60,11 +62,11 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:epp-discovery
           workingDir: /workspace/examples/backends/vllm
         containers:
           - name: frontend
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            image: docker.io/lambda108/dynamo:epp-discovery
             command:
               - python3
             args:

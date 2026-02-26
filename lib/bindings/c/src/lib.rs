@@ -702,7 +702,9 @@ pub unsafe extern "C" fn create_routers(
             }
             None if !decode_fallback => {
                 tracing::error!(
-                    "Prefill workers required but none found and decode fallback is disabled"
+                    "No prefill workers found and decode_fallback is disabled. \
+                     If running in aggregated mode, set DYN_DECODE_FALLBACK=true. \
+                     If running in disaggregated mode, ensure prefill workers are deployed."
                 );
                 return Err(QueryRouterResult::ErrDisaggEnforced);
             }

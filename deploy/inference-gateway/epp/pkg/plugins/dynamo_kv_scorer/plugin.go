@@ -173,7 +173,16 @@ func initFFI() error {
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {
-			ffiErr = fmt.Errorf("create_routers failed with code %d", rc)
+			switch rc {
+			case C.QUERY_ROUTER_ERR_DISAGG_ENFORCED:
+				ffiErr = fmt.Errorf(
+					"create_routers failed: no prefill workers found. " +
+						"If running in aggregated mode, set DYN_DECODE_FALLBACK=true to allow decode-only routing. " +
+						"If running in disaggregated mode, ensure prefill workers are deployed and discoverable in namespace %q",
+					ffiNamespace)
+			default:
+				ffiErr = fmt.Errorf("create_routers failed with code %d", rc)
+			}
 			return
 		}
 		routerInitialized = true

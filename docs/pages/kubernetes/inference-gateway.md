@@ -139,6 +139,11 @@ kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml  -n ${NAMESPAC
 kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml  -n ${NAMESPACE}
 ```
 We provide examples for llama-3-70b vLLM under the `recipes/llama-3-70b/vllm/agg/gaie/` for aggregated and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/` for disaggregated serving.
+Note for the aggregated serving you need to enable DYN_DECODE_FALLBACK in epp config.
+```bash
+  - name: DYN_DECODE_FALLBACK
+    value: "true"
+```
 Use the proper folder in commands below.
 
 ```bash
