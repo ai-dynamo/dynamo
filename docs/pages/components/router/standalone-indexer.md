@@ -5,8 +5,6 @@ title: Standalone KV Indexer
 subtitle: Run the KV cache indexer as an independent HTTP service for querying block state
 ---
 
-# Standalone KV Indexer
-
 ## Overview
 
 The standalone KV indexer (`dynamo-kv-indexer`) is a lightweight HTTP binary that subscribes to ZMQ KV event streams from workers, maintains a radix tree of cached blocks, and exposes HTTP endpoints for querying and managing workers.

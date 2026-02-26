@@ -21,6 +21,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
+from .utils.kv_cache import compute_kv_bytes_per_token
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -80,6 +81,20 @@ async def worker():
     # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
     if args.num_workers > 1 and args.model_path:
         await prefetch_model(args.model_path)
+
+    # Auto-compute kv_bytes_per_token from model config if not explicitly set
+    if args.kv_bytes_per_token is None and args.model_path:
+        args.kv_bytes_per_token = compute_kv_bytes_per_token(
+            args.model_path, args.kv_cache_dtype
+        )
+
+    # Inject kv_bytes_per_token into engine args JSON (computed after model prefetch)
+    if args.kv_bytes_per_token is not None and not args.extra_engine_args:
+        with open(extra_engine_args_path) as f:
+            engine_args = json.load(f)
+        engine_args["kv_bytes_per_token"] = args.kv_bytes_per_token
+        with open(extra_engine_args_path, "w") as f:
+            json.dump(engine_args, f, indent=2)
 
     try:
         logger.info(

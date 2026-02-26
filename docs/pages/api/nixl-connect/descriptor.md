@@ -4,8 +4,6 @@
 title: Descriptor
 ---
 
-# dynamo.nixl_connect.Descriptor
-
 Memory descriptor that ensures memory is registered with the NIXL-base I/O subsystem.
 Memory must be registered with the NIXL subsystem to enable interaction with the memory.
 
