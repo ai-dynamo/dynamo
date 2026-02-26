@@ -650,13 +650,13 @@ jobs:
 
           # vllm EFA (CUDA 12, amd64 only)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-vllm-efa-cuda12-amd64"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime-efa:${NGC_VERSION_TAG}"
-          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime-efa:${NGC_VERSION_TAG}"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
           # trtllm EFA (CUDA 13, amd64 only)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${IMAGE_PREFIX}-trtllm-efa-cuda13-amd64"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime-efa:${NGC_VERSION_TAG}"
-          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime-efa:${NGC_VERSION_TAG}"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
           # ---- Frontend images ----
           echo ""
@@ -782,8 +782,8 @@ jobs:
           echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "EFA runtime images (amd64 only):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime-efa:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime-efa:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Operator image:" >> $GITHUB_STEP_SUMMARY
           echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
