@@ -14,10 +14,10 @@ export DYNAMO_USE_FLEXKV=1
 
 ### Aggregated Serving
 
-Use FlexKV with the `--connector flexkv` flag:
+Use FlexKV with the `--kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'` flag:
 
 ```bash
-python -m dynamo.vllm --model $YOUR_MODEL --connector flexkv
+python -m dynamo.vllm --model $YOUR_MODEL --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
 ```
 
 Refer to [`agg_flexkv.sh`](../../../examples/backends/vllm/launch/agg_flexkv.sh) for quick setup.
