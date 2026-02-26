@@ -131,8 +131,6 @@ navigation:
   # ==================== Backends ====================
   - section: Backends
     contents:
-      - page: vLLM
-        path: ../pages/backends/vllm/README.md
       - section: SGLang
         path: ../pages/backends/sglang/README.md
         contents:
@@ -148,6 +146,8 @@ navigation:
             path: ../pages/backends/sglang/sglang-observability.md
       - page: TensorRT-LLM
         path: ../pages/backends/trtllm/README.md
+      - page: vLLM
+        path: ../pages/backends/vllm/README.md
 
   # ==================== Components ====================
   - section: Components
