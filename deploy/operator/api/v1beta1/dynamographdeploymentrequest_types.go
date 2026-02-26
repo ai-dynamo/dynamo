@@ -538,6 +538,13 @@ func (d *DynamoGraphDeploymentRequest) GetPhase() DGDRPhase {
 	return d.Status.Phase
 }
 
+// GetState implements the observability.StateProvider interface, returning the
+// phase as a string so v1beta1 DGDRs can be counted by the resource counter
+// without registering a v1alpha1 cache informer.
+func (d *DynamoGraphDeploymentRequest) GetState() string {
+	return string(d.Status.Phase)
+}
+
 // SetProfilingPhase updates the profiling sub-phase.
 func (d *DynamoGraphDeploymentRequest) SetProfilingPhase(phase ProfilingPhase) {
 	d.Status.ProfilingPhase = phase

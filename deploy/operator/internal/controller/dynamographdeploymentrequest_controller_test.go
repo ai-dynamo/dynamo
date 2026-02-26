@@ -94,9 +94,10 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "vllm",
-					Image:   "test-profiler:latest",
+					Model:     "test-model",
+					Backend:   "vllm",
+					Image:     "test-profiler:latest",
+					AutoApply: true,
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -1060,8 +1061,9 @@ var _ = Describe("DGDR Error Handling", func() {
 	BeforeEach(func() {
 		recorder = record.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:   k8sClient,
-			Recorder: recorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Recorder:  recorder,
 			Config: &configv1alpha1.OperatorConfiguration{
 				Namespace: configv1alpha1.NamespaceConfiguration{
 					Restricted: "",
@@ -1859,9 +1861,10 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "vllm",
-					Image:   "test-profiler:latest",
+					Model:     "test-model",
+					Backend:   "vllm",
+					Image:     "test-profiler:latest",
+					AutoApply: true,
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         "H100-SXM5-80GB",
@@ -1922,7 +1925,7 @@ spec:
 					Namespace: namespace,
 				},
 				Data: map[string]string{
-					ProfilingOutputFileMocker: dgdYAML,
+					ProfilingOutputFile: dgdYAML,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())

@@ -92,8 +92,7 @@ const (
 
 	// Volume paths
 	ProfilingOutputPath        = "/data"
-	ProfilingOutputFile        = "config_with_planner.yaml"
-	ProfilingOutputFileMocker  = "mocker_config_with_planner.yaml"
+	ProfilingOutputFile        = "final_config.yaml"
 	ProfilingConfigMountPath   = "/config"
 	ProfilingConfigDefaultKey  = "disagg.yaml"
 	DefaultModelCacheMountPath = "/opt/model-cache"
@@ -111,7 +110,7 @@ const (
 	MessageAICProfilingJobCreated    = "AIC profiling job created"
 	MessageProfilingInProgress       = "Profiling is in progress"
 	MessageSpecGenerated             = "DynamoGraphDeployment spec generated successfully"
-	MessageSpecAvailable             = "Generated spec is available in status.generatedDeployment"
+	MessageSpecAvailable             = "Generated spec is available in annotation nvidia.com/generated-dgd-spec"
 	MessageDeploymentCreated         = "DynamoGraphDeployment %s created successfully"
 	MessageDeploymentReady           = "DynamoGraphDeployment %s is ready"
 	MessageDeploymentDegraded        = "DynamoGraphDeployment %s degraded from Ready to %s"
@@ -222,13 +221,6 @@ data:
 EOF
 sed 's/^/    /' {{.OutputPath}}/{{.OutputFile}} >> /tmp/cm.yaml
 
-# Add mocker config (profiler always generates both real and mocker configs)
-if [ -f {{.OutputPath}}/{{.MockerOutputFile}} ]; then
-  echo "  {{.MockerOutputFile}}: |" >> /tmp/cm.yaml
-  sed 's/^/    /' {{.OutputPath}}/{{.MockerOutputFile}} >> /tmp/cm.yaml
-  echo "Added mocker config to ConfigMap"
-fi
-
 # Add profiler status file for debugging
 if [ -f {{.OutputPath}}/profiler_status.yaml ]; then
   echo "  profiler_status.yaml: |" >> /tmp/cm.yaml
@@ -245,6 +237,7 @@ echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
 	client.Client
+	APIReader     client.Reader
 	Recorder      record.EventRecorder
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
@@ -794,14 +787,7 @@ func isOnlineProfiling(_ *nvidiacomv1beta1.DynamoGraphDeploymentRequest) bool {
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	var errs []error
 
-	// Validate image is specified (required for the profiling job container).
-	// Mirrors the webhook admission check so controller-side writes cannot bypass it.
-	if dgdr.Spec.Image == "" {
-		errs = append(errs, fmt.Errorf("spec.image is required"))
-	}
-
 	// Disallow searchStrategy: thorough with backend: auto.
-	// Mirrors the webhook admission check so controller-side writes cannot bypass it.
 	if dgdr.Spec.SearchStrategy == nvidiacomv1beta1.SearchStrategyThorough &&
 		dgdr.Spec.Backend == nvidiacomv1beta1.BackendTypeAuto {
 		errs = append(errs, fmt.Errorf(
@@ -850,7 +836,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		return nil
 	}
 
-	_, err := gpu.DiscoverGPUs(ctx, r.Client)
+	_, err := gpu.DiscoverGPUs(ctx, r.APIReader)
 	if err == nil {
 		// GPU discovery is available, validation passes
 		return nil
@@ -996,10 +982,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// Profiler args: pass the DGDR spec as JSON via --config
-		profilerArgs := []string{"--config", specJSON}
+		// --output-dir must match ProfilingOutputPath so the sidecar can find profiler_status.yaml
+		profilerArgs := []string{"--config", specJSON, "--output-dir", ProfilingOutputPath}
 
-		// Use image from spec
+		// Use image from spec; the defaulting webhook fills this in for production builds.
+		// Guard against empty image in case the webhook didn't run (e.g. local dev builds).
 		imageName := dgdr.Spec.Image
+		if imageName == "" {
+			return nil, false, fmt.Errorf("spec.image is required but not set; ensure the defaulting webhook ran or set spec.image explicitly")
+		}
 		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{
@@ -1009,6 +1000,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			Args:         profilerArgs,
 			Env:          profilerEnv,
 			VolumeMounts: volumeMounts,
+			WorkingDir:   "/workspace",
 		}
 
 		// Generate sidecar script from template
@@ -1019,12 +1011,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 		var scriptBuf bytes.Buffer
 		err = tmpl.Execute(&scriptBuf, map[string]string{
-			"OutputPath":       ProfilingOutputPath,
-			"OutputFile":       ProfilingOutputFile,
-			"MockerOutputFile": ProfilingOutputFileMocker,
-			"ConfigMapName":    outputConfigMapName,
-			"Namespace":        dgdr.Namespace,
-			"DGDRName":         dgdr.Name,
+			"OutputPath":    ProfilingOutputPath,
+			"OutputFile":    ProfilingOutputFile,
+			"ConfigMapName": outputConfigMapName,
+			"Namespace":     dgdr.Namespace,
+			"DGDRName":      dgdr.Name,
 		})
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to execute sidecar script template: %w", err)
@@ -1222,7 +1213,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		return nil // all fields already set by user
 	}
 
-	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.Client)
+	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.APIReader)
 	if err != nil {
 		return err
 	}
@@ -1392,14 +1383,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 
 	// Select the right config file based on mocker feature flag
-	// Profiler always generates both real and mocker configs
-	var outputFile string
-	if dgdr.Spec.Features != nil && dgdr.Spec.Features.Mocker != nil && dgdr.Spec.Features.Mocker.Enabled {
-		outputFile = ProfilingOutputFileMocker
-		logger.Info("Using mocker deployment config")
-	} else {
-		outputFile = ProfilingOutputFile
-	}
+	// Profiler writes the selected config (real or mocker) to a single output file
+	outputFile := ProfilingOutputFile
 
 	// Get YAML content from ConfigMap
 	yamlContent, exists := cm.Data[outputFile]
