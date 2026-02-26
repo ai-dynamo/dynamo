@@ -26,7 +26,7 @@ DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.6.3"
 LMCACHE_REF="0.3.14"
-VLLM_OMNI_REF="0.14.0"
+VLLM_OMNI_REF="v0.16.0rc1"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -182,10 +182,19 @@ if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
     # Save original vllm entrypoint before vllm-omni overwrites it
     VLLM_BIN=$(which vllm)
     cp "$VLLM_BIN" /tmp/vllm-entrypoint-backup
-    uv pip install vllm-omni==${VLLM_OMNI_REF}
+    # Try PyPI first, fall back to building from source
+    if uv pip install vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
+        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
+    else
+        echo "⚠ PyPI install failed, building from source..."
+        git clone --depth 1 --branch ${VLLM_OMNI_REF} https://github.com/vllm-project/vllm-omni.git $INSTALLATION_DIR/vllm-omni
+        uv pip install $INSTALLATION_DIR/vllm-omni
+        rm -rf $INSTALLATION_DIR/vllm-omni
+        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source"
+    fi
     # Restore original vllm CLI entrypoint (vllm-omni replaces it with its own)
     cp /tmp/vllm-entrypoint-backup "$VLLM_BIN"
-    echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed (original vllm entrypoint preserved)"
+    echo "✓ Original vllm entrypoint preserved"
 else
     echo "⚠ Skipping vLLM-Omni (no ref provided or ARM64 not supported)"
 fi

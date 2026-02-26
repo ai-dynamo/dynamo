@@ -58,7 +58,10 @@ vllm = [
     "uvloop",
     "nixl[cu12]<=0.9.0",
     "vllm[flashinfer,runai]==0.16.0",
-    "vllm-omni==0.14.0",
+    # vllm-omni 0.16.0rc1 is not on PyPI; installed from source in container builds
+    # (see container/deps/vllm/install_vllm.sh). pip install ai-dynamo[vllm] will
+    # not include vllm-omni — install it separately from source if needed.
+    # "vllm-omni==0.16.0rc1",
     "blake3>=1.0.0,<2.0.0",
 ]
 
