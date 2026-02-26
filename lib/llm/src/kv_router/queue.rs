@@ -241,7 +241,8 @@ impl SchedulerQueue {
 /// Build the effective worker map for a scheduling decision.
 ///
 /// When `provided_worker_ids` is `Some`, those IDs define the worker set.
-/// Configs are looked up from discovery; workers not yet discovered get a default config.
+/// Configs are looked up from discovery; workers not yet discovered get
+/// `ModelRuntimeConfig::default()` (data_parallel_size=1, no capacity limits).
 ///
 /// When `provided_worker_ids` is `None`, the discovery worker map is used as-is.
 fn build_effective_workers(
