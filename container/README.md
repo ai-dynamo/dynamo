@@ -285,6 +285,39 @@ The frontend image includes:
 
 The frontend image is designed for Kubernetes deployment with the Gateway API Inference Extension. See [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md) for complete deployment instructions using Helm charts.
 
+### build_images.sh - Build and Push Dynamo Images for K8s Deployment
+
+A convenience script (`build_images.sh`) is provided to build and optionally push major docker images for k8s deployment. The script builds up to five images: the operator, frontend (with EPP), and backend runtimes (vLLM, SGLang, TensorRT-LLM), and pushes them to a Docker registry.
+
+```bash
+# Build and push all images
+container/build_images.sh \
+  --repo my-repo --tag my-tag --push
+
+# Build only specific images (e.g. frontend + vllm)
+container/build_images.sh \
+  --repo my-repo --tag my-tag --images frontend,vllm
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--repo` | Yes | Docker registry username/org (e.g. `my-repo`) |
+| `--tag` | Yes | Image tag (e.g. `my-tag`) |
+| `--images` | No | Comma-separated subset: `operator`, `frontend`, `vllm`, `sglang`, `trtllm` (default: all) |
+| `--push` | No | Push images to registry after building |
+
+The resulting image names follow this convention:
+
+| Image | Name |
+|-------|------|
+| Operator | `<repo>/dynamo-operator:<tag>` |
+| Frontend | `<repo>/dynamo-frontend:<tag>` |
+| vLLM | `<repo>/vllm-runtime:<tag>` |
+| SGLang | `<repo>/sglang-runtime:<tag>` |
+| TensorRT-LLM | `<repo>/trtllm-runtime:<tag>` |
+
+> **Note**: Building the frontend image requires Docker BuildKit and pulls the Rust toolchain as part of the EPP build stage. No host-side Rust installation is needed — everything is built inside Docker.
+
 ### run.sh - Container Runtime Manager
 
 The `run.sh` script launches Docker containers with the appropriate configuration for development and inference workloads.

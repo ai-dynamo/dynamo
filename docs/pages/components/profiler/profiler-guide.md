@@ -152,40 +152,7 @@ The profiler enforces these rules at startup:
 
 ## Building Container Images
 
-If you want to use customized dynamo images, a convenience script is provided to build and push all Docker images needed for DGDR end-to-end testing. The script builds up to five images: the operator, frontend (with EPP), and backend runtimes (vLLM, SGLang, TensorRT-LLM), name and push them to a docker registry so that the profiler can find them.
-
-The script lives at `components/src/dynamo/profiler/build_images.sh` and must be run from within the Dynamo repository.
-
-```bash
-# Build and push all images
-./components/src/dynamo/profiler/build_images.sh \
-  --repo my-repo --tag my-tag --push
-
-# Build only specific images (e.g. frontend + vllm)
-./components/src/dynamo/profiler/build_images.sh \
-  --repo my-repo --tag my-tag --images frontend,vllm
-```
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--repo` | Yes | Docker registry username/org (e.g. `my-repo`) |
-| `--tag` | Yes | Image tag (e.g. `my-tag`) |
-| `--images` | No | Comma-separated subset: `operator`, `frontend`, `vllm`, `sglang`, `trtllm` (default: all) |
-| `--push` | No | Push images to registry after building |
-
-The resulting image names follow this convention:
-
-| Image | Name |
-|-------|------|
-| Operator | `<repo>/dynamo-operator:<tag>` |
-| Frontend | `<repo>/dynamo-frontend:<tag>` |
-| vLLM | `<repo>/vllm-runtime:<tag>` |
-| SGLang | `<repo>/sglang-runtime:<tag>` |
-| TensorRT-LLM | `<repo>/trtllm-runtime:<tag>` |
-
-> **Note**: Building the frontend image requires Docker BuildKit and pulls the Rust toolchain as part of the EPP build stage. No host-side Rust installation is needed — everything is built inside Docker.
-
-For detailed information about the container build system, targets, and development workflows, see the [Container Development Guide](../../../../container/README.md).
+If you want to use customized Dynamo images, a convenience script (`container/build_images.sh`) is provided to build and push all Docker images needed for DGDR end-to-end testing. See the [Container Development Guide](../../../../container/README.md#build_imagessh---build-and-push-all-images) for full usage details.
 
 ## CLI Usage
 

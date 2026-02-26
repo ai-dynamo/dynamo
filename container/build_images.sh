@@ -10,12 +10,12 @@
 #   - trtllm-runtime     (TensorRT-LLM backend)
 #
 # Usage:
-#   ./build_images.sh --repo <dockerhub-user> --tag <tag> [--images operator,frontend,vllm,sglang,trtllm] [--push]
+#   container/build_images.sh --repo <dockerhub-user> --tag <tag> [--images operator,frontend,vllm,sglang,trtllm] [--push]
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DYNAMO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+DYNAMO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 REPO=""
 TAG=""
