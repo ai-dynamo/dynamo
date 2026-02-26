@@ -27,6 +27,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 ARG PYTHON_VERSION
+ARG DEVICE
 
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -82,6 +83,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
     /tmp/install_vllm.sh \
+        --device $DEVICE \
         --vllm-ref $VLLM_REF \
         --max-jobs $MAX_JOBS \
         --arch $ARCH \

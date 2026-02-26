@@ -18,6 +18,12 @@
 #TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
 ARG ARCH={{ platform }}
 ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
+ARG DEVICE={{ device }}
+{% if device == "cuda" -%}
+{% set device_key = device + cuda_version -%}
+{% else -%}
+{% set device_key = device -%}
+{% endif %}
 
 # Python/CUDA configuration
 ARG PYTHON_VERSION={{ context.dynamo.python_version }}
@@ -25,13 +31,19 @@ ARG CUDA_VERSION={{ cuda_version }}
 ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
 
 # Base and runtime images configuration
-{% set cuda_context_key = "cuda" + cuda_version %}
-ARG BASE_IMAGE={{ context[framework].base_image }}
-ARG BASE_IMAGE_TAG={{ context[framework][cuda_context_key].base_image_tag }}
+ARG BASE_IMAGE={{ context[framework][device_key].base_image }}
+ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
 {% if framework in ["sglang", "trtllm", "vllm"] -%}
-ARG RUNTIME_IMAGE={{ context[framework].runtime_image }}
-ARG RUNTIME_IMAGE_TAG={{ context[framework][cuda_context_key].runtime_image_tag }}
+ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
+ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
 {%- endif %}
+
+# wheel builder image selection
+{% if device == "xpu" %}
+ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}:${BASE_IMAGE_TAG}
+{% else %}
+ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_${ARCH_ALT}
+{% endif %}
 
 # Build configuration
 ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
@@ -66,7 +78,11 @@ ARG FRONTEND_IMAGE={{ context.dynamo.frontend_image }}
 
 {% if framework == "vllm" -%}
 # Make sure to update the dependency version in pyproject.toml when updating this
+{% if device_key == "xpu" -%}
+ARG VLLM_REF={{ context.vllm.xpu.vllm_ref }}
+{% else -%}
 ARG VLLM_REF={{ context.vllm.vllm_ref }}
+{% endif %}
 ARG MAX_JOBS={{ context.vllm.max_jobs }}
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
 ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
