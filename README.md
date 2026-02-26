@@ -346,9 +346,6 @@ python3 -m dynamo.frontend
 
 ## Benchmarking
 
-Dynamo provides comprehensive benchmarking tools:
-
-- **[Benchmarking Guide](docs/pages/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
 - **[SLA-Driven Deployments](docs/pages/components/planner/planner-guide.md)** – Optimize deployments to meet SLA requirements
 
 ## Frontend OpenAPI Specification
