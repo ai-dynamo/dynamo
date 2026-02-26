@@ -48,9 +48,15 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo)   REPO="$2"; shift 2 ;;
-        --tag)    TAG="$2"; shift 2 ;;
-        --images) IMAGES="$2"; shift 2 ;;
+        --repo)
+            [[ -z "${2:-}" || "$2" == --* ]] && { echo "Error: --repo requires a value"; usage 1; }
+            REPO="$2"; shift 2 ;;
+        --tag)
+            [[ -z "${2:-}" || "$2" == --* ]] && { echo "Error: --tag requires a value"; usage 1; }
+            TAG="$2"; shift 2 ;;
+        --images)
+            [[ -z "${2:-}" || "$2" == --* ]] && { echo "Error: --images requires a value"; usage 1; }
+            IMAGES="$2"; shift 2 ;;
         --push)   PUSH=true; shift ;;
         -h|--help) usage 0 ;;
         *) echo "Unknown option: $1"; usage 1 ;;
