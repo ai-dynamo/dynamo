@@ -341,7 +341,9 @@ jobs:
         cd deploy/helm/charts/platform/
         helm dep build .
         # Install platform with namespace restriction for single profile testing
+        # we manage crds via Velonix so we skip the crds installation
         helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+          --skip-crds \
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
@@ -509,10 +511,8 @@ jobs:
   cleanup:
     name: Cleanup AKS resources
     runs-on: prod-default-small-v2
-    if: >-
-      always() &&
-      needs.deploy-status-check.result == 'success'
-    needs: [deploy-operator, deploy-status-check]
+    if:  always()
+    needs: [deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - name: Checkout code
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
