@@ -31,7 +31,6 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
     pytest.mark.parametrize(
         "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
     ),
@@ -211,6 +210,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(230)  # 3x average
+@pytest.mark.post_merge
 def test_request_migration_sglang_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -262,6 +262,7 @@ def test_request_migration_sglang_aggregated(
 @pytest.mark.skip(reason="Cannot reliably migrate at Prefill that finish < 1 ms")
 @pytest.mark.xfail(strict=False, reason="Prefill migration not yet supported")
 @pytest.mark.timeout(230)  # 3x average
+@pytest.mark.nightly
 def test_request_migration_sglang_prefill(
     request,
     runtime_services_dynamic_ports,
@@ -330,6 +331,7 @@ def test_request_migration_sglang_prefill(
 
 @pytest.mark.skip(reason="KV cache transfer may fail")
 @pytest.mark.timeout(230)  # 3x average
+@pytest.mark.nightly
 def test_request_migration_sglang_kv_transfer(
     request,
     runtime_services_dynamic_ports,
@@ -397,6 +399,7 @@ def test_request_migration_sglang_kv_transfer(
 
 
 @pytest.mark.timeout(230)  # 3x average
+@pytest.mark.nightly
 def test_request_migration_sglang_decode(
     request,
     runtime_services_dynamic_ports,
