@@ -95,6 +95,8 @@ navigation:
             path: ../pages/features/multimodal/multimodal-sglang.md
       - page: Tool Calling
         path: ../pages/agents/tool-calling.md
+      - page: SGLang for Agentic Workloads
+        path: ../pages/backends/sglang/agents.md
       - page: LoRA Adapters
         path: ../pages/features/lora/README.md
       - section: Observability (Local)
