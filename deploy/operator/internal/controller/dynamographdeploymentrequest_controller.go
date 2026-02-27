@@ -1169,7 +1169,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	}
 	hw := dgdr.Spec.Hardware
 	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
-		return nil // all fields already set by user
+		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
 
 	gpuInfo, err := gpu.DiscoverGPUs(ctx, r.APIReader)
@@ -1180,6 +1180,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	logger := log.FromContext(ctx)
 	logger.Info("GPU discovery completed successfully",
 		"gpusPerNode", gpuInfo.GPUsPerNode,
+		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
 		"model", gpuInfo.Model,
 		"vramMiB", gpuInfo.VRAMPerGPU)
 
@@ -1193,6 +1195,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	if hw.NumGPUsPerNode == nil {
 		n := int32(gpuInfo.GPUsPerNode)
 		hw.NumGPUsPerNode = &n
+	}
+	if hw.TotalGPUs == nil {
+		total := int32(gpuInfo.GPUsPerNode * gpuInfo.NodesWithGPUs)
+		hw.TotalGPUs = &total
 	}
 	return nil
 }
