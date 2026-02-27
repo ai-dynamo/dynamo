@@ -48,7 +48,7 @@ class TargetReplica(BaseModel):
 class KubernetesConnector(PlannerConnector):
     def __init__(
         self,
-        dynamo_namespace: str,
+        _dynamo_namespace: str,
         model_name: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
         parent_dgd_name: Optional[str] = None,
