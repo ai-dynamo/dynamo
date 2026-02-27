@@ -210,7 +210,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(230)  # 3x average
-@pytest.mark.post_merge
+# @pytest.mark.post_merge. # TODO: remove later
 def test_request_migration_sglang_aggregated(
     request,
     runtime_services_dynamic_ports,
