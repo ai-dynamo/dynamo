@@ -207,7 +207,11 @@ func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serv
 func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
 	switch role {
 	case RoleLeader:
-		fullCommand := strings.Join(container.Command, " ")
+		quotedCmd := make([]string, len(container.Command))
+		for i, tok := range container.Command {
+			quotedCmd[i] = shellQuoteForBashC(tok)
+		}
+		fullCommand := strings.Join(quotedCmd, " ")
 		quotedArgs := make([]string, len(container.Args))
 		for i, arg := range container.Args {
 			quotedArgs[i] = shellQuoteForBashC(arg)
