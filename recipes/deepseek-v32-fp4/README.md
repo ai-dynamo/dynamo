@@ -4,8 +4,7 @@ This recipe demonstrates the performance difference between **aggregated (round-
 
 ## Results
 
-
-
+https://github.com/user-attachments/assets/49cfa125-256d-4f9e-b23b-d62bcdef9065
 
 ## Experiment Overview
 
@@ -14,7 +13,7 @@ We compare two deployment modes on **32x GB200 GPUs across 8 nodes**:
 | Mode | Routing | Configuration |
 |------|---------|---------------|
 | **Aggregated** | Round-robin | 4x DEP8 workers |
-| **Disaggregated** | KV-aware | 2x prefill + 2x decode w/ WIDEEP (DEP8) |
+| **Disaggregated** | KV-aware | 2x prefill + 2x decode w/ WideEP (DEP8) |
 
 ## Dataset: Mooncake-based Synthetic Coding Trace
 
