@@ -873,9 +873,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 // If the error does not match any known category, "unknown" is returned.
 func GetGPUDiscoveryFailureReason(err error) string {
     if err == nil {
-+		return "unknown"
-+	}
-+	errMsg := strings.ToLower(err.Error())
+		return "unknown"
+	}
+	errMsg := strings.ToLower(err.Error())
 	
     switch {
     case strings.Contains(errMsg, "list pods"):
@@ -1220,10 +1220,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
 	}
 
-	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
-		dgdr.Spec.Hardware.VRAMMB != nil ||
-		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
-		
+	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" || dgdr.Spec.Hardware.VRAMMB != nil || dgdr.Spec.Hardware.NumGPUsPerNode != nil)
+
 	var gpuInfo *gpu.GPUInfo
 	logger := log.FromContext(ctx)
 
