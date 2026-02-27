@@ -101,13 +101,7 @@ jobs:
       - name: Install Fern CLI
         run: npm install -g fern-api
 
-      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
-      - name: Create fern directory symlink
-        working-directory: docs
-        run: ln -s . fern
-
       - name: Validate Fern configuration
-        working-directory: docs
         run: fern check
 
   fern-broken-links:
@@ -130,13 +124,7 @@ jobs:
       - name: Install Fern CLI
         run: npm install -g fern-api
 
-      # Fern CLI expects a fern/ directory; create symlink after docs/ migration
-      - name: Create fern directory symlink
-        working-directory: docs
-        run: ln -s . fern
-
       - name: Check for broken links
-        working-directory: docs
         run: fern docs broken-links
 
   #############################################################################
@@ -178,14 +166,21 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Sync dev content from main
         run: |
-          # Sync pages/ directory (dev content)
-          echo "Syncing pages/ to docs-website branch..."
-          rm -rf docs-checkout/fern/pages
-          cp -r source-checkout/docs/pages docs-checkout/fern/pages
+          # Sync content directories from docs/ to fern/pages/ on docs-website
+          # Excludes non-content items that are synced separately or not needed
+          echo "Syncing content pages to docs-website branch..."
+          rm -rf docs-checkout/fern/pages-dev
+          mkdir -p docs-checkout/fern/pages-dev
+          rsync -a \
+            --exclude='assets' \
+            --exclude='blogs' \
+            --exclude='diagrams' \
+            --exclude='index.yml' \
+            source-checkout/docs/ docs-checkout/fern/pages-dev/
 
-          # Sync versions/dev.yml (dev navigation)
-          echo "Syncing versions/dev.yml to docs-website branch..."
-          cp source-checkout/docs/versions/dev.yml docs-checkout/fern/versions/dev.yml
+          # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
+          echo "Syncing index.yml to docs-website branch as versions/dev.yml..."
+          cp source-checkout/docs/index.yml docs-checkout/fern/versions/dev.yml
 
           # Sync assets/ directory
           echo "Syncing assets/ to docs-website branch..."
@@ -194,7 +189,7 @@ jobs:
 
           # Sync fern.config.json
           echo "Syncing fern.config.json to docs-website branch..."
-          cp source-checkout/docs/fern.config.json docs-checkout/fern/fern.config.json
+          cp source-checkout/fern/fern.config.json docs-checkout/fern/fern.config.json
 
           # Sync docs/README.md (developer guide, referenced from dev.yml)
           if [ -f source-checkout/docs/README.md ]; then
@@ -202,20 +197,20 @@ jobs:
           fi
 
           # Sync .gitignore if it exists
-          if [ -f source-checkout/docs/.gitignore ]; then
-            cp source-checkout/docs/.gitignore docs-checkout/fern/.gitignore
+          if [ -f source-checkout/fern/.gitignore ]; then
+            cp source-checkout/fern/.gitignore docs-checkout/fern/.gitignore
           fi
 
           # Sync convert_callouts.py script
-          if [ -f source-checkout/docs/convert_callouts.py ]; then
-            cp source-checkout/docs/convert_callouts.py docs-checkout/fern/convert_callouts.py
+          if [ -f source-checkout/fern/convert_callouts.py ]; then
+            cp source-checkout/fern/convert_callouts.py docs-checkout/fern/convert_callouts.py
           fi
 
           # Sync components/ directory (e.g., CustomFooter.tsx)
-          if [ -d source-checkout/docs/components ]; then
+          if [ -d source-checkout/fern/components ]; then
             echo "Syncing components/ to docs-website branch..."
             rm -rf docs-checkout/fern/components
-            cp -r source-checkout/docs/components docs-checkout/fern/components
+            cp -r source-checkout/fern/components docs-checkout/fern/components
           fi
 
           # Sync blogs/ directory
@@ -226,10 +221,22 @@ jobs:
           fi
 
           # Sync main.css
-          if [ -f source-checkout/docs/main.css ]; then
+          if [ -f source-checkout/fern/main.css ]; then
             echo "Syncing main.css to docs-website branch..."
-            cp source-checkout/docs/main.css docs-checkout/fern/main.css
+            cp source-checkout/fern/main.css docs-checkout/fern/main.css
           fi
+
+      - name: Transform paths in dev.yml for docs-website layout
+        run: |
+          # In the source repo, index.yml uses paths relative to docs/ (e.g. getting-started/quickstart.md).
+          # On docs-website, fern/versions/dev.yml needs ../pages-dev/ prefix for content
+          # and ../ prefix for blogs (which are a sibling of pages/, not inside it).
+          yq -i '(.. | select(has("path")).path) |= (
+            if test("^blogs/") then "../" + .
+            elif test("^[a-zA-Z]") then "../pages-dev/" + .
+            else .
+            end
+          )' docs-checkout/fern/versions/dev.yml
 
       - name: Convert GitHub callouts to Fern format
         run: |
@@ -248,7 +255,7 @@ jobs:
           cat /tmp/preserved_product.yml
 
           # Copy docs.yml from source to get config updates (redirects, layout, etc.)
-          cp ../../source-checkout/docs/docs.yml docs.yml
+          cp ../../source-checkout/fern/docs.yml docs.yml
 
           # Restore the preserved products[0] block
           yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
