@@ -10,6 +10,7 @@
 aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@7287307c4e3861b90927198da74e1adda53a4caf
 filterpy==1.4.5
 kubernetes==32.0.1
+kubernetes_asyncio==32.0.0
 matplotlib==3.10.7
 pmdarima==2.1.1
 prometheus-api-client==0.6.0
