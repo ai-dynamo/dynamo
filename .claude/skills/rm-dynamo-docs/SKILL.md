@@ -1,6 +1,4 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 name: rm-dynamo-docs
 description: Remove a page from the Dynamo Fern docs site. Use when deleting documentation pages.
 ---

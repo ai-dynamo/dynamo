@@ -1,6 +1,4 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 name: update-dynamo-docs
 description: Update an existing page in the Dynamo Fern docs site. Use when editing content, titles, or moving pages between sections.
 ---
