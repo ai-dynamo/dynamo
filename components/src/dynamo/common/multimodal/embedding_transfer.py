@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
-from typing import Any, List
+from typing import Any, Awaitable, List
 
 import torch
 from pydantic import BaseModel
@@ -74,7 +74,7 @@ class AbstractEmbeddingReceiver(ABC):
         pass
 
     @abstractmethod
-    def release_tensor(self, tensor_id: int):
+    def release_tensor(self, tensor_id: int) -> None:
         """
         Abstract method to indicate that the tensor associated with the ID is no longer in use.
         Args:
@@ -91,7 +91,7 @@ class AbstractEmbeddingSender(ABC):
     @abstractmethod
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
-    ) -> tuple[TransferRequest, asyncio.Future]:
+    ) -> tuple[TransferRequest, Awaitable[None]]:
         """
         Abstract method to send precomputed embeddings for a given request ID.
 
@@ -100,7 +100,7 @@ class AbstractEmbeddingSender(ABC):
             stage_embeddings: A boolean indicating whether the embeddings should be staged for the transfer,
             if True, the embeddings may be used as transfer buffer and must not be released until the return future is completed.
         Returns:
-            A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
+            A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
         """
         pass
 
@@ -139,7 +139,7 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
 
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
-    ) -> tuple[TransferRequest, asyncio.Future]:
+    ) -> tuple[TransferRequest, Awaitable[None]]:
         """
         Send precomputed embeddings for a given request ID.
 
@@ -148,7 +148,7 @@ class LocalEmbeddingSender(AbstractEmbeddingSender):
             stage_embeddings: A boolean indicating whether the embeddings should be staged for the transfer,
             if True, the embeddings may be used as transfer buffer and must not be released until the return future is completed.
         Returns:
-            A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
+            A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
         """
         # Implementation to send embeddings to the downstream worker
         # This could involve publishing to a message queue or making an API call
@@ -202,7 +202,7 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.received_tensors[tensor_id] = tensor_path
         return tensor_id, embedding_tensor
 
-    def release_tensor(self, tensor_id: int):
+    def release_tensor(self, tensor_id: int) -> None:
         """
         Indicate that the tensor associated with the ID is no longer in use.
 
@@ -227,7 +227,7 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
 
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
-    ) -> tuple[TransferRequest, asyncio.Future]:
+    ) -> tuple[TransferRequest, Awaitable[None]]:
         """
         Send precomputed embeddings.
 
@@ -236,7 +236,7 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
             stage_embeddings: A boolean indicating whether the embeddings should be staged for the transfer,
             if True, the embeddings may be used as transfer buffer and must not be released until the return future is completed.
         Returns:
-            A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
+            A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
         """
 
         descriptor = nixl_connect.Descriptor(embeddings.cpu())
@@ -299,7 +299,7 @@ class NixlEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.tensor_id_counter += 1
         return tensor_id, encodings_tensor
 
-    def release_tensor(self, tensor_id: int):
+    def release_tensor(self, tensor_id: int) -> None:
         """
         Indicate that the tensor associated with the ID is no longer in use.
 
@@ -334,7 +334,7 @@ def remote_release_overwrite(self) -> None:
     pass
 
 
-nixl_connect.Remote._release = remote_release_overwrite
+nixl_connect.Remote._release = remote_release_overwrite  # type: ignore[method-assign]
 
 
 class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
@@ -349,7 +349,7 @@ class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
 
     async def send_embeddings(
         self, embeddings: torch.Tensor, stage_embeddings: bool = False
-    ) -> tuple[TransferRequest, asyncio.Future]:
+    ) -> tuple[TransferRequest, Awaitable[None]]:
         """
         Send precomputed embeddings.
 
@@ -359,7 +359,7 @@ class NixlPersistentEmbeddingSender(AbstractEmbeddingSender):
             if True, the embeddings may be used as transfer buffer and must not be released until the return future is completed.
             if False, the sender will copy the embeddings.
         Returns:
-            A tuple containing the TransferRequest object and a future that can be awaited to indicate the send is completed.
+            A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
         """
         if stage_embeddings:
             transfer_buf = embeddings
@@ -389,15 +389,18 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
     """
 
     def __init__(
-        self, embedding_hidden_size=8 * 1024, max_item_mm_token=1024, max_items=50
-    ):
+        self,
+        embedding_hidden_size: int = 8 * 1024,
+        max_item_mm_token: int = 1024,
+        max_items: int = 50,
+    ) -> None:
         super().__init__()
         self.connector = PersistentConnector()
         self.tensor_id_counter = 0
         self.aggregated_op_create_time = 0
         self.aggregated_op_wait_time = 0
-        self.warmedup_descriptors = Queue()
-        self.inuse_descriptors = {}
+        self.warmedup_descriptors: Queue[nixl_connect.Descriptor] = Queue()
+        self.inuse_descriptors: dict[int, tuple[nixl_connect.Descriptor, bool]] = {}
         # Handle both sync and async contexts
         try:
             asyncio.get_running_loop()  # Check if we're in async context
@@ -452,7 +455,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
             # Slide view of pre-allocated tensor
             tensor_size_bytes = embeddings_dtype.itemsize * math.prod(embeddings_shape)
             encodings_tensor = (
-                descriptor._data_ref[:tensor_size_bytes]
+                descriptor._data_ref[:tensor_size_bytes]  # type: ignore[index]
                 .view(dtype=embeddings_dtype)
                 .view(embeddings_shape)
             )
@@ -470,7 +473,7 @@ class NixlPersistentEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.inuse_descriptors[tensor_id] = (descriptor, dynamic_descriptor)
         return tensor_id, encodings_tensor
 
-    def release_tensor(self, tensor_id: int):
+    def release_tensor(self, tensor_id: int) -> None:
         """
         Indicate that the tensor associated with the ID is no longer in use.
 
