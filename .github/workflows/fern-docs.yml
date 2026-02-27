@@ -196,6 +196,11 @@ jobs:
           echo "Syncing fern.config.json to docs-website branch..."
           cp source-checkout/docs/fern.config.json docs-checkout/fern/fern.config.json
 
+          # Sync docs/README.md (developer guide, referenced from dev.yml)
+          if [ -f source-checkout/docs/README.md ]; then
+            cp source-checkout/docs/README.md docs-checkout/fern/README.md
+          fi
+
           # Sync .gitignore if it exists
           if [ -f source-checkout/docs/.gitignore ]; then
             cp source-checkout/docs/.gitignore docs-checkout/fern/.gitignore

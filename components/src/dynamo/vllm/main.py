@@ -487,7 +487,9 @@ def setup_vllm_engine(config, stat_logger=None):
                 "Continuing without KV event consolidation. "
                 "Ensure 'kvbm' package is installed if this feature is needed."
             )
-    vllm_config.consolidator_endpoints = consolidator_endpoints
+    # Store consolidator endpoints in additional_config (vLLM 0.16+ uses strict
+    # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
+    vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
     factory = []
     if stat_logger:
@@ -646,13 +648,11 @@ async def init_prefill(
     consolidator_enabled = False
     consolidator_port = None
 
-    if (
-        hasattr(vllm_config, "consolidator_endpoints")
-        and vllm_config.consolidator_endpoints
-    ):
+    _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
+    if _consolidator_eps:
         # Extract connect endpoint (third element) for clients to subscribe
         # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
+        consolidator_output_endpoint = _consolidator_eps[2]
         consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
         consolidator_enabled = True
 
@@ -831,13 +831,11 @@ async def init(
     consolidator_enabled = False
     consolidator_port = None
 
-    if (
-        hasattr(vllm_config, "consolidator_endpoints")
-        and vllm_config.consolidator_endpoints
-    ):
+    _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
+    if _consolidator_eps:
         # Extract connect endpoint (third element) for clients to subscribe
         # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-        consolidator_output_endpoint = vllm_config.consolidator_endpoints[2]
+        consolidator_output_endpoint = _consolidator_eps[2]
         consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
         consolidator_enabled = True
 

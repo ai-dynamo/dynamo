@@ -27,7 +27,6 @@ class BaseOmniHandler(BaseWorkerHandler):
     def __init__(
         self,
         runtime,
-        component,
         config,
         default_sampling_params: Dict[str, Any],
         shutdown_event: asyncio.Event | None = None,
@@ -36,7 +35,6 @@ class BaseOmniHandler(BaseWorkerHandler):
 
         Args:
             runtime: Dynamo distributed runtime.
-            component: Dynamo component handle.
             config: Parsed Config object from args.py.
             default_sampling_params: Default sampling parameters dict.
             shutdown_event: Optional asyncio event for graceful shutdown.
@@ -56,7 +54,6 @@ class BaseOmniHandler(BaseWorkerHandler):
         # TODO: Kv publishers not supported yet
         # TODO: Adopt to baseworker initialization pattern
         self.runtime = runtime
-        self.component = component
         self.default_sampling_params = default_sampling_params
         self.config = config
         self.model_max_len = config.engine_args.max_model_len

@@ -276,6 +276,7 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     "multimodal_disagg_qwen3vl_2b_e_pd": VLLMConfig(
         name="multimodal_disagg_qwen3vl_2b_e_pd",
         directory=vllm_dir,
@@ -335,20 +336,22 @@ vllm_configs = {
             )
         ],
     ),
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
     "multimodal_disagg_qwen3vl_2b_epd": VLLMConfig(
         name="multimodal_disagg_qwen3vl_2b_epd",
         directory=vllm_dir,
         script_name="disagg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.pre_merge],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        timeout=360,
         env={
             "DYN_ENCODE_WORKER_GPU": "0",
             "DYN_PREFILL_WORKER_GPU": "0",
-            "DYN_DECODE_WORKER_GPU": "1",
-            "DYN_ENCODE_GPU_MEM": "0.4",
+            "DYN_DECODE_WORKER_GPU": "0",
+            "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_PREFILL_GPU_MEM": "0.4",
-            "DYN_DECODE_GPU_MEM": "0.85",
+            "DYN_DECODE_GPU_MEM": "0.4",
         },
         request_payloads=[
             chat_payload(

@@ -64,6 +64,7 @@ class FrontendConfig(ConfigBase):
     router_track_output_blocks: bool
     router_event_threads: int
     router_queue_threshold: Optional[float]
+    router_enable_cache_control: bool
     decode_fallback: bool
 
     migration_limit: int
@@ -95,6 +96,8 @@ class FrontendConfig(ConfigBase):
             raise ValueError(
                 "--migration-limit must be between 0 and 4294967295 (0=disabled)"
             )
+        if self.router_enable_cache_control and self.router_mode != "kv":
+            raise ValueError("--enable-cache-control requires --router-mode=kv")
 
 
 @register_encoder(FrontendConfig)
@@ -372,6 +375,18 @@ class FrontendArgGroup(ArgGroup):
                 "hints. Must be > 0. If not set, queueing is disabled."
             ),
             arg_type=float,
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-cache-control",
+            env_var="DYN_ENABLE_CACHE_CONTROL",
+            default=False,
+            dest="router_enable_cache_control",
+            help=(
+                "KV Router: Enable cache control (PIN with TTL). When set, the router creates "
+                "a cache_control service mesh client and fires pin_prefix after generation for "
+                "requests with nvext.cache_control. Requires --router-mode=kv."
+            ),
         )
         add_negatable_bool_argument(
             g,
