@@ -208,11 +208,11 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 	switch role {
 	case RoleLeader:
 		fullCommand := strings.Join(container.Command, " ")
-		originalArgs := strings.Join(container.Args, " ")
-		// Use Ray executor for multi-node vLLM deployments.
-		// vLLM will create a placement group spanning all Ray nodes and spawn workers automatically.
-		// DO NOT pass --nnodes or --node-rank - these are only for mp backend.
-		// The Ray executor handles multi-node distribution via placement groups.
+		quotedArgs := make([]string, len(container.Args))
+		for i, arg := range container.Args {
+			quotedArgs[i] = shellQuoteForBashC(arg)
+		}
+		originalArgs := strings.Join(quotedArgs, " ")
 		vllmMultinodeFlags := "--distributed-executor-backend ray"
 		container.Args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s %s", VLLMPort, fullCommand, originalArgs, vllmMultinodeFlags)}
 	case RoleWorker:
