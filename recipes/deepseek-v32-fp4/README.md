@@ -1,6 +1,6 @@
 # Deepseek V3.2 NVFP4: Aggregated Round Robin vs Disaggregated KV Routing with WideEP
 
-This recipe demonstrates the performance difference between **aggregated (round-robin)** and **disaggregated (KV-aware)** routing using a synthetic trace dataset adapted from the [Mooncake FAST25 paper](https://github.com/kvcache-ai/Mooncake).
+This **GB200 NVL72** recipe demonstrates the performance difference between **aggregated (round-robin)** and **disaggregated (KV-aware)** routing on a synthetic trace dataset adapted from the [Mooncake FAST25 paper](https://github.com/kvcache-ai/Mooncake). 
 
 ## Results
 
@@ -17,7 +17,7 @@ We compare two deployment modes on **32x GB200 GPUs across 8 nodes**:
 
 ## Dataset: Mooncake-based Synthetic Coding Trace
 
-The benchmark uses a synthetic trace which simulates coding workloads. We synthesize the data by increasing the input sequence length and prefix reuse rate of the original [Mooncake conversation trace](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/conversation_trace.jsonl).
+The benchmark uses a trace which simulates coding workloads. We synthesize the trace by increasing the input sequence length and prefix reuse rate of the original [Mooncake conversation trace](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/conversation_trace.jsonl).
 
 To reproduce our benchmark, run Dynamo's [prefix data generator tool](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/prefix_data_generator) on the Mooncake `conversation_trace.jsonl`:
 ```bash
@@ -30,7 +30,7 @@ datagen synthesize \
 # synthesizes `conversation_trace_synth_16.00x1+10.00_speedup1_maxisl110000.jsonl`
 ```
 
-The ISL/OSL/cache hit statistics of the resulting trace is below.
+The ISL/OSL/cache hit statistics of our trace is below.
 
 <details>
 <summary>Dataset statistics: Mooncake-based Synthetic Trace</summary>
