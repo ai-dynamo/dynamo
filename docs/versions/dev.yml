@@ -232,8 +232,8 @@ navigation:
         path: ../blogs/flash-indexer/flash-indexer.md
         slug: flash-indexer
 
-  # ==================== Developer Guide ====================
-  - section: Developer Guide
+  # ==================== Documentation ====================
+  - section: Documentation
     contents:
       - page: Dynamo Docs Guide
         path: ../README.md
