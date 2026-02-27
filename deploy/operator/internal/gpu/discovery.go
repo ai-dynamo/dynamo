@@ -590,13 +590,15 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Client) (*GPUInfo, error
 
 	// Infer hardware system from GPU model
 	bestGPUInfo.System = InferHardwareSystem(bestGPUInfo.Model)
+	bestGPUInfo.NodesWithGPUs = nodesWithGPUs
 
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestGPUInfo.GPUsPerNode,
+		"nodesWithGPUs", bestGPUInfo.NodesWithGPUs,
+		"totalGpus", bestGPUInfo.GPUsPerNode*bestGPUInfo.NodesWithGPUs,
 		"model", bestGPUInfo.Model,
 		"vram", bestGPUInfo.VRAMPerGPU,
-		"system", bestGPUInfo.System,
-		"nodesWithGPUs", nodesWithGPUs)
+		"system", bestGPUInfo.System)
 
 	return bestGPUInfo, nil
 }
