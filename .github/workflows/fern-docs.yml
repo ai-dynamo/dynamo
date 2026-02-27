@@ -166,7 +166,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Sync dev content from main
         run: |
-          # Sync content directories from docs/ to fern/pages/ on docs-website
+          # Sync content directories from docs/ to fern/pages-dev/ on docs-website
           # Excludes non-content items that are synced separately or not needed
           echo "Syncing content pages to docs-website branch..."
           rm -rf docs-checkout/fern/pages-dev
@@ -231,17 +231,16 @@ jobs:
           # In the source repo, index.yml uses paths relative to docs/ (e.g. getting-started/quickstart.md).
           # On docs-website, fern/versions/dev.yml needs ../pages-dev/ prefix for content
           # and ../ prefix for blogs (which are a sibling of pages/, not inside it).
-          yq -i '(.. | select(has("path")).path) |= (
-            if test("^blogs/") then "../" + .
-            elif test("^[a-zA-Z]") then "../pages-dev/" + .
-            else .
-            end
-          )' docs-checkout/fern/versions/dev.yml
+          #
+          # Order matters: transform blogs/ first so the second sub() won't re-match them
+          # (they'll start with ../ which doesn't match ^[a-zA-Z]).
+          yq -i '(.. | select(has("path")).path) |= sub("^blogs/", "../blogs/")' docs-checkout/fern/versions/dev.yml
+          yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-dev/${1}")' docs-checkout/fern/versions/dev.yml
 
       - name: Convert GitHub callouts to Fern format
         run: |
           echo "Converting GitHub-style callouts to Fern format in pages/..."
-          python3 docs-checkout/fern/convert_callouts.py --dir docs-checkout/fern/pages
+          python3 docs-checkout/fern/convert_callouts.py --dir docs-checkout/fern/pages-dev
           echo "Callout conversion complete."
 
       - name: Update docs.yml preserving products
@@ -418,10 +417,10 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
-          echo "Creating fern/pages-$TAG/ from fern/pages/..."
+          echo "Creating fern/pages-$TAG/ from fern/pages-dev/..."
 
-          # Copy current pages/ to pages-vX.Y.Z/
-          cp -r fern/pages "fern/pages-$TAG"
+          # Copy current pages-dev/ to pages-vX.Y.Z/
+          cp -r fern/pages-dev "fern/pages-$TAG"
 
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
@@ -473,8 +472,8 @@ jobs:
           sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
           sed -i "s|# Matching https://docs.nvidia.com/dynamo/latest/|# Snapshot from tag $TAG|" "$VERSION_FILE"
 
-          # Update all page paths from ../pages/ to ../pages-vX.Y.Z/
-          sed -i "s|path: \.\./pages/|path: ../pages-$TAG/|g" "$VERSION_FILE"
+          # Update all page paths from ../pages-dev/ to ../pages-vX.Y.Z/
+          sed -i "s|path: \.\./pages-dev/|path: ../pages-$TAG/|g" "$VERSION_FILE"
 
           echo "Created $VERSION_FILE"
           echo "First 30 lines:"
