@@ -1146,7 +1146,6 @@ class BaseWorkerHandler(ABC):
         prompt,
         sampling_params,
         request_id,
-        data_parallel_rank=None,
         lora_request=None,
         embedding_sequence_length=None,
         trace_headers=None,
@@ -1164,7 +1163,6 @@ class BaseWorkerHandler(ABC):
                 sampling_params,
                 request_id,
                 lora_request=lora_request,
-                data_parallel_rank=data_parallel_rank,
                 trace_headers=trace_headers,
                 priority=priority,
             )
@@ -1317,7 +1315,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
         priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
@@ -1328,7 +1325,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     prompt,
                     sampling_params,
                     request_id,
-                    data_parallel_rank=dp_rank,
                     lora_request=lora_request,
                     embedding_sequence_length=embedding_sequence_length,
                     trace_headers=trace_headers,
@@ -1364,7 +1360,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
         priority = routing.get("priority", 0)
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
@@ -1377,7 +1372,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     prompt,
                     sampling_params,
                     request_id,
-                    data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
                     priority=priority,
                 )
@@ -1525,7 +1519,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         routing = request.get("routing") or {}
-        dp_rank = routing.get("dp_rank")
         priority = routing.get("priority", 0)
 
         trace_headers = build_trace_headers(context)
@@ -1536,7 +1529,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     prompt,
                     sampling_params,
                     request_id,
-                    data_parallel_rank=dp_rank,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     priority=priority,
