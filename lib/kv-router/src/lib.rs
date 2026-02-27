@@ -10,13 +10,17 @@ pub mod approx;
 #[cfg(feature = "bench")]
 pub mod bench_utils;
 pub mod concurrent_radix_tree;
+pub mod config;
 pub mod indexer;
 pub mod multi_worker_sequence;
 #[cfg(feature = "bench")]
 pub mod naive_indexers;
 pub mod nested_map;
 pub mod protocols;
+pub mod queue;
 pub mod radix_tree;
+pub mod scheduling;
+pub mod selector;
 pub mod sequence;
 
 #[cfg(test)]
@@ -24,6 +28,7 @@ pub(crate) mod test_utils;
 
 // Re-export key types for convenience
 pub use concurrent_radix_tree::ConcurrentRadixTree;
+pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
 pub use multi_worker_sequence::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
@@ -33,8 +38,11 @@ pub use multi_worker_sequence::{
 pub use naive_indexers::{InvertedIndex, NaiveNestedMap};
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
-    KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,
+    KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, WorkerConfigLike, WorkerId,
     compute_block_hash_for_seq,
 };
+pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;
+pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
+pub use selector::{DefaultWorkerSelector, WorkerSelector};
 pub use sequence::{ActiveSequences, RequestId};

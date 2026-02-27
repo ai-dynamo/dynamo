@@ -6,35 +6,18 @@ mod common;
 use common::*;
 
 use clap::Parser;
-use dynamo_kv_router::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, OverlapScores, SequencePublisher, SequenceRequest,
-};
+use dynamo_kv_router::bench_utils::NoopSequencePublisher;
+use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::{ActiveSequencesMultiWorker, OverlapScores, SequenceRequest};
 use dynamo_mocker::common::protocols::{DirectRequest, OutputSignal};
 use dynamo_mocker::scheduler::Scheduler;
 use dynamo_tokens::SequenceHash;
 use std::collections::HashMap;
-use std::future;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
-
-struct NoopSequencePublisher;
-
-impl SequencePublisher for NoopSequencePublisher {
-    fn publish_event(
-        &self,
-        _event: &ActiveSequenceEvent,
-    ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
-        future::ready(Ok(()))
-    }
-
-    fn publish_load(&self, _load: ActiveLoad) {}
-
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
-}
 
 #[derive(Parser, Debug)]
 #[clap(
