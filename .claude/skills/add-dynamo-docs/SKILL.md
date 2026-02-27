@@ -136,7 +136,7 @@ git commit -s -m "docs: add <page-title> page"
 
 ### `fern docs broken-links` reports errors
 
-- **Broken internal link:** A `[text](../path/to/file.md)` reference points to a file that doesn't exist. Fix the path or remove the link.
+- **Broken internal link:** A markdown link reference points to a file that doesn't exist. Fix the path or remove the link.
 - **Anchor not found:** A `#section-heading` link doesn't match any heading in the target page.
 
 ### CI fails after merge
