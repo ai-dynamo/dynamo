@@ -50,7 +50,7 @@ branch based on `main`). The sync workflow copies changes to
 Three Claude Code skills automate common docs tasks. Invoke them as slash
 commands in Claude Code (e.g., `/add-dynamo-docs`) — each skill walks through
 the full workflow: creating or editing the markdown file, updating the
-navigation in `docs/versions/dev.yml`, and running `fern check` to validate.
+navigation in `docs/index.yml`, and running `fern check` to validate.
 
 | Skill | Description |
 |-------|-------------|
@@ -64,10 +64,10 @@ navigation in `docs/versions/dev.yml`, and running `fern check` to validate.
 
 The documentation system uses a **dual-branch model**:
 
-| Branch | Purpose | Docs directory |
-|---|---|---|
-| `main` | Source of truth for **dev** (unreleased) documentation | `docs/` |
-| `docs-website` | Published documentation including **all versioned snapshots** | `docs/` |
+| Branch | Purpose | Content | Fern config |
+|---|---|---|---|
+| `main` | Source of truth for **dev** (unreleased) documentation | `docs/` | `fern/` |
+| `docs-website` | Published documentation including **all versioned snapshots** | `fern/pages/` | `fern/` |
 
 Authors edit pages on `main`. A GitHub Actions workflow automatically syncs
 changes to the `docs-website` branch and publishes them to Fern. The
@@ -86,51 +86,61 @@ bloating the `main` branch with frozen copies of old documentation.
 ### On `main`
 
 ```text
-docs/
-├── fern.config.json          # Fern org + CLI version pin
-├── docs.yml                  # Site configuration (instances, branding, layout)
-├── versions/
-│   └── dev.yml               # Navigation tree for the dev version
-├── pages/                    # Markdown content (the actual docs)
-│   ├── getting-started/
-│   ├── guides/
-│   ├── kubernetes/
-│   ├── reference/
-│   └── ...
-├── assets/                   # Images, fonts, SVGs, logos
+fern/                             # Fern CLI configuration (fern/ is a Fern convention)
+├── fern.config.json              # Fern org + CLI version pin
+├── docs.yml                      # Site configuration (instances, branding, layout)
 ├── components/
-│   └── CustomFooter.tsx      # React component for the site footer
-├── main.css                  # Custom CSS (NVIDIA branding, dark mode, etc.)
-├── convert_callouts.py       # GitHub → Fern admonition converter script
-└── diagrams/                 # D2 diagram source files
+│   └── CustomFooter.tsx          # React component for the site footer
+├── main.css                      # Custom CSS (NVIDIA branding, dark mode, etc.)
+├── convert_callouts.py           # GitHub → Fern admonition converter script
+└── .gitignore                    # Fern-specific ignores
+
+docs/                             # Documentation content
+├── index.yml                     # Navigation tree for the dev version
+├── getting-started/              # Markdown content (the actual docs)
+├── kubernetes/
+├── reference/
+├── ...
+├── assets/                       # Images, fonts, SVGs, logos
+├── blogs/                        # Blog posts
+└── diagrams/                     # D2 diagram source files
 ```
 
 ### On `docs-website`
 
-The `docs-website` branch mirrors the above structure, plus versioned snapshots:
+The `docs-website` branch has a different layout optimized for Fern's directory
+conventions, plus versioned snapshots:
 
 ```text
-docs/
-├── docs.yml                  # Includes the full versions array
+fern/
+├── fern.config.json              # Fern org + CLI version pin
+├── docs.yml                      # Includes the full versions array
 ├── versions/
-│   ├── dev.yml               # "Next" / dev navigation (synced from main)
-│   ├── v0.8.1.yml            # Navigation for v0.8.1 snapshot
-│   └── v0.8.0.yml            # Navigation for v0.8.0 snapshot
-├── pages/                    # Current dev content (synced from main)
-├── pages-v0.8.1/             # Frozen snapshot of pages/ at v0.8.1
-├── pages-v0.8.0/             # Frozen snapshot of pages/ at v0.8.0
-└── ...                       # (other files same as main)
+│   ├── dev.yml                   # "Next" / dev navigation (synced from main)
+│   ├── v0.8.1.yml                # Navigation for v0.8.1 snapshot
+│   └── v0.8.0.yml                # Navigation for v0.8.0 snapshot
+├── pages/                        # Current dev content (synced from main)
+├── pages-v0.8.1/                 # Frozen snapshot of pages/ at v0.8.1
+├── pages-v0.8.0/                 # Frozen snapshot of pages/ at v0.8.0
+├── components/                   # React components
+├── main.css                      # Custom CSS
+├── convert_callouts.py           # Callout converter
+├── blogs/                        # Blog posts (synced from main)
+└── assets/                       # Images, fonts, SVGs
 ```
 
 Each `pages-vX.Y.Z/` directory is an immutable copy of `pages/` taken at
 release time. The corresponding `versions/vX.Y.Z.yml` file is a copy of
 `dev.yml` with all `../pages/` paths rewritten to `../pages-vX.Y.Z/`.
 
+The sync workflow copies content from `main`'s `docs/` into `fern/pages/` and
+transforms navigation paths in `index.yml` → `versions/dev.yml` accordingly.
+
 ---
 
 ## Configuration Files
 
-### `fern.config.json`
+### `fern/fern.config.json`
 
 ```json
 {
@@ -142,7 +152,7 @@ release time. The corresponding `versions/vX.Y.Z.yml` file is a copy of
 - **organization**: The Fern organization that owns the docs site.
 - **version**: Pins the Fern CLI version used for generation.
 
-### `docs.yml`
+### `fern/docs.yml`
 
 This is the main Fern site configuration. Key sections:
 
@@ -164,7 +174,7 @@ This is the main Fern site configuration. Key sections:
 The sync workflow preserves the versions array from `docs-website` when copying
 `docs.yml` from `main`.
 
-### `versions/dev.yml`
+### `docs/index.yml`
 
 Defines the navigation tree — the sidebar structure of the docs site. Each
 entry maps a page title to a markdown file path:
@@ -174,13 +184,18 @@ navigation:
   - section: Getting Started
     contents:
       - page: Quickstart
-        path: ../pages/getting-started/quickstart.md
+        path: getting-started/quickstart.md
       - page: Support Matrix
-        path: ../pages/reference/support-matrix.md
+        path: reference/support-matrix.md
 ```
 
-Sections can be nested. Pages can be marked as `hidden: true` to make them
-accessible by URL but invisible in the sidebar.
+Paths are relative to the `docs/` directory. Sections can be nested. Pages can
+be marked as `hidden: true` to make them accessible by URL but invisible in the
+sidebar.
+
+During sync to `docs-website`, the workflow copies `index.yml` to
+`fern/versions/dev.yml` and transforms paths (e.g., `getting-started/X` →
+`../pages/getting-started/X`) to match the docs-website directory layout.
 
 ---
 
@@ -210,23 +225,17 @@ publishing. It runs three jobs depending on the trigger:
 
 **Steps:**
 1. Checks out both `main` and `docs-website` branches side-by-side
-2. Copies from `main` → `docs-website`:
-   - `docs/` — all markdown content
-   - `docs/versions/dev.yml` — navigation structure
-   - `docs/assets/` — images, fonts, SVGs
-   - `docs/fern.config.json` — Fern config
-   - `docs/components/` — React components
-   - `docs/main.css` — custom styles
-   - `docs/convert_callouts.py` — conversion script
-3. Runs `convert_callouts.py` to transform GitHub-style callouts to Fern format
-4. Updates `docs.yml` from `main` **while preserving the versions array** from
+2. Copies content from `main`'s `docs/` → `docs-website`'s `fern/pages/`
+3. Copies `docs/index.yml` → `fern/versions/dev.yml` and transforms paths
+   for the docs-website layout using `yq`
+4. Syncs assets from `docs/assets/` and blogs from `docs/blogs/`
+5. Copies Fern config files from `fern/` → docs-website's `fern/`
+   (`fern.config.json`, `components/`, `main.css`, `convert_callouts.py`)
+6. Runs `convert_callouts.py` to transform GitHub-style callouts to Fern format
+7. Updates `docs.yml` from `main` **while preserving the versions array** from
    `docs-website` (uses `yq` to save/restore the versions list)
-5. Commits and pushes to `docs-website`
-6. Publishes to Fern via `fern generate --docs`
-
-**Symlink trick:** The Fern CLI expects a `fern/` directory. Since docs live in
-`docs/`, the workflow creates a symlink `docs/fern → docs/.` (i.e., pointing to
-itself) so Fern can find its config files.
+8. Commits and pushes to `docs-website`
+9. Publishes to Fern via `fern generate --docs`
 
 #### Job 3: Version Release (tags)
 
@@ -236,14 +245,14 @@ manual `workflow_dispatch` with a tag specified.
 **Steps:**
 1. Validates tag format (must be exactly `vX.Y.Z`, no suffixes like `-rc1`)
 2. Checks that the version doesn't already exist (no duplicate snapshots)
-3. Creates `docs/pages-vX.Y.Z/` by copying `docs/`
+3. Creates `fern/pages-vX.Y.Z/` by copying `fern/pages/`
 4. Rewrites GitHub links in the snapshot:
    - `github.com/ai-dynamo/dynamo/tree/main` → `tree/vX.Y.Z`
    - `github.com/ai-dynamo/dynamo/blob/main` → `blob/vX.Y.Z`
 5. Runs `convert_callouts.py` on the snapshot
-6. Creates `docs/versions/vX.Y.Z.yml` from `dev.yml` with paths updated to
+6. Creates `fern/versions/vX.Y.Z.yml` from `dev.yml` with paths updated to
    `../pages-vX.Y.Z/`
-7. Updates `docs.yml`:
+7. Updates `fern/docs.yml`:
    - Inserts new version right after the "dev" entry
    - Sets the product's default `path` to the new version
    - Updates the "Latest" display-name to `"Latest (vX.Y.Z)"`
@@ -274,8 +283,8 @@ Runs two independent link-checking jobs:
 ### Writing docs on `main`
 
 1. Edit or add markdown files in `docs/`.
-2. If adding a new page, add an entry in `docs/versions/dev.yml` to make it
-   appear in the sidebar navigation.
+2. If adding a new page, add an entry in `docs/index.yml` to make it appear
+   in the sidebar navigation.
 3. Use standard GitHub-flavored markdown. Callouts (admonitions) should use
    GitHub's native syntax — they are automatically converted during sync:
    ```markdown
@@ -300,14 +309,14 @@ markdown files:
 
 ### Custom components
 
-React components in `docs/components/` can be used in markdown via MDX. The
+React components in `fern/components/` can be used in markdown via MDX. The
 `CustomFooter.tsx` renders the NVIDIA footer with legal links and branding.
 
 ---
 
 ## Callout Conversion
 
-The `docs/convert_callouts.py` script bridges the gap between GitHub-flavored
+The `fern/convert_callouts.py` script bridges the gap between GitHub-flavored
 markdown and Fern's admonition format. This lets authors use GitHub's native
 callout syntax on `main` while Fern gets its required component format.
 
@@ -325,13 +334,13 @@ callout syntax on `main` while Fern gets its required component format.
 
 ```bash
 # Convert all files in a directory (recursive, in-place)
-python convert_callouts.py --dir docs/pages
+python fern/convert_callouts.py --dir docs/
 
 # Convert a single file
-python convert_callouts.py input.md output.md
+python fern/convert_callouts.py input.md output.md
 
 # Run built-in tests
-python convert_callouts.py --test
+python fern/convert_callouts.py --test
 ```
 
 The conversion happens automatically during the sync-dev and release-version
@@ -353,28 +362,12 @@ Install the Fern CLI globally via npm:
 npm install -g fern-api
 ```
 
-### Create the `fern` symlink
-
-The Fern CLI requires its configuration files to live inside a directory called
-`fern/`. In this repo the docs live in `docs/`, so you need to create a symlink
-that points `fern` back to the same directory:
-
-```bash
-cd docs
-ln -s . fern
-```
-
-This makes the CLI find `fern/fern.config.json`, `fern/docs.yml`, etc. without
-moving any files. The symlink is listed in `.gitignore` and should not be
-committed.
-
 ### Validate configuration
 
-Run `fern check` to validate that `docs.yml`, `fern.config.json`, and the
-navigation files are syntactically correct:
+Run `fern check` from the repo root to validate that `fern/docs.yml`,
+`fern/fern.config.json`, and the navigation files are syntactically correct:
 
 ```bash
-cd docs
 fern check
 ```
 
@@ -384,7 +377,6 @@ Use `fern docs broken-links` to scan all pages for internal links that don't
 resolve:
 
 ```bash
-cd docs
 fern docs broken-links
 ```
 
@@ -395,7 +387,6 @@ This is the same check that runs in CI on every pull request.
 Run `fern docs dev` to build the site and serve it locally with hot-reload:
 
 ```bash
-cd docs
 fern docs dev
 ```
 
@@ -410,12 +401,12 @@ including navigation, version dropdowns, and custom styling.
 
 The Fern site supports a version dropdown in the UI. Each version is defined by:
 
-1. **A navigation file** (`docs/versions/vX.Y.Z.yml`) — sidebar structure
-   pointing to version-specific pages.
-2. **A pages directory** (`docs/pages-vX.Y.Z/`) — frozen snapshot of the
-   markdown content at release time.
-3. **An entry in `docs.yml`** — tells Fern about the version's display name,
-   slug, and config path.
+1. **A navigation file** (`fern/versions/vX.Y.Z.yml`) — sidebar structure
+   pointing to version-specific pages (on the `docs-website` branch).
+2. **A pages directory** (`fern/pages-vX.Y.Z/`) — frozen snapshot of the
+   markdown content at release time (on the `docs-website` branch).
+3. **An entry in `fern/docs.yml`** — tells Fern about the version's display
+   name, slug, and config path.
 
 ### Version types
 
@@ -460,11 +451,12 @@ automatically.
 │       │                                                             │
 │       ▼                                                             │
 │  sync-dev job:                                                      │
-│    1. Copy docs/, assets/, configs → docs-website branch      │
-│    2. Convert GitHub callouts → Fern admonitions                    │
-│    3. Preserve version list from docs-website's docs.yml            │
-│    4. Commit + push to docs-website                                 │
-│    5. fern generate --docs (publishes to Fern)                      │
+│    1. Copy docs/ content → fern/pages/ on docs-website branch │
+│    2. Copy fern/ configs → fern/ on docs-website branch             │
+│    3. Convert GitHub callouts → Fern admonitions                    │
+│    4. Preserve version list from docs-website's docs.yml            │
+│    5. Commit + push to docs-website                                 │
+│    6. fern generate --docs (publishes to Fern)                      │
 │       │                                                             │
 │       ▼                                                             │
 │  Live on docs.dynamo.nvidia.com/dynamo/dev/ within minutes          │
@@ -479,11 +471,11 @@ automatically.
 │  release-version job:                                               │
 │    1. Validate tag format (vX.Y.Z only)                             │
 │    2. Check version doesn't already exist                           │
-│    3. Snapshot pages/ → pages-vX.Y.Z/                               │
+│    3. Snapshot fern/pages/ → fern/pages-vX.Y.Z/                     │
 │    4. Rewrite GitHub links (tree/main → tree/vX.Y.Z)               │
 │    5. Convert callouts in snapshot                                  │
-│    6. Create versions/vX.Y.Z.yml (paths → pages-vX.Y.Z/)          │
-│    7. Update docs.yml (insert version, set as default)              │
+│    6. Create fern/versions/vX.Y.Z.yml (paths → pages-vX.Y.Z/)     │
+│    7. Update fern/docs.yml (insert version, set as default)         │
 │    8. Commit + push to docs-website                                 │
 │    9. fern generate --docs (publishes to Fern)                      │
 │       │                                                             │
@@ -505,7 +497,7 @@ automatically.
 ### Update existing documentation
 
 1. Edit files in `docs/` on a feature branch.
-2. If adding a new page, add its entry in `docs/versions/dev.yml`.
+2. If adding a new page, add its entry in `docs/index.yml`.
 3. Open a PR — linting runs automatically.
 4. Merge — sync + publish happens automatically.
 
@@ -513,8 +505,7 @@ automatically.
 
 1. Create a directory under `docs/` (e.g., `docs/new-section/`).
 2. Add markdown files for each page.
-3. Add a new `- section:` block in `docs/versions/dev.yml` with the desired
-   hierarchy.
+3. Add a new `- section:` block in `docs/index.yml` with the desired hierarchy.
 
 ### Release versioned documentation
 
@@ -537,7 +528,7 @@ Go to **Actions → Fern Docs → Run workflow**:
 1. Check the **Actions** tab for the failed `Fern Docs` workflow run.
 2. Common issues:
    - **Broken links:** Fix the links flagged by `fern docs broken-links`.
-   - **Invalid YAML:** Check `docs.yml` or `versions/dev.yml` syntax.
+   - **Invalid YAML:** Check `fern/docs.yml` or `docs/index.yml` syntax.
    - **Expired `FERN_TOKEN`:** Rotate the token in repo secrets.
    - **Duplicate version:** The tag was already released; check `docs-website`
-     for existing `pages-vX.Y.Z/` directory.
+     for existing `fern/pages-vX.Y.Z/` directory.
