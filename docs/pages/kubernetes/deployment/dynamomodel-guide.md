@@ -55,7 +55,7 @@ kubectl get dynamomodel my-lora
 ```
 
 **Expected output:**
-```text
+```
 NAME      TOTAL   READY   AGE
 my-lora   2       2       30s
 ```
@@ -254,7 +254,7 @@ kubectl get dynamomodel
 ```
 
 **Example output:**
-```text
+```
 NAME              TOTAL   READY   AGE
 my-lora           2       2       5m
 customer-lora     4       3       2h
@@ -266,7 +266,7 @@ kubectl describe dynamomodel my-lora
 ```
 
 **Example output:**
-```text
+```
 Name:         my-lora
 Namespace:    dynamo-system
 Spec:
@@ -316,7 +316,7 @@ kubectl get dynamomodel my-lora -o jsonpath='{.status.endpoints[*].address}' | t
 ```
 
 **Output:**
-```text
+```
 http://10.0.1.5:9090
 http://10.0.1.6:9090
 ```

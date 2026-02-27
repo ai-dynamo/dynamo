@@ -120,7 +120,7 @@ The migration system exposes Prometheus metrics to monitor migration activity. T
     - `migration_type`: Either `new_request` (initial connection failure) or `ongoing_request` (mid-stream disconnection)
 
 **Example metrics output:**
-```text
+```
 dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 3
 dynamo_frontend_model_migration_total{migration_type="new_request",model="Qwen/Qwen3-0.6B"} 1
 ```

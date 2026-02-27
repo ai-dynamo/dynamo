@@ -145,7 +145,7 @@ disagg Top Configurations: (Sorted by tokens/s/gpu)
 
 The `--save_dir` generates ready-to-use Kubernetes manifests:
 
-```text
+```
 results_vllm/
 ├── agg/
 │   └── top1/
@@ -574,7 +574,7 @@ kubectl logs <prefill-worker-pod> | grep -i "UCX\|NIXL"
 ```
 
 You should see:
-```text
+```
 NIXL INFO Backend UCX was instantiated
 ```
 

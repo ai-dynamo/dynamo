@@ -18,7 +18,7 @@ When all workers exceed their configured busy thresholds, new requests receive a
 
 ## Architecture
 
-```text
+```
                                     ┌─────────────────┐
                                     │  Worker Monitor │
                                     │  (Background)   │
@@ -98,7 +98,7 @@ Workers are marked as "busy" based on a dual-threshold system. A worker is consi
 
 Monitors the percentage of KV cache blocks in use:
 
-```text
+```
 busy = active_decode_blocks / kv_total_blocks > threshold
 ```
 
@@ -108,7 +108,7 @@ Example: With `active_decode_blocks_threshold=0.85`, a worker using 87% of its K
 
 Monitors the number of tokens currently being prefilled:
 
-```text
+```
 busy = active_prefill_tokens > threshold
 ```
 
@@ -159,7 +159,7 @@ Workers publish these metrics for monitoring:
 
 When requests are rejected, clients receive:
 
-```text
+```http
 HTTP/1.1 503 Service Unavailable
 Content-Type: application/json
 

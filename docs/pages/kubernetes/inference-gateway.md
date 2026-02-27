@@ -357,7 +357,7 @@ Sample inference output:
 
 ***If you have more than one HttpRoute running on the cluster***
 Add the host to your HttpRoute.yaml and add the header `curl -H "Host: llama3-70b-agg.example.com" ...` to every request.
-```yaml
+```bash
 spec:
   hostnames:
     - llama3-70b-agg.example.com

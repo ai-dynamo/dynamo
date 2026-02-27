@@ -37,7 +37,7 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
 
 ## Architecture
 
-```text
+```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         API Server                               │
 │  1. User submits CR (kubectl apply)                             │
@@ -354,7 +354,7 @@ The operator supports running both **cluster-wide** and **namespace-restricted**
 
 ### Scenario
 
-```text
+```
 Cluster:
 ├─ Operator A (cluster-wide, namespace: platform-system)
 │  └─ Validates all namespaces EXCEPT team-a
@@ -412,7 +412,7 @@ The webhook configuration name reflects the deployment mode:
 
 Example:
 
-```text
+```bash
 # Cluster-wide
 platform-operator-validating
 
@@ -471,7 +471,7 @@ kubectl logs -n <namespace> deployment/<release>-dynamo-operator | grep webhook
 ### Connection Refused Errors
 
 **Symptoms:**
-```text
+```
 Error from server (InternalError): Internal error occurred: failed calling webhook:
 Post "https://...webhook-service...:443/validate-...": dial tcp ...:443: connect: connection refused
 ```
@@ -508,7 +508,7 @@ kubectl logs -n <namespace> deployment/<release>-dynamo-operator | grep -i error
 ### Certificate Errors
 
 **Symptoms:**
-```text
+```
 Error from server (InternalError): Internal error occurred: failed calling webhook:
 x509: certificate signed by unknown authority
 ```

@@ -63,7 +63,7 @@ Dynamo exposes metrics in Prometheus Exposition Format text at the `/metrics` HT
 
 **Example Prometheus Exposition Format text:**
 
-```text
+```
 # HELP dynamo_component_requests_total Total requests processed
 # TYPE dynamo_component_requests_total counter
 dynamo_component_requests_total{dynamo_namespace="default",dynamo_component="worker",dynamo_endpoint="generate"} 42
@@ -177,7 +177,7 @@ This section explains the distinction between two key metrics used to track requ
 2. **HTTP Queue**: Tracks requests from HTTP handler start until first token generation begins (including prefill time)
 
 **Example Request Flow:**
-```bash
+```
 curl -s localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
   "model": "Qwen/Qwen3-0.6B",
   "prompt": "Hello let's talk about LLMs",
