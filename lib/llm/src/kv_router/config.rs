@@ -128,11 +128,6 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "durable_kv_events requires use_kv_events=true",
         ));
     }
-    if !config.use_kv_events && config.router_event_threads > 1 {
-        return Err(ValidationError::new(
-            "router_event_threads > 1 requires use_kv_events=true",
-        ));
-    }
     if config.router_track_output_blocks && !config.router_track_active_blocks {
         return Err(ValidationError::new(
             "router_track_output_blocks requires router_track_active_blocks=true",
