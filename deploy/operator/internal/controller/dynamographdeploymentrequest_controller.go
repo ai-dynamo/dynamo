@@ -437,7 +437,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 	}
 
 	// If autoApply is enabled, transition to Deploying phase
-	if dgdr.Spec.AutoApply != nil && *dgdr.Spec.AutoApply {
+	if dgdr.Spec.AutoApply == nil || *dgdr.Spec.AutoApply {
 		logger.Info("AutoApply enabled, transitioning to Deploying phase")
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseDeploying, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionTrue, nvidiacomv1beta1.EventReasonSpecGenerated, MessageSpecGenerated)
 	}
