@@ -84,7 +84,7 @@ class TestRunNaiveFallback:
             "tpot": 0.0,
             "request_latency": 0.0,
         }
-        assert result["chosen_exp"] is None
+        assert result["chosen_exp"] == "agg"
         assert isinstance(result["best_config_df"], pd.DataFrame)
         assert result["best_config_df"].empty
 
