@@ -8,7 +8,7 @@ Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com
 
 ## Prerequisites
 
-This guide assumes familiarity with deploying Dynamo with vLLM as described in the [vLLM backend guide](/docs/backends/vllm/README.md).
+This guide assumes familiarity with deploying Dynamo with vLLM as described in the [vLLM backend guide](README.md).
 
 ### Installation
 
@@ -189,7 +189,7 @@ For S3 credential configuration, set the standard AWS environment variables (`AW
 
 ## Stage Configuration
 
-Omni pipelines are configured via YAML stage configs. See [`examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml`](/examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml) for an example. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
+Omni pipelines are configured via YAML stage configs. See [`examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml) for an example. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
 
 ## Current Limitations
 

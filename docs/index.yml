@@ -236,7 +236,7 @@ navigation:
   - section: Documentation
     contents:
       - page: Dynamo Docs Guide
-        path: ../README.md
+        path: README.md
 
   # ==================== Hidden Pages ====================
   # Pages accessible via direct URL but not shown in main navigation.

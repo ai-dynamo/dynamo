@@ -54,9 +54,9 @@ navigation in `docs/versions/dev.yml`, and running `fern check` to validate.
 
 | Skill | Description |
 |-------|-------------|
-| [add-dynamo-docs](/.claude/skills/add-dynamo-docs/SKILL.md) | Add a new page — creates the file with frontmatter, adds the nav entry |
-| [rm-dynamo-docs](/.claude/skills/rm-dynamo-docs/SKILL.md) | Remove a page — deletes the file, removes the nav entry, checks for broken links |
-| [update-dynamo-docs](/.claude/skills/update-dynamo-docs/SKILL.md) | Update a page — edit content, rename, or move between sections |
+| [add-dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/add-dynamo-docs/SKILL.md) | Add a new page — creates the file with frontmatter, adds the nav entry |
+| [rm-dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/rm-dynamo-docs/SKILL.md) | Remove a page — deletes the file, removes the nav entry, checks for broken links |
+| [update-dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/update-dynamo-docs/SKILL.md) | Update a page — edit content, rename, or move between sections |
 
 ---
 
