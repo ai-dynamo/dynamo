@@ -28,6 +28,7 @@ jobs:
       - name: Check documentation links with lychee
         uses: lycheeverse/lychee-action@v2
         with:
+          # TODO: once DYN-2259 is fixed remove exclusion of ./docs/components/profiler/profiler_guide.md
           args: >-
             --cache
             --no-progress
@@ -43,7 +44,6 @@ jobs:
             --exclude 0.0.0.0
             ${{ github.event_name == 'pull_request' && '--offline' || '' }}
             .
-            # TODO: once DYN-2259 is fixed remove exclusion of ./docs/components/profiler/profiler_guide.md
           fail: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
