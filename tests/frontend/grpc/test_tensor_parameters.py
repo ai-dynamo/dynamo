@@ -16,7 +16,8 @@ import shutil
 
 import numpy as np
 import pytest
-import tritonclient.grpc as grpcclient
+
+grpcclient = pytest.importorskip("tritonclient.grpc")
 
 from tests.utils.managed_process import ManagedProcess
 

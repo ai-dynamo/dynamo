@@ -20,8 +20,9 @@ from functools import partial
 
 import numpy as np
 import pytest
+
+grpcclient = pytest.importorskip("tritonclient.grpc")
 import triton_echo_client
-import tritonclient.grpc as grpcclient
 
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import ManagedProcess

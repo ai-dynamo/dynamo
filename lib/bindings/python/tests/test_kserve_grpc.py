@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional, Tuple
 
 import pytest
-import tritonclient.grpc.model_config_pb2 as mc
+
+mc = pytest.importorskip("tritonclient.grpc.model_config_pb2")
 from tritonclient.utils import InferenceServerException
 
 from dynamo.llm import KserveGrpcService, ModelRuntimeConfig, PythonAsyncEngine
