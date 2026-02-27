@@ -4,7 +4,8 @@
 """Tests for AdditionalMetricsCollector and unified metrics integration."""
 
 import unittest
-from unittest.mock import patch
+from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
 from prometheus_client import CollectorRegistry, generate_latest
 
@@ -16,16 +17,25 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         """Create a fresh registry and collector for each test."""
         self.registry = CollectorRegistry()
 
-        # Patch prometheus_client.Counter to use our test registry
-        with patch("dynamo.trtllm.metrics.Counter") as MockCounter:
+        # Patch prometheus_client.Counter and Histogram to use our test registry
+        with patch("dynamo.trtllm.metrics.Counter") as MockCounter, \
+             patch("dynamo.trtllm.metrics.Histogram") as MockHistogram:
 
-            from prometheus_client import Counter
+            from prometheus_client import Counter, Histogram
 
             def make_counter(name, documentation, labelnames=None, **kw):
                 return Counter(name, documentation, labelnames=labelnames or [],
                                registry=self.registry)
 
+            def make_histogram(name, documentation, labelnames=None, buckets=None, **kw):
+                kwargs = {"registry": self.registry}
+                if buckets is not None:
+                    kwargs["buckets"] = buckets
+                return Histogram(name, documentation, labelnames=labelnames or [],
+                                 **kwargs)
+
             MockCounter.side_effect = make_counter
+            MockHistogram.side_effect = make_histogram
 
             from dynamo.trtllm.metrics import AdditionalMetricsCollector
             self.collector = AdditionalMetricsCollector(
@@ -71,6 +81,32 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.assertIn("kv_transfer_success_total", output)
         self.assertIn("kv_transfer_failure_total", output)
 
+    def test_kv_transfer_perf_metrics(self):
+        """Test KV transfer latency/bytes/speed from timing_metrics."""
+        tm = MagicMock()
+        tm.kv_cache_transfer_start = timedelta(seconds=1.0)
+        tm.kv_cache_transfer_end = timedelta(seconds=1.05)
+        tm.kv_cache_size = 1_000_000_000  # 1 GB
+
+        self.collector.record_kv_transfer_perf(tm)
+        output = generate_latest(self.registry).decode()
+        self.assertIn("kv_transfer_latency_seconds", output)
+        self.assertIn("kv_transfer_bytes_total", output)
+        self.assertIn("kv_transfer_speed_gb_s", output)
+
+    def test_kv_transfer_perf_skipped_when_no_transfer(self):
+        """Test that KV transfer perf is not recorded when no transfer occurred."""
+        tm = MagicMock()
+        tm.kv_cache_transfer_start = timedelta(0)
+        tm.kv_cache_transfer_end = timedelta(0)
+        tm.kv_cache_size = 0
+
+        self.collector.record_kv_transfer_perf(tm)
+        output = generate_latest(self.registry).decode()
+        # Histogram/counter are defined but should have no observations
+        # The _count for the histogram should be 0
+        self.assertNotIn("kv_transfer_latency_seconds_count 1", output)
+
     def test_no_duplicate_metrics(self):
         """Test that removed duplicate metrics are not present."""
         output = generate_latest(self.registry).decode()
@@ -93,10 +129,8 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.assertNotIn("detailed_config_info", output)
         self.assertNotIn("cache_config_info", output)
         self.assertNotIn("engine_startup_time", output)
-        # Unwired KV transfer metrics removed (defined but never emitted)
-        self.assertNotIn("kv_transfer_speed_gb_s", output)
-        self.assertNotIn("kv_transfer_latency_seconds", output)
-        self.assertNotIn("kv_transfer_bytes_total", output)
+        # KV transfer perf metrics are now wired from request_perf_metrics.timing_metrics
+        # (kv_transfer_latency_seconds, kv_transfer_bytes_total, kv_transfer_speed_gb_s)
 
 
 class TestBackwardsCompatAlias(unittest.TestCase):

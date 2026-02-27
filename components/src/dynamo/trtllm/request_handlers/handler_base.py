@@ -819,10 +819,14 @@ class HandlerBase(BaseGenerativeHandler):
 
                     # Record unified (additional) metrics on request finish
                     if res.finished and _um and out.get("finish_reason"):
-                        # KV transfer success from request_perf_metrics
+                        # KV transfer metrics from request_perf_metrics
                         if output.request_perf_metrics is not None:
                             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                                 _um.record_kv_transfer_success()
+                            # Record KV transfer latency/bytes/speed from timing_metrics
+                            tm = output.request_perf_metrics.timing_metrics
+                            if tm is not None:
+                                _um.record_kv_transfer_perf(tm)
 
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
                     # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict

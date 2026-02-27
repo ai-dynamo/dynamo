@@ -26,15 +26,26 @@ The Rust frontend (metrics.rs) provides token counters:
 
 This module adds metrics that have no engine/runtime/frontend equivalent:
   - Request types (image, structured output)
-  - KV transfer metrics (success/failure counters)
+  - KV transfer metrics (success/failure counters, latency, throughput, bytes)
   - Abort tracking
 """
 
 import logging
+from datetime import timedelta
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Histogram
 
 logger = logging.getLogger(__name__)
+
+# Histogram buckets for KV cache transfer metrics
+KV_TRANSFER_LATENCY_BUCKETS = (
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+    float("inf"),
+)
+KV_TRANSFER_SPEED_BUCKETS = (
+    0.1, 0.5, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0,
+    float("inf"),
+)
 
 
 class AdditionalMetricsCollector:
@@ -82,6 +93,23 @@ class AdditionalMetricsCollector:
             "Total number of failed KV cache transfers",
             labelnames=self._labelnames,
         )
+        self.kv_transfer_latency = Histogram(
+            "kv_transfer_latency_seconds",
+            "KV cache transfer latency per request in seconds",
+            labelnames=self._labelnames,
+            buckets=KV_TRANSFER_LATENCY_BUCKETS,
+        )
+        self.kv_transfer_bytes = Counter(
+            "kv_transfer_bytes_total",
+            "Total bytes transferred for KV cache",
+            labelnames=self._labelnames,
+        )
+        self.kv_transfer_speed = Histogram(
+            "kv_transfer_speed_gb_s",
+            "KV cache transfer speed per request in GB/s",
+            labelnames=self._labelnames,
+            buckets=KV_TRANSFER_SPEED_BUCKETS,
+        )
 
         logger.info("AdditionalMetricsCollector initialized")
 
@@ -110,6 +138,36 @@ class AdditionalMetricsCollector:
     def record_kv_transfer_failure(self):
         """Increment the KV transfer failure counter."""
         self.kv_transfer_failure.labels(*self._labelvalues).inc()
+
+    def record_kv_transfer_perf(self, timing_metrics) -> None:
+        """Record KV transfer performance from RequestPerfMetrics.timing_metrics.
+
+        Extracts kv_cache_transfer_start, kv_cache_transfer_end, and kv_cache_size
+        from TRT-LLM's TimingMetrics and records latency, bytes, and speed.
+        Only records when a transfer actually occurred (non-zero transfer times).
+
+        Args:
+            timing_metrics: TimingMetrics object from RequestPerfMetrics.
+        """
+        transfer_start = timing_metrics.kv_cache_transfer_start
+        transfer_end = timing_metrics.kv_cache_transfer_end
+
+        # Only record when a transfer actually happened
+        if transfer_end <= timedelta(0) or transfer_start <= timedelta(0):
+            return
+
+        latency_s = (transfer_end - transfer_start).total_seconds()
+        if latency_s <= 0:
+            return
+
+        kv_bytes = timing_metrics.kv_cache_size
+
+        self.kv_transfer_latency.labels(*self._labelvalues).observe(latency_s)
+        self.kv_transfer_bytes.labels(*self._labelvalues).inc(kv_bytes)
+
+        if kv_bytes > 0:
+            speed_gb_s = kv_bytes / (latency_s * 1e9)
+            self.kv_transfer_speed.labels(*self._labelvalues).observe(speed_gb_s)
 
 
 # Backwards compatibility alias
