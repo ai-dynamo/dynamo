@@ -187,7 +187,7 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	// Setup SSH for worker nodes
 	// Use $HOME instead of ~ for the same reasons as setupLeaderContainer (see comment above).
 	sshSetupCommands := []string{
-		"mkdir -p $HOME/.ssh $HOME/.ssh/host_keys $HOME/.ssh/run /run/sshd",
+		"mkdir -p $HOME/.ssh $HOME/.ssh/host_keys $HOME/.ssh/run",
 		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
 		"cp /ssh-pk/private.key $HOME/.ssh/id_rsa",
 		"cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub",
@@ -206,7 +206,9 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		// relative paths from the connecting user's /etc/passwd home (-> /root/).
 		// StrictModes disabled because /home/dynamo may be owned by a non-root UID
 		// while sshd runs as root, causing permission check failures.
-		fmt.Sprintf("printf 'Port %d\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_rsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile '$HOME'/.ssh/run/sshd.pid\\nStrictModes no\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile '$HOME'/.ssh/authorized_keys\\n' > $HOME/.ssh/sshd_config", commonconsts.MpiRunSshPort),
+		// UsePrivilegeSeparation disabled so sshd does not require /run/sshd to exist;
+		// that directory is root-owned and unavailable in non-root containers.
+		fmt.Sprintf("printf 'Port %d\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_rsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile '$HOME'/.ssh/run/sshd.pid\\nStrictModes no\\nUsePrivilegeSeparation no\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile '$HOME'/.ssh/authorized_keys\\n' > $HOME/.ssh/sshd_config", commonconsts.MpiRunSshPort),
 		"/usr/sbin/sshd -D -f $HOME/.ssh/sshd_config",
 	}
 
