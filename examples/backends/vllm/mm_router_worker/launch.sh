@@ -20,6 +20,7 @@ MODEL="${MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
 NAMESPACE="${NAMESPACE:-dynamo}"
 HTTP_PORT="${HTTP_PORT:-8000}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"            # Must match vLLM backend KV block size
+# TODO: migrate to DYN_GPU_MEMORY_FRACTION_OVERRIDE for profiler binary search
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 

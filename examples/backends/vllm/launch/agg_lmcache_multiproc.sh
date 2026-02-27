@@ -43,7 +43,12 @@ echo "=========================================="
 python -m dynamo.frontend &
 
 # run worker with LMCache enabled and PROMETHEUS_MULTIPROC_DIR explicitly set
+GPU_MEM_ARGS=()
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    GPU_MEM_ARGS=("--gpu-memory-utilization" "$DYN_GPU_MEMORY_FRACTION_OVERRIDE")
+fi
+
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
   PROMETHEUS_MULTIPROC_DIR="$PROMETHEUS_MULTIPROC_DIR" \
-  python -m dynamo.vllm --model "$MODEL" --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+  python -m dynamo.vllm --model "$MODEL" "${GPU_MEM_ARGS[@]}" --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 

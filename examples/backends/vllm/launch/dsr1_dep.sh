@@ -116,6 +116,10 @@ mkdir -p $LOG_DIR
 # the GPU memory requires for vLLM reservation and runtime spike (not
 # reserved by vLLM) can be different and cause model fails to start,
 # adjust '--gpu-memory-utilization' as needed
+# TODO: honor DYN_GPU_MEMORY_FRACTION_OVERRIDE env var for profiler binary search
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    echo "WARNING: DYN_GPU_MEMORY_FRACTION_OVERRIDE is set but dsr1_dep.sh does not support it yet." >&2
+fi
 dp_start_rank=$((NODE_RANK * GPUS_PER_NODE))
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
 VLLM_ALL2ALL_BACKEND="deepep_low_latency" \
