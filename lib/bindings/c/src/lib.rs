@@ -51,15 +51,13 @@ unsafe fn cstr_or_default<'a>(ptr: *const c_char, default_val: &'a str) -> Cow<'
 }
 
 fn initialize_tracing() {
-    // Sets up RUST_LOG environment variable for logging while KV Publishing
-    // Example: os.environ["RUST_LOG"] = "debug"
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    tracing::debug!("Tracing initialized");
+    if tracing::subscriber::set_global_default(subscriber).is_ok() {
+        tracing::debug!("Tracing initialized");
+    }
 }
 
 #[repr(u32)]
@@ -589,6 +587,8 @@ pub unsafe extern "C" fn create_routers(
     decode_fallback: bool,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
+    initialize_tracing();
+
     if namespace.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
