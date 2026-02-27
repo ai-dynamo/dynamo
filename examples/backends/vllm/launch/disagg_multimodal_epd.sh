@@ -11,8 +11,8 @@ MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 # This is intended for functional testing with small models (e.g. 2B) where CI
 # only has 1 GPU available. It reduces performance by:
 #   - Enabling --enforce-eager (disables torch.compile and CUDA graph capture)
+#   - Hardcoding P/D KV cache to 512 MB (skips all memory profiling)
 #   - Limiting --max-model-len to 4096 tokens on P/D workers
-#   - Skipping multimodal encoder profiling (--skip-mm-prof)
 #   - Limiting P/D workers to image=1,video=0,audio=0 (--limit-mm-per-prompt)
 #   - Using lower gpu-memory-utilization fractions to share the GPU
 SINGLE_GPU=false
@@ -57,7 +57,7 @@ done
 
 
 echo "=================================================="
-echo "Disaggregated Multimodal Serving"
+echo "Disaggregated Multimodal Serving (E + P + D)"
 echo "=================================================="
 echo "Model: $MODEL_NAME"
 echo "=================================================="
@@ -81,9 +81,15 @@ DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
+# 512 MB KV cache per P/D worker. Setting --kv-cache-memory-bytes bypasses vLLM's
+# memory profiling entirely (both language model and multimodal encoder), which avoids
+# OOM during profiling when 3 workers share a GPU. 512 MB covers the
+# minimum vLLM requires for max_model_len=4096 on Qwen3-VL-2B.
+PD_KV_CACHE_BYTES=$((512 * 1024 * 1024))
+
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    EXTRA_ARGS="--enforce-eager --skip-mm-prof"
-    PD_EXTRA_ARGS='--max-model-len 4096 --limit-mm-per-prompt {"image":1,"video":0,"audio":0}'
+    EXTRA_ARGS="--enforce-eager"
+    PD_EXTRA_ARGS="--max-model-len 4096 --kv-cache-memory-bytes $PD_KV_CACHE_BYTES --limit-mm-per-prompt {\"image\":1,\"video\":0,\"audio\":0}"
 fi
 
 # Start encode worker
