@@ -28,6 +28,7 @@ pub use dynamo_kv_router::approx;
 pub use dynamo_kv_router::indexer;
 pub use dynamo_kv_router::protocols;
 
+pub mod cache_control;
 pub mod config;
 pub mod indexer_standalone;
 mod jetstream;
@@ -42,6 +43,7 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
+pub use cache_control::{CacheControlClient, spawn_pin_prefix};
 pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
@@ -386,18 +388,12 @@ impl KvRouter {
         });
         let hash_elapsed = start.elapsed();
 
-        let mut overlap_scores = self
+        let overlap_scores = self
             .indexer
             .find_matches(block_hashes)
             .instrument(tracing::info_span!("kv_router.find_matches"))
             .await?;
         let find_matches_elapsed = start.elapsed();
-
-        if let Some(ref allowed_ids) = allowed_worker_ids {
-            overlap_scores
-                .scores
-                .retain(|worker, _| allowed_ids.contains(&worker.worker_id));
-        }
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {

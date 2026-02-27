@@ -11,11 +11,13 @@ pub mod approx;
 pub mod bench_utils;
 pub mod concurrent_radix_tree;
 pub mod indexer;
+pub mod multi_worker_sequence;
 #[cfg(feature = "bench")]
 pub mod naive_indexers;
 pub mod nested_map;
 pub mod protocols;
 pub mod radix_tree;
+pub mod sequence;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -23,6 +25,10 @@ pub(crate) mod test_utils;
 // Re-export key types for convenience
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
+pub use multi_worker_sequence::{
+    ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
+    SequenceSubscriber,
+};
 #[cfg(feature = "bench")]
 pub use naive_indexers::{InvertedIndex, NaiveNestedMap};
 pub use nested_map::PositionalIndexer;
@@ -31,3 +37,4 @@ pub use protocols::{
     compute_block_hash_for_seq,
 };
 pub use radix_tree::RadixTree;
+pub use sequence::{ActiveSequences, RequestId};

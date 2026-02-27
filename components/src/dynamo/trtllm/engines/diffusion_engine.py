@@ -1,265 +1,204 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generic Diffusion Engine wrapper for visual_gen pipelines.
+"""Generic Diffusion Engine wrapper for TensorRT-LLM visual_gen pipelines.
 
 This module provides a unified interface for various diffusion models
-(Wan, Flux, Cosmos, etc.) through a pipeline registry system.
+(Wan, Flux, Cosmos, etc.) through TensorRT-LLM's AutoPipeline system.
 
 The pipeline type is auto-detected from model_index.json (shipped with every
 HuggingFace Diffusers model), eliminating the need for a --model-type flag.
 
 Requirements:
-    - visual_gen: Part of TensorRT-LLM, located at tensorrt_llm/visual_gen/.
-      Currently on the feat/visual_gen branch (not yet merged to main).
-      See: https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen/tensorrt_llm/visual_gen
+    - tensorrt_llm with visual_gen support (tensorrt_llm._torch.visual_gen).
+      See: https://github.com/NVIDIA/TensorRT-LLM
     - See docs/pages/backends/trtllm/README.md for setup instructions.
 
 Note on imports:
-    visual_gen is imported lazily in initialize() because:
+    tensorrt_llm._torch.visual_gen is imported lazily in initialize() because:
     1. It's a heavy package that may not be installed in all environments
-    2. Importing at module load would fail if visual_gen is not available
+    2. Importing at module load would fail if tensorrt_llm is not available
     3. This allows the module to be imported for type checking and validation
-       without requiring visual_gen to be installed
+       without requiring tensorrt_llm to be installed
 """
 
-import importlib
-import json
 import logging
-from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+import random
+from enum import Enum
+from typing import TYPE_CHECKING, Optional
 
-import numpy as np
 import torch
 
 if TYPE_CHECKING:
+    from tensorrt_llm._torch.visual_gen import DiffusionArgs
+    from tensorrt_llm._torch.visual_gen.output import MediaOutput
+    from tensorrt_llm._torch.visual_gen.pipeline import BasePipeline
+
     from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PipelineInfo:
-    """Auto-detected pipeline information from model_index.json."""
+class DiffusionModality(str, Enum):
+    """Output modality of a diffusion pipeline."""
 
-    module_path: str
-    class_name: str
-    modalities: list[str]
-    config_overrides: dict[str, Any]
+    VIDEO = "video_diffusion"
+    IMAGE = "image_diffusion"
+
+
+# Explicit mapping from TRT-LLM pipeline class names to their output modality.
+# This replaces brittle substring matching and must be updated when new
+# pipelines are registered in TRT-LLM's PIPELINE_REGISTRY.
+_PIPELINE_MODALITY_MAP: dict[str, DiffusionModality] = {
+    "WanPipeline": DiffusionModality.VIDEO,
+    "WanImageToVideoPipeline": DiffusionModality.VIDEO,
+    "FluxPipeline": DiffusionModality.IMAGE,
+    "LTX2Pipeline": DiffusionModality.VIDEO,
+}
+
+# Default when the pipeline is not yet loaded or the class name is unknown.
+_DEFAULT_MODALITY = DiffusionModality.VIDEO
 
 
 class DiffusionEngine:
-    """Generic wrapper for visual_gen diffusion pipelines.
+    """Generic wrapper for TensorRT-LLM visual_gen diffusion pipelines.
 
     This engine provides:
-    - Auto-detection of pipeline class from model_index.json
-    - A registry mapping diffusers _class_name to visual_gen pipelines
-    - Lazy loading of pipeline modules
-    - Common interface for video/image generation
+    - Auto-detection of pipeline class from model_index.json via AutoPipeline
+    - Loading and initialization through PipelineLoader
+    - Common interface for video/image generation via pipeline.infer()
+
+    The old visual_gen standalone package (setup_configs + from_pretrained +
+    PIPELINE_REGISTRY) has been replaced by TensorRT-LLM's integrated
+    visual_gen module which uses:
+    - DiffusionArgs for configuration
+    - PipelineLoader for model loading (handles MetaInit, weight loading,
+      quantization, torch.compile, and warmup)
+    - AutoPipeline for pipeline type auto-detection
+    - MediaOutput for typed output (video/image/audio torch tensors)
 
     Example:
         >>> engine = DiffusionEngine(config)
         >>> await engine.initialize()
-        >>> frames = engine.generate(prompt="A cat playing piano", ...)
+        >>> output = engine.generate(prompt="A cat playing piano", ...)
+        >>> output.video  # torch.Tensor (num_frames, H, W, 3) uint8
     """
-
-    # Registry: diffusers _class_name -> (module_path, visual_gen_class, supported_modalities)
-    # The _class_name comes from model_index.json shipped with every HF Diffusers model.
-    # torch_compile_models is derived dynamically from transformer* keys in model_index.json.
-    #
-    # NOTE: This registry is initially focused on Wan text-to-video models.
-    # Follow-up PRs will extend support for other model families (Flux, Cosmos, etc.)
-    # which may require additional config fields in DiffusionConfig.
-    PIPELINE_REGISTRY: dict[str, tuple[str, str, list[str]]] = {
-        "WanPipeline": (
-            "visual_gen.pipelines.wan_pipeline",
-            "ditWanPipeline",
-            ["video_diffusion"],
-        ),
-        # TODO: Add support for WanImageToVideoPipeline, FluxPipeline, etc.
-    }
-
-    @classmethod
-    def detect_pipeline_info(cls, model_path: str) -> PipelineInfo:
-        """Auto-detect pipeline class from model's model_index.json.
-
-        Reads model_index.json (local path or HuggingFace Hub) to determine:
-        - Which visual_gen pipeline class to use (via _class_name)
-        - Which transformer models to torch.compile (via transformer* keys)
-
-        Args:
-            model_path: Local path or HuggingFace model identifier.
-
-        Returns:
-            PipelineInfo with module_path, class_name, modalities, and config_overrides.
-
-        Raises:
-            ValueError: If _class_name is not in the registry.
-            FileNotFoundError: If model_index.json cannot be found locally or on HF Hub.
-        """
-        # Try local path first
-        local_index = Path(model_path) / "model_index.json"
-        if local_index.exists():
-            with open(local_index) as f:
-                model_index = json.load(f)
-        else:
-            # Download from HuggingFace Hub
-            from huggingface_hub import hf_hub_download
-
-            index_path = hf_hub_download(model_path, "model_index.json")
-            with open(index_path) as f:
-                model_index = json.load(f)
-
-        class_name = model_index.get("_class_name")
-        if class_name not in cls.PIPELINE_REGISTRY:
-            supported = list(cls.PIPELINE_REGISTRY.keys())
-            raise ValueError(
-                f"Unsupported diffusion pipeline '{class_name}' from model '{model_path}'.\n"
-                f"Supported pipelines: {', '.join(supported)}\n"
-                f"Check that model_index.json has a supported _class_name."
-            )
-
-        module_path, vg_class, modalities = cls.PIPELINE_REGISTRY[class_name]
-
-        # Derive torch_compile_models from transformer* keys in model_index.json
-        transformer_keys = sorted(k for k in model_index if k.startswith("transformer"))
-        torch_compile_models = (
-            ",".join(transformer_keys) if transformer_keys else "transformer"
-        )
-
-        config_overrides = {"torch_compile_models": torch_compile_models}
-
-        return PipelineInfo(module_path, vg_class, modalities, config_overrides)
 
     def __init__(self, config: "DiffusionConfig"):
         """Initialize the engine with configuration.
 
-        Auto-detects the pipeline type from config.model_path's model_index.json.
-
         Args:
             config: Diffusion generation configuration.
-
-        Raises:
-            ValueError: If the model's pipeline type is not supported.
         """
-        info = self.detect_pipeline_info(config.model_path)
-
         self.config = config
-        self._pipeline = None
+        self._pipeline: Optional["BasePipeline"] = None
         self._initialized = False
 
-        self._module_path = info.module_path
-        self._class_name = info.class_name
-        self._supported_modalities = info.modalities
-        self._config_overrides = info.config_overrides
-
     async def initialize(self) -> None:
-        """Load and configure the diffusion pipeline.
+        """Load and configure the diffusion pipeline via PipelineLoader.
 
         This is called once at worker startup to load the model.
-        The specific pipeline class is determined by the auto-detected pipeline type.
+        PipelineLoader handles:
+        1. Loading config via DiffusionModelConfig.from_pretrained()
+        2. Creating pipeline via AutoPipeline.from_config() (auto-detects type)
+        3. Loading weights with optional on-the-fly quantization
+        4. Post-load hooks (TeaCache setup, etc.)
+        5. torch.compile (if enabled)
+        6. Warmup inference
         """
         if self._initialized:
             logger.warning("Engine already initialized, skipping")
             return
 
         logger.info(
-            f"Initializing DiffusionEngine: pipeline={self._class_name}, "
-            f"model_path={self.config.model_path}"
+            f"Initializing DiffusionEngine: model_path={self.config.model_path}"
         )
 
-        # Import visual_gen setup
-        from visual_gen import setup_configs
+        # Import TensorRT-LLM visual_gen components
+        from tensorrt_llm._torch.visual_gen import PipelineLoader
 
-        # Build configuration dict based on model type
-        dit_configs = self._build_dit_configs()
-        logger.info(f"dit_configs: {dit_configs}")
+        # Build DiffusionArgs from DiffusionConfig
+        diffusion_args = self._build_diffusion_args()
+        logger.info(f"DiffusionArgs: {diffusion_args}")
 
-        # Setup global configuration (required before pipeline loading)
-        setup_configs(**dit_configs)
-
-        # Dynamically import the pipeline class
-        logger.info(f"Importing pipeline from {self._module_path}.{self._class_name}")
-        module = importlib.import_module(self._module_path)
-        pipeline_class = getattr(module, self._class_name)
-
-        # Load the pipeline
-        # Convert torch_dtype string to actual torch dtype
-        dtype_map = {
-            "bfloat16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-        }
-        torch_dtype = dtype_map.get(self.config.torch_dtype, torch.bfloat16)
-        logger.info(
-            f"Loading pipeline from {self.config.model_path} with dtype={self.config.torch_dtype}"
-        )
-        self._pipeline = pipeline_class.from_pretrained(
-            self.config.model_path,
-            torch_dtype=torch_dtype,
-            **dit_configs,
-        )
-
-        # Move to target device
-        # NOTE: HuggingFace's from_pretrained() loads to CPU by default,
-        # so we must explicitly move to GPU for optimal performance.
-        if self.device == "cuda":
-            logger.info("Moving pipeline to GPU...")
-            self._pipeline.to(self.device)
-            logger.info("Pipeline moved to GPU successfully")
-        else:
-            logger.info("CPU offload enabled, pipeline stays on CPU")
+        # Use PipelineLoader for the full loading flow:
+        #   DiffusionArgs → DiffusionModelConfig → AutoPipeline → BasePipeline
+        loader = PipelineLoader(diffusion_args)
+        self._pipeline = loader.load()
 
         self._initialized = True
-        logger.info(f"DiffusionEngine initialization complete: {self._class_name}")
-
-    def _build_dit_configs(self) -> dict[str, Any]:
-        """Build dit_configs dict from DiffusionConfig.
-
-        Returns:
-            Configuration dictionary for visual_gen's setup_configs.
-        """
-        # Get torch_compile_models from auto-detected config overrides
-        # Each pipeline in PIPELINE_REGISTRY specifies its required settings
-        torch_compile_models = self._config_overrides.get(
-            "torch_compile_models", "transformer"
+        logger.info(
+            f"DiffusionEngine initialization complete: "
+            f"{self._pipeline.__class__.__name__}"
         )
 
-        return {
-            "pipeline": {
-                "enable_torch_compile": not self.config.disable_torch_compile,
-                "torch_compile_models": torch_compile_models,
-                "torch_compile_mode": self.config.torch_compile_mode,
-                "fuse_qkv": True,
-            },
-            "attn": {
-                "type": self.config.attn_type,
-            },
-            "linear": {
-                "type": self.config.linear_type,
-                "recipe": "dynamic",
-            },
-            "parallel": {
-                "disable_parallel_vae": False,
-                "parallel_vae_split_dim": "width",
-                "dit_dp_size": self.config.dit_dp_size,
-                "dit_tp_size": self.config.dit_tp_size,
-                "dit_ulysses_size": self.config.dit_ulysses_size,
-                "dit_ring_size": self.config.dit_ring_size,
-                "dit_cp_size": 1,
-                "dit_cfg_size": self.config.dit_cfg_size,
-                "dit_fsdp_size": self.config.dit_fsdp_size,
-                "t5_fsdp_size": 1,
-            },
-            "teacache": {
-                "enable_teacache": self.config.enable_teacache,
-                "use_ret_steps": self.config.teacache_use_ret_steps,
-                "teacache_thresh": self.config.teacache_thresh,
-                "ret_steps": 0,
-                "cutoff_steps": self.config.default_num_inference_steps,
-            },
-        }
+    def _build_diffusion_args(self) -> "DiffusionArgs":
+        """Build DiffusionArgs from DiffusionConfig.
+
+        Maps dynamo's DiffusionConfig fields to TensorRT-LLM's DiffusionArgs
+        structure with its nested sub-configs (PipelineConfig, AttentionConfig,
+        ParallelConfig, TeaCacheConfig, quant_config).
+
+        Returns:
+            DiffusionArgs instance for PipelineLoader.
+        """
+        from tensorrt_llm._torch.visual_gen import (
+            DiffusionArgs,
+            ParallelConfig,
+            PipelineConfig,
+            TeaCacheConfig,
+        )
+        from tensorrt_llm._torch.visual_gen.config import AttentionConfig
+
+        # Build quant_config dict if quantization is requested
+        # DiffusionArgs accepts a dict in ModelOpt format and parses it via model_validator
+        quant_config: dict | None = None
+        if self.config.quant_algo:
+            quant_config = {
+                "quant_algo": self.config.quant_algo,
+                "dynamic": self.config.quant_dynamic,
+            }
+
+        args_kwargs: dict = dict(
+            checkpoint_path=self.config.model_path,
+            device=self.device,
+            dtype=self.config.torch_dtype,
+            skip_components=self.config.skip_components,
+            pipeline=PipelineConfig(
+                enable_torch_compile=not self.config.disable_torch_compile,
+                torch_compile_mode=self.config.torch_compile_mode,
+                enable_fullgraph=self.config.enable_fullgraph,
+                fuse_qkv=self.config.fuse_qkv,
+                enable_cuda_graph=self.config.enable_cuda_graph,
+                enable_layerwise_nvtx_marker=self.config.enable_layerwise_nvtx_marker,
+                warmup_steps=self.config.warmup_steps,
+                enable_offloading=self.config.enable_async_cpu_offload,
+            ),
+            attention=AttentionConfig(
+                backend=self.config.attn_backend.upper(),
+            ),
+            parallel=ParallelConfig(
+                dit_dp_size=self.config.dit_dp_size,
+                dit_tp_size=self.config.dit_tp_size,
+                dit_ulysses_size=self.config.dit_ulysses_size,
+                dit_ring_size=self.config.dit_ring_size,
+                dit_cfg_size=self.config.dit_cfg_size,
+                dit_fsdp_size=self.config.dit_fsdp_size,
+            ),
+            teacache=TeaCacheConfig(
+                enable_teacache=self.config.enable_teacache,
+                use_ret_steps=self.config.teacache_use_ret_steps,
+                teacache_thresh=self.config.teacache_thresh,
+            ),
+        )
+
+        # Add optional fields
+        if self.config.revision:
+            args_kwargs["revision"] = self.config.revision
+        if quant_config is not None:
+            args_kwargs["quant_config"] = quant_config
+
+        return DiffusionArgs(**args_kwargs)
 
     def generate(
         self,
@@ -271,11 +210,14 @@ class DiffusionEngine:
         num_inference_steps: int = 50,
         guidance_scale: float = 5.0,
         seed: Optional[int] = None,
-    ) -> np.ndarray:
+    ) -> "MediaOutput":
         """Generate video/image frames from text prompt.
 
         This is a synchronous method that should be called from a thread pool
         to avoid blocking the event loop.
+
+        The pipeline's infer() method handles the full generation flow:
+        prompt encoding, latent preparation, denoising loop, and VAE decoding.
 
         Args:
             prompt: Text description of the content to generate.
@@ -288,8 +230,10 @@ class DiffusionEngine:
             seed: Random seed for reproducibility.
 
         Returns:
-            numpy array of shape (num_frames, height, width, 3) with uint8 values
-            for video, or (height, width, 3) for images.
+            MediaOutput with model-specific fields populated:
+            - .video: torch.Tensor (num_frames, H, W, 3) uint8 for video models
+            - .image: torch.Tensor (H, W, 3) uint8 for image models
+            - .audio: torch.Tensor for audio (if supported by model)
 
         Raises:
             RuntimeError: If engine not initialized or generation fails.
@@ -302,41 +246,46 @@ class DiffusionEngine:
             f"size={width}x{height}, frames={num_frames}, steps={num_inference_steps}"
         )
 
-        # Create generator for reproducibility
-        # Device must match pipeline device (CPU if offload enabled, CUDA otherwise)
-        generator = None
-        if seed is not None:
-            generator = torch.Generator(device=self.device).manual_seed(seed)
+        # Use TRT-LLM's DiffusionRequest dataclass so that all defaults
+        # (including pipeline-specific fields like max_sequence_length,
+        # guidance_scale_2, boundary_ratio) are owned by TRT-LLM rather
+        # than hardcoded here.
+        from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
 
-        # Run the pipeline
-        with torch.no_grad():
-            result = self._pipeline(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                height=height,
-                width=width,
-                num_frames=num_frames,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                output_type="np",  # Return numpy array
-            )
+        req = DiffusionRequest(
+            request_id=0,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            seed=seed if seed is not None else random.randint(0, 2**32 - 1),
+        )
 
-        # result.frames[0] is numpy array (num_frames, height, width, 3) uint8
-        frames = result.frames[0]
-        logger.info(f"Generated output with shape {frames.shape}")
+        # Run the pipeline — infer() wraps forward() with torch.no_grad()
+        output = self._pipeline.infer(req)
 
-        return frames
+        if output is not None:
+            if output.video is not None:
+                logger.info(f"Generated video output with shape {output.video.shape}")
+            elif output.image is not None:
+                logger.info(f"Generated image output with shape {output.image.shape}")
+
+        return output
 
     def cleanup(self) -> None:
         """Cleanup resources."""
         if self._pipeline is not None:
+            if hasattr(self._pipeline, "cleanup"):
+                self._pipeline.cleanup()
             del self._pipeline
             self._pipeline = None
         self._initialized = False
         if self.device == "cuda":
             torch.cuda.empty_cache()
-        logger.info(f"DiffusionEngine cleanup complete: {self._class_name}")
+        logger.info("DiffusionEngine cleanup complete")
 
     @property
     def is_initialized(self) -> bool:
@@ -345,8 +294,26 @@ class DiffusionEngine:
 
     @property
     def supported_modalities(self) -> list[str]:
-        """Get the modalities supported by this engine's model type."""
-        return self._supported_modalities
+        """Get the modalities supported by this engine's pipeline.
+
+        Uses an explicit mapping from pipeline class names to modalities
+        (see ``_PIPELINE_MODALITY_MAP``).  The pipeline class is determined
+        at load time by AutoPipeline from model_index.json.
+        """
+        if self._pipeline is None:
+            return [_DEFAULT_MODALITY.value]
+
+        class_name = self._pipeline.__class__.__name__
+        modality = _PIPELINE_MODALITY_MAP.get(class_name)
+        if modality is None:
+            logger.warning(
+                "Unknown pipeline class '%s' — defaulting to %s. "
+                "Please add it to _PIPELINE_MODALITY_MAP.",
+                class_name,
+                _DEFAULT_MODALITY.value,
+            )
+            modality = _DEFAULT_MODALITY
+        return [modality.value]
 
     @property
     def device(self) -> str:

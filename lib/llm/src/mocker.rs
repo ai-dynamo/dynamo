@@ -41,6 +41,7 @@ use dynamo_mocker::common::protocols::OutputSignal;
 pub use dynamo_mocker::common::protocols::{
     DirectRequest, KvCacheEventSink, MockEngineArgs, MockEngineArgsBuilder,
 };
+use dynamo_mocker::common::utils::{compute_kv_transfer_delay, sleep_precise};
 pub use dynamo_mocker::common::{bootstrap, perf_model, protocols, running_mean, sequence};
 pub use dynamo_mocker::scheduler::Scheduler;
 pub use dynamo_mocker::{kv_manager, scheduler};
@@ -538,6 +539,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let bootstrap_server = self.bootstrap_server.clone();
         let reasoning = self.engine_args.reasoning.clone();
 
+        // Compute KV transfer delay for prefill workers.
+        // Simulates the time to transfer KV cache from prefill to decode worker.
+        let kv_transfer_delay = if is_prefill {
+            compute_kv_transfer_delay(&self.engine_args, request.token_ids.len())
+        } else {
+            None
+        };
+
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
             let mut token_count = 0;
@@ -570,14 +579,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             ..Default::default()
                         };
 
-                        // Prefill: after first token, mark room complete (unblocks decode)
-                        if is_prefill
-                            && token_count == 1
-                            && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
-                        {
-                            server.complete_room(room_id);
-                        }
-
                         if signal.completed && token_count < max_output_tokens {
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
                             break;
@@ -585,6 +586,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
                         if signal.completed {
                             let _ = stream_tx.send(output);
+
+                            // Simulate KV transfer delay before prefill's first (and only) token.
+                            // This models the time to transfer KV cache to the decode worker.
+                            if token_count == 1
+                                && let Some(delay) = kv_transfer_delay
+                            {
+                                sleep_precise(delay).await;
+                            }
+
+                            // Prefill: after first token, mark room complete (unblocks decode)
+                            if is_prefill
+                                && token_count == 1
+                                && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
+                            {
+                                server.complete_room(room_id);
+                            }
+
                             let _ = stream_tx.send(LLMEngineOutput::length());
                             break;
                         }

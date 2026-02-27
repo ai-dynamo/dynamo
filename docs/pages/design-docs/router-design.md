@@ -4,8 +4,6 @@
 title: Router Design
 ---
 
-# Router Design
-
 This document describes the internal architecture of the Dynamo KV Router, including block tracking mechanisms, the KV cache optimization system, event handling, and transport modes.
 
 ## KV Router Architecture
@@ -107,7 +105,7 @@ To get a feel for how KV Cache management works on a single worker with KV Cache
     - These tensors are stored in the newly allocated cache blocks
     - **KVPublisher emits a kv stored event notifying KVIndexer about newly stored blocks**.
 
-Further details can be found for: [TRT-LLM](https://developer.nvidia.com/blog/introducing-new-kv-cache-reuse-optimizations-in-nvidia-tensorrt-llm/), [vLLM](https://docs.vllm.ai/en/latest/design/automatic_prefix_caching.html#design-automatic-prefix-caching) and [SGLang](https://lmsys.org/blog/2024-01-17-sglang/).
+Further details can be found for: [SGLang](https://lmsys.org/blog/2024-01-17-sglang/), [TRT-LLM](https://developer.nvidia.com/blog/introducing-new-kv-cache-reuse-optimizations-in-nvidia-tensorrt-llm/) and [vLLM](https://docs.vllm.ai/en/latest/design/automatic_prefix_caching.html#design-automatic-prefix-caching).
 
 ## Events
 
@@ -214,7 +212,7 @@ By default, workers have local indexer enabled. Each worker maintains its own lo
 
 - **Best for**: Lower-latency setups; simpler deployments without JetStream; single-router scenarios; deployments without NATS (using ZMQ event plane)
 - **Tradeoffs**: State persists on workers (not centralized); recovery depends on workers being available
-- **Switch to JetStream**: Use `--durable-kv-events` flag on **both** workers (vLLM, SGLang, TRT-LLM, mocker) **and** frontend
+- **Switch to JetStream**: Use `--durable-kv-events` flag on **both** workers (SGLang, TRT-LLM, vLLM, mocker) **and** frontend
 
 ```mermaid
 graph TD

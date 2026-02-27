@@ -66,9 +66,7 @@ export default function CustomFooter() {
             <div className="footer-links">
               <a href="https://www.nvidia.com/en-us/about-nvidia/privacy-policy/" target="_blank" rel="noopener">Privacy Policy</a>
               <span className="pipe-separator"> | </span>
-              <a href="https://www.nvidia.com/en-us/preferences/cookie-policy/" target="_blank" rel="noopener">Manage My Privacy</a>
-              <span className="pipe-separator"> | </span>
-              <a href="https://www.nvidia.com/en-us/preferences/start/" target="_blank" rel="noopener">Do Not Sell or Share My Data</a>
+              <a href="https://www.nvidia.com/en-us/about-nvidia/privacy-center/" target="_blank" rel="noopener">Your Privacy Choices</a>
               <span className="pipe-separator"> | </span>
               <a href="https://www.nvidia.com/en-us/about-nvidia/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>
               <span className="pipe-separator"> | </span>
