@@ -108,8 +108,8 @@ var (
 	ffiOnce sync.Once
 	ffiErr  error
 
-	ffiNamespace     string
-	ffiComponent     string
+	ffiNamespace      string
+	ffiComponent      string
 	ffiDecodeFallback bool
 
 	routerInitialized bool
@@ -123,9 +123,14 @@ func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
 	ffiDecodeFallback = getEnvBoolOrDefault("DYN_DECODE_FALLBACK", false)
-	// Note: model name and kv_cache_block_size are now auto-discovered from the model card
-	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, decode_fallback=%v\n",
-		ffiNamespace, ffiComponent, ffiDecodeFallback)
+	// DYN_KV_CACHE_BLOCK_SIZE and DYN_MODEL_NAME are read by the Rust router (lib.rs)
+	// at create_routers time. They replace the values from the model card discovery.
+	// Set these in the EPP pod env to match the worker configuration.
+	fmt.Printf("Dynamo KV Scorer: namespace=%s, component=%s, decode_fallback=%v, "+
+		"kv_cache_block_size=%s, model_name=%s\n",
+		ffiNamespace, ffiComponent, ffiDecodeFallback,
+		getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
+		getEnvOrDefault("DYN_MODEL_NAME", "(from discovery)"))
 }
 
 func getEnvOrDefault(key, def string) string {
@@ -168,7 +173,16 @@ func initFFI() error {
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {
-			ffiErr = fmt.Errorf("create_routers failed with code %d", rc)
+			switch rc {
+			case C.QUERY_ROUTER_ERR_DISAGG_ENFORCED:
+				ffiErr = fmt.Errorf(
+					"create_routers failed: no prefill workers found. " +
+						"If running in aggregated mode, set DYN_DECODE_FALLBACK=true to allow decode-only routing. " +
+						"If running in disaggregated mode, ensure prefill workers are deployed and discoverable in namespace %q",
+					ffiNamespace)
+			default:
+				ffiErr = fmt.Errorf("create_routers failed with code %d", rc)
+			}
 			return
 		}
 		routerInitialized = true

@@ -13,7 +13,14 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: docker.io/lambda108/epp-inference-extension-dynamo:discovery-logs
+          env:
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "128"
+            - name: DYN_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
+            - name: DYN_DECODE_FALLBACK
+              value: "true"
       eppConfig:
         config:
           plugins:
@@ -55,11 +62,11 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: docker.io/lambda108/dynamo:discovery-logs
           workingDir: /workspace/examples/backends/vllm
         containers:
           - name: frontend
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            image: docker.io/lambda108/dynamo:discovery-logs
             command:
               - python3
             args:
@@ -101,6 +108,8 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.uid
+              - name: DYN_LOG
+                value: "info,dynamo_llm::protocols::openai::nvext=debug,dynamo_llm::kv_router::push_router=debug"
             livenessProbe:
               httpGet:
                 path: /live

@@ -3,6 +3,7 @@
 
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
+use super::WorkerDiscoveryMode;
 use super::WorkerSelector;
 use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::queue::SchedulerQueue;
@@ -98,11 +99,12 @@ impl KvScheduler {
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
+        let discovery_mode = kv_router_config.worker_discovery_mode;
 
-        // Get initial workers from watch receiver.
-        // Caller must ensure at least one worker is present (via wait_for).
-        let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
-            workers_with_configs.borrow().clone();
+        let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> = match discovery_mode {
+            WorkerDiscoveryMode::External => HashMap::new(),
+            WorkerDiscoveryMode::Dynamo => workers_with_configs.borrow().clone(),
+        };
 
         let router_id = component.drt().discovery().instance_id();
         let slots = create_multi_worker_sequences(
@@ -116,40 +118,68 @@ impl KvScheduler {
         .await
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
-        // Spawn background task to sync slots when the watch value changes.
-        let slots_monitor = slots.clone();
-        let mut monitor_rx = workers_with_configs.clone();
-        let monitor_cancel_token = component.drt().child_token();
-        tokio::spawn(async move {
-            tracing::trace!("KvScheduler workers monitoring task started");
-            let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
+        match discovery_mode {
+            WorkerDiscoveryMode::Dynamo => {
+                let slots_monitor = slots.clone();
+                let mut monitor_rx = workers_with_configs.clone();
+                let monitor_cancel_token = component.drt().child_token();
+                tokio::spawn(async move {
+                    tracing::trace!("KvScheduler workers monitoring task started");
+                    let mut last_workers: HashMap<WorkerId, ModelRuntimeConfig> = HashMap::new();
 
-            loop {
-                tokio::select! {
-                    _ = monitor_cancel_token.cancelled() => {
-                        tracing::trace!("KvScheduler workers monitoring task shutting down");
-                        break;
-                    }
-                    result = monitor_rx.changed() => {
-                        if result.is_err() {
-                            tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
-                            break;
+                    loop {
+                        tokio::select! {
+                            _ = monitor_cancel_token.cancelled() => {
+                                tracing::trace!("KvScheduler workers monitoring task shutting down");
+                                break;
+                            }
+                            result = monitor_rx.changed() => {
+                                if result.is_err() {
+                                    tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                                    break;
+                                }
+                            }
+                        }
+
+                        let current_workers = monitor_rx.borrow_and_update().clone();
+
+                        if current_workers != last_workers {
+                            let dp_sizes: HashMap<u64, u32> = current_workers
+                                .iter()
+                                .map(|(&id, c)| (id, c.data_parallel_size))
+                                .collect();
+                            slots_monitor.update_workers(dp_sizes);
+                            last_workers = current_workers;
                         }
                     }
-                }
-
-                let current_workers = monitor_rx.borrow_and_update().clone();
-
-                if current_workers != last_workers {
-                    let dp_sizes: HashMap<u64, u32> = current_workers
-                        .iter()
-                        .map(|(&id, c)| (id, c.data_parallel_size))
-                        .collect();
-                    slots_monitor.update_workers(dp_sizes);
-                    last_workers = current_workers;
-                }
+                });
             }
-        });
+            WorkerDiscoveryMode::External => {
+                tracing::info!(
+                    "GAIE: External worker discovery mode: worker set will be provided per-request by EPP"
+                );
+
+                let mut monitor_rx = workers_with_configs.clone();
+                let monitor_cancel_token = component.drt().child_token();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = monitor_cancel_token.cancelled() => break,
+                            result = monitor_rx.changed() => {
+                                if result.is_err() { break; }
+                            }
+                        }
+                        let current = monitor_rx.borrow_and_update();
+                        let worker_ids: Vec<u64> = current.keys().copied().collect();
+                        tracing::debug!(
+                            ?worker_ids,
+                            count = worker_ids.len(),
+                            "GAIE: External mode: discovery-registered workers updated (used for RuntimeConfig lookup)"
+                        );
+                    }
+                });
+            }
+        }
 
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
@@ -160,6 +190,7 @@ impl KvScheduler {
             kv_router_config.router_queue_threshold,
             block_size,
             selector,
+            kv_router_config.worker_discovery_mode,
         ));
         let queue_clone = queue.clone();
 
@@ -412,11 +443,7 @@ impl WorkerSelector for DefaultWorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
 
-        let allowed_ids = request.allowed_worker_ids.as_ref();
-
-        if allowed_ids.map_or(workers.is_empty(), |ids| {
-            !workers.keys().any(|wid| ids.contains(wid))
-        }) {
+        if workers.is_empty() {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
@@ -436,10 +463,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             .and_then(|cfg| cfg.overlap_score_weight)
             .unwrap_or(self.kv_router_config.overlap_score_weight);
 
-        for (worker_id, config) in workers
-            .iter()
-            .filter(|(wid, _)| allowed_ids.is_none_or(|ids| ids.contains(wid)))
-        {
+        for (worker_id, config) in workers.iter() {
             let data_parallel_size = config.data_parallel_size;
 
             for dp_rank in 0..data_parallel_size {

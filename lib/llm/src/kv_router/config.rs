@@ -8,6 +8,19 @@ use validator::{Validate, ValidationError};
 
 use crate::kv_router::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 
+/// How the router discovers its worker set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerDiscoveryMode {
+    Dynamo,
+    External,
+}
+
+impl Default for WorkerDiscoveryMode {
+    fn default() -> Self {
+        Self::Dynamo
+    }
+}
+
 /// Override configuration for router settings that can be specified per-request
 #[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
 pub struct RouterConfigOverride {
@@ -86,6 +99,11 @@ pub struct KvRouterConfig {
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
+    /// How the router discovers workers.
+    /// `Dynamo` (default): waits for workers via Kubernetes / NATS discovery.
+    /// `External`: workers are provided per-request (e.g. by the EPP); the router
+    /// starts immediately without blocking on discovery.
+    pub worker_discovery_mode: WorkerDiscoveryMode,
     /// Enable cache control (PIN with TTL) via the worker's cache_control service mesh endpoint.
     /// When true, the router creates a cache_control client and honors nvext.cache_control on
     /// requests, firing a pin_prefix call (with TTL) to the worker after generation completes.
@@ -111,6 +129,7 @@ impl Default for KvRouterConfig {
             router_prune_target_ratio: 0.8,
             router_queue_threshold: None,
             router_event_threads: 1,
+            worker_discovery_mode: WorkerDiscoveryMode::default(),
             router_enable_cache_control: false,
         }
     }

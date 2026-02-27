@@ -44,7 +44,7 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use cache_control::{CacheControlClient, spawn_pin_prefix};
-pub use config::{KvRouterConfig, RouterConfigOverride};
+pub use config::{KvRouterConfig, RouterConfigOverride, WorkerDiscoveryMode};
 pub use indexer_standalone::start_kv_block_indexer;
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
@@ -299,13 +299,19 @@ impl KvRouter {
 
         let indexer = Indexer::new(component, &kv_router_config, block_size);
 
-        // Wait for at least one worker with a known runtime config before starting scheduler
-        let _ = workers_with_configs
-            .wait_for(|m| !m.is_empty())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("runtime config watch closed before any workers appeared")
-            })?;
+        // Wait for at least one worker with a known runtime config before starting scheduler if discovery mode is Dynamo
+        if kv_router_config.worker_discovery_mode == WorkerDiscoveryMode::Dynamo {
+            let _ = workers_with_configs
+                .wait_for(|m| !m.is_empty())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("runtime config watch closed before any workers appeared")
+                })?;
+        } else {
+            tracing::info!(
+                "External worker discovery mode: skipping wait for discovery-based workers"
+            );
+        }
 
         let scheduler = KvScheduler::start(
             component.clone(),

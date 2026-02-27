@@ -2,17 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use super::WorkerDiscoveryMode;
 use super::WorkerSelector;
-use super::protocols::WorkerWithDpRank;
+use super::protocols::{WorkerId, WorkerWithDpRank};
 use super::scheduler::{SchedulingRequest, SchedulingResponse};
 use super::sequence::{ActiveSequencesMulti, SequenceRequest};
 use crate::discovery::RuntimeConfigWatch;
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
@@ -59,6 +61,7 @@ pub struct SchedulerQueue {
     start_time: Instant,
     block_size: u32,
     selector: Box<dyn WorkerSelector + Send + Sync>,
+    worker_discovery_mode: WorkerDiscoveryMode,
 }
 
 impl SchedulerQueue {
@@ -68,6 +71,7 @@ impl SchedulerQueue {
         threshold_frac: Option<f64>,
         block_size: u32,
         selector: Box<dyn WorkerSelector + Send + Sync>,
+        worker_discovery_mode: WorkerDiscoveryMode,
     ) -> Self {
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
@@ -80,6 +84,7 @@ impl SchedulerQueue {
             start_time: Instant::now(),
             block_size,
             selector,
+            worker_discovery_mode,
         }
     }
 
@@ -97,11 +102,20 @@ impl SchedulerQueue {
     /// Enqueue a new request.
     /// If queueing is disabled or workers have capacity, schedule immediately.
     /// Otherwise park in the pending heap.
+    ///
+    /// In External discovery mode the capacity check is skipped because the
+    /// discovery-based worker map may be empty; the effective worker set is
+    /// determined per-request inside `schedule()`.
     pub async fn enqueue(&self, request: SchedulingRequest) {
         let Some(threshold) = self.threshold_frac else {
             self.schedule(request).await;
             return;
         };
+
+        if self.worker_discovery_mode == WorkerDiscoveryMode::External {
+            self.schedule(request).await;
+            return;
+        }
 
         if self.all_workers_busy(threshold) {
             tracing::debug!("all workers busy, queueing request");
@@ -135,6 +149,14 @@ impl SchedulerQueue {
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load → select worker → respond → book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest) {
+        if self.worker_discovery_mode == WorkerDiscoveryMode::External
+            && request.allowed_worker_ids.is_none()
+        {
+            tracing::error!("External discovery mode requires worker IDs in each request");
+            request.respond(Err(super::scheduler::KvSchedulerError::NoEndpoints));
+            return;
+        }
+
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens(
             request.token_seq.clone(),
             request.isl_tokens,
@@ -144,9 +166,39 @@ impl SchedulerQueue {
         request.prefill_tokens = prefill_tokens;
 
         let selection = {
-            let workers = self.workers_with_configs.borrow();
+            let discovery_workers = self.workers_with_configs.borrow();
+            let effective_workers =
+                build_effective_workers(&request.allowed_worker_ids, &discovery_workers);
+
+            if self.worker_discovery_mode == WorkerDiscoveryMode::External {
+                let epp_ids: Vec<WorkerId> = request
+                    .allowed_worker_ids
+                    .as_ref()
+                    .map(|ids| ids.iter().copied().collect())
+                    .unwrap_or_default();
+                let discovery_ids: Vec<WorkerId> = discovery_workers.keys().copied().collect();
+                let resolved_from_discovery: Vec<WorkerId> = effective_workers
+                    .keys()
+                    .filter(|id| discovery_workers.contains_key(id))
+                    .copied()
+                    .collect();
+                let using_fallback: Vec<WorkerId> = effective_workers
+                    .keys()
+                    .filter(|id| !discovery_workers.contains_key(id))
+                    .copied()
+                    .collect();
+                tracing::debug!(
+                    ?epp_ids,
+                    ?discovery_ids,
+                    ?resolved_from_discovery,
+                    ?using_fallback,
+                    effective_count = effective_workers.len(),
+                    "GAIE: External mode: EPP-provided workers vs discovery-registered workers"
+                );
+            }
+
             self.selector
-                .select_worker(&workers, &request, self.block_size)
+                .select_worker(&effective_workers, &request, self.block_size)
         };
 
         let selection = match selection {
@@ -210,5 +262,43 @@ impl SchedulerQueue {
             }
         }
         true
+    }
+}
+
+/// Build the effective worker map for a scheduling decision.
+///
+/// When `provided_worker_ids` is `Some` (External mode), those IDs define the
+/// worker set. Each worker's `ModelRuntimeConfig` is set by the worker itself at startup and
+/// published via discovery. By the time a request arrives, the config is
+/// typically available in `discovery_workers`. If a worker hasn't registered
+/// yet (e.g., startup race), a safe fallback config is used with
+/// `enable_local_indexer: false` to avoid querying a non-existent indexer
+/// endpoint. The config will be updated once the worker registers.
+///
+/// When `provided_worker_ids` is `None` (Dynamo mode), the discovery worker
+/// map is used as-is.
+fn build_effective_workers(
+    provided_worker_ids: &Option<std::collections::HashSet<WorkerId>>,
+    discovery_workers: &HashMap<WorkerId, ModelRuntimeConfig>,
+) -> HashMap<WorkerId, ModelRuntimeConfig> {
+    match provided_worker_ids {
+        Some(ids) => {
+            let mut workers = HashMap::with_capacity(ids.len());
+            for &id in ids {
+                let config = discovery_workers.get(&id).cloned().unwrap_or_else(|| {
+                    tracing::debug!(
+                        worker_id = id,
+                        "GAIE: Worker from EPP not yet in discovery, using fallback ModelRuntimeConfig"
+                    );
+                    ModelRuntimeConfig {
+                        enable_local_indexer: false,
+                        ..Default::default()
+                    }
+                });
+                workers.insert(id, config);
+            }
+            workers
+        }
+        None => discovery_workers.clone(),
     }
 }
