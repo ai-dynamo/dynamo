@@ -123,17 +123,21 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 # Initialize Git LFS (required for git+https dependencies with LFS artifacts)
 RUN git lfs install
 
-# Install runtime dependencies (common + planner).
+# Install runtime dependencies (common + planner + frontend).
+# Frontend deps (tritonclient + grpcio/protobuf pins) are installed here so the resolver
+# sees all constraints in one pass, avoiding grpcio downgrades in the test layer.
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
+    --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.common.txt \
-        --requirement /tmp/requirements.planner.txt
+        --requirement /tmp/requirements.planner.txt \
+        --requirement /tmp/requirements.frontend.txt
 
 # Copy workspace source code
 ARG WORKSPACE_DIR=/workspace

@@ -27,8 +27,8 @@ nvidia-ml-py<=13.580.65  # NVIDIA/CUDA related, may vary by driver version
 opentelemetry-api<=1.38.0  # May need to stay in sync with other components
 opentelemetry-exporter-otlp<=1.38.0  # May need to stay in sync with other components
 opentelemetry-sdk<=1.38.0  # May need to stay in sync with other components
+protobuf>=5.29.5,<7.0.0
 prometheus_client==0.23.1
-protobuf>=5.29.5,<6.0dev  # tritonclient<=2.62.0 (in test deps) requires <6.0dev
 pydantic>=2.11.4,<2.13  # vllm==0.12.0 depends on pydantic>=2.12.0
 pydantic-settings<2.13.0  # tensorrt_llm DynamicYamlWithDeepMergeSettingsSource incompatible with 2.13.0+ deep_merge param
 PyYAML==6.0.3
