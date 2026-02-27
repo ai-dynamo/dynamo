@@ -1359,11 +1359,14 @@ async fn responses(
             err_response
         })?;
 
-    // For non-streaming responses, we still use internal streaming for aggregation,
-    // but we set the chat completion stream flag appropriately.
-    if !streaming {
-        chat_request.inner.stream = Some(true); // Internal streaming for aggregation
-    }
+    // Always use internal streaming for aggregation.
+    // Set stream_options.include_usage so the backend sends token counts in the final chunk.
+    chat_request.inner.stream = Some(true);
+    chat_request.inner.stream_options =
+        Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+            include_usage: true,
+            continuous_usage_stats: false,
+        });
 
     let request = context.map(|mut _req| chat_request);
 
