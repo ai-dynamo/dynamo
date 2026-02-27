@@ -399,7 +399,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// for manual review and application.
 	// +optional
 	// +kubebuilder:default=true
-	AutoApply bool `json:"autoApply,omitempty"`
+	AutoApply *bool `json:"autoApply,omitempty"`
 }
 
 // ParetoConfig represents a single Pareto-optimal deployment configuration
