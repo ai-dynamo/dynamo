@@ -375,6 +375,12 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
         self.agent_metadata_b64 = base64.b64encode(self.agent_metadata).decode("utf-8")
 
         self.transfer_tracker = {}
+        # Track dynamically registered descriptors for cleanup,
+        # there can be case of the same tensor being requested to be transferred multiple times,
+        # we want to avoid duplicated registration or early deregistration while other transfer
+        # of the tensor is still in-flight, so we track the inflight transfer with respect to
+        # the actual tensor buffer and only deregister after all transfers of the same tensor is completed.
+        self.registered_descs = {}
 
         self.id_counter = MonolithicCounter()
         # Create a queue for hinting if there is future transfer
@@ -457,8 +463,14 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
                         transfer_info = self.transfer_tracker.pop(tensor_id, None)
                         if transfer_info is not None:
                             # Clean up registered memory after transfer completion
-                            _, _, registered_desc, fut = transfer_info
-                            self.nixl_agent.deregister_memory(registered_desc)
+                            embeddings, _, fut = transfer_info
+                            desc_key = (embeddings.data_ptr(), embeddings.get_device())
+                            self.registered_descs[desc_key][1] -= 1
+                            if self.registered_descs[desc_key][1] == 0:
+                                self.nixl_agent.deregister_memory(
+                                    self.registered_descs[desc_key][0]
+                                )
+                                del self.registered_descs[desc_key]
                             # Future can be done if the embeddings is not external
                             if not fut.done():
                                 fut.set_result(None)
@@ -513,9 +525,16 @@ class NixlEmbeddingSender(AbstractEmbeddingSender):
             fut.set_result(None)
 
         # track the NIXL descriptors for future transfer
-        registered_desc = self.nixl_agent.register_memory(embeddings)
+        desc_key = (embeddings.data_ptr(), embeddings.get_device())
+        if desc_key not in self.registered_descs:
+            # [NOTE] registeration can be time consuming, see e2e benchmark for the difference.
+            registered_desc = self.nixl_agent.register_memory(embeddings)
+            self.registered_descs[desc_key] = [registered_desc, 1]
+        else:
+            self.registered_descs[desc_key][1] += 1
+
         desc = self.nixl_agent.get_xfer_descs(embeddings)
-        self.transfer_tracker[tensor_id] = (embeddings, desc, registered_desc, fut)
+        self.transfer_tracker[tensor_id] = (embeddings, desc, fut)
         self.transfer_queue.put_nowait("task_indicator")
 
         request = TransferRequest(
