@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,13 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 1024
+max_batch_size: 4
+max_seq_len: 4096
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: true
+# Overlap scheduler not currently supported in prefill only workers.
+disable_overlap_scheduler: true
 
-## Append samples of your project ##
-resources:
-- nvidia.com_v1alpha1_dynamocomponentdeployment.yaml
-- nvidia.com_v1alpha1_dynamocomponent.yaml
-- nvidia.com_v1alpha1_dynamographdeployment.yaml
-- nvidia.com_v1beta1_dynamographdeploymentrequest.yaml
-- nvidia.com_v1alpha1_dynamomodel.yaml
-- nvidia.com_v1alpha1_dynamocheckpoint.yaml
-#+kubebuilder:scaffold:manifestskustomizesamples
+kv_cache_config:
+  free_gpu_memory_fraction: 0.10
+  enable_block_reuse: false
+
+cache_transceiver_config:
+  backend: DEFAULT

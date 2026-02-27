@@ -30,7 +30,7 @@
 //	──────────────────────────────────────────  ──────────────────────────────────────
 //	Spec.Model              (string)           Spec.Model                    (string)
 //	Spec.Backend            (string)           Spec.Backend              (BackendType)
-//	Spec.AutoApply          (bool)             Spec.AutoApply                  (bool)
+//	Spec.AutoApply          (bool)             Spec.AutoApply                 (*bool)
 //	Spec.UseMocker          (bool)             Spec.Features.Mocker.Enabled    (bool)
 //	Spec.ProfilingConfig.ProfilerImage         Spec.Image                    (string)
 //	Spec.DeploymentOverrides.WorkersImage      (no v1beta1 equivalent yet — TODO: overrides.dgd)
@@ -221,7 +221,7 @@ func setAnnotation(obj *v1beta1.DynamoGraphDeploymentRequest, key, value string)
 // convertDGDRSpecTo converts the v1alpha1 Spec into the v1beta1 Spec.
 func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, dstObj *v1beta1.DynamoGraphDeploymentRequest) error {
 	dst.Model = src.Model
-	dst.AutoApply = src.AutoApply
+	dst.AutoApply = &src.AutoApply
 
 	if src.Backend != "" {
 		dst.Backend = v1beta1.BackendType(src.Backend)
@@ -398,7 +398,11 @@ func convertDeploymentOverridesToAnnotation(src *DeploymentOverridesSpec, dstObj
 // convertDGDRSpecFrom converts the v1beta1 Spec back into the v1alpha1 Spec.
 func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec, srcObj *v1beta1.DynamoGraphDeploymentRequest) {
 	dst.Model = src.Model
-	dst.AutoApply = src.AutoApply
+	if src.AutoApply != nil {
+		dst.AutoApply = *src.AutoApply
+	} else {
+		dst.AutoApply = true // v1beta1 default
+	}
 
 	if src.Backend != "" {
 		dst.Backend = string(src.Backend)
