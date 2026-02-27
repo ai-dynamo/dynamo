@@ -275,7 +275,9 @@ mod tests {
         isl_tokens: usize,
     ) -> (
         SchedulingRequest,
-        tokio::sync::oneshot::Receiver<Result<SchedulingResponse, crate::scheduling::types::KvSchedulerError>>,
+        tokio::sync::oneshot::Receiver<
+            Result<SchedulingResponse, crate::scheduling::types::KvSchedulerError>,
+        >,
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = SchedulingRequest {
@@ -328,7 +330,10 @@ mod tests {
 
         let active = slots.active_tokens();
         for (worker, tokens) in &active {
-            assert_eq!(*tokens, 0, "worker {worker:?} still has {tokens} active tokens");
+            assert_eq!(
+                *tokens, 0,
+                "worker {worker:?} still has {tokens} active tokens"
+            );
         }
     }
 
@@ -382,7 +387,10 @@ mod tests {
 
         let resp = rx.await.expect("oneshot dropped");
         assert!(
-            matches!(resp, Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)),
+            matches!(
+                resp,
+                Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)
+            ),
             "expected NoEndpoints, got {resp:?}"
         );
     }

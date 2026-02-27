@@ -733,4 +733,3 @@ pub fn median(durations: &[Duration]) -> Duration {
     sorted.sort();
     sorted[sorted.len() / 2]
 }
-
