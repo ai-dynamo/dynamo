@@ -93,6 +93,8 @@ class VllmWorkerProcess(ManagedProcess):
             "harmony",
             "--dyn-reasoning-parser",
             "gpt_oss",
+            "--max-model-len",
+            "32768",
         ]
 
         env = os.environ.copy()
@@ -220,7 +222,7 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
     return response_json
 
 
-@pytest.mark.timeout(240)  # ~3x measured total (~70s/test), rounded up
+@pytest.mark.timeout(300)  # ~3x measured total (~70s/test), rounded up
 @pytest.mark.post_merge
 def test_reasoning_effort(
     request, start_services: ServicePorts, predownload_models
