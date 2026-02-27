@@ -25,26 +25,6 @@ branch based on `main`). The sync workflow copies changes to
 `docs-website` automatically.
 </Error>
 
-**Claude Code Skills:**
-
-Three Claude Code skills automate common docs tasks. Invoke them as slash
-commands in Claude Code (e.g., `/add-dynamo-docs`) — each skill walks through
-the full workflow: creating or editing the markdown file, updating the
-navigation in `docs/versions/dev.yml`, and running `fern check` to validate.
-
-| Skill | Description |
-|-------|-------------|
-| [add-dynamo-docs](/.claude/skills/add-dynamo-docs/SKILL.md) | Add a new page — creates the file with frontmatter, adds the nav entry |
-| [rm-dynamo-docs](/.claude/skills/rm-dynamo-docs/SKILL.md) | Remove a page — deletes the file, removes the nav entry, checks for broken links |
-| [update-dynamo-docs](/.claude/skills/update-dynamo-docs/SKILL.md) | Update a page — edit content, rename, or move between sections |
-
-**Live URLs:**
-
-| Environment | URL |
-|---|---|
-| Fern-hosted (primary) | [dynamo.docs.buildwithfern.com/dynamo](https://dynamo.docs.buildwithfern.com/dynamo) |
-| Custom domain (alias) | [docs.dynamo.nvidia.com/dynamo](https://docs.dynamo.nvidia.com/dynamo) |
-
 ---
 
 ## Table of Contents
@@ -61,6 +41,22 @@ navigation in `docs/versions/dev.yml`, and running `fern check` to validate.
 - [Version Management](#version-management)
 - [How Publishing Works](#how-publishing-works)
 - [Common Tasks](#common-tasks)
+- [Claude Code Skills](#claude-code-skills)
+
+---
+
+## Claude Code Skills
+
+Three Claude Code skills automate common docs tasks. Invoke them as slash
+commands in Claude Code (e.g., `/add-dynamo-docs`) — each skill walks through
+the full workflow: creating or editing the markdown file, updating the
+navigation in `docs/versions/dev.yml`, and running `fern check` to validate.
+
+| Skill | Description |
+|-------|-------------|
+| [add-dynamo-docs](/.claude/skills/add-dynamo-docs/SKILL.md) | Add a new page — creates the file with frontmatter, adds the nav entry |
+| [rm-dynamo-docs](/.claude/skills/rm-dynamo-docs/SKILL.md) | Remove a page — deletes the file, removes the nav entry, checks for broken links |
+| [update-dynamo-docs](/.claude/skills/update-dynamo-docs/SKILL.md) | Update a page — edit content, rename, or move between sections |
 
 ---
 
