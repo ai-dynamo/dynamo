@@ -872,7 +872,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 //
 // If the error does not match any known category, "unknown" is returned.
 func GetGPUDiscoveryFailureReason(err error) string {
-    errMsg := err.Error()
+    if err == nil {
++		return "unknown"
++	}
++	errMsg := strings.ToLower(err.Error())
+	
     switch {
     case strings.Contains(errMsg, "list pods"):
         return "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
@@ -880,22 +884,22 @@ func GetGPUDiscoveryFailureReason(err error) string {
         return "GPU Operator not installed in expected namespace"
     case strings.Contains(errMsg, "helm init failed"):
         return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
-    case strings.Contains(errMsg, "timeout waiting for DCGM exporter pods"):
+    case strings.Contains(errMsg, "timeout waiting for dcgm exporter pods"):
         return "timeout while waiting for DCGM exporter pods to become ready"
-    case strings.Contains(errMsg, "GET"):
+    case strings.Contains(errMsg, "get"):
         return "failed to reach DCGM metrics endpoint on pod (network/port issue)"
     case strings.Contains(errMsg, "metrics endpoint") &&
         strings.Contains(errMsg, "status"):
         return "DCGM pod metrics endpoint returned non-200 status"
     case strings.Contains(errMsg, "parse prometheus metrics"):
-        return "failed to parse DCGM Prometheus metrics (invalid format)"
-    case strings.Contains(errMsg, "no GPUs detected"):
-        return "no GPUs detected in DCGM metrics (GPU model or metrics missing)"
-    case strings.Contains(errMsg, "DCGM is not enabled in the GPU Operator"):
+        return "failed to parse dcgm Prometheus metrics (invalid format)"
+    case strings.Contains(errMsg, "no gpus detected"):
+        return "no GPUs detected in dcgm metrics (GPU model or metrics missing)"
+    case strings.Contains(errMsg, "dcgm is not enabled in the GPU Operator"):
         return "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"
     case strings.Contains(errMsg, "failed to scrape any dcgm exporter pod"):
-        return "failed to scrape any DCGM exporter pod (check DCGM exporter pod status and network connectivity)"
-    case strings.Contains(errMsg, "no GPU metrics could be parsed from any dcgm pod"):
+        return "failed to scrape any dcgm exporter pod (check DCGM exporter pod status and network connectivity)"
+    case strings.Contains(errMsg, "no gpu metrics could be parsed from any dcgm pod"):
         return "no GPU metrics could be parsed from any DCGM pod (check DCGM exporter pod status and network connectivity)"
     case strings.Contains(errMsg, "failed to create helm path"):
         return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
