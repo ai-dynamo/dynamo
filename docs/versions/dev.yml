@@ -312,8 +312,6 @@ navigation:
         path: ../pages/kubernetes/deployment/create-deployment.md
       - page: FluxCD
         path: ../pages/kubernetes/fluxcd.md
-      - page: Model Caching with Fluid (Legacy)
-        path: ../pages/kubernetes/model-caching-with-fluid.md
       # -- Reference --
       - page: Glossary
         path: ../pages/reference/glossary.md
