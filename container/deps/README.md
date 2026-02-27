@@ -13,7 +13,6 @@ so each image only installs what it needs.
 | `requirements.vllm.txt` | vLLM-specific deps |
 | `requirements.trtllm.txt` | TensorRT-LLM-specific deps |
 | `requirements.benchmark.txt` | Benchmark and profiling tools |
-| `requirements.standard.txt` | CUDA-specific packages |
 | `requirements.test.txt` | Test-only deps |
 | `requirements.dev.txt` | Dev-only tools |
 

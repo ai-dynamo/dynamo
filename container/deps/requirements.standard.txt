@@ -1,5 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-# CUDA-specific packages that may have platform variations.
-ucx-py-cu12<=0.45.0  # CUDA 12 variant, max version may differ by platform/architecture
