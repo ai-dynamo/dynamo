@@ -116,7 +116,7 @@ The `run.sh` script and rendering scripts are convenience that simplify common D
 ```bash
 # Build runtime image
 python container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t dynamo:latest-vllm-runtime -f rendered.Dockerfile .
+docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # Run runtime container
 container/run.sh --image dynamo:latest-vllm-runtime -it
@@ -236,7 +236,7 @@ docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f cont
 
 # Build TensorRT-LLM development image called dynamo:latest-trtllm
 python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
-docker build -t dynamo:latest-trtllm-runtime -f rendered.Dockerfile .
+docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 ```
 
 ### Building the Frontend Image
@@ -262,7 +262,7 @@ EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
 ```bash
 # Build the frontend image (automatically builds EPP image as a dependency)
 python container/render.py --framework=dynamo --target=frontend --output-short-filename
-docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f rendered.Dockerfile .
+docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f container/rendered.Dockerfile .
 ```
 
 The build process automatically:
@@ -440,7 +440,7 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ```bash
 # 1. Build production runtime image (runs as non-root dynamo user)
 python container/render.py --framework=vllm --target=runtime --output-short-filename
-docker build -t dynamo:latest-vllm-runtime -f rendered.Dockerfile .
+docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # 2. Run production container as non-root dynamo user
 container/run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/home/dynamo/.cache
@@ -450,7 +450,7 @@ container/run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/
 ```bash
 # 1. Build dev image
 python container/render.py --framework=vllm --target=dev --output-short-filename
-docker build -t dynamo:latest-vllm-dev -f rendered.Dockerfile .
+docker build -t dynamo:latest-vllm-dev -f container/rendered.Dockerfile .
 
 # 2. Run tests with network isolation for reproducible results (no -it needed for CI)
 container/run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/dynamo/.cache -- python -m pytest tests/

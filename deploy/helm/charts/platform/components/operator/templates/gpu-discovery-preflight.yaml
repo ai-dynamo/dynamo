@@ -13,110 +13,59 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Pre-install check: verifies the installer has permission to create the GPU discovery ClusterRole.
+# Best-effort template-time check for cluster-scoped RBAC access required by GPU discovery.
 # Runs only when namespaceRestriction.enabled=true and gpuDiscovery.enabled=true (the default).
-# If the check fails, installation is aborted with a clear error message explaining the options.
+#
+# Limitation: Helm's lookup function can only test list/get access, not create. This check
+# verifies the installer can read ClusterRole resources as a proxy for full cluster RBAC
+# access. In the rare case where an installer has create but not list permissions, this
+# check will false-fail; if that happens Helm's native error on the actual ClusterRole
+# creation (in gpu-discovery-rbac.yaml) will still be clear about the missing permission.
 {{- if and .Values.namespaceRestriction.enabled .Values.gpuDiscovery.enabled }}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-gpu-discovery-preflight
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "dynamo-operator.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-10"
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-gpu-discovery-preflight
-  labels:
-    {{- include "dynamo-operator.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-10"
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
-rules:
-  - apiGroups: ["authorization.k8s.io"]
-    resources: ["selfsubjectaccessreviews"]
-    verbs: ["create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-gpu-discovery-preflight
-  labels:
-    {{- include "dynamo-operator.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-10"
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-gpu-discovery-preflight
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "dynamo-operator.fullname" . }}-gpu-discovery-preflight
-    namespace: {{ .Release.Namespace }}
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-gpu-discovery-preflight
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "dynamo-operator.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-5"
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
-spec:
-  backoffLimit: 0
-  activeDeadlineSeconds: 60
-  template:
-    spec:
-      restartPolicy: Never
-      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-gpu-discovery-preflight
-      {{- if .Values.controllerManager.tolerations }}
-      tolerations:
-        {{- toYaml .Values.controllerManager.tolerations | nindent 8 }}
-      {{- end }}
-      containers:
-        - name: check
-          image: alpine/k8s:1.34.1
-          command:
-            - /bin/sh
-            - -c
-            - |
-              if kubectl auth can-i create clusterroles --all-namespaces > /dev/null 2>&1; then
-                echo "GPU discovery preflight check passed: installer has ClusterRole creation permissions."
-                exit 0
-              else
-                echo ""
-                echo "ERROR: GPU discovery requires ClusterRole creation permissions, but the installer"
-                echo "does not have them. This is needed to grant the namespace-scoped operator"
-                echo "read-only node access for automatic GPU hardware discovery."
-                echo ""
-                echo "Options:"
-                echo "  1. Ask your cluster admin to grant ClusterRole creation permissions and re-run."
-                echo ""
-                echo "  2. Disable GPU discovery and provide hardware config manually in each DGDR:"
-                echo "     helm install ... --set dynamo-operator.gpuDiscovery.enabled=false"
-                echo ""
-                echo "     Then in your DynamoGraphDeploymentRequest:"
-                echo "     spec:"
-                echo "       profilingConfig:"
-                echo "         config:"
-                echo "           hardware:"
-                echo "             numGpusPerNode: 8"
-                echo "             gpuModel: \"H100-SXM5-80GB\""
-                echo "             gpuVramMib: 81920"
-                echo ""
-                exit 1
-              fi
+{{- /*
+  GPU discovery (gpu-discovery-rbac.yaml) creates a ClusterRole + ClusterRoleBinding to grant
+  the namespace-scoped operator read-only node access.
+
+  This is a best-effort check: lookup runs as the installing user and tests list/get access
+  on ClusterRoles — not the create permission that gpu-discovery-rbac.yaml actually needs.
+  There is no mechanism in Helm templates to test create permissions directly. In practice,
+  installers with create access almost always have list access too, so this catches the
+  common case. If the check is wrong, the actual resource creation will fail with a clear
+  Helm RBAC error.
+
+  lookup returns an empty dict during helm template / --dry-run, so we use a two-probe
+  heuristic to distinguish dry-run mode from insufficient permissions:
+    1. Probe ClusterRoles — if non-empty, the installer has cluster RBAC read access.
+    2. If empty, probe the release Namespace.  All authenticated users can read their own
+       namespace during a real install.  If this succeeds but ClusterRoles did not, the
+       installer likely lacks cluster-scoped access.
+    3. If both are empty we are in dry-run / template mode — skip the check.
+*/ -}}
+{{- $clusterProbe := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" "" -}}
+{{- if not $clusterProbe -}}
+  {{- $nsProbe := lookup "v1" "Namespace" "" .Release.Namespace -}}
+  {{- if $nsProbe -}}
+    {{- fail (join "\n" (list ""
+      "ERROR: GPU discovery requires cluster-scoped RBAC permissions, but the installer"
+      "does not have them. This is needed to grant the namespace-scoped operator"
+      "read-only node access for automatic GPU hardware discovery."
+      ""
+      "Options:"
+      "  1. Ask your cluster admin to grant ClusterRole creation permissions and re-run."
+      ""
+      "  2. Disable GPU discovery and provide hardware config manually in each DGDR:"
+      "     helm install ... --set dynamo-operator.gpuDiscovery.enabled=false"
+      ""
+      "     Then in your DynamoGraphDeploymentRequest:"
+      "     spec:"
+      "       profilingConfig:"
+      "         config:"
+      "           hardware:"
+      "             numGpusPerNode: 8"
+      "             gpuModel: \"H100-SXM5-80GB\""
+      "             gpuVramMib: 81920"
+      ""
+    )) -}}
+  {{- end -}}
+{{- end -}}
 {{- end }}
