@@ -59,7 +59,7 @@ runs:
           # Replace underscores with hyphens for k8s naming compliance
           PROFILE_SANITIZED="${PROFILE//_/-}"
           SELF_NS="${NAMESPACE}-${FRAMEWORK}-${PROFILE_SANITIZED}"
-          #TODO: Improve this truncation logic. The operator creates k8s labels as "{namespace}-{deployment_name} which restricts max length to 44 chars 
+          #TODO: Improve this truncation logic. The operator creates k8s labels as "{namespace}-{deployment_name} which restricts max length to 44 chars
           # (largest deployment name is "vllm-disagg-router" (18 chars)).
           SELF_NS="${SELF_NS:0:44}"
           # Remove trailing dash from truncation

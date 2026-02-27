@@ -45,7 +45,7 @@ runs:
           ngc-api=enabled \
           nvcr-imagepull=enabled \
           --overwrite=true
-        
+
         # Set the context to the new namespace
         kubectl config set-context --current --namespace=$NAMESPACE
 
