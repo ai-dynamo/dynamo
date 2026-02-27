@@ -9,7 +9,7 @@ grpcio-tools<=1.76.0  # May have platform-specific builds; pins grpcio ecosystem
 httpx==0.28.1
 msgspec==0.19.0
 nvidia-ml-py<=13.580.65  # NVIDIA/CUDA related, may vary by driver version
-opentelemetry-api<=1.38.0  # Optional for all frameworks; pinned for tracing support
+opentelemetry-api<=1.38.0  # Pinned for tracing support
 opentelemetry-exporter-otlp<=1.38.0
 opentelemetry-sdk<=1.38.0
 protobuf>=5.29.5,<7.0.0
