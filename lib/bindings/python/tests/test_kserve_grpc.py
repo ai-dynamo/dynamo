@@ -12,8 +12,8 @@ try:
     import tritonclient.grpc.model_config_pb2 as mc
     from tritonclient.utils import InferenceServerException
 except ImportError:
-    mc = None  # type: ignore[assignment]
-    InferenceServerException = None  # type: ignore[assignment,misc]
+    mc = None
+    InferenceServerException = None
 
 from dynamo.llm import KserveGrpcService, ModelRuntimeConfig, PythonAsyncEngine
 

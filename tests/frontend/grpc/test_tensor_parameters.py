@@ -20,7 +20,7 @@ import pytest
 try:
     import tritonclient.grpc as grpcclient
 except ImportError:
-    grpcclient = None  # type: ignore[assignment]
+    grpcclient = None
 
 from tests.utils.managed_process import ManagedProcess
 
