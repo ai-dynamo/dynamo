@@ -212,17 +212,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
-
-  workload:
-    isl: 3000
-    osl: 150
-
-  sla:
-    ttft: 200.0
-    itl: 20.0
-
-  autoApply: true
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
 ```
 
 **Step 2: Apply the DGDR**
