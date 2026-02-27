@@ -136,6 +136,30 @@ git add docs/pages/ docs/versions/dev.yml
 git commit -s -m "docs: update <page-title>"
 ```
 
+## Debugging
+
+### `fern check` fails
+
+- **Invalid YAML in `dev.yml`:** Check indentation — nav entries use 2-space indent. A `- page:` must be inside a `contents:` block.
+- **Missing file:** If you moved a page, the `path:` in `dev.yml` must match the new location.
+- **Duplicate entry:** The same page appears twice in `dev.yml`. Remove the old entry after a section move.
+
+### `fern docs broken-links` reports errors
+
+- **Stale internal links:** After moving or renaming a page, other pages may still link to the old path. Search with `grep -r "<old-filename>" docs/pages/` and update references.
+- **Anchor not found:** A `#section-heading` link doesn't match any heading in the target page. Check if the heading text changed.
+
+### CI fails after merge
+
+- **MDX parse error:** Angle-bracket URLs like `<https://example.com>` break MDX parsing. Use `[text](https://example.com)` instead.
+- **Broken links check:** The `detect_broken_links.py` job found stale references to the old path. Fix all incoming links before merging.
+- **Fern publish error:** Check the Actions tab for the `Fern Docs` workflow. Common causes: expired `FERN_TOKEN`, invalid `docs.yml` syntax, or a moved file that wasn't synced to `docs-website`.
+
+### Changes don't appear on the live site
+
+- **Title mismatch:** You updated the frontmatter `title:` but not the `- page:` name in `dev.yml` (or vice versa). Keep them in sync.
+- **Sync delay:** After merge to `main`, the sync-dev workflow takes a few minutes to publish.
+
 ## Key References
 
 | File | Purpose |

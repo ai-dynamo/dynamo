@@ -127,6 +127,30 @@ git add docs/pages/<subdirectory>/<filename>.md docs/versions/dev.yml
 git commit -s -m "docs: add <page-title> page"
 ```
 
+## Debugging
+
+### `fern check` fails
+
+- **Invalid YAML in `dev.yml`:** Check indentation — nav entries use 2-space indent. A `- page:` must be inside a `contents:` block.
+- **Missing file:** The `path:` in `dev.yml` must match the actual file location. Paths are relative to `docs/versions/` (e.g., `../pages/getting-started/quickstart.md`).
+
+### `fern docs broken-links` reports errors
+
+- **Broken internal link:** A `[text](../path/to/file.md)` reference points to a file that doesn't exist. Fix the path or remove the link.
+- **Anchor not found:** A `#section-heading` link doesn't match any heading in the target page.
+
+### CI fails after merge
+
+- **MDX parse error:** Angle-bracket URLs like `<https://example.com>` break MDX parsing. Use `[text](https://example.com)` instead.
+- **Broken links check:** The `detect_broken_links.py` job checks relative links across all docs. If your new page links to a file that doesn't exist yet, CI will fail.
+- **Fern publish error:** Check the Actions tab for the `Fern Docs` workflow. Common causes: expired `FERN_TOKEN`, invalid `docs.yml` syntax, or a file referenced in `dev.yml` that wasn't synced to `docs-website`.
+
+### Page doesn't appear on the live site
+
+- **Missing nav entry:** The page exists but isn't in `docs/versions/dev.yml`. Add it.
+- **Hidden section:** The page is inside a `hidden: true` section. It's accessible by direct URL but won't appear in the sidebar.
+- **Sync delay:** After merge to `main`, the sync-dev workflow takes a few minutes to publish.
+
 ## Key References
 
 | File | Purpose |

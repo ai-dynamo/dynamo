@@ -113,6 +113,28 @@ git add -u docs/
 git commit -s -m "docs: remove <page-title> page"
 ```
 
+## Debugging
+
+### `fern check` fails
+
+- **Orphaned nav entry:** You deleted the file but left the `- page:` entry in `dev.yml`. Remove it.
+- **Empty section:** If the removed page was the only entry in a section, delete the entire `- section:` block from `dev.yml`.
+
+### `fern docs broken-links` reports errors
+
+- **Incoming links to removed page:** Other pages still link to the deleted file. Search with `grep -r "<filename>" docs/pages/` and update or remove those links.
+
+### CI fails after merge
+
+- **MDX parse error:** Angle-bracket URLs like `<https://example.com>` break MDX parsing. Use `[text](https://example.com)` instead.
+- **Broken links check:** The `detect_broken_links.py` job found pages that still reference the removed file. Fix all incoming links before merging.
+- **Fern publish error:** Check the Actions tab for the `Fern Docs` workflow. Common causes: expired `FERN_TOKEN`, invalid `docs.yml` syntax.
+
+### Page still appears on the live site
+
+- **Sync delay:** After merge to `main`, the sync-dev workflow takes a few minutes to publish.
+- **Cached version:** Fern CDN may cache the old page briefly. Hard-refresh or wait a few minutes.
+
 ## Key References
 
 | File | Purpose |
