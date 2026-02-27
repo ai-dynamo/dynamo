@@ -18,6 +18,7 @@ import dataclasses
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional, Union
@@ -73,6 +74,7 @@ class RequestHandlerConfig:
     shutdown_event: Optional[asyncio.Event] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
+    unified_metrics: Optional[object] = None  # AdditionalMetricsCollector
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -102,6 +104,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
         self.disable_request_abort = config.disable_request_abort
+        self.unified_metrics = config.unified_metrics
 
     def check_error(self, result: dict):
         """
@@ -601,6 +604,21 @@ class HandlerBase(BaseGenerativeHandler):
         """
         logging.debug(f"Request: {request}")
 
+        # Unified metrics: timing and request type detection
+        _um = self.unified_metrics
+        _um_start_time = time.monotonic() if _um else None
+        _um_first_token_time = None
+
+        if _um:
+            # Detect request types for metrics
+            sampling_options = request.get("sampling_options", {})
+            guided = sampling_options.get("guided_decoding")
+            if guided and isinstance(guided, dict):
+                if any(guided.get(k) for k in ("json", "regex", "grammar", "json_object")):
+                    _um.record_request_type_structured_output()
+            if request.get("multi_modal_data"):
+                _um.record_request_type_image()
+
         # Normalize OpenAI format to TRT-LLM internal format
         self._normalize_request_format(request)
 
@@ -802,6 +820,33 @@ class HandlerBase(BaseGenerativeHandler):
                             "Request finished with no finish reason set - this indicates a possible bug"
                         )
 
+                    # Record unified (additional) metrics on request finish
+                    if res.finished and _um and out.get("finish_reason"):
+                        _um_e2e = time.monotonic() - _um_start_time
+                        usage = out.get("completion_usage", {})
+                        _um.record_request_finish(
+                            prompt_tokens=usage.get("prompt_tokens", 0),
+                            gen_tokens=usage.get("completion_tokens", 0),
+                        )
+                        _ttft = (_um_first_token_time - _um_start_time) if _um_first_token_time else None
+                        _um.record_phase_times(ttft=_ttft, e2e=_um_e2e)
+                        gen_tokens = usage.get("completion_tokens", 0)
+                        if _um_e2e > 0 and gen_tokens > 0:
+                            _um.set_gen_throughput(gen_tokens / _um_e2e)
+                        # KV cache hits from request_perf_metrics
+                        if output.request_perf_metrics is not None:
+                            kv_metrics = output.request_perf_metrics.kv_cache_metrics
+                            cached = min(
+                                usage.get("prompt_tokens", 0),
+                                kv_metrics.num_reused_blocks * self.kv_block_size,
+                            )
+                            _um.record_kv_cache_hits(cached)
+                        # Handler timing (optional)
+                        if _um.enable_handler_timing:
+                            _um.record_handler_e2e(_um_e2e)
+                            if _ttft is not None:
+                                _um.record_handler_ttft(_ttft)
+
                     # Log metrics to TensorRT-LLM MetricsCollector when request finishes
                     # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
                     if (
@@ -824,6 +869,10 @@ class HandlerBase(BaseGenerativeHandler):
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 
+                    # Track first token time for phase timing
+                    if _um and _um_first_token_time is None and out.get("token_ids"):
+                        _um_first_token_time = time.monotonic()
+
                     # Yield the chunk to the client and update the token count for the next iteration.
                     yield out
                     num_output_tokens_so_far = next_total_toks
@@ -832,12 +881,16 @@ class HandlerBase(BaseGenerativeHandler):
         except asyncio.CancelledError:
             logging.debug(f"Request {request_id}: Client cancelled")
             # _cancellation_monitor already called abort_request
+            if _um:
+                _um.record_request_abort()
             return  # Just stop, no error response
 
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
             error_msg = str(e)
             logging.warning(f"Request {request_id} error: {error_msg}")
+            if _um and self.disaggregation_mode == DisaggregationMode.PREFILL:
+                _um.record_kv_transfer_failure()
             yield {
                 "finish_reason": {"error": error_msg},
                 "token_ids": [],

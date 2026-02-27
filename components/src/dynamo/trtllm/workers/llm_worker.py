@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Optional
 
 from prometheus_client import REGISTRY
@@ -389,6 +390,8 @@ async def init_llm_worker(
         )
         logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
 
+        _engine_elapsed = time.monotonic() - _engine_start_time
+
         # The get_engine_runtime_config function exists but is not called here due to:
         # 1. get_stats_async requires active requests to work properly
         # 2. We need runtime config during registration, before any requests are made
@@ -422,6 +425,86 @@ async def init_llm_worker(
                     f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
                 )
 
+        # --- Unified (additional) metrics ---
+        unified_metrics = None
+        _engine_start_time = time.monotonic()
+
+        if config.enable_unified_metrics:
+            try:
+                from dynamo.trtllm.metrics import AdditionalMetricsCollector
+
+                disagg_mode_str = config.disaggregation_mode.value if hasattr(
+                    config.disaggregation_mode, "value"
+                ) else str(config.disaggregation_mode)
+                unified_metrics = AdditionalMetricsCollector(
+                    labels={
+                        "model_name": model_name_for_metrics,
+                        "disaggregation_mode": disagg_mode_str,
+                        "engine_type": "trtllm",
+                    },
+                    enable_handler_timing=config.enable_handler_timing,
+                )
+
+                # Tier 3: Config info gauges (set once)
+                gpu_type = os.environ.get("GPU_TYPE", "unknown")
+                unified_metrics.set_model_config(
+                    model=str(config.model),
+                    served_model_name=model_name_for_metrics,
+                    gpu_type=gpu_type,
+                )
+                unified_metrics.set_parallel_config(
+                    tensor_parallel_size=config.tensor_parallel_size,
+                    pipeline_parallel_size=config.pipeline_parallel_size,
+                    gpu_count=config.tensor_parallel_size * config.pipeline_parallel_size,
+                )
+                unified_metrics.set_detailed_config(
+                    max_batch_size=config.max_batch_size,
+                    max_num_tokens=config.max_num_tokens,
+                    max_seq_len=config.max_seq_len,
+                    kv_block_size=config.kv_block_size,
+                    free_gpu_memory_fraction=config.free_gpu_memory_fraction,
+                    disaggregation_mode=disagg_mode_str,
+                    modality=config.modality.value if hasattr(config.modality, "value") else str(config.modality),
+                )
+                unified_metrics.set_cache_config(
+                    free_gpu_memory_fraction=config.free_gpu_memory_fraction,
+                    kv_block_size=config.kv_block_size,
+                )
+
+                logging.info(
+                    "Unified metrics initialized (disagg_mode=%s, handler_timing=%s)",
+                    disagg_mode_str,
+                    config.enable_handler_timing,
+                )
+
+                # Register unified metrics with Dynamo endpoint callback
+                if not config.publish_events_and_metrics:
+                    register_engine_metrics_callback(
+                        endpoint=endpoint,
+                        registry=REGISTRY,
+                        exclude_prefixes=["python_", "process_", "gc_"],
+                        namespace_name=config.namespace,
+                        component_name=config.component,
+                        endpoint_name="generate",
+                        model_name=model_name_for_metrics,
+                    )
+                    logging.info("Unified-only metrics callback registered")
+            except Exception as e:
+                logging.warning("Failed to initialize unified metrics: %s", e)
+
+        if unified_metrics:
+            unified_metrics.set_engine_startup_time(_engine_elapsed)
+
+        # Start worker HTTP metrics server for direct Prometheus scraping
+        if config.publish_events_and_metrics or unified_metrics:
+            _worker_metrics_port = int(os.environ.get("WORKER_METRICS_PORT", "8001"))
+            try:
+                import prometheus_client as _pc
+                _pc.start_http_server(_worker_metrics_port)
+                logging.info("Worker metrics HTTP server started on port %d", _worker_metrics_port)
+            except OSError as e:
+                logging.warning("Could not start worker metrics server on port %d: %s", _worker_metrics_port, e)
+
         # Register callback for Dynamo component metrics using dedicated registry
         register_engine_metrics_callback(
             endpoint=endpoint,
@@ -444,6 +527,7 @@ async def init_llm_worker(
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             disable_request_abort=config.disable_request_abort,
+            unified_metrics=unified_metrics,
         )
 
         # Register the model with runtime config
