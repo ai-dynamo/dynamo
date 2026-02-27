@@ -82,7 +82,7 @@ pub struct KvRouterConfig {
 
     /// Number of event processing threads for the KV indexer.
     /// When > 1, uses ConcurrentRadixTree with a thread pool instead of the
-    /// single-threaded RadixTree. Default: 1.
+    /// single-threaded RadixTree. Default: 4.
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
@@ -126,11 +126,6 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
     if config.durable_kv_events && !config.use_kv_events {
         return Err(ValidationError::new(
             "durable_kv_events requires use_kv_events=true",
-        ));
-    }
-    if !config.use_kv_events && config.router_event_threads > 1 {
-        return Err(ValidationError::new(
-            "router_event_threads > 1 requires use_kv_events=true",
         ));
     }
     if config.router_track_output_blocks && !config.router_track_active_blocks {
