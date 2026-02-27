@@ -43,6 +43,32 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+echo "=========================================="
+echo "Launching Aggregated Multimodal Serving (1 GPU)"
+echo "=========================================="
+echo "Model:       $MODEL_NAME"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL_NAME}\","
+echo "      \"messages\": [{"
+echo "        \"role\": \"user\","
+echo "        \"content\": ["
+echo "          {\"type\": \"text\", \"text\": \"Describe the image.\"},"
+echo "          {\"type\": \"image_url\", \"image_url\": {\"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/480px-Cat03.jpg\"}}"
+echo "        ]"
+echo "      }],"
+echo "      \"max_tokens\": 50"
+echo "    }'"
+echo ""
+echo "=========================================="
+
 # Use TCP transport (instead of default NATS)
 # TCP is preferred for multimodal workloads because it overcomes:
 # - NATS default 1MB max payload limit (multimodal base64 images can exceed this)

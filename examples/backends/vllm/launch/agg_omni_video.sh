@@ -23,13 +23,26 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 echo "=========================================="
-echo "Starting vLLM-Omni Worker"
-echo "Model: $MODEL"
+echo "Launching vLLM-Omni Video Generation (1 GPU)"
+echo "=========================================="
+echo "Model:       $MODEL"
+echo "Frontend:    http://localhost:$HTTP_PORT"
+echo "=========================================="
+echo ""
+echo "Example test command:"
+echo ""
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{"
+echo "      \"model\": \"${MODEL}\","
+echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Generate a short video of ocean waves.\"}],"
+echo "      \"max_tokens\": 32"
+echo "    }'"
+echo ""
 echo "=========================================="
 
-
-echo "Starting frontend on port ${DYN_HTTP_PORT:-8000}..."
 python -m dynamo.frontend &
 FRONTEND_PID=$!
 
