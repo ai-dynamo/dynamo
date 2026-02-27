@@ -210,7 +210,7 @@ pub enum AnthropicMessageContent {
 /// A single content block within a message.
 ///
 /// Uses a custom deserializer so that unknown block types (e.g. `citations`,
-/// `server_tool_use`, `redacted_thinking`) are captured as `Unknown` instead
+/// `server_tool_use`, `redacted_thinking`) are captured as `Other(Value)` instead
 /// of causing a hard deserialization failure. This is important because Claude
 /// Code may send block types that we don't yet handle.
 #[derive(Debug, Clone, Serialize)]
@@ -281,10 +281,11 @@ pub enum AnthropicContentBlock {
         #[serde(default)]
         content: serde_json::Value,
     },
-    /// Catch-all for unrecognized block types. Silently accepted and skipped
-    /// during conversion so that new Anthropic features don't break the endpoint.
-    #[serde(skip)]
-    Unknown { block_type: String },
+    /// Catch-all for unrecognized block types. Preserves the full JSON value
+    /// so that new Anthropic features don't break the endpoint and can be
+    /// round-tripped or inspected.
+    #[serde(untagged)]
+    Other(serde_json::Value),
 }
 
 /// Content of a `tool_result` block — either a plain string or an array of
@@ -344,7 +345,7 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                 let text = value
                     .get("text")
                     .and_then(|t| t.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("text"))?
                     .to_string();
                 let citations: Option<Vec<serde_json::Value>> = value
                     .get("citations")
@@ -370,12 +371,12 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                 let id = value
                     .get("id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("id"))?
                     .to_string();
                 let name = value
                     .get("name")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("name"))?
                     .to_string();
                 let input = value.get("input").cloned().unwrap_or(serde_json::json!({}));
                 let cache_control: Option<CacheControl> = value
@@ -393,7 +394,7 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                 let tool_use_id = value
                     .get("tool_use_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("tool_use_id"))?
                     .to_string();
                 let content: Option<ToolResultContent> = value
                     .get("content")
@@ -415,12 +416,12 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                 let thinking = value
                     .get("thinking")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("thinking"))?
                     .to_string();
                 let signature = value
                     .get("signature")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("signature"))?
                     .to_string();
                 let cache_control: Option<CacheControl> = value
                     .get("cache_control")
@@ -436,7 +437,7 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                 let data = value
                     .get("data")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("data"))?
                     .to_string();
                 Ok(AnthropicContentBlock::RedactedThinking { data })
             }
@@ -444,12 +445,12 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                 let id = value
                     .get("id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("id"))?
                     .to_string();
                 let name = value
                     .get("name")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("name"))?
                     .to_string();
                 let input = value.get("input").cloned().unwrap_or(serde_json::json!({}));
                 Ok(AnthropicContentBlock::ServerToolUse { id, name, input })
@@ -458,7 +459,7 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                 let tool_use_id = value
                     .get("tool_use_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| serde::de::Error::missing_field("tool_use_id"))?
                     .to_string();
                 let content = value
                     .get("content")
@@ -470,10 +471,11 @@ impl<'de> Deserialize<'de> for AnthropicContentBlock {
                 })
             }
             other => {
-                tracing::debug!("Unknown Anthropic content block type '{}', skipping", other);
-                Ok(AnthropicContentBlock::Unknown {
-                    block_type: other.to_string(),
-                })
+                tracing::debug!(
+                    "Unrecognized Anthropic content block type '{}', preserving as Other",
+                    other
+                );
+                Ok(AnthropicContentBlock::Other(value))
             }
         }
     }
@@ -953,7 +955,7 @@ fn convert_user_blocks(
             | AnthropicContentBlock::RedactedThinking { .. }
             | AnthropicContentBlock::ServerToolUse { .. }
             | AnthropicContentBlock::WebSearchToolResult { .. }
-            | AnthropicContentBlock::Unknown { .. } => {
+            | AnthropicContentBlock::Other(_) => {
                 // tool_use/thinking/server-side blocks/unknown in a user message: skip
             }
         }
@@ -1104,7 +1106,14 @@ fn convert_anthropic_tools(tools: &[AnthropicTool]) -> Vec<ChatCompletionTool> {
             // Server tools (web_search, bash, etc.) don't have input_schema
             // and can't be meaningfully converted to OpenAI function tools.
             // They are backend-specific and handled separately.
-            let schema = tool.input_schema.clone()?;
+            let schema = tool.input_schema.clone().or_else(|| {
+                tracing::debug!(
+                    tool_name = %tool.name,
+                    tool_type = ?tool.tool_type,
+                    "Skipping server tool in OpenAI conversion (no input_schema)"
+                );
+                None
+            })?;
             Some(ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
@@ -1341,7 +1350,7 @@ fn estimate_block_len(block: &AnthropicContentBlock) -> usize {
         }
         AnthropicContentBlock::WebSearchToolResult { content, .. } => content.to_string().len(),
         AnthropicContentBlock::Image { .. } => 256, // rough estimate for image metadata
-        AnthropicContentBlock::Unknown { .. } => 0,
+        AnthropicContentBlock::Other(v) => v.to_string().len(),
     }
 }
 
@@ -1800,10 +1809,10 @@ mod tests {
                     &content[3],
                     AnthropicContentBlock::WebSearchToolResult { tool_use_id, .. } if tool_use_id == "stu_1"
                 ));
-                // Truly unknown types still fall through to Unknown
+                // Truly unknown types still fall through to Other with full JSON preserved
                 assert!(matches!(
                     &content[4],
-                    AnthropicContentBlock::Unknown { block_type } if block_type == "future_block_type"
+                    AnthropicContentBlock::Other(v) if v.get("type").and_then(|t| t.as_str()) == Some("future_block_type")
                 ));
                 assert!(matches!(&content[5], AnthropicContentBlock::Text { .. }));
             }
