@@ -21,11 +21,18 @@ from functools import partial
 import numpy as np
 import pytest
 
-grpcclient = pytest.importorskip("tritonclient.grpc")
-import triton_echo_client  # noqa: E402
+try:
+    import tritonclient.grpc as grpcclient
+except ImportError:
+    grpcclient = None  # type: ignore[assignment]
 
-from tests.utils.constants import QWEN  # noqa: E402
-from tests.utils.managed_process import ManagedProcess  # noqa: E402
+try:
+    import triton_echo_client
+except ImportError:
+    triton_echo_client = None  # type: ignore[assignment]
+
+from tests.utils.constants import QWEN
+from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
 

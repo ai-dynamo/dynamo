@@ -17,9 +17,12 @@ import shutil
 import numpy as np
 import pytest
 
-grpcclient = pytest.importorskip("tritonclient.grpc")
+try:
+    import tritonclient.grpc as grpcclient
+except ImportError:
+    grpcclient = None  # type: ignore[assignment]
 
-from tests.utils.managed_process import ManagedProcess  # noqa: E402
+from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
 
