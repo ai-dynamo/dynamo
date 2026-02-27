@@ -1198,16 +1198,14 @@ pub fn chat_completion_to_anthropic_response(
         // The backend strips <think>...</think> from the text and surfaces it
         // as reasoning_content on the message. Map this to a Thinking block
         // so clients see proper extended thinking in the Anthropic response.
-        if let Some(thinking) = choice.message.reasoning_content {
-            if !thinking.is_empty() {
-                content.insert(
-                    0,
-                    AnthropicResponseContentBlock::Thinking {
-                        thinking,
-                        signature: String::new(),
-                    },
-                );
-            }
+        if let Some(thinking) = choice.message.reasoning_content.filter(|t| !t.is_empty()) {
+            content.insert(
+                0,
+                AnthropicResponseContentBlock::Thinking {
+                    thinking,
+                    signature: String::new(),
+                },
+            );
         }
 
         // Extract text content
