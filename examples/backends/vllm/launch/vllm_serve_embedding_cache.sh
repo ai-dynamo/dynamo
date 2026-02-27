@@ -25,6 +25,7 @@ if [[ "$CAPACITY_GB" != "0" ]]; then
     }")
 fi
 
+# TODO: honor DYN_GPU_MEMORY_FRACTION_OVERRIDE env var for profiler binary search
 CUDA_VISIBLE_DEVICES=2 \
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
     --enable-log-requests \

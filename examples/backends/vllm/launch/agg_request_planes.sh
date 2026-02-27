@@ -44,6 +44,11 @@ echo "Using request plane mode: $REQUEST_PLANE"
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend &
 
+GPU_MEM_ARGS=()
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    GPU_MEM_ARGS=("--gpu-memory-utilization" "$DYN_GPU_MEMORY_FRACTION_OVERRIDE")
+fi
+
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 DYN_HEALTH_CHECK_ENABLED=true \
-    python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager
+    python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager "${GPU_MEM_ARGS[@]}"

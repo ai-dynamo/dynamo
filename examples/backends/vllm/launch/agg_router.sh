@@ -1,6 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# TODO: rename to agg_router_2gpu.sh (uses 2 GPUs) and update all references
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
@@ -23,11 +24,17 @@ python -m dynamo.frontend \
 # If multiple workers are launched, they must not share the same system/metrics port.
 # Use DYN_SYSTEM_PORT{1,2} so tests/launchers can provide a simple numbered port set.
 #
+GPU_MEM_ARGS=()
+if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+    GPU_MEM_ARGS=("--gpu-memory-utilization" "$DYN_GPU_MEMORY_FRACTION_OVERRIDE")
+fi
+
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+    "${GPU_MEM_ARGS[@]}" \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
@@ -36,4 +43,5 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
+    "${GPU_MEM_ARGS[@]}" \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'

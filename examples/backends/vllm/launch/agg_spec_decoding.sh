@@ -15,6 +15,7 @@ python -m dynamo.frontend --http-port=8000 &
 # 2. Speculative Main Worker
 # ---------------------------
 # This runs the main model with EAGLE as the draft model for speculative decoding
+# TODO: honor DYN_GPU_MEMORY_FRACTION_OVERRIDE env var for profiler binary search
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \

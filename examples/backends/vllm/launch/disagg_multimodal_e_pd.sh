@@ -74,17 +74,26 @@ EXTRA_ARGS=""
 export TRANSFER_LOCAL=${TRANSFER_LOCAL:-1}
 
 # GPU assignments (override via environment variables)
+# DYN_GPU_MEMORY_FRACTION_OVERRIDE takes precedence over per-worker vars.
+# In single-GPU mode, the override is split evenly between the two workers
+# since they share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
-    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.4}
-    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.4}
+    if [[ -n "${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-}" ]]; then
+        HALF_FRAC=$(awk -v f="$DYN_GPU_MEMORY_FRACTION_OVERRIDE" 'BEGIN { printf "%.2f", f / 2 }')
+        DYN_ENCODE_GPU_MEM=$HALF_FRAC
+        DYN_PD_GPU_MEM=$HALF_FRAC
+    else
+        DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.4}
+        DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.4}
+    fi
     EXTRA_ARGS="--enforce-eager"
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-2}
-    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
-    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.9}
+    DYN_ENCODE_GPU_MEM=${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-${DYN_ENCODE_GPU_MEM:-0.9}}
+    DYN_PD_GPU_MEM=${DYN_GPU_MEMORY_FRACTION_OVERRIDE:-${DYN_PD_GPU_MEM:-0.9}}
 fi
 
 # Start encode worker
@@ -115,5 +124,11 @@ echo "=================================================="
 echo "All components started. Waiting for initialization..."
 echo "=================================================="
 
-# Wait for all background processes to complete
-wait
+# Exit immediately if any background process dies (all are long-running servers).
+# `wait -n` returns when the first job exits; a non-zero exit propagates to
+# ManagedProcess._check_process_alive() so the test fails fast instead of
+# waiting the full health-check timeout.
+wait -n
+EXIT_CODE=$?
+echo "A background process exited with code $EXIT_CODE"
+exit $EXIT_CODE

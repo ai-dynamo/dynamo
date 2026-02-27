@@ -9,9 +9,10 @@ from pytest_httpserver import HTTPServer
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 # Shared constants for multimodal testing
-IMAGE_SERVER_PORT = 8765
+IMAGE_SERVER_PORT = allocate_port(8765)
 MULTIMODAL_IMG_PATH = os.path.join(
     WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
 )
@@ -42,7 +43,8 @@ def get_multimodal_test_image_bytes() -> bytes:
 
 @pytest.fixture(scope="session")
 def httpserver_listen_address():
-    return ("127.0.0.1", IMAGE_SERVER_PORT)
+    yield ("127.0.0.1", IMAGE_SERVER_PORT)
+    deallocate_port(IMAGE_SERVER_PORT)
 
 
 @pytest.fixture(scope="function")
@@ -60,7 +62,7 @@ def image_server(httpserver: HTTPServer):
 
     Usage:
         def test_multimodal(image_server):
-            url = "http://localhost:8765/llm-graphic.png"
+            # Use MULTIMODAL_IMG_URL from this module
             # ... use url in your test payload
     """
     image_data = get_multimodal_test_image_bytes()

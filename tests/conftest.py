@@ -41,6 +41,7 @@ def pytest_configure(config):
         "gpu_2: marks tests to run on 2GPUs",
         "gpu_4: marks tests to run on 4GPUs",
         "gpu_8: marks tests to run on 8GPUs",
+        "max_vram(N): peak VRAM in GiB (with 10% safety). Filter with --max-vram-gib=N",
         "e2e: marks tests as end-to-end tests",
         "integration: marks tests as integration tests",
         "unit: marks tests as unit tests",
@@ -98,6 +99,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,  # None = use fixture's default behavior
         help="Skip restarting NATS and etcd services before deployment. "
         "Default: deploy tests skip (for speed), fault-tolerance tests restart (for clean state).",
+    )
+    parser.addoption(
+        "--max-vram-gib",
+        type=int,
+        default=None,
+        help="Skip tests whose @pytest.mark.max_vram(N) exceeds this value (GiB).",
     )
 
 
@@ -257,6 +264,17 @@ def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    # Skip tests that exceed --max-vram-gib
+    vram_limit = config.getoption("--max-vram-gib", default=None)
+    if vram_limit is not None:
+        skip_vram = pytest.mark.skip(
+            reason=f"requires more than {vram_limit} GiB VRAM (--max-vram-gib={vram_limit})"
+        )
+        for item in items:
+            vram_mark = item.get_closest_marker("max_vram")
+            if vram_mark and vram_mark.args and vram_mark.args[0] > vram_limit:
+                item.add_marker(skip_vram)
+
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
     for item in items:
